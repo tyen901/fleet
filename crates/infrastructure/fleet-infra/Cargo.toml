@@ -1,0 +1,27 @@
+[package]
+name = "fleet-infra"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Internal
+fleet-core = { workspace = true }
+
+# IO / Net / Async
+tokio = { workspace = true, features = ["full"] }
+reqwest = { workspace = true, features = ["json", "stream", "gzip", "brotli", "blocking"] }
+futures = { workspace = true }
+camino = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+# Hashing
+md5 = { workspace = true }
+byteorder = { workspace = true }
+
+# Platform
+shlex = { workspace = true }
+
+# Rate Limiting
+governor = { workspace = true }
+percent-encoding = { workspace = true }

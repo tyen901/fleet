@@ -1,0 +1,19 @@
+[package]
+name = "fleet-scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fleet-core = { workspace = true }
+camino = { workspace = true }
+walkdir = { workspace = true }
+rayon = { workspace = true }
+md5 = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+fleet-infra = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

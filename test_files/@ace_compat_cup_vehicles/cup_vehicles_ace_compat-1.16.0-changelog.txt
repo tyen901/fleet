@@ -1,0 +1,8 @@
+﻿Version 1.16.0 (14|Sep|2020)
+
+
+FIXED:
+* CUP_Vehicles_ACE_compat - Fixed Kamaz 5350 inheritance
+* CUP_Vehicles_ACE_compat - Fixed Kamaz 5350 Refuel and Repair inheritance
+ 
+---------------------------------------------------------------------

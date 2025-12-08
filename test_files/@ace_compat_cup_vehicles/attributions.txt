@@ -1,0 +1,18 @@
+Attributions for sources and content included in CUP
+
+
+Arma Licensed Data Packs
+https://community.bistudio.com/wiki/Arma_Licensed_Data_Pack (APL sources)
+License: APL
+Disclaimer of Warranties: APL Section 5
+https://www.bistudio.com/community/licenses/arma-public-license
+Copyright © 2013 - 2016 Bohemia Interactive a.s. All rights reserved.
+
+
+CUP created content and Community donated content
+http://cup-arma3.org/
+License: CUP-License
+Disclaimer of Warranties: CUP-License section 7
+http://cup-arma3.org/CUP-License.txt
+Copyright © 2016 CUP Community Upgrade Project. All rights reserved
+

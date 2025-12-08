@@ -1,0 +1,4 @@
+If you encounter problems with CUP using capital letters in it's folder structure,
+try renaming the folders with one of the given options on this site:
+
+http://www.commandlinefu.com/commands/view/3764/convert-filenames-in-current-directory-to-lowercase

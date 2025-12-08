@@ -1,0 +1,6 @@
+//<'cup_vehicles_ace_compat.pbo' properties via Mikero's dos tools, dll version 10.06>
+prefix=cup\cup_vehicles_ace_compat;
+Mikero=DePbo.dll.7.96;
+version=21061008;
+//PboType=Arma Addon;
+//</properties>

@@ -1,0 +1,32 @@
+[package]
+name = "fleet-pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fleet-core = { workspace = true }
+fleet-infra = { workspace = true }
+fleet-scanner = { workspace = true }
+
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+async-trait = { workspace = true }
+walkdir = { workspace = true }
+directories = { workspace = true }
+uuid = { workspace = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+camino = { workspace = true }
+filetime = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tempfile = { workspace = true }
+hyper = { workspace = true }
+axum = { workspace = true }

@@ -1,0 +1,13 @@
+name = "CUP Vehicles ACE Compatibility 1.16.0";
+picture = "logo_CUP_ca.paa";
+actionName = "Website";
+action = "http://cup-arma3.org";
+logo = "logo_CUP_ca_small.paa";
+logoOver = "logo_CUP_ca_small.paa";
+tooltip = "CUP Vehicles ACE Compatibility 1.16.0";
+tooltipOwned = "CUP Vehicles ACE Compatibility 1.16.0";
+overview = "The Community Upgrade Project aims at importing all released assets from previous ArmA games into Arma 3, upgraded to fit closely with the quality and standards of the ArmA 3 assets. They're not a straight port, but individual items taken and upgraded to a new level. At the same time, CUP provides these assets as a resource for modders.";
+author = "The CUP Team";
+overviewPicture = "logo_CUP_ca.paa";
+overviewText = "CUP Vehicles ACE Compatibility 1.16.0";
+overviewFootnote = "";

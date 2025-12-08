@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build + Package (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows
+            os: windows-latest
+            app_id: fleet
+            exe_name: fleet.exe
+          - target: linux
+            os: ubuntu-latest
+            app_id: fleet
+            exe_name: fleet
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2
+
+      - name: Build
+        env:
+          FLEET_VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: cargo build -p fleet --release
+
+      - name: Stage package directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf packdir
+          mkdir -p packdir
+          cp "target/release/${{ matrix.exe_name }}" packdir/
+
+      - name: Install .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install vpk
+        shell: bash
+        run: |
+          dotnet tool update -g vpk
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Velopack pack
+        shell: bash
+        run: |
+          vpk pack -u "${{ matrix.app_id }}" -v "${{ steps.ver.outputs.version }}" -p packdir -e "${{ matrix.exe_name }}"
+          rm -f Releases/RELEASES || true
+
+      - name: Normalize asset names
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/normalize_releases.py
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARGET: ${{ matrix.target }}
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            Releases/*.nupkg
+            Releases/*.zip
+            Releases/*.exe
+            Releases/*.AppImage
+            Releases/releases.*.json
+            Releases/assets.*.json
+          fail_on_unmatched_files: false
