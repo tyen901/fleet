@@ -6,12 +6,22 @@ mod updates;
 mod utils;
 
 use fleet_app_core::FleetApplication;
+use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 fn setup_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = FmtSubscriber::builder().with_env_filter(filter).finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
+}
+
+fn app_icon() -> Arc<eframe::egui::IconData> {
+    const ICON_PNG: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../assets/icon.png"
+    ));
+
+    Arc::new(eframe::icon_data::from_png_bytes(ICON_PNG).unwrap_or_default())
 }
 
 pub fn run() -> eframe::Result<()> {
@@ -21,6 +31,7 @@ pub fn run() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([700.0, 500.0])
+            .with_icon(app_icon())
             .with_title("FLEET // MANAGER"),
         ..Default::default()
     };

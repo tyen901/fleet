@@ -69,6 +69,15 @@ jobs:
           mkdir -p packdir
           cp "target/release/${{ matrix.exe_name }}" packdir/
 
+      - name: Prepare packaging icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            python -m pip install --upgrade --quiet pillow
+            python .github/scripts/make_windows_ico.py assets/icon.png assets/icon.ico
+          fi
+
       - name: Install .NET 8
         uses: actions/setup-dotnet@v4
         with:
@@ -83,7 +92,11 @@ jobs:
       - name: Velopack pack
         shell: bash
         run: |
-          vpk pack -u "${{ matrix.app_id }}" -v "${{ steps.ver.outputs.version }}" -p packdir -e "${{ matrix.exe_name }}"
+          ICON_ARG="assets/icon.png"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ICON_ARG="assets/icon.ico"
+          fi
+          vpk pack -u "${{ matrix.app_id }}" -v "${{ steps.ver.outputs.version }}" -p packdir -e "${{ matrix.exe_name }}" -i "$ICON_ARG"
           rm -f Releases/RELEASES || true
 
       - name: Normalize asset names
