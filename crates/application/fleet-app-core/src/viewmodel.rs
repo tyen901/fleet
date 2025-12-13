@@ -2,6 +2,7 @@ use crate::app::FleetApplication;
 use crate::domain::{AppSettings, AppState, Profile, ProfileId};
 use crate::pipeline::{PipelineState, StepStatus};
 use chrono::{DateTime, Utc};
+use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
 use std::path::Path;
 
 fn format_last_synced(ts: Option<DateTime<Utc>>) -> Option<String> {
@@ -271,19 +272,14 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     let pl = &state.pipeline;
     let local_root = Path::new(&profile.local_path);
 
-    let has_any_cache = local_root.is_dir()
-        && std::fs::read_dir(local_root)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|name| name.starts_with('@'))
-            .any(|name| local_root.join(name).join(".fleet-cache.json").exists());
-
-    let has_baseline_files = local_root.join(".fleet-local-manifest.json").exists()
-        || local_root.join(".fleet-local-summary.json").exists();
+    let store = RedbFleetDataStore;
+    let (db_state, db_error) = match camino::Utf8PathBuf::from_path_buf(local_root.to_path_buf()) {
+        Ok(p) => match store.validate(&p) {
+            Ok(s) => (s, None),
+            Err(e) => (DbState::Missing, Some(e.to_string())),
+        },
+        Err(_) => (DbState::Missing, Some("Non-UTF local path".into())),
+    };
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -310,10 +306,6 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     // 1. Determine High-Level State
     let dashboard_state = if let Some(err) = &pl.error {
         DashboardState::Error { msg: err.clone() }
-    } else if local_root.is_dir() && !has_baseline_files && !has_any_cache {
-        DashboardState::Unknown {
-            msg: "Local state not initialized. Run Repair.".into(),
-        }
     } else if pl.is_running() {
         // Map pipeline steps to a simple "Busy" view
         let (task, detail, prog) = if pl.sync_status == StepStatus::Running {
@@ -370,6 +362,34 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             detail,
             progress: prog,
             can_cancel: true,
+        }
+    } else if local_root.is_dir() {
+        if let Some(msg) = db_error {
+            DashboardState::Error {
+                msg: format!("Failed to open local database: {msg}"),
+            }
+        } else {
+            match db_state {
+            DbState::Valid => DashboardState::Idle {
+                last_check_msg: if profile.last_synced.is_some() {
+                    Some("Files verified.".into())
+                } else {
+                    None
+                },
+                can_launch: true,
+            },
+            DbState::Missing | DbState::Corrupt => DashboardState::Unknown {
+                msg: "Local state not initialized. Run Repair.".into(),
+            },
+            DbState::Busy => DashboardState::Error {
+                msg: "Local database is busy (another Fleet instance may be running). Close it and try again.".into(),
+            },
+            DbState::NewerSchema { found, supported } => DashboardState::Error {
+                msg: format!(
+                    "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+                ),
+            },
+            }
         }
     } else if let Some(plan) = &state.last_plan {
         // We have a plan, check if it has changes

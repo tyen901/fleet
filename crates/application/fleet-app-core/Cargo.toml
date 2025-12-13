@@ -12,6 +12,7 @@ fleet-pipeline = { workspace = true }
 fleet-core = { workspace = true }
 fleet-scanner = { workspace = true }
 fleet-infra = { workspace = true }
+fleet-persistence = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

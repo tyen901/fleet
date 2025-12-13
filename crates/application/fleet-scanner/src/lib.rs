@@ -20,6 +20,8 @@ pub enum ScannerError {
     Cancelled,
     #[error("Hashing error: {0}")]
     Hash(#[from] fleet_infra::hashing::ScanError),
+    #[error("Cache error: {0}")]
+    Cache(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +48,11 @@ struct ScanContext {
 
 type ProgressCb = std::sync::Arc<Box<dyn Fn(ScanStats) + Send + Sync>>;
 
+pub trait ScanCacheStore: Send + Sync {
+    fn load_mod_cache(&self, mod_name: &str) -> Result<ScanCache, ScannerError>;
+    fn save_mod_cache(&self, mod_name: &str, cache: &ScanCache) -> Result<(), ScannerError>;
+}
+
 pub struct Scanner;
 
 impl Scanner {
@@ -61,7 +68,7 @@ impl Scanner {
         root: &Utf8Path,
         strategy: ScanStrategy,
         on_progress: Option<Box<dyn Fn(ScanStats) + Send + Sync>>,
-        cache_root: Option<Utf8PathBuf>,
+        cache_store: Option<Arc<dyn ScanCacheStore>>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Manifest, ScannerError> {
         info!("Scanning {} ({:?})", root, strategy);
@@ -120,7 +127,7 @@ impl Scanner {
                         return Err(ScannerError::Cancelled);
                     }
                 }
-                Self::scan_mod(mod_dir, strategy, &ctx, cache_root.as_deref())
+                Self::scan_mod(mod_dir, strategy, &ctx, cache_store.as_deref())
             })
             .collect();
 
@@ -151,20 +158,15 @@ impl Scanner {
         mod_root: &Utf8Path,
         strategy: ScanStrategy,
         ctx: &ScanContext,
-        cache_root: Option<&Utf8Path>,
+        cache_store: Option<&dyn ScanCacheStore>,
     ) -> Result<Mod, ScannerError> {
         let mod_name = mod_root.file_name().unwrap_or("unknown").to_string();
-
-        let cache_path = if let Some(root) = cache_root {
-            ScanCache::get_path(root, &mod_name)
-        } else {
-            mod_root.join(".fleet-cache.json")
-        };
-
         let mut cache = if matches!(strategy, ScanStrategy::ForceRehash) {
             ScanCache::default()
+        } else if let Some(store) = cache_store {
+            store.load_mod_cache(&mod_name)?
         } else {
-            ScanCache::load(&cache_path)
+            ScanCache::default()
         };
 
         // Collect files
@@ -203,7 +205,7 @@ impl Scanner {
                     FleetPath::normalize(fs_path.strip_prefix(mod_root).unwrap().as_str());
 
                 if let Some(entry) = cache.get(&rel_path) {
-                    if entry.mtime == mtime && entry.len == len {
+                    if entry.mtime == mtime && entry.size == len {
                         {
                             let mut s = ctx.stats.lock().unwrap();
                             s.files_scanned += 1;
@@ -239,8 +241,10 @@ impl Scanner {
                 cache.update(&f.path, Self::mtime(&meta), f.length, f.checksum.clone());
             }
         }
-
-        cache.save(&cache_path)?;
+        cache.prune_ghosts(mod_root);
+        if let Some(store) = cache_store {
+            store.save_mod_cache(&mod_name, &cache)?;
+        }
 
         let mut hasher = md5::Context::new();
         let mut sorted_files = scanned_files.clone();

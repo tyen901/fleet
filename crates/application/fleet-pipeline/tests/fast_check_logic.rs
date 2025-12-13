@@ -1,5 +1,5 @@
+use fleet_persistence::{CacheUpsert, FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::sync::local::{DefaultLocalStateProvider, LocalStateProvider};
-use fleet_pipeline::sync::storage::{FileManifestStore, ManifestStore};
 use fleet_pipeline::sync::SyncMode;
 use fleet_scanner::Scanner;
 use std::fs;
@@ -19,11 +19,6 @@ async fn fast_check_detects_mtime_change() {
     let mtime = Scanner::mtime(&meta);
     let len = meta.len(); // 8
 
-    // Create Cache
-    let mut cache = fleet_scanner::cache::ScanCache::default();
-    cache.update("data.bin", mtime, len, "checksum_orig".into());
-    cache.save(&mod_dir.join(".fleet-cache.json")).unwrap();
-
     // Create Manifest Contract
     let manifest = fleet_core::Manifest {
         version: "1.0".into(),
@@ -39,10 +34,22 @@ async fn fast_check_detects_mtime_change() {
             }],
         }],
     };
-    let store = Arc::new(FileManifestStore::new());
-    ManifestStore::save(store.as_ref(), &root, &manifest).unwrap();
+    let store: Arc<dyn FleetDataStore> = Arc::new(RedbFleetDataStore);
+    store.commit_repair_snapshot(&root, &manifest, &[]).unwrap();
+    store
+        .scan_cache_upsert_batch(
+            &root,
+            "@test",
+            &[CacheUpsert {
+                rel_path: "data.bin".into(),
+                mtime,
+                size: len,
+                checksum: "checksum_orig".into(),
+            }],
+        )
+        .unwrap();
 
-    let provider = DefaultLocalStateProvider::new(None, store);
+    let provider = DefaultLocalStateProvider::new(store);
 
     let clean_state = provider
         .local_state(&root, SyncMode::FastCheck, None)
@@ -81,10 +88,6 @@ async fn fast_check_detects_size_change() {
     let mtime = Scanner::mtime(&meta);
     let len = meta.len();
 
-    let mut cache = fleet_scanner::cache::ScanCache::default();
-    cache.update("data.bin", mtime, len, "checksum_orig".into());
-    cache.save(&mod_dir.join(".fleet-cache.json")).unwrap();
-
     let manifest = fleet_core::Manifest {
         version: "1.0".into(),
         mods: vec![fleet_core::Mod {
@@ -99,10 +102,22 @@ async fn fast_check_detects_size_change() {
             }],
         }],
     };
-    let store = Arc::new(FileManifestStore::new());
-    ManifestStore::save(store.as_ref(), &root, &manifest).unwrap();
+    let store: Arc<dyn FleetDataStore> = Arc::new(RedbFleetDataStore);
+    store.commit_repair_snapshot(&root, &manifest, &[]).unwrap();
+    store
+        .scan_cache_upsert_batch(
+            &root,
+            "@test",
+            &[CacheUpsert {
+                rel_path: "data.bin".into(),
+                mtime,
+                size: len,
+                checksum: "checksum_orig".into(),
+            }],
+        )
+        .unwrap();
 
-    let provider = DefaultLocalStateProvider::new(None, store);
+    let provider = DefaultLocalStateProvider::new(store);
 
     // Tamper: change size
     fs::write(&file_path, "original_modified").unwrap();
@@ -131,10 +146,6 @@ async fn fast_check_handles_missing_file() {
     let mtime = Scanner::mtime(&meta);
     let len = meta.len();
 
-    let mut cache = fleet_scanner::cache::ScanCache::default();
-    cache.update("data.bin", mtime, len, "checksum_orig".into());
-    cache.save(&mod_dir.join(".fleet-cache.json")).unwrap();
-
     let manifest = fleet_core::Manifest {
         version: "1.0".into(),
         mods: vec![fleet_core::Mod {
@@ -149,10 +160,22 @@ async fn fast_check_handles_missing_file() {
             }],
         }],
     };
-    let store = Arc::new(FileManifestStore::new());
-    ManifestStore::save(store.as_ref(), &root, &manifest).unwrap();
+    let store: Arc<dyn FleetDataStore> = Arc::new(RedbFleetDataStore);
+    store.commit_repair_snapshot(&root, &manifest, &[]).unwrap();
+    store
+        .scan_cache_upsert_batch(
+            &root,
+            "@test",
+            &[CacheUpsert {
+                rel_path: "data.bin".into(),
+                mtime,
+                size: len,
+                checksum: "checksum_orig".into(),
+            }],
+        )
+        .unwrap();
 
-    let provider = DefaultLocalStateProvider::new(None, store);
+    let provider = DefaultLocalStateProvider::new(store);
 
     // Remove file
     fs::remove_file(&file_path).unwrap();

@@ -12,6 +12,7 @@ use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus}
 use crate::ports::SyncPipelinePort;
 
 use fleet_core::SyncPlan;
+use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::{
     DefaultSyncEngine, ProgressTracker, SyncMode, SyncOptions, SyncRequest, TransferSnapshot,
 };
@@ -117,10 +118,62 @@ impl PipelineOrchestrator {
                         })
                         .await;
 
-                    let root_path = std::path::Path::new(&profile.local_path);
-                    let manifest_path = root_path.join(".fleet-local-manifest.json");
-                    let summary_path = root_path.join(".fleet-local-summary.json");
-                    let is_cold = !manifest_path.exists() || !summary_path.exists();
+                    let local_root = camino::Utf8PathBuf::from(profile.local_path.clone());
+                    let store = RedbFleetDataStore;
+                    let db_state = match store.validate(&local_root) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let _ = tx
+                                .send(DomainEvent::PipelineEvent {
+                                    run_id,
+                                    ev: PipelineRunEvent::Failed {
+                                        message: format!("Failed to open local database: {e}"),
+                                    },
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let is_cold = matches!(db_state, DbState::Missing | DbState::Corrupt);
+
+                    if matches!(db_state, DbState::Busy) {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: "Local database is busy (another Fleet instance may be running). Close it and try again.".into(),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
+
+                    if let DbState::NewerSchema { found, supported } = db_state {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: format!(
+                                        "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+                                    ),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
+
+                    if matches!(kind, CheckKind::LocalIntegrity) && is_cold {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: "Local state not initialized. Run Repair first.".into(),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
 
                     let mode = match kind {
                         CheckKind::LocalIntegrity => SyncMode::FastCheck,
@@ -142,7 +195,7 @@ impl PipelineOrchestrator {
 
                     let req = SyncRequest {
                         repo_url: profile.repo_url.clone(),
-                        local_root: camino::Utf8PathBuf::from(profile.local_path.clone()),
+                        local_root,
                         mode,
                         options,
                         profile_id: Some(profile.id.clone()),

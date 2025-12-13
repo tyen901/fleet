@@ -1,7 +1,7 @@
 use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
 use fleet_core::{DownloadAction, SyncPlan};
-use fleet_infra::net::DownloadEvent;
+use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::sync::{DefaultSyncEngine, SyncMode, SyncOptions, SyncRequest};
 use std::fs;
 use tempfile::tempdir;
@@ -76,11 +76,8 @@ async fn execute_sync_then_fast_check_is_clean() {
         .unwrap();
     assert!(result.executed);
 
-    let cache_path = root.join("@mod").join(".fleet-cache.json");
-    assert!(cache_path.exists());
-
-    let cache: fleet_scanner::cache::ScanCache =
-        serde_json::from_str(&fs::read_to_string(&cache_path).unwrap()).unwrap();
+    let store = RedbFleetDataStore;
+    let cache = store.scan_cache_load_mod(&root, "@mod").unwrap();
     let entry = cache.get("file.txt").expect("Cache entry missing");
 
     let file_path = root.join("@mod").join("file.txt");
