@@ -5,6 +5,7 @@ members = [
     "crates/application/fleet-pipeline",
     "crates/application/fleet-app-core",
     "crates/domain/fleet-core",
+    "crates/infrastructure/fleet-persistence",
     "crates/infrastructure/fleet-infra",
     "crates/interfaces/fleet",
     "crates/interfaces/fleet-cli",
@@ -20,6 +21,7 @@ license = "GPL-3.0-only"
 fleet-cli = { path = "crates/interfaces/fleet-cli", version = "0.2.0" }
 fleet-core = { path = "crates/domain/fleet-core", version = "0.1.0" }
 fleet-infra = { path = "crates/infrastructure/fleet-infra", version = "0.1.0" }
+fleet-persistence = { path = "crates/infrastructure/fleet-persistence", version = "0.1.0" }
 fleet-scanner = { path = "crates/application/fleet-scanner", version = "0.1.0" }
 fleet-config = { path = "crates/interfaces/fleet-config", version = "0.1.0" }
 fleet-app-core = { path = "crates/application/fleet-app-core", version = "0.1.0" }

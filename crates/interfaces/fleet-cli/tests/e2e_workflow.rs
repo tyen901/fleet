@@ -114,8 +114,8 @@ async fn full_user_lifecycle_workflow() {
         "File must exist on disk"
     );
     assert!(
-        root.join(".fleet-local-manifest.json").exists(),
-        "Manifest must be saved"
+        root.join("fleet.redb").exists(),
+        "`fleet.redb` must be saved"
     );
 
     // Phase 2: warm check, expect 0 ops
@@ -129,8 +129,8 @@ async fn full_user_lifecycle_workflow() {
     );
     assert_eq!(plan.deletes.len(), 0, "Warm check should delete nothing");
 
-    // Phase 3: cold check (delete persisted manifest), expect 0 ops
-    std::fs::remove_file(root.join(".fleet-local-manifest.json")).unwrap();
+    // Phase 3: cold check (delete persisted baseline), expect 0 ops
+    std::fs::remove_file(root.join("fleet.redb")).unwrap();
     let plan = commands::cmd_check(repo_url.clone(), root.clone(), CliSyncMode::Smart)
         .await
         .expect("Phase 3 check failed");
@@ -140,17 +140,14 @@ async fn full_user_lifecycle_workflow() {
         "Cold check should find existing files and skip download"
     );
 
-    // Restore manifest via a sync (should be a no-op but saves manifest)
-    let _ = commands::cmd_sync(
-        repo_url.clone(),
-        root.clone(),
-        CliSyncMode::Smart,
-        4,
-        None,
-        None,
-    )
-    .await
-    .expect("Phase 3 restore sync failed");
+    // Restore baseline via repair (writes fleet.redb)
+    commands::cmd_repair(repo_url.clone(), root.clone())
+        .await
+        .expect("Phase 3 restore repair failed");
+    assert!(
+        root.join("fleet.redb").exists(),
+        "Repair must write `fleet.redb`"
+    );
 
     // Phase 4: sabotage (delete mod folder)
     std::fs::remove_dir_all(root.join("@e2e_mod")).unwrap();

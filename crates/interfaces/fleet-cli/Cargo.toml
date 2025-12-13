@@ -19,6 +19,7 @@ fleet-core = { workspace = true }
 fleet-scanner = { workspace = true }
 fleet-infra = { workspace = true }
 fleet-app-core = { workspace = true }
+fleet-persistence = { workspace = true }
 
 # Utilities
 anyhow = { workspace = true }

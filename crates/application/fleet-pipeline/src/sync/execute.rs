@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 
 use camino::Utf8Path;
@@ -211,8 +211,6 @@ impl PlanExecutor for DefaultPlanExecutor {
             return Err(SyncError::Execution(format!("Failed downloads: {failed}")));
         }
 
-        update_scan_caches(root, opts.cache_root.as_deref(), &plan, &artifacts).await?;
-
         Ok((artifacts, stats))
     }
 }
@@ -240,72 +238,6 @@ fn build_file_url(repo_url: &str, mod_name: &str, rel_path: &str) -> Result<Stri
     }
 
     Ok(url.to_string())
-}
-
-async fn update_scan_caches(
-    root: &Utf8Path,
-    cache_root: Option<&Utf8Path>,
-    plan: &SyncPlan,
-    artifacts: &[SyncArtifact],
-) -> Result<(), SyncError> {
-    let root = root.to_owned();
-    let cache_root = cache_root.map(|p| p.to_owned());
-    let artifacts = artifacts.to_vec();
-    let deletes = plan.deletes.clone();
-
-    tokio::task::spawn_blocking(move || {
-        use fleet_scanner::cache::ScanCache;
-
-        let mut mod_artifacts: HashMap<String, Vec<SyncArtifact>> = HashMap::new();
-        for art in artifacts {
-            mod_artifacts
-                .entry(art.mod_name.clone())
-                .or_default()
-                .push(art);
-        }
-
-        let mut mods_with_deletes = HashSet::new();
-        for del in &deletes {
-            if let Some((mod_name, _)) = del.path.split_once('/') {
-                mods_with_deletes.insert(mod_name.to_string());
-            }
-        }
-
-        let mut touched_mods: HashSet<String> = mod_artifacts.keys().cloned().collect();
-        touched_mods.extend(mods_with_deletes);
-
-        for mod_name in touched_mods {
-            let cache_path = if let Some(root) = &cache_root {
-                ScanCache::get_path(root, &mod_name)
-            } else {
-                root.join(&mod_name).join(".fleet-cache.json")
-            };
-            let mut cache = ScanCache::load(&cache_path);
-
-            let mod_dir = root.join(&mod_name);
-            cache.prune_ghosts(&mod_dir);
-
-            if let Some(arts) = mod_artifacts.get(&mod_name) {
-                for art in arts {
-                    cache.update(
-                        &art.rel_path,
-                        art.final_mtime,
-                        art.size,
-                        art.checksum.clone(),
-                    );
-                }
-            }
-
-            cache
-                .save(&cache_path)
-                .map_err(|e| format!("save cache {mod_name} failed: {e}"))?;
-        }
-
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| SyncError::Execution(format!("cache update join failed: {e}")))?
-    .map_err(SyncError::Execution)
 }
 
 #[cfg(test)]

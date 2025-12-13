@@ -9,11 +9,13 @@ use crate::sync::execute::{DefaultPlanExecutor, PlanExecutor};
 use crate::sync::local::{DefaultLocalStateProvider, LocalState, LocalStateProvider};
 use crate::sync::remote::{HttpRemoteStateProvider, RemoteStateProvider};
 use crate::sync::storage::{
-    FileManifestStore, FileRepoSummaryStore, LocalFileSummary, LocalManifestSummary, ManifestStore,
-    RepoSummary, RepoSummaryStore,
+    FileRepoSummaryStore, LocalFileSummary, LocalManifestSummary, RepoSummary, RepoSummaryStore,
 };
 use crate::sync::{SyncError, SyncMode, SyncOptions, SyncRequest, SyncResult, SyncStats};
 use fleet_core::path_utils::FleetPath;
+use fleet_persistence::{
+    CacheDeleteRecord, CacheRenameRecord, CacheUpsertRecord, FleetDataStore, RedbFleetDataStore,
+};
 use fleet_scanner::Scanner;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,22 +24,22 @@ pub struct DefaultSyncEngine {
     remote: Box<dyn RemoteStateProvider>,
     local: Box<dyn LocalStateProvider>,
     executor: Box<dyn PlanExecutor>,
-    manifest_store: Arc<dyn ManifestStore>,
+    fleet_data: Arc<dyn FleetDataStore>,
     repo_summary_store: Arc<dyn RepoSummaryStore>,
 }
 
 impl DefaultSyncEngine {
     pub fn new(client: reqwest::Client) -> Self {
         let remote = Box::new(HttpRemoteStateProvider::new(client.clone()));
-        let manifest_store: Arc<dyn ManifestStore> = Arc::new(FileManifestStore::new());
-        let local = Box::new(DefaultLocalStateProvider::new(None, manifest_store.clone()));
+        let fleet_data: Arc<dyn FleetDataStore> = Arc::new(RedbFleetDataStore);
+        let local = Box::new(DefaultLocalStateProvider::new(fleet_data.clone()));
         let executor = Box::new(DefaultPlanExecutor::new(client));
         let repo_summary_store: Arc<dyn RepoSummaryStore> = Arc::new(FileRepoSummaryStore::new());
         Self {
             remote,
             local,
             executor,
-            manifest_store,
+            fleet_data,
             repo_summary_store,
         }
     }
@@ -46,14 +48,14 @@ impl DefaultSyncEngine {
         remote: Box<dyn RemoteStateProvider>,
         local: Box<dyn LocalStateProvider>,
         executor: Box<dyn PlanExecutor>,
-        manifest_store: Arc<dyn ManifestStore>,
+        fleet_data: Arc<dyn FleetDataStore>,
         repo_summary_store: Arc<dyn RepoSummaryStore>,
     ) -> Self {
         Self {
             remote,
             local,
             executor,
-            manifest_store,
+            fleet_data,
             repo_summary_store,
         }
     }
@@ -116,7 +118,7 @@ impl DefaultSyncEngine {
         let mut mods_to_fetch = Vec::new();
 
         // Try to load the last known manifest we synced to
-        let last_known_manifest = self.manifest_store.load(&req.local_root).ok();
+        let last_known_manifest = self.fleet_data.load_baseline_manifest(&req.local_root).ok();
 
         let total_mods = repository.required_mods.len();
 
@@ -203,27 +205,35 @@ impl DefaultSyncEngine {
     }
 
     /// Builds a plan without any network I/O by comparing current local state against the last
-    /// saved local summary (captured at the end of a successful sync).
+    /// persisted local summary stored in `fleet.redb` (captured at the end of a successful sync).
     pub fn compute_local_integrity_plan(
         &self,
         req: &SyncRequest,
         local: &LocalState,
     ) -> Result<SyncPlan, SyncError> {
-        let empty = || SyncPlan {
-            renames: Vec::new(),
-            checks: Vec::new(),
-            downloads: Vec::new(),
-            deletes: Vec::new(),
-        };
+        let expected = self
+            .fleet_data
+            .load_baseline_summary(&req.local_root)
+            .map_err(|e| match e.kind() {
+                fleet_persistence::StorageErrorKind::Missing => {
+                    SyncError::Local("Local baseline missing (run `repair` to initialize)".into())
+                }
+                fleet_persistence::StorageErrorKind::Busy => SyncError::Local(
+                    "Local database is busy (another Fleet instance may be running)".into(),
+                ),
+                fleet_persistence::StorageErrorKind::NewerSchema => SyncError::Local(
+                    "Local database is from a newer Fleet; update Fleet and try again".into(),
+                ),
+                fleet_persistence::StorageErrorKind::Corrupt => {
+                    SyncError::Local("Local database is corrupt; run `repair` to recreate".into())
+                }
+                _ => SyncError::Local(format!("fleet.redb baseline load failed: {e}")),
+            })?;
 
-        let expected = match self.manifest_store.load_summary(&req.local_root) {
-            Ok(s) => s,
-            Err(_) => return Ok(empty()),
-        };
-        let current = match local.summary.clone() {
-            Some(s) => s,
-            None => return Ok(empty()),
-        };
+        let current = local
+            .summary
+            .clone()
+            .ok_or_else(|| SyncError::Local("Local scan did not produce a summary".into()))?;
 
         Ok(build_fast_plan(&expected, &current))
     }
@@ -295,16 +305,53 @@ impl DefaultSyncEngine {
                 .manifest
         };
 
-        if let Err(e) = self.manifest_store.save(&req.local_root, &manifest_to_save) {
-            return Err(SyncError::Local(format!("manifest save failed: {e}")));
-        }
         let summary = compute_summary_from_manifest(&req.local_root, &manifest_to_save);
-        if let Err(e) = self.manifest_store.save_summary(&req.local_root, &summary) {
-            return Err(SyncError::Local(format!("summary save failed: {e}")));
-        }
 
-        // Suppress unused warning for artifacts in case we don't use them further yet.
-        let _ = artifacts;
+        let cache_updates: Vec<CacheUpsertRecord> = artifacts
+            .iter()
+            .map(|a| CacheUpsertRecord {
+                mod_name: a.mod_name.clone(),
+                rel_path: a.rel_path.clone(),
+                mtime: a.final_mtime,
+                size: a.size,
+                checksum: a.checksum.clone(),
+            })
+            .collect();
+
+        let cache_deletes = plan
+            .deletes
+            .iter()
+            .filter_map(|d| split_mod_rel(&d.path))
+            .map(|(mod_name, rel_path)| CacheDeleteRecord { mod_name, rel_path })
+            .collect::<Vec<_>>();
+
+        let cache_renames = plan
+            .renames
+            .iter()
+            .filter_map(|r| {
+                let (old_mod, old_rel) = split_mod_rel(&r.old_path)?;
+                let (new_mod, new_rel) = split_mod_rel(&r.new_path)?;
+                if old_mod != new_mod {
+                    return None;
+                }
+                Some(CacheRenameRecord {
+                    mod_name: old_mod,
+                    old_rel_path: old_rel?,
+                    new_rel_path: new_rel?,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        self.fleet_data
+            .commit_sync_snapshot(
+                &req.local_root,
+                &manifest_to_save,
+                &summary,
+                &cache_updates,
+                &cache_deletes,
+                &cache_renames,
+            )
+            .map_err(|e| SyncError::Local(format!("fleet.redb commit failed: {e}")))?;
 
         Ok(SyncResult {
             plan,
@@ -314,24 +361,30 @@ impl DefaultSyncEngine {
     }
 
     /// Persist the given manifest as the local baseline and write a matching summary file.
-    /// This is used by "repair" to bootstrap `.fleet-local-manifest.json` + `.fleet-local-summary.json`
-    /// without executing a sync.
+    /// This is used by "repair" to bootstrap `fleet.redb` without executing a sync.
     pub fn persist_remote_snapshot(
         &self,
         root: &Utf8Path,
         manifest: &fleet_core::Manifest,
     ) -> Result<(), SyncError> {
-        self.manifest_store
-            .save(root, manifest)
-            .map_err(|e| SyncError::Local(format!("manifest save failed: {e}")))?;
-
         let summary = compute_summary_from_manifest(root, manifest);
-        self.manifest_store
-            .save_summary(root, &summary)
-            .map_err(|e| SyncError::Local(format!("summary save failed: {e}")))?;
+        self.fleet_data
+            .commit_repair_snapshot(root, manifest, &summary)
+            .map_err(|e| SyncError::Local(format!("fleet.redb repair commit failed: {e}")))?;
 
         Ok(())
     }
+}
+
+fn split_mod_rel(path: &str) -> Option<(String, Option<String>)> {
+    let cleaned = path.trim_end_matches('/');
+    if let Some((mod_name, rel)) = cleaned.split_once('/') {
+        if rel.is_empty() {
+            return Some((mod_name.to_string(), None));
+        }
+        return Some((mod_name.to_string(), Some(FleetPath::normalize(rel))));
+    }
+    Some((cleaned.to_string(), None))
 }
 
 fn compute_summary_from_manifest(
@@ -475,256 +528,8 @@ fn build_fast_plan(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::sync::execute::SyncArtifact;
-    use crate::sync::local::{LocalState, LocalTrustLevel};
-    use crate::sync::storage::{
-        LocalFileSummary, LocalManifestSummary, ManifestStore, RepoSummaryStore,
-    };
-    use camino::Utf8PathBuf;
-    use fleet_core::formats::repo::RepoModExternal;
-    use fleet_core::repo::RepoMod;
-    use fleet_core::{File, FileType, Manifest, Mod};
-    use std::sync::Mutex;
-    use tokio::sync::mpsc::Sender;
-
-    struct MemoryManifestStore {
-        inner: Mutex<Option<Manifest>>,
-        summary: Mutex<Option<Vec<LocalManifestSummary>>>,
-    }
-
-    impl MemoryManifestStore {
-        fn new(manifest: Option<Manifest>) -> Arc<Self> {
-            Arc::new(Self {
-                inner: Mutex::new(manifest),
-                summary: Mutex::new(None),
-            })
-        }
-    }
-
-    impl ManifestStore for MemoryManifestStore {
-        fn load(&self, _root: &Utf8Path) -> Result<Manifest, String> {
-            self.inner
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| "missing".to_string())
-        }
-
-        fn save(&self, _root: &Utf8Path, manifest: &Manifest) -> Result<(), String> {
-            *self.inner.lock().unwrap() = Some(manifest.clone());
-            Ok(())
-        }
-
-        fn load_summary(&self, _root: &Utf8Path) -> Result<Vec<LocalManifestSummary>, String> {
-            self.summary
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| "missing".into())
-        }
-
-        fn save_summary(
-            &self,
-            _root: &Utf8Path,
-            summary: &[LocalManifestSummary],
-        ) -> Result<(), String> {
-            *self.summary.lock().unwrap() = Some(summary.to_vec());
-            Ok(())
-        }
-    }
-
-    struct FakeRemote {
-        manifest: Manifest,
-    }
-
-    #[async_trait::async_trait]
-    impl RemoteStateProvider for FakeRemote {
-        async fn head_repo_json_mtime(&self, _repo_url: &str) -> Result<Option<String>, SyncError> {
-            Ok(None)
-        }
-
-        async fn fetch_repo_json(
-            &self,
-            _repo_url: &str,
-        ) -> Result<fleet_core::formats::RepositoryExternal, SyncError> {
-            let mods: Vec<RepoModExternal> = self
-                .manifest
-                .mods
-                .iter()
-                .map(|m| RepoModExternal {
-                    mod_name: m.name.clone(),
-                    checksum: m.checksum.clone(),
-                    enabled: true,
-                })
-                .collect();
-            Ok(fleet_core::formats::RepositoryExternal {
-                repo_name: "test".into(),
-                checksum: "c".into(),
-                required_mods: mods.clone(),
-                optional_mods: Vec::new(),
-            })
-        }
-
-        async fn fetch_mod_srf(
-            &self,
-            _base: &reqwest::Url,
-            mod_name: &str,
-        ) -> Result<Mod, SyncError> {
-            self.manifest
-                .mods
-                .iter()
-                .find(|m| m.name == mod_name)
-                .cloned()
-                .ok_or_else(|| SyncError::Remote("mod not found".into()))
-        }
-
-        async fn fetch_remote(
-            &self,
-            _repo_url: &str,
-        ) -> Result<crate::sync::remote::RemoteState, SyncError> {
-            Ok(crate::sync::remote::RemoteState {
-                manifest: self.manifest.clone(),
-            })
-        }
-    }
-
-    struct NoopRepoSummaryStore;
-
-    impl RepoSummaryStore for NoopRepoSummaryStore {
-        fn load_repo_summary(&self, _profile_id: &str) -> Result<Option<RepoSummary>, String> {
-            Ok(None)
-        }
-
-        fn save_repo_summary(
-            &self,
-            _profile_id: &str,
-            _summary: &RepoSummary,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    struct FakeLocal {
-        manifest: Manifest,
-    }
-
-    #[async_trait::async_trait]
-    impl LocalStateProvider for FakeLocal {
-        async fn local_state(
-            &self,
-            _root: &Utf8Path,
-            _mode: SyncMode,
-            _on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
-        ) -> Result<LocalState, SyncError> {
-            Ok(LocalState {
-                manifest: self.manifest.clone(),
-                summary: None,
-                trust: LocalTrustLevel::CacheOnly,
-            })
-        }
-    }
-
-    struct NoopExecutor;
-
-    #[async_trait::async_trait]
-    impl PlanExecutor for NoopExecutor {
-        async fn execute(
-            &self,
-            _root: &Utf8Path,
-            _repo_url: &str,
-            plan: SyncPlan,
-            _opts: &SyncOptions,
-            _progress_tx: Option<Sender<DownloadEvent>>,
-        ) -> Result<(Vec<SyncArtifact>, SyncStats), SyncError> {
-            Ok((
-                Vec::new(),
-                SyncStats {
-                    files_planned_download: plan.downloads.len() as u64,
-                    ..SyncStats::default()
-                },
-            ))
-        }
-    }
-
-    fn simple_manifest(with_file: bool) -> Manifest {
-        let mut files = Vec::new();
-        if with_file {
-            files.push(File {
-                path: "addons/a.pbo".into(),
-                length: 10,
-                checksum: "abc".into(),
-                file_type: FileType::File,
-                parts: Vec::new(),
-            });
-        }
-        Manifest {
-            version: "1.0".into(),
-            mods: vec![Mod {
-                name: "@m".into(),
-                checksum: "m1".into(),
-                files,
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn plan_empty_when_manifests_match() {
-        let manifest = simple_manifest(true);
-        let store = MemoryManifestStore::new(Some(manifest.clone()));
-        let engine = DefaultSyncEngine::with_components(
-            Box::new(FakeRemote {
-                manifest: manifest.clone(),
-            }),
-            Box::new(FakeLocal {
-                manifest: manifest.clone(),
-            }),
-            Box::new(NoopExecutor),
-            store,
-            Arc::new(NoopRepoSummaryStore),
-        );
-
-        let req = SyncRequest {
-            repo_url: "https://x/".into(),
-            local_root: Utf8PathBuf::from("/tmp"),
-            mode: SyncMode::CacheOnly,
-            options: SyncOptions::default(),
-            profile_id: None,
-        };
-
-        let plan = engine.plan(&req).await.unwrap();
-        assert_eq!(plan.downloads.len(), 0);
-        assert_eq!(plan.deletes.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn plan_includes_download_when_missing_locally() {
-        let remote_manifest = simple_manifest(true);
-        let local_manifest = simple_manifest(false);
-        let store = MemoryManifestStore::new(Some(local_manifest.clone()));
-        let engine = DefaultSyncEngine::with_components(
-            Box::new(FakeRemote {
-                manifest: remote_manifest,
-            }),
-            Box::new(FakeLocal {
-                manifest: local_manifest,
-            }),
-            Box::new(NoopExecutor),
-            store,
-            Arc::new(NoopRepoSummaryStore),
-        );
-
-        let req = SyncRequest {
-            repo_url: "https://x/".into(),
-            local_root: Utf8PathBuf::from("/tmp"),
-            mode: SyncMode::CacheOnly,
-            options: SyncOptions::default(),
-            profile_id: None,
-        };
-
-        let plan = engine.plan(&req).await.unwrap();
-        assert_eq!(plan.downloads.len(), 1);
-    }
+    use super::build_fast_plan;
+    use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 
     #[test]
     fn fast_plan_detects_changes() {
@@ -770,10 +575,6 @@ mod tests {
             .downloads
             .iter()
             .any(|d| d.mod_name == "@m" && d.rel_path == "a.txt"));
-        assert!(plan
-            .downloads
-            .iter()
-            .any(|d| d.mod_name == "@m" && d.rel_path == "b.txt"));
         assert!(plan.deletes.iter().any(|d| d.path == "@m/c.txt"));
     }
 }

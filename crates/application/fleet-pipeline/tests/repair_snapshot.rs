@@ -1,4 +1,5 @@
 use camino::Utf8PathBuf;
+use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::sync::DefaultSyncEngine;
 use tempfile::tempdir;
 
@@ -26,12 +27,10 @@ fn repair_persists_local_baseline_manifest_and_summary() {
 
     engine.persist_remote_snapshot(&root, &manifest).unwrap();
 
-    assert!(root.join(".fleet-local-manifest.json").exists());
-    assert!(root.join(".fleet-local-summary.json").exists());
+    assert!(root.join("fleet.redb").exists());
 
-    let summary_json = std::fs::read_to_string(root.join(".fleet-local-summary.json")).unwrap();
-    let summary: Vec<fleet_pipeline::sync::storage::LocalManifestSummary> =
-        serde_json::from_str(&summary_json).unwrap();
+    let store: RedbFleetDataStore = RedbFleetDataStore;
+    let summary = store.load_baseline_summary(&root).unwrap();
 
     assert_eq!(summary.len(), 1);
     assert_eq!(summary[0].mod_name, "@m");
