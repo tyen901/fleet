@@ -13,6 +13,7 @@ pub struct FleetUiApp {
     update_client: updates::UpdateClient,
     update_events: std::sync::mpsc::Receiver<updates::UpdateEvent>,
     update_state: updates::UpdateState,
+    last_checked_profile_id: Option<String>,
 }
 
 impl FleetUiApp {
@@ -26,6 +27,7 @@ impl FleetUiApp {
             update_client,
             update_events,
             update_state: updates::UpdateState::Idle,
+            last_checked_profile_id: None,
         }
     }
 }
@@ -178,6 +180,23 @@ impl eframe::App for FleetUiApp {
                                         &self.core.state,
                                         pid.clone(),
                                     ) {
+                                        if !self.core.is_pipeline_running()
+                                            && self
+                                                .last_checked_profile_id
+                                                .as_deref()
+                                                != Some(vm.profile.id.as_str())
+                                        {
+                                            if let Err(e) =
+                                                self.core.start_local_check(vm.profile.id.clone())
+                                            {
+                                                tracing::error!(
+                                                    "Failed to start automatic local check: {e}"
+                                                );
+                                            } else {
+                                                self.last_checked_profile_id =
+                                                    Some(vm.profile.id.clone());
+                                            }
+                                        }
                                         dashboard::draw(tui, &vm, &mut self.core);
                                     } else {
                                         tui.label("Profile not found");

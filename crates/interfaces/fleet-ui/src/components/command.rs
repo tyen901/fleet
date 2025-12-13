@@ -8,7 +8,8 @@ use fleet_app_core::viewmodel::DashboardState;
 
 pub struct CommandInterfaceResponse {
     pub sync: bool,
-    pub check: bool,
+    pub check_remote: bool,
+    pub check_local: bool,
     pub launch: bool,
     pub join: bool,
     pub cancel: bool,
@@ -18,7 +19,8 @@ pub struct CommandInterfaceResponse {
 pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> CommandInterfaceResponse {
     let mut resp = CommandInterfaceResponse {
         sync: false,
-        check: false,
+        check_remote: false,
+        check_local: false,
         launch: false,
         join: false,
         cancel: false,
@@ -234,10 +236,16 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                             resp.join = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "CHECK", "outline", true))
+                            .ui(|ui| cmd_button(ui, "LOCAL CHECK", "outline", true))
                             .clicked()
                         {
-                            resp.check = true;
+                            resp.check_local = true;
+                        }
+                        if tui
+                            .ui(|ui| cmd_button(ui, "CHECK FOR UPDATES", "outline", true))
+                            .clicked()
+                        {
+                            resp.check_remote = true;
                         }
                     }
                     DashboardState::Error { .. } => {
@@ -262,10 +270,16 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                             resp.join = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "CHECK", "outline", true))
+                            .ui(|ui| cmd_button(ui, "LOCAL CHECK", "outline", true))
                             .clicked()
                         {
-                            resp.check = true;
+                            resp.check_local = true;
+                        }
+                        if tui
+                            .ui(|ui| cmd_button(ui, "CHECK FOR UPDATES", "outline", true))
+                            .clicked()
+                        {
+                            resp.check_remote = true;
                         }
                     }
                 });

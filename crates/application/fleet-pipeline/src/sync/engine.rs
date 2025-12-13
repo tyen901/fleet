@@ -187,14 +187,8 @@ impl DefaultSyncEngine {
         req: &SyncRequest,
         on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
     ) -> Result<LocalState, SyncError> {
-        let local_mode = if matches!(req.mode, SyncMode::FastCheck) {
-            SyncMode::SmartVerify
-        } else {
-            req.mode
-        };
-
         self.local
-            .local_state(&req.local_root, local_mode, on_progress)
+            .local_state(&req.local_root, req.mode, on_progress)
             .await
     }
 

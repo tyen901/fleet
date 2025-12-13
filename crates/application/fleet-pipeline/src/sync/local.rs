@@ -194,23 +194,19 @@ impl DefaultLocalStateProvider {
     }
 
     async fn fast_check(&self, root: &Utf8Path) -> Result<LocalState, SyncError> {
-        let root = root.to_owned();
         let cache_root = self.cache_root.clone();
         let manifest_store = self.manifest_store.clone();
 
+        // Prefer a summary-based check when we have a cached manifest.
+        // If there is no manifest (or it contains no mods), fall back to a
+        // metadata-only scan so callers still see the on-disk files.
+        let contract = match manifest_store.load(root) {
+            Ok(m) if !m.mods.is_empty() => m,
+            _ => return self.metadata_only(root).await,
+        };
+
+        let root = root.to_owned();
         let (manifest, summary) = tokio::task::spawn_blocking(move || {
-            let contract = match manifest_store.load(&root) {
-                Ok(m) => m,
-                Err(_) => {
-                    return Ok((
-                        Manifest {
-                            version: "1.0".to_string(),
-                            mods: Vec::new(),
-                        },
-                        Vec::new(),
-                    ))
-                }
-            };
 
             // Process mods in parallel for performance.
             let results: Vec<_> = contract

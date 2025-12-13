@@ -67,6 +67,7 @@ impl FleetApplication {
 
     // --- Actions ---
 
+    /// Full remote check - fetch remote manifest and compare against local state.
     pub fn start_check(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
         let profile = self.get_profile(profile_id)?.clone();
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
@@ -75,7 +76,24 @@ impl FleetApplication {
 
         if let Err(e) = self
             .orchestrator
-            .start_check(profile, self.state.settings.clone(), run_id)
+            .start_check(profile, self.state.settings.clone(), run_id, false)
+        {
+            self.state = reduce(self.state.clone(), DomainEvent::UserError(e.to_string()));
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Fast local-only check - compares local files against cached local state.
+    pub fn start_local_check(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
+        let profile = self.get_profile(profile_id)?.clone();
+        let run_id: PipelineRunId = uuid::Uuid::new_v4();
+        self.state.pipeline.run_id = Some(run_id);
+        // Do not clear last_plan here; remote comparison is unchanged.
+
+        if let Err(e) = self
+            .orchestrator
+            .start_check(profile, self.state.settings.clone(), run_id, true)
         {
             self.state = reduce(self.state.clone(), DomainEvent::UserError(e.to_string()));
             return Err(e);

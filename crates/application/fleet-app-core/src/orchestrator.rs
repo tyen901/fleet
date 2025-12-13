@@ -42,6 +42,7 @@ impl PipelineOrchestrator {
         profile: Profile,
         settings: AppSettings,
         run_id: PipelineRunId,
+        fast_local_only: bool,
     ) -> anyhow::Result<()> {
         self.cancel();
         let token = CancellationToken::new();
@@ -76,10 +77,13 @@ impl PipelineOrchestrator {
                         })
                         .await;
 
-                    let manifest_path = std::path::Path::new(&profile.local_path)
-                        .join(".fleet-local-manifest.json");
-                    let is_cold = !manifest_path.exists();
-                    let mode = if is_cold {
+                    let root_path = std::path::Path::new(&profile.local_path);
+                    let manifest_path = root_path.join(".fleet-local-manifest.json");
+                    let summary_path = root_path.join(".fleet-local-summary.json");
+                    let is_cold = !manifest_path.exists() || !summary_path.exists();
+                    let mode = if fast_local_only {
+                        SyncMode::FastCheck
+                    } else if is_cold {
                         SyncMode::SmartVerify
                     } else {
                         SyncMode::FastCheck
@@ -152,6 +156,102 @@ impl PipelineOrchestrator {
                             return;
                         }
                     };
+
+                    if fast_local_only {
+                        // Fast local-only check: synthesize scan stats and diff against cached
+                        // local state; no remote fetch.
+                        // Synthesize a quick scan summary for the UI/readout.
+                        let mut total_files: u64 = 0;
+                        let mut total_bytes: u64 = 0;
+                        for m in &local_state.manifest.mods {
+                            total_files += m.files.len() as u64;
+                            total_bytes += m.files.iter().map(|f| f.length).sum::<u64>();
+                        }
+                        let stats = fleet_scanner::ScanStats {
+                            files_scanned: total_files,
+                            files_cached: total_files,
+                            total_files,
+                            bytes_processed: total_bytes,
+                            total_bytes,
+                        };
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::ScanStats { stats },
+                            })
+                            .await;
+
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::StepChanged {
+                                    step: PipelineStep::Fetch,
+                                    status: StepStatus::Skipped,
+                                    detail: "Using cached manifest snapshot".into(),
+                                },
+                            })
+                            .await;
+
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::StepChanged {
+                                    step: PipelineStep::Diff,
+                                    status: StepStatus::Running,
+                                    detail: "Comparing local files to cached state...".into(),
+                                },
+                            })
+                            .await;
+
+                        let plan_res =
+                            engine.compute_plan(&local_state.manifest, &local_state, &req);
+                        match plan_res {
+                            Ok(plan) => {
+                                let diff_stats = (plan.downloads.len(), plan.deletes.len());
+                                let existing_mods = std::fs::read_dir(&profile.local_path)
+                                    .ok()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|res| res.ok())
+                                    .filter_map(|entry| {
+                                        let path = entry.path();
+                                        if !path.is_dir() {
+                                            return None;
+                                        }
+                                        let name =
+                                            path.file_name()?.to_string_lossy().to_string();
+                                        if name.starts_with('@') {
+                                            Some(name)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                let _ = tx
+                                    .send(DomainEvent::PipelineEvent {
+                                        run_id,
+                                        ev: PipelineRunEvent::PlanReady {
+                                            plan,
+                                            diff_stats,
+                                            existing_mods,
+                                        },
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = tx
+                                    .send(DomainEvent::PipelineEvent {
+                                        run_id,
+                                        ev: PipelineRunEvent::Failed {
+                                            message: e.to_string(),
+                                        },
+                                    })
+                                    .await;
+                            }
+                        }
+
+                        return;
+                    }
 
                     let _ = tx
                         .send(DomainEvent::PipelineEvent {

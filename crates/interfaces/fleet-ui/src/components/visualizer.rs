@@ -144,8 +144,10 @@ impl Visualizer {
                 let exec_processed = (exec_ratio * capacity as f32).floor() as usize;
 
                 let block_status_fn = |idx: usize| -> (egui::Color32, f32, bool) {
+                    let has_overlay = overlays.get(idx).copied().flatten().is_some();
                     let is_active_check =
-                        vm.phase == VisualizerPhase::Scanning && idx == scan_active;
+                        (vm.phase == VisualizerPhase::Scanning && idx == scan_active)
+                            || (vm.phase == VisualizerPhase::Review && has_overlay);
                     match vm.phase {
                         VisualizerPhase::Scanning => {
                             if idx < scan_processed {
@@ -167,10 +169,10 @@ impl Visualizer {
                             }
                         }
                         VisualizerPhase::Review => match overlays.get(idx).copied().flatten() {
-                            Some(Overlay::Delete) => (COL_DANGER, 0.85, false),
-                            Some(Overlay::Add) => (COL_SUCCESS, 0.9, false),
-                            Some(Overlay::Edit) => (COL_ACCENT, 0.9, false),
-                            None => (COL_SUCCESS, 0.25, false),
+                            Some(Overlay::Delete) => (COL_DANGER, 0.85, is_active_check),
+                            Some(Overlay::Add) => (COL_SUCCESS, 0.9, is_active_check),
+                            Some(Overlay::Edit) => (COL_ACCENT, 0.9, is_active_check),
+                            None => (COL_SUCCESS, 0.25, is_active_check),
                         },
                         VisualizerPhase::Fetching
                         | VisualizerPhase::Diffing
