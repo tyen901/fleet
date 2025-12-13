@@ -1,5 +1,6 @@
 use fleet_app_core::viewmodel::profile_dashboard_vm;
 use fleet_app_core::{AppState, Profile};
+use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
 
 #[test]
 fn dashboard_state_is_unknown_when_no_baseline_or_cache_files_exist() {
@@ -29,9 +30,18 @@ fn dashboard_state_is_unknown_when_no_baseline_or_cache_files_exist() {
 #[test]
 fn dashboard_state_is_not_unknown_when_any_cache_file_exists() {
     let dir = tempfile::tempdir().unwrap();
-    let mod_dir = dir.path().join("@m");
-    std::fs::create_dir_all(&mod_dir).unwrap();
-    std::fs::write(mod_dir.join(".fleet-cache.json"), "{}").unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+    let store = RedbFleetDataStore;
+    store
+        .commit_repair_snapshot(
+            &root,
+            &fleet_core::Manifest {
+                version: "1.0".into(),
+                mods: vec![],
+            },
+            &[],
+        )
+        .unwrap();
 
     let profile = Profile {
         id: "p1".to_string(),
@@ -50,6 +60,6 @@ fn dashboard_state_is_not_unknown_when_any_cache_file_exists() {
     let vm = profile_dashboard_vm(&state, profile.id.clone()).unwrap();
     assert!(
         !matches!(vm.state, fleet_app_core::DashboardState::Unknown { .. }),
-        "unexpected Unknown state when cache file exists"
+        "unexpected Unknown state when fleet.redb exists"
     );
 }

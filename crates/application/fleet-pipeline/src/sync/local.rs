@@ -2,13 +2,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 use fleet_core::path_utils::FleetPath;
 use fleet_core::{File, FileType, Manifest, Mod};
 use fleet_scanner::cache::ScanCache;
-use fleet_scanner::{ScanStrategy, Scanner};
+use fleet_scanner::{ScanCacheStore, ScanStrategy, Scanner};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::sync::storage::{LocalFileSummary, LocalManifestSummary, ManifestStore};
+use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 use crate::sync::{SyncError, SyncMode};
 use fleet_infra::hashing::compute_file_checksum;
+use fleet_persistence::{CacheUpsert, FleetDataStore};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,24 +39,20 @@ pub trait LocalStateProvider: Send + Sync {
 }
 
 pub struct DefaultLocalStateProvider {
-    pub cache_root: Option<Utf8PathBuf>,
-    pub manifest_store: Arc<dyn ManifestStore>,
+    pub fleet_data: Arc<dyn FleetDataStore>,
 }
 
 impl DefaultLocalStateProvider {
-    pub fn new(cache_root: Option<Utf8PathBuf>, manifest_store: Arc<dyn ManifestStore>) -> Self {
-        Self {
-            cache_root,
-            manifest_store,
-        }
+    pub fn new(fleet_data: Arc<dyn FleetDataStore>) -> Self {
+        Self { fleet_data }
     }
 
     async fn cache_only(&self, root: &Utf8Path) -> Result<LocalState, SyncError> {
         let manifest = self
-            .manifest_store
-            .load(root)
-            .map_err(|e| SyncError::Local(format!("manifest load failed: {e}")))?;
-        let summary = self.manifest_store.load_summary(root).ok();
+            .fleet_data
+            .load_baseline_manifest(root)
+            .map_err(|e| SyncError::Local(format!("fleet.redb manifest load failed: {e}")))?;
+        let summary = self.fleet_data.load_baseline_summary(root).ok();
 
         Ok(LocalState {
             manifest,
@@ -69,7 +66,7 @@ impl DefaultLocalStateProvider {
         root: &Utf8Path,
         on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
     ) -> Result<LocalState, SyncError> {
-        let cache_root = self.cache_root.clone();
+        let fleet_data = self.fleet_data.clone();
         let root = root.to_owned();
         let (manifest, summaries) = tokio::task::spawn_blocking(move || {
             let mut mods = Vec::new();
@@ -90,13 +87,13 @@ impl DefaultLocalStateProvider {
                     continue;
                 }
                 let mod_name = utf.file_name().unwrap().to_string();
-                let cache_path = if let Some(ref root) = cache_root {
-                    ScanCache::get_path(root, &mod_name)
-                } else {
-                    utf.join(".fleet-cache.json")
+                let cache = match fleet_data.scan_cache_load_mod(&root, &mod_name) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("Cache unavailable for {mod_name}: {e}");
+                        Default::default()
+                    }
                 };
-
-                let cache = ScanCache::load(&cache_path);
 
                 let mut files = Vec::new();
                 let mut summary_files = Vec::new();
@@ -123,7 +120,7 @@ impl DefaultLocalStateProvider {
 
                     let checksum = cache
                         .get(&rel)
-                        .filter(|entry| entry.len == len && entry.mtime == mtime)
+                        .filter(|entry| entry.size == len && entry.mtime == mtime)
                         .map(|entry| entry.checksum.clone())
                         .unwrap_or_default();
                     if !checksum.is_empty() {
@@ -220,13 +217,12 @@ impl DefaultLocalStateProvider {
         root: &Utf8Path,
         on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
     ) -> Result<LocalState, SyncError> {
-        let cache_root = self.cache_root.clone();
-        let manifest_store = self.manifest_store.clone();
+        let fleet_data = self.fleet_data.clone();
 
         // Prefer a summary-based check when we have a cached manifest.
         // If there is no manifest (or it contains no mods), fall back to a
         // metadata-only scan so callers still see the on-disk files.
-        let contract = match manifest_store.load(root) {
+        let contract = match fleet_data.load_baseline_manifest(root) {
             Ok(m) if !m.mods.is_empty() => m,
             _ => return self.metadata_only(root, on_progress).await,
         };
@@ -234,10 +230,10 @@ impl DefaultLocalStateProvider {
         let root = root.to_owned();
         let (manifest, summary) = tokio::task::spawn_blocking(move || {
             // Process mods in parallel for performance.
-            let results: Vec<_> = contract
+            let results: Result<Vec<_>, String> = contract
                 .mods
                 .par_iter()
-                .map(|contract_mod| {
+                .map(|contract_mod| -> Result<_, String> {
                     let mod_path = root.join(&contract_mod.name);
                     let mut expected_files: u64 = 0;
                     let mut expected_bytes: u64 = 0;
@@ -250,7 +246,7 @@ impl DefaultLocalStateProvider {
 
                     if !mod_path.exists() {
                         // If the directory is gone, the whole mod is missing.
-                        return (
+                        return Ok((
                             // Manifest Mod Entry (marked dirty/empty)
                             Mod {
                                 name: contract_mod.name.clone(),
@@ -263,17 +259,16 @@ impl DefaultLocalStateProvider {
                                 files: Vec::new(),
                             },
                             (expected_files, expected_bytes, cached_files),
-                        );
+                        ));
                     }
 
-                    let cache_path = if let Some(ref cr) = cache_root {
-                        ScanCache::get_path(cr, &contract_mod.name)
-                    } else {
-                        mod_path.join(".fleet-cache.json")
+                    let cache = match fleet_data.scan_cache_load_mod(&root, &contract_mod.name) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("Cache unavailable for {}: {e}", contract_mod.name);
+                            Default::default()
+                        }
                     };
-
-                    // Load cache for this specific mod
-                    let cache = ScanCache::load(&cache_path);
 
                     let mut valid_files = Vec::new();
                     let mut summary_files = Vec::new();
@@ -295,7 +290,7 @@ impl DefaultLocalStateProvider {
                             // We strictly compare FS vs Cache first.
                             // If FS matches Cache, we assume Cache's checksum is the file's checksum.
                             if let Some(cached_entry) = cache.get(&contract_file.path) {
-                                if current_size == cached_entry.len
+                                if current_size == cached_entry.size
                                     && current_mtime == cached_entry.mtime
                                 {
                                     current_checksum = cached_entry.checksum.clone();
@@ -337,7 +332,7 @@ impl DefaultLocalStateProvider {
                         }
                     }
 
-                    (
+                    Ok((
                         Mod {
                             name: contract_mod.name.clone(),
                             checksum: contract_mod.checksum.clone(),
@@ -348,11 +343,12 @@ impl DefaultLocalStateProvider {
                             files: summary_files,
                         },
                         (expected_files, expected_bytes, cached_files),
-                    )
+                    ))
                 })
                 .collect();
 
             // Unzip the parallel results
+            let results = results?;
             let mut actual_mods = Vec::with_capacity(results.len());
             let mut actual_summary = Vec::with_capacity(results.len());
             let mut expected_files_total: u64 = 0;
@@ -404,10 +400,13 @@ impl DefaultLocalStateProvider {
         on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
     ) -> Result<LocalState, SyncError> {
         let root_path = root.to_owned();
-        let cache_root = self.cache_root.clone();
+        let cache_store: Arc<dyn ScanCacheStore> = Arc::new(FleetDataScanCacheStore {
+            root: root_path.clone(),
+            fleet_data: self.fleet_data.clone(),
+        });
 
         let manifest = tokio::task::spawn_blocking(move || {
-            Scanner::scan_directory(&root_path, strategy, on_progress, cache_root.clone(), None)
+            Scanner::scan_directory(&root_path, strategy, on_progress, Some(cache_store), None)
         })
         .await
         .map_err(|e| SyncError::Local(format!("scan join failed: {e}")))?
@@ -420,6 +419,58 @@ impl DefaultLocalStateProvider {
             summary,
             trust,
         })
+    }
+}
+
+struct FleetDataScanCacheStore {
+    root: Utf8PathBuf,
+    fleet_data: Arc<dyn FleetDataStore>,
+}
+
+impl ScanCacheStore for FleetDataScanCacheStore {
+    fn load_mod_cache(&self, mod_name: &str) -> Result<ScanCache, fleet_scanner::ScannerError> {
+        let entries = match self.fleet_data.scan_cache_load_mod(&self.root, mod_name) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("Cache load failed for {mod_name}: {e}");
+                return Ok(ScanCache::default());
+            }
+        };
+        let mut cache = ScanCache::default();
+        for (rel_path, e) in entries {
+            cache.entries.insert(
+                rel_path,
+                fleet_scanner::cache::FileCacheEntry {
+                    mtime: e.mtime,
+                    size: e.size,
+                    checksum: e.checksum,
+                },
+            );
+        }
+        Ok(cache)
+    }
+
+    fn save_mod_cache(
+        &self,
+        mod_name: &str,
+        cache: &ScanCache,
+    ) -> Result<(), fleet_scanner::ScannerError> {
+        let mut upserts = Vec::with_capacity(cache.entries.len());
+        for (rel_path, e) in &cache.entries {
+            upserts.push(CacheUpsert {
+                rel_path: rel_path.clone(),
+                mtime: e.mtime,
+                size: e.size,
+                checksum: e.checksum.clone(),
+            });
+        }
+        if let Err(e) = self
+            .fleet_data
+            .scan_cache_upsert_batch(&self.root, mod_name, &upserts)
+        {
+            tracing::warn!("Cache save failed for {mod_name}: {e}");
+        }
+        Ok(())
     }
 }
 
@@ -478,6 +529,7 @@ impl LocalStateProvider for DefaultLocalStateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_persistence::RedbFleetDataStore;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -497,15 +549,21 @@ mod tests {
         let mtime = Scanner::mtime(&meta);
         let len = meta.len();
 
-        let cache_path = mod_dir.join(".fleet-cache.json");
-        let mut cache = ScanCache::default();
-        cache.update("file.txt", mtime, len, checksum.clone());
-        cache.save(&cache_path).unwrap();
+        let fleet_data = Arc::new(RedbFleetDataStore);
+        fleet_data
+            .scan_cache_upsert_batch(
+                &root,
+                "@m",
+                &[CacheUpsert {
+                    rel_path: "file.txt".into(),
+                    mtime,
+                    size: len,
+                    checksum: checksum.clone(),
+                }],
+            )
+            .unwrap();
 
-        let provider = DefaultLocalStateProvider::new(
-            None,
-            Arc::new(crate::sync::storage::FileManifestStore::new()),
-        );
+        let provider = DefaultLocalStateProvider::new(fleet_data);
         let state = provider.metadata_only(&root, None).await.unwrap();
 
         assert_eq!(state.trust, LocalTrustLevel::MetadataOnly);
@@ -530,18 +588,24 @@ mod tests {
         let mtime = Scanner::mtime(&meta);
         let len = meta.len();
 
-        let cache_path = mod_dir.join(".fleet-cache.json");
-        let mut cache = ScanCache::default();
-        cache.update("file.txt", mtime, len, "abc".into());
-        cache.save(&cache_path).unwrap();
+        let fleet_data = Arc::new(RedbFleetDataStore);
+        fleet_data
+            .scan_cache_upsert_batch(
+                &root,
+                "@m",
+                &[CacheUpsert {
+                    rel_path: "file.txt".into(),
+                    mtime,
+                    size: len,
+                    checksum: "abc".into(),
+                }],
+            )
+            .unwrap();
 
         // Change file to invalidate metadata
         std::fs::write(&file_path, b"hello world").unwrap();
 
-        let provider = DefaultLocalStateProvider::new(
-            None,
-            Arc::new(crate::sync::storage::FileManifestStore::new()),
-        );
+        let provider = DefaultLocalStateProvider::new(fleet_data);
         let state = provider.metadata_only(&root, None).await.unwrap();
         let f = state.manifest.mods[0]
             .files

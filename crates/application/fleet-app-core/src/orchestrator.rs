@@ -12,6 +12,7 @@ use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus}
 use crate::ports::SyncPipelinePort;
 
 use fleet_core::SyncPlan;
+use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::{
     DefaultSyncEngine, ProgressTracker, SyncMode, SyncOptions, SyncRequest, TransferSnapshot,
 };
@@ -117,10 +118,12 @@ impl PipelineOrchestrator {
                         })
                         .await;
 
-                    let root_path = std::path::Path::new(&profile.local_path);
-                    let manifest_path = root_path.join(".fleet-local-manifest.json");
-                    let summary_path = root_path.join(".fleet-local-summary.json");
-                    let is_cold = !manifest_path.exists() || !summary_path.exists();
+                    let local_root = camino::Utf8PathBuf::from(profile.local_path.clone());
+                    let store = RedbFleetDataStore;
+                    let is_cold = !matches!(
+                        store.validate(&local_root).unwrap_or(DbState::Missing),
+                        DbState::Valid
+                    );
 
                     let mode = match kind {
                         CheckKind::LocalIntegrity => SyncMode::FastCheck,
@@ -142,7 +145,7 @@ impl PipelineOrchestrator {
 
                     let req = SyncRequest {
                         repo_url: profile.repo_url.clone(),
-                        local_root: camino::Utf8PathBuf::from(profile.local_path.clone()),
+                        local_root,
                         mode,
                         options,
                         profile_id: Some(profile.id.clone()),

@@ -2,6 +2,7 @@ use crate::app::FleetApplication;
 use crate::domain::{AppSettings, AppState, Profile, ProfileId};
 use crate::pipeline::{PipelineState, StepStatus};
 use chrono::{DateTime, Utc};
+use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
 use std::path::Path;
 
 fn format_last_synced(ts: Option<DateTime<Utc>>) -> Option<String> {
@@ -271,19 +272,18 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     let pl = &state.pipeline;
     let local_root = Path::new(&profile.local_path);
 
-    let has_any_cache = local_root.is_dir()
-        && std::fs::read_dir(local_root)
+    let has_fleet_data = if local_root.join("fleet.redb").exists() {
+        camino::Utf8PathBuf::from_path_buf(local_root.to_path_buf())
             .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|name| name.starts_with('@'))
-            .any(|name| local_root.join(name).join(".fleet-cache.json").exists());
-
-    let has_baseline_files = local_root.join(".fleet-local-manifest.json").exists()
-        || local_root.join(".fleet-local-summary.json").exists();
+            .and_then(|p| {
+                let store = RedbFleetDataStore;
+                store.validate(&p).ok()
+            })
+            .map(|s| s == DbState::Valid)
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -310,7 +310,7 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     // 1. Determine High-Level State
     let dashboard_state = if let Some(err) = &pl.error {
         DashboardState::Error { msg: err.clone() }
-    } else if local_root.is_dir() && !has_baseline_files && !has_any_cache {
+    } else if local_root.is_dir() && !has_fleet_data {
         DashboardState::Unknown {
             msg: "Local state not initialized. Run Repair.".into(),
         }
