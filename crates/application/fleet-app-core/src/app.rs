@@ -34,7 +34,8 @@ impl Default for FleetApplication {
 impl FleetApplication {
     pub fn new() -> Self {
         let (msg_tx, msg_rx) = mpsc::channel(100);
-        let client = reqwest::Client::new();
+        let client =
+            fleet_infra::net::default_http_client().unwrap_or_else(|_| reqwest::Client::new());
         let engine = fleet_pipeline::default_engine(client);
         let engine = std::sync::Arc::new(engine);
 
@@ -248,10 +249,11 @@ impl FleetApplication {
                 .name("fleet-save-profile".into())
                 .spawn(move || {
                     let res: anyhow::Result<()> = (|| {
-                        let client = reqwest::Client::new();
+                        let client = fleet_infra::net::default_http_client()
+                            .unwrap_or_else(|_| reqwest::Client::new());
                         let engine = fleet_pipeline::default_engine(client);
-                        let rt = tokio::runtime::Runtime::new()?;
-                        rt.block_on(engine.validate_repo_url(&repo_url))?;
+                        crate::async_runtime::runtime()?
+                            .block_on(engine.validate_repo_url(&repo_url))?;
 
                         let persistence = FilePersistence::new();
                         persistence.save_profiles(&profiles_snapshot)?;

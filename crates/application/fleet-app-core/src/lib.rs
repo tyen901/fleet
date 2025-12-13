@@ -1,5 +1,6 @@
 pub mod app;
 pub mod app_core;
+mod async_runtime;
 pub mod domain;
 pub mod kernel;
 pub mod launcher;

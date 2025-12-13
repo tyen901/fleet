@@ -53,7 +53,7 @@ impl PipelineOrchestrator {
         std::thread::Builder::new()
             .name("fleet-check".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Runtime::new() {
+                let rt = match crate::async_runtime::runtime() {
                     Ok(rt) => rt,
                     Err(e) => {
                         let _ = tx.blocking_send(DomainEvent::PipelineEvent {
@@ -278,7 +278,7 @@ impl PipelineOrchestrator {
         std::thread::Builder::new()
             .name("fleet-sync".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Runtime::new() {
+                let rt = match crate::async_runtime::runtime() {
                     Ok(rt) => rt,
                     Err(e) => {
                         let _ = tx.blocking_send(DomainEvent::PipelineEvent {
@@ -419,8 +419,7 @@ impl SyncPipelinePort for PipelineOrchestrator {
                 handle.block_on(async move { engine.validate_repo_url(&repo).await })
             })?;
         } else {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(self.engine.validate_repo_url(repo_url))?;
+            crate::async_runtime::runtime()?.block_on(self.engine.validate_repo_url(repo_url))?;
         }
         Ok(())
     }

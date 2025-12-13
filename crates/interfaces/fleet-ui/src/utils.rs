@@ -13,6 +13,16 @@ pub fn section_label(ui: &mut egui::Ui, text: &str) {
 }
 
 pub fn cmd_button(ui: &mut egui::Ui, label: &str, variant: &str, enabled: bool) -> egui::Response {
+    cmd_button_width(ui, label, variant, enabled, 80.0)
+}
+
+pub fn cmd_button_width(
+    ui: &mut egui::Ui,
+    label: &str,
+    variant: &str,
+    enabled: bool,
+    width: f32,
+) -> egui::Response {
     let (fill, stroke_col, text_col) = match variant {
         "primary" => (COL_ACCENT, COL_ACCENT, COL_BG_DARK),
         "danger" => (Color32::TRANSPARENT, COL_DANGER, COL_DANGER),
@@ -26,7 +36,7 @@ pub fn cmd_button(ui: &mut egui::Ui, label: &str, variant: &str, enabled: bool) 
             .color(if enabled { text_col } else { COL_TEXT_DIM });
 
     let btn = egui::Button::new(text)
-        .min_size(egui::vec2(80.0, 22.0))
+        .min_size(egui::vec2(width, 22.0))
         .fill(if enabled && variant == "primary" {
             fill
         } else {

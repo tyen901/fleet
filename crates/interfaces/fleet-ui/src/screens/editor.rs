@@ -10,9 +10,11 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, app: &mut FleetApplication) {
     let Some(vm) = profile_editor_vm(&*app) else {
         return;
     };
+
+    // Outer scrollable column
     tui.style(taffy::Style {
         flex_direction: taffy::FlexDirection::Column,
-        gap: length(8.0),
+        gap: length(10.0),
         size: percent(1.),
         overflow: taffy::Point {
             x: taffy::Overflow::Hidden,
@@ -21,12 +23,14 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, app: &mut FleetApplication) {
         ..Default::default()
     })
     .add(|tui| {
+        // Section header
         tui.ui(|ui| crate::utils::section_label(ui, "PROFILE EDITOR"));
 
         if let Some(draft) = app.state.editor_draft.as_mut() {
+            // ID
             tui.style(taffy::Style {
                 flex_direction: taffy::FlexDirection::Column,
-                gap: length(2.0),
+                gap: length(4.0),
                 ..Default::default()
             })
             .add(|tui| {
@@ -40,11 +44,63 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, app: &mut FleetApplication) {
                 );
             });
 
+            // NAME + REPO as stacked rows
             text_field(&mut *tui, "NAME", &mut draft.name, "Profile Name");
             text_field(&mut *tui, "REPOSITORY", &mut draft.repo_url, "git@...");
-            text_field(&mut *tui, "PATH", &mut draft.local_path, "C:/Mods/...");
+
+            // PATH row with browse button placed beneath for clarity
+            tui.style(taffy::Style {
+                flex_direction: taffy::FlexDirection::Column,
+                gap: length(4.0),
+                ..Default::default()
+            })
+            .add(|tui| {
+                tui.ui(|ui| crate::utils::section_label(ui, "PATH"));
+                // Row: full-width text field
+                tui.ui(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.local_path)
+                            .hint_text("C:/Mods/...")
+                            .desired_width(f32::INFINITY)
+                            .font(egui::FontId::monospace(12.0)),
+                    );
+                });
+                // Row: actions underneath
+                tui.ui(|ui| {
+                    if ui
+                        .add_enabled(
+                            true,
+                            egui::Button::new(
+                                egui::RichText::new("BROWSE")
+                                    .size(10.0)
+                                    .color(crate::theme::COL_ACCENT),
+                            )
+                            .min_size(egui::vec2(90.0, 24.0))
+                            .stroke(egui::Stroke::new(1.0, crate::theme::COL_ACCENT)),
+                        )
+                        .clicked()
+                    {
+                        let mut dialog = rfd::FileDialog::new();
+                        let current = draft.local_path.trim();
+                        if !current.is_empty() {
+                            let p = std::path::PathBuf::from(current);
+                            if p.is_dir() {
+                                dialog = dialog.set_directory(p);
+                            } else if let Some(parent) = p.parent() {
+                                if parent.is_dir() {
+                                    dialog = dialog.set_directory(parent);
+                                }
+                            }
+                        }
+                        if let Some(folder) = dialog.pick_folder() {
+                            draft.local_path = folder.to_string_lossy().to_string();
+                        }
+                    }
+                });
+            });
         }
 
+        // Errors stacked beneath fields
         if let Some(err) = vm.id_error {
             tui.colored_label(COL_ERROR, err);
         }
@@ -55,6 +111,7 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, app: &mut FleetApplication) {
             tui.colored_label(COL_ERROR, err);
         }
 
+        // Action buttons in their own row underneath
         tui.style(taffy::Style {
             flex_direction: taffy::FlexDirection::Row,
             justify_content: Some(taffy::JustifyContent::SpaceBetween),

@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use fleet_scanner::ScanStats;
 use std::fs;
+use std::io::Write;
 pub struct FilePersistence;
 
 impl Default for FilePersistence {
@@ -63,7 +64,7 @@ impl FilePersistence {
     pub fn save_profiles(&self, profiles: &[Profile]) -> Result<()> {
         let path = self.profiles_path()?;
         let json = serde_json::to_string_pretty(profiles)?;
-        fs::write(&path, json).context("Failed to write profiles")?;
+        atomic_write(&path, json.as_bytes()).context("Failed to write profiles")?;
         Ok(())
     }
 
@@ -80,7 +81,7 @@ impl FilePersistence {
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {
         let path = self.settings_path()?;
         let json = serde_json::to_string_pretty(settings)?;
-        fs::write(&path, json).context("Failed to write settings")?;
+        atomic_write(&path, json.as_bytes()).context("Failed to write settings")?;
         Ok(())
     }
 
@@ -90,4 +91,51 @@ impl FilePersistence {
         fs::write(&path, json).context("Failed to write profile stats")?;
         Ok(())
     }
+}
+
+fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    let tmp_path = {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".tmp");
+        std::path::PathBuf::from(name)
+    };
+
+    let mut file = fs::File::create(&tmp_path)
+        .with_context(|| format!("Failed to create temp file {}", tmp_path.to_string_lossy()))?;
+
+    file.write_all(contents)
+        .with_context(|| format!("Failed to write temp file {}", tmp_path.to_string_lossy()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync temp file {}", tmp_path.to_string_lossy()))?;
+    drop(file);
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(path).ok();
+            fs::rename(&tmp_path, path).with_context(|| {
+                format!(
+                    "Failed to replace destination file {}",
+                    path.to_string_lossy()
+                )
+            })?;
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to rename temp file {} to {}",
+                    tmp_path.to_string_lossy(),
+                    path.to_string_lossy()
+                )
+            });
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(())
 }

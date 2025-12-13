@@ -7,12 +7,6 @@ Inspired by:
 - Swifty: https://getswifty.net/
 - Nimble: https://github.com/vitorhnn/nimble
 
-## Auto-updates (Velopack)
-
-- Release builds: push a tag like `v1.2.3` (see `.github/workflows/release.yml`).
-- Updates are hosted on GitHub Releases at `https://github.com/tyen901/fleet/releases/latest/download`.
-- Override the update feed base URL via `FLEET_UPDATE_URL`.
-
 ## CLI (`fleet-cli`)
 
 Common commands:

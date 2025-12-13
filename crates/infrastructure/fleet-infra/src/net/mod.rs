@@ -7,11 +7,44 @@ use governor::{Quota, RateLimiter};
 use reqwest::Client;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::Sender;
 use tracing::warn;
+
+#[derive(Debug)]
+struct PartFileCleanup {
+    path: Utf8PathBuf,
+    keep: bool,
+}
+
+impl PartFileCleanup {
+    fn new(path: Utf8PathBuf) -> Self {
+        Self { path, keep: false }
+    }
+
+    fn disarm(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for PartFileCleanup {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = std::fs::remove_file(self.path.as_std_path());
+    }
+}
+
+pub fn default_http_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30 * 60))
+        .build()
+}
 
 #[derive(Debug, Clone)]
 pub struct DownloadRequest {
@@ -91,6 +124,7 @@ impl Downloader {
         }
 
         let tmp_path = req.target_path.with_extension("part");
+        let mut tmp_cleanup = PartFileCleanup::new(tmp_path.clone());
 
         if let Some(parent) = req.target_path.parent() {
             let _ = tokio::fs::create_dir_all(parent.as_std_path()).await;
@@ -206,6 +240,7 @@ impl Downloader {
                                 .is_ok()
                             {
                                 success = true;
+                                tmp_cleanup.disarm();
                                 break;
                             }
                         }

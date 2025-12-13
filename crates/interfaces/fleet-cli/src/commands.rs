@@ -68,7 +68,7 @@ pub async fn cmd_check(
     println!("   Repo:  {}", repo);
     println!("   Local: {}", local_path);
 
-    let client = reqwest::Client::new();
+    let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
     let engine = fleet_pipeline::default_engine(client);
 
     let req = SyncRequest {
@@ -100,7 +100,7 @@ pub async fn cmd_sync(
     println!(":: Synchronizing...");
     println!("   Target: {}", path);
 
-    let client = reqwest::Client::new();
+    let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
     let engine = fleet_pipeline::default_engine(client);
 
     let options = SyncOptions {

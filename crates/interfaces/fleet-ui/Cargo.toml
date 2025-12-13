@@ -19,3 +19,4 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid = { workspace = true }
 velopack = { workspace = true }
+rfd = { workspace = true }
