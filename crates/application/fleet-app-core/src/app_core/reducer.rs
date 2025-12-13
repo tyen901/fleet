@@ -1,5 +1,6 @@
 use crate::domain::{AppState, BootState, Route};
 use crate::pipeline::{PipelineRunEvent, PipelineStep, StepStatus};
+use chrono::Utc;
 
 use super::events::DomainEvent;
 
@@ -66,7 +67,13 @@ fn apply_pipeline_event(state: &mut AppState, ev: PipelineRunEvent) {
         }
 
         PipelineRunEvent::ScanStats { stats } => {
-            state.pipeline.stats.scan = Some(stats);
+            state.pipeline.stats.scan = Some(stats.clone());
+
+            if let Some(active_id) = &state.pipeline.active_profile_id {
+                if let Some(profile) = state.profiles.iter_mut().find(|p| &p.id == active_id) {
+                    profile.last_scan = Some(stats);
+                }
+            }
         }
 
         PipelineRunEvent::TransferProgress { snapshot } => {
@@ -107,6 +114,12 @@ fn apply_pipeline_event(state: &mut AppState, ev: PipelineRunEvent) {
             state
                 .pipeline
                 .set_step_status(PipelineStep::Execute, StepStatus::Succeeded);
+
+            if let Some(active_id) = &state.pipeline.active_profile_id {
+                if let Some(profile) = state.profiles.iter_mut().find(|p| &p.id == active_id) {
+                    profile.last_synced = Some(Utc::now());
+                }
+            }
         }
 
         PipelineRunEvent::Failed { message } => {
