@@ -10,6 +10,7 @@ pub struct CommandInterfaceResponse {
     pub sync: bool,
     pub check_remote: bool,
     pub check_local: bool,
+    pub repair: bool,
     pub launch: bool,
     pub join: bool,
     pub cancel: bool,
@@ -21,6 +22,7 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
         sync: false,
         check_remote: false,
         check_local: false,
+        repair: false,
         launch: false,
         join: false,
         cancel: false,
@@ -61,6 +63,7 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                     DashboardState::Review { .. } => ("REVIEW", false),
                     DashboardState::Synced { .. } => ("SYNCED", false),
                     DashboardState::Error { .. } => ("ERROR", false),
+                    DashboardState::Unknown { .. } => ("UNKNOWN", false),
                 };
 
                 tui.style(taffy::Style {
@@ -95,6 +98,7 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                     DashboardState::Synced { .. } => "UP TO DATE".to_string(),
                     DashboardState::Error { msg } => msg.clone(),
                     DashboardState::Idle { .. } => "READY".to_string(),
+                    DashboardState::Unknown { msg } => msg.clone(),
                 };
 
                 tui.style(taffy::Style {
@@ -117,6 +121,7 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                     DashboardState::Busy { detail, .. } => Some(detail.as_str()),
                     DashboardState::Synced { msg, .. } => Some(msg.as_str()),
                     DashboardState::Error { msg } => Some(msg.as_str()),
+                    DashboardState::Unknown { msg } => Some(msg.as_str()),
                     _ => None,
                 };
 
@@ -254,6 +259,14 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                             .clicked()
                         {
                             resp.ack = true;
+                        }
+                    }
+                    DashboardState::Unknown { .. } => {
+                        if tui
+                            .ui(|ui| cmd_button(ui, "REPAIR", "primary", true))
+                            .clicked()
+                        {
+                            resp.repair = true;
                         }
                     }
                     DashboardState::Idle { can_launch, .. } => {

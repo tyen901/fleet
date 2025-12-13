@@ -79,6 +79,11 @@ pub fn draw<'a>(
                 tracing::error!("Failed to start remote check: {e}");
             }
         }
+        if cmd_resp.repair {
+            if let Err(e) = app.repair(vm.profile.id.clone()) {
+                tracing::error!("Failed to repair profile: {e}");
+            }
+        }
         if cmd_resp.sync {
             if let Err(e) = app.execute_sync(vm.profile.id.clone()) {
                 tracing::error!("Failed to start sync: {e}");

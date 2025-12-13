@@ -110,6 +110,22 @@ impl FleetApplication {
         Ok(())
     }
 
+    pub fn repair(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
+        let profile = self.get_profile(profile_id)?.clone();
+        let run_id: PipelineRunId = uuid::Uuid::new_v4();
+        self.state.pipeline.run_id = Some(run_id);
+        self.state.last_plan = None;
+
+        if let Err(e) = self
+            .orchestrator
+            .start_repair(profile, self.state.settings.clone(), run_id)
+        {
+            self.state = reduce(self.state.clone(), DomainEvent::UserError(e.to_string()));
+            return Err(e);
+        }
+        Ok(())
+    }
+
     fn ensure_local_integrity_checked(&mut self, profile_id: &ProfileId) {
         if self.is_pipeline_running() {
             return;

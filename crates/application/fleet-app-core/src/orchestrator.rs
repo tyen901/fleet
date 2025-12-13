@@ -26,6 +26,7 @@ pub struct PipelineOrchestrator {
 enum CheckKind {
     LocalIntegrity,
     RemoteUpdate,
+    Repair,
 }
 
 impl PipelineOrchestrator {
@@ -61,6 +62,15 @@ impl PipelineOrchestrator {
         self.start_check_worker(profile, settings, run_id, CheckKind::RemoteUpdate)
     }
 
+    pub fn start_repair(
+        &mut self,
+        profile: Profile,
+        settings: AppSettings,
+        run_id: PipelineRunId,
+    ) -> anyhow::Result<()> {
+        self.start_check_worker(profile, settings, run_id, CheckKind::Repair)
+    }
+
     fn start_check_worker(
         &mut self,
         profile: Profile,
@@ -78,6 +88,7 @@ impl PipelineOrchestrator {
         let thread_name = match kind {
             CheckKind::LocalIntegrity => "fleet-check-local",
             CheckKind::RemoteUpdate => "fleet-check-remote",
+            CheckKind::Repair => "fleet-repair",
         };
 
         std::thread::Builder::new()
@@ -120,6 +131,7 @@ impl PipelineOrchestrator {
                                 SyncMode::FastCheck
                             }
                         }
+                        CheckKind::Repair => SyncMode::SmartVerify,
                     };
 
                     let options = SyncOptions {
@@ -263,7 +275,7 @@ impl PipelineOrchestrator {
                             }
                             return;
                         }
-                        CheckKind::RemoteUpdate => {}
+                        CheckKind::RemoteUpdate | CheckKind::Repair => {}
                     }
 
                     let _ = tx
@@ -322,6 +334,32 @@ impl PipelineOrchestrator {
                             },
                         })
                         .await;
+
+                    if matches!(kind, CheckKind::Repair) {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::StepChanged {
+                                    step: PipelineStep::Diff,
+                                    status: StepStatus::Running,
+                                    detail: "Saving baseline snapshot...".into(),
+                                },
+                            })
+                            .await;
+                        if let Err(e) =
+                            engine.persist_remote_snapshot(&req.local_root, &fetch_res.manifest)
+                        {
+                            let _ = tx
+                                .send(DomainEvent::PipelineEvent {
+                                    run_id,
+                                    ev: PipelineRunEvent::Failed {
+                                        message: e.to_string(),
+                                    },
+                                })
+                                .await;
+                            return;
+                        }
+                    }
 
                     let plan_res = engine.compute_plan(&fetch_res.manifest, &local_state, &req);
                     match plan_res {

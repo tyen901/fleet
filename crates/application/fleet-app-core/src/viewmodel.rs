@@ -232,6 +232,8 @@ pub enum DashboardState {
     Synced { msg: String, can_launch: bool },
     /// Error state.
     Error { msg: String },
+    /// Local folder has no baseline/cache information yet.
+    Unknown { msg: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +269,21 @@ pub struct ProfileDashboardVm {
 pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<ProfileDashboardVm> {
     let profile = state.profiles.iter().find(|p| p.id == profile_id)?;
     let pl = &state.pipeline;
+    let local_root = Path::new(&profile.local_path);
+
+    let has_any_cache = local_root.is_dir()
+        && std::fs::read_dir(local_root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| name.starts_with('@'))
+            .any(|name| local_root.join(name).join(".fleet-cache.json").exists());
+
+    let has_baseline_files = local_root.join(".fleet-local-manifest.json").exists()
+        || local_root.join(".fleet-local-summary.json").exists();
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -293,6 +310,10 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     // 1. Determine High-Level State
     let dashboard_state = if let Some(err) = &pl.error {
         DashboardState::Error { msg: err.clone() }
+    } else if local_root.is_dir() && !has_baseline_files && !has_any_cache {
+        DashboardState::Unknown {
+            msg: "Local state not initialized. Run Repair.".into(),
+        }
     } else if pl.is_running() {
         // Map pipeline steps to a simple "Busy" view
         let (task, detail, prog) = if pl.sync_status == StepStatus::Running {

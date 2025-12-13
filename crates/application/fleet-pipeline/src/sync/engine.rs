@@ -199,24 +199,6 @@ impl DefaultSyncEngine {
         local: &LocalState,
         req: &SyncRequest,
     ) -> Result<SyncPlan, SyncError> {
-        if matches!(req.mode, SyncMode::FastCheck) {
-            if let (Ok(expected), Some(current)) = (
-                self.manifest_store.load_summary(&req.local_root),
-                local.summary.clone(),
-            ) {
-                return Ok(build_fast_plan(&expected, &current));
-            }
-        }
-
-        if let Some(summary) = &local.summary {
-            if !matches!(
-                local.trust,
-                crate::sync::local::LocalTrustLevel::MetadataLite
-            ) {
-                let _ = self.manifest_store.save_summary(&req.local_root, summary);
-            }
-        }
-
         Ok(diff_manifests(remote, &local.manifest))
     }
 
@@ -329,6 +311,26 @@ impl DefaultSyncEngine {
             executed: true,
             stats,
         })
+    }
+
+    /// Persist the given manifest as the local baseline and write a matching summary file.
+    /// This is used by "repair" to bootstrap `.fleet-local-manifest.json` + `.fleet-local-summary.json`
+    /// without executing a sync.
+    pub fn persist_remote_snapshot(
+        &self,
+        root: &Utf8Path,
+        manifest: &fleet_core::Manifest,
+    ) -> Result<(), SyncError> {
+        self.manifest_store
+            .save(root, manifest)
+            .map_err(|e| SyncError::Local(format!("manifest save failed: {e}")))?;
+
+        let summary = compute_summary_from_manifest(root, manifest);
+        self.manifest_store
+            .save_summary(root, &summary)
+            .map_err(|e| SyncError::Local(format!("summary save failed: {e}")))?;
+
+        Ok(())
     }
 }
 
