@@ -7,6 +7,13 @@ pub struct CacheKey<'a> {
 }
 
 impl<'a> CacheKey<'a> {
+    pub fn validate_mod_name(mod_name: &str) -> Result<(), crate::StorageError> {
+        if mod_name.as_bytes().contains(&CACHE_KEY_SEPARATOR) {
+            return Err(crate::StorageError::InvalidPath(mod_name.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn new(mod_name: &'a str, rel_path: &'a str) -> Self {
         Self { mod_name, rel_path }
     }
@@ -16,6 +23,15 @@ impl<'a> CacheKey<'a> {
         prefix.extend_from_slice(mod_name.as_bytes());
         prefix.push(CACHE_KEY_SEPARATOR);
         prefix
+    }
+
+    pub fn range_for_mod(mod_name: &str) -> Result<(Vec<u8>, Vec<u8>), crate::StorageError> {
+        Self::validate_mod_name(mod_name)?;
+        let start = Self::prefix_for_mod(mod_name);
+        let mut end = Vec::with_capacity(mod_name.len() + 1);
+        end.extend_from_slice(mod_name.as_bytes());
+        end.push(CACHE_KEY_SEPARATOR + 1);
+        Ok((start, end))
     }
 
     pub fn to_bytes(self) -> Vec<u8> {

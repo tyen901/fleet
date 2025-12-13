@@ -11,7 +11,7 @@ fn corrupt_redb_is_quarantined_and_repair_can_recreate() {
     assert!(db_path.exists());
 
     let store = RedbFleetDataStore;
-    assert_eq!(store.validate(&root).unwrap(), DbState::Missing);
+    assert_eq!(store.validate(&root).unwrap(), DbState::Corrupt);
 
     assert!(!db_path.exists());
     let quarantines: Vec<_> = std::fs::read_dir(&root)

@@ -37,6 +37,20 @@ const BASELINE_SUMMARY: &str = "summary";
 pub struct RedbFleetDataStore;
 
 impl RedbFleetDataStore {
+    fn is_corrupt_open_error(err: &redb::DatabaseError) -> bool {
+        match err {
+            redb::DatabaseError::Storage(storage) => match storage {
+                redb::StorageError::Corrupted(_) => true,
+                redb::StorageError::Io(ioe) => matches!(
+                    ioe.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                ),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn db_cache() -> &'static Mutex<HashMap<Utf8PathBuf, Arc<Database>>> {
         static CACHE: OnceLock<Mutex<HashMap<Utf8PathBuf, Arc<Database>>>> = OnceLock::new();
         CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -71,7 +85,7 @@ impl RedbFleetDataStore {
                 Err(redb::DatabaseError::DatabaseAlreadyOpen) => {
                     return Err(StorageError::DatabaseAlreadyOpen);
                 }
-                Err(redb::DatabaseError::Storage(redb::StorageError::Corrupted(_))) => {
+                Err(e) if Self::is_corrupt_open_error(&e) => {
                     let _ = quarantine_corrupt_file(&path);
                     return Err(StorageError::Corrupt);
                 }
@@ -81,7 +95,13 @@ impl RedbFleetDataStore {
             Database::create(path.as_std_path())?
         };
 
-        self.ensure_schema(&db, &path)?;
+        if let Err(e) = self.ensure_schema(&db) {
+            drop(db);
+            if matches!(e, StorageError::Corrupt) {
+                let _ = quarantine_corrupt_file(&path);
+            }
+            return Err(e);
+        }
         let db = Arc::new(db);
         cache.insert(path, db.clone());
         Ok(db)
@@ -107,20 +127,26 @@ impl RedbFleetDataStore {
             Err(redb::DatabaseError::DatabaseAlreadyOpen) => {
                 return Err(StorageError::DatabaseAlreadyOpen);
             }
-            Err(redb::DatabaseError::Storage(redb::StorageError::Corrupted(_))) => {
+            Err(e) if Self::is_corrupt_open_error(&e) => {
                 let _ = quarantine_corrupt_file(&path);
                 return Err(StorageError::Corrupt);
             }
             Err(e) => return Err(e.into()),
         };
 
-        self.ensure_schema(&db, &path)?;
+        if let Err(e) = self.ensure_schema(&db) {
+            drop(db);
+            if matches!(e, StorageError::Corrupt) {
+                let _ = quarantine_corrupt_file(&path);
+            }
+            return Err(e);
+        }
         let db = Arc::new(db);
         cache.insert(path, db.clone());
         Ok(db)
     }
 
-    fn ensure_schema(&self, db: &Database, path: &Utf8Path) -> Result<(), StorageError> {
+    fn ensure_schema(&self, db: &Database) -> Result<(), StorageError> {
         // Create tables and required meta keys on first open.
         let write_tx = db.begin_write()?;
         {
@@ -134,9 +160,6 @@ impl RedbFleetDataStore {
                 meta.insert(META_CREATED_AT, created_at.as_str())?;
                 meta.insert(META_HASHING_ALGO_VERSION, "1")?;
             } else if format.as_deref() != Some(META_FORMAT_VALUE) {
-                drop(meta);
-                drop(write_tx);
-                let _ = quarantine_corrupt_file(path);
                 return Err(StorageError::Corrupt);
             }
         }
@@ -153,7 +176,6 @@ impl RedbFleetDataStore {
             .and_then(|g| g.value().parse::<u32>().ok())
             .unwrap_or(0);
         if schema_version == 0 {
-            let _ = quarantine_corrupt_file(path);
             return Err(StorageError::Corrupt);
         }
         if schema_version > CURRENT_SCHEMA {
@@ -163,7 +185,6 @@ impl RedbFleetDataStore {
             });
         }
         if schema_version != CURRENT_SCHEMA {
-            let _ = quarantine_corrupt_file(path);
             return Err(StorageError::Corrupt);
         }
         Ok(())
@@ -197,6 +218,44 @@ impl RedbFleetDataStore {
     }
 
     // Cache keys are handled by `CacheKey`.
+
+    fn cleanup_legacy_artifacts(
+        root: &Utf8Path,
+        touched_mods: Option<&std::collections::HashSet<String>>,
+    ) {
+        let _ = std::fs::remove_file(root.join(".fleet-local-manifest.json").as_std_path());
+        let _ = std::fs::remove_file(root.join(".fleet-local-summary.json").as_std_path());
+
+        let remove_mod_cache = |mod_name: &str| {
+            let _ =
+                std::fs::remove_file(root.join(mod_name).join(".fleet-cache.json").as_std_path());
+        };
+
+        if let Some(mods) = touched_mods {
+            for mod_name in mods {
+                remove_mod_cache(mod_name);
+            }
+            return;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(root.as_std_path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Ok(utf) = Utf8PathBuf::from_path_buf(path) else {
+                    continue;
+                };
+                let Some(name) = utf.file_name() else {
+                    continue;
+                };
+                if name.starts_with('@') {
+                    remove_mod_cache(name);
+                }
+            }
+        }
+    }
 }
 
 impl FleetDataStore for RedbFleetDataStore {
@@ -217,25 +276,25 @@ impl FleetDataStore for RedbFleetDataStore {
         }
 
         match Database::open(path.as_std_path()) {
-            Ok(db) => match self.ensure_schema(&db, &path) {
+            Ok(db) => match self.ensure_schema(&db) {
                 Ok(()) => Ok(DbState::Valid),
-                Err(StorageError::NewerSchema { .. }) => Ok(DbState::Missing),
-                Err(StorageError::DatabaseAlreadyOpen) => Ok(DbState::Valid),
-                Err(StorageError::Corrupt) => Ok(DbState::Missing),
-                Err(_) => {
-                    let _ = quarantine_corrupt_file(&path);
-                    Ok(DbState::Missing)
+                Err(StorageError::NewerSchema { found, supported }) => {
+                    Ok(DbState::NewerSchema { found, supported })
                 }
+                Err(StorageError::DatabaseAlreadyOpen) => Ok(DbState::Busy),
+                Err(StorageError::Corrupt) => {
+                    drop(db);
+                    let _ = quarantine_corrupt_file(&path);
+                    Ok(DbState::Corrupt)
+                }
+                Err(e) => Err(e),
             },
-            Err(redb::DatabaseError::DatabaseAlreadyOpen) => Ok(DbState::Valid),
-            Err(redb::DatabaseError::Storage(redb::StorageError::Corrupted(_))) => {
+            Err(redb::DatabaseError::DatabaseAlreadyOpen) => Ok(DbState::Busy),
+            Err(e) if Self::is_corrupt_open_error(&e) => {
                 let _ = quarantine_corrupt_file(&path);
-                Ok(DbState::Missing)
+                Ok(DbState::Corrupt)
             }
-            Err(_) => {
-                let _ = quarantine_corrupt_file(&path);
-                Ok(DbState::Missing)
-            }
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -270,6 +329,7 @@ impl FleetDataStore for RedbFleetDataStore {
         root: &Utf8Path,
         mod_name: &str,
     ) -> Result<HashMap<String, crate::api::FileCacheEntry>, StorageError> {
+        CacheKey::validate_mod_name(mod_name)?;
         let path = Self::path_for_root(root);
         if !path.exists() {
             return Ok(HashMap::new());
@@ -279,18 +339,15 @@ impl FleetDataStore for RedbFleetDataStore {
             Err(StorageError::Missing) => return Ok(HashMap::new()),
             Err(e) => return Err(e),
         };
-        let prefix = CacheKey::prefix_for_mod(mod_name);
+        let (start, end) = CacheKey::range_for_mod(mod_name)?;
         let read_tx = db.begin_read()?;
         let cache = read_tx.open_table(SCAN_CACHE)?;
 
         let mut out = HashMap::new();
-        for row in cache.iter()? {
+        for row in cache.range(start.as_slice()..end.as_slice())? {
             let (k, v) = row?;
             let key = k.value();
-            if !key.starts_with(&prefix) {
-                continue;
-            }
-            let Some(rel) = CacheKey::rel_path_from_prefixed_key(&prefix, key) else {
+            let Some(rel) = CacheKey::rel_path_from_prefixed_key(start.as_slice(), key) else {
                 continue;
             };
             let entry = decode_cache_entry(v.value())?;
@@ -305,6 +362,7 @@ impl FleetDataStore for RedbFleetDataStore {
         mod_name: &str,
         entries: &[CacheUpsert],
     ) -> Result<(), StorageError> {
+        CacheKey::validate_mod_name(mod_name)?;
         let db = self.open_or_create(root)?;
         let write_tx = db.begin_write()?;
         {
@@ -330,6 +388,7 @@ impl FleetDataStore for RedbFleetDataStore {
         mod_name: &str,
         rel_path: &str,
     ) -> Result<(), StorageError> {
+        CacheKey::validate_mod_name(mod_name)?;
         let db = self.open_or_create(root)?;
         let rel = normalize_rel_path(rel_path)?;
         let key = CacheKey::new(mod_name, &rel).to_bytes();
@@ -343,22 +402,20 @@ impl FleetDataStore for RedbFleetDataStore {
     }
 
     fn scan_cache_delete_mod(&self, root: &Utf8Path, mod_name: &str) -> Result<(), StorageError> {
+        CacheKey::validate_mod_name(mod_name)?;
         let path = Self::path_for_root(root);
         if !path.exists() {
             return Ok(());
         }
         let db = self.open_or_create(root)?;
-        let prefix = CacheKey::prefix_for_mod(mod_name);
+        let (start, end) = CacheKey::range_for_mod(mod_name)?;
         let write_tx = db.begin_write()?;
         {
             let mut table = write_tx.open_table(SCAN_CACHE)?;
             let mut keys = Vec::new();
-            for row in table.iter()? {
+            for row in table.range(start.as_slice()..end.as_slice())? {
                 let (k, _) = row?;
-                let k = k.value();
-                if k.starts_with(&prefix) {
-                    keys.push(k.to_vec());
-                }
+                keys.push(k.value().to_vec());
             }
             for k in keys {
                 let _ = table.remove(k.as_slice())?;
@@ -375,6 +432,7 @@ impl FleetDataStore for RedbFleetDataStore {
         old_rel_path: &str,
         new_rel_path: &str,
     ) -> Result<(), StorageError> {
+        CacheKey::validate_mod_name(mod_name)?;
         let db = self.open_or_create(root)?;
         let old_rel = normalize_rel_path(old_rel_path)?;
         let new_rel = normalize_rel_path(new_rel_path)?;
@@ -420,6 +478,7 @@ impl FleetDataStore for RedbFleetDataStore {
             meta.insert(META_LAST_REPAIR_AT, ts.as_str())?;
         }
         write_tx.commit()?;
+        Self::cleanup_legacy_artifacts(root, None);
         Ok(())
     }
 
@@ -432,6 +491,11 @@ impl FleetDataStore for RedbFleetDataStore {
         cache_deletes: &[CacheDeleteRecord],
         cache_renames: &[CacheRenameRecord],
     ) -> Result<(), StorageError> {
+        let mut touched_mods = std::collections::HashSet::new();
+        touched_mods.extend(cache_updates.iter().map(|r| r.mod_name.clone()));
+        touched_mods.extend(cache_deletes.iter().map(|r| r.mod_name.clone()));
+        touched_mods.extend(cache_renames.iter().map(|r| r.mod_name.clone()));
+
         let db = self.open_or_create(root)?;
         let manifest = Self::normalize_manifest(manifest)?;
         let summary = Self::normalize_summary(summary)?;
@@ -448,6 +512,7 @@ impl FleetDataStore for RedbFleetDataStore {
             let mut cache = write_tx.open_table(SCAN_CACHE)?;
 
             for del in cache_deletes {
+                CacheKey::validate_mod_name(&del.mod_name)?;
                 match &del.rel_path {
                     Some(rel) => {
                         let rel = normalize_rel_path(rel)?;
@@ -455,14 +520,11 @@ impl FleetDataStore for RedbFleetDataStore {
                         let _ = cache.remove(key.as_slice())?;
                     }
                     None => {
-                        let prefix = CacheKey::prefix_for_mod(&del.mod_name);
+                        let (start, end) = CacheKey::range_for_mod(&del.mod_name)?;
                         let mut keys = Vec::new();
-                        for row in cache.iter()? {
+                        for row in cache.range(start.as_slice()..end.as_slice())? {
                             let (k, _) = row?;
-                            let k = k.value();
-                            if k.starts_with(&prefix) {
-                                keys.push(k.to_vec());
-                            }
+                            keys.push(k.value().to_vec());
                         }
                         for k in keys {
                             let _ = cache.remove(k.as_slice())?;
@@ -472,6 +534,7 @@ impl FleetDataStore for RedbFleetDataStore {
             }
 
             for ren in cache_renames {
+                CacheKey::validate_mod_name(&ren.mod_name)?;
                 let old_rel = normalize_rel_path(&ren.old_rel_path)?;
                 let new_rel = normalize_rel_path(&ren.new_rel_path)?;
                 let old_key = CacheKey::new(&ren.mod_name, &old_rel).to_bytes();
@@ -485,6 +548,7 @@ impl FleetDataStore for RedbFleetDataStore {
             }
 
             for up in cache_updates {
+                CacheKey::validate_mod_name(&up.mod_name)?;
                 let rel = normalize_rel_path(&up.rel_path)?;
                 let key = CacheKey::new(&up.mod_name, &rel).to_bytes();
                 let value = encode_cache_entry(&crate::api::FileCacheEntry {
@@ -500,6 +564,7 @@ impl FleetDataStore for RedbFleetDataStore {
             meta.insert(META_LAST_SYNC_AT, ts.as_str())?;
         }
         write_tx.commit()?;
+        Self::cleanup_legacy_artifacts(root, Some(&touched_mods));
         Ok(())
     }
 }

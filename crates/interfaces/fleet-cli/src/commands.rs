@@ -96,11 +96,15 @@ pub async fn cmd_check_for_updates(repo: String, local_path: Utf8PathBuf) -> any
     println!("   Local: {}", local_path);
 
     let store = RedbFleetDataStore;
-    let has_baseline = matches!(store.validate(&local_path)?, DbState::Valid);
-    let mode = if has_baseline {
-        SyncMode::FastCheck
-    } else {
-        SyncMode::SmartVerify
+    let mode = match store.validate(&local_path)? {
+        DbState::Valid => SyncMode::FastCheck,
+        DbState::Missing | DbState::Corrupt => SyncMode::SmartVerify,
+        DbState::Busy => anyhow::bail!(
+            "Local database is busy (another Fleet instance may be running). Close it and try again."
+        ),
+        DbState::NewerSchema { found, supported } => anyhow::bail!(
+            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+        ),
     };
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
@@ -134,8 +138,17 @@ pub async fn cmd_local_check(local_path: Utf8PathBuf) -> anyhow::Result<()> {
     println!("   Local: {}", local_path);
 
     let store = RedbFleetDataStore;
-    if !matches!(store.validate(&local_path)?, DbState::Valid) {
-        anyhow::bail!("Unknown local state: missing `fleet.redb` (run `repair` first)");
+    match store.validate(&local_path)? {
+        DbState::Valid => {}
+        DbState::Missing | DbState::Corrupt => {
+            anyhow::bail!("Unknown local state: missing `fleet.redb` (run `repair` first)")
+        }
+        DbState::Busy => anyhow::bail!(
+            "Local database is busy (another Fleet instance may be running). Close it and try again."
+        ),
+        DbState::NewerSchema { found, supported } => anyhow::bail!(
+            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+        ),
     }
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;

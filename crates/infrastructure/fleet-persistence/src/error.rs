@@ -6,7 +6,7 @@ pub enum StorageError {
     Corrupt,
     #[error("fleet.redb is from a newer Fleet (schema_version={found}, supported={supported})")]
     NewerSchema { found: u32, supported: u32 },
-    #[error("fleet.redb is already open in this process")]
+    #[error("fleet.redb is busy (locked)")]
     DatabaseAlreadyOpen,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

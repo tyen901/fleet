@@ -211,21 +211,29 @@ impl DefaultSyncEngine {
         req: &SyncRequest,
         local: &LocalState,
     ) -> Result<SyncPlan, SyncError> {
-        let empty = || SyncPlan {
-            renames: Vec::new(),
-            checks: Vec::new(),
-            downloads: Vec::new(),
-            deletes: Vec::new(),
-        };
+        let expected = self
+            .fleet_data
+            .load_baseline_summary(&req.local_root)
+            .map_err(|e| match e.kind() {
+                fleet_persistence::StorageErrorKind::Missing => {
+                    SyncError::Local("Local baseline missing (run `repair` to initialize)".into())
+                }
+                fleet_persistence::StorageErrorKind::Busy => SyncError::Local(
+                    "Local database is busy (another Fleet instance may be running)".into(),
+                ),
+                fleet_persistence::StorageErrorKind::NewerSchema => SyncError::Local(
+                    "Local database is from a newer Fleet; update Fleet and try again".into(),
+                ),
+                fleet_persistence::StorageErrorKind::Corrupt => {
+                    SyncError::Local("Local database is corrupt; run `repair` to recreate".into())
+                }
+                _ => SyncError::Local(format!("fleet.redb baseline load failed: {e}")),
+            })?;
 
-        let expected = match self.fleet_data.load_baseline_summary(&req.local_root) {
-            Ok(s) => s,
-            Err(_) => return Ok(empty()),
-        };
-        let current = match local.summary.clone() {
-            Some(s) => s,
-            None => return Ok(empty()),
-        };
+        let current = local
+            .summary
+            .clone()
+            .ok_or_else(|| SyncError::Local("Local scan did not produce a summary".into()))?;
 
         Ok(build_fast_plan(&expected, &current))
     }

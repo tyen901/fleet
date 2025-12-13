@@ -10,6 +10,9 @@ pub const CURRENT_SCHEMA: u32 = 1;
 pub enum DbState {
     Missing,
     Valid,
+    Busy,
+    Corrupt,
+    NewerSchema { found: u32, supported: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

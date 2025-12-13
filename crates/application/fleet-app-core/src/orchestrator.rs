@@ -120,10 +120,60 @@ impl PipelineOrchestrator {
 
                     let local_root = camino::Utf8PathBuf::from(profile.local_path.clone());
                     let store = RedbFleetDataStore;
-                    let is_cold = !matches!(
-                        store.validate(&local_root).unwrap_or(DbState::Missing),
-                        DbState::Valid
-                    );
+                    let db_state = match store.validate(&local_root) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let _ = tx
+                                .send(DomainEvent::PipelineEvent {
+                                    run_id,
+                                    ev: PipelineRunEvent::Failed {
+                                        message: format!("Failed to open local database: {e}"),
+                                    },
+                                })
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let is_cold = matches!(db_state, DbState::Missing | DbState::Corrupt);
+
+                    if matches!(db_state, DbState::Busy) {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: "Local database is busy (another Fleet instance may be running). Close it and try again.".into(),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
+
+                    if let DbState::NewerSchema { found, supported } = db_state {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: format!(
+                                        "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+                                    ),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
+
+                    if matches!(kind, CheckKind::LocalIntegrity) && is_cold {
+                        let _ = tx
+                            .send(DomainEvent::PipelineEvent {
+                                run_id,
+                                ev: PipelineRunEvent::Failed {
+                                    message: "Local state not initialized. Run Repair first.".into(),
+                                },
+                            })
+                            .await;
+                        return;
+                    }
 
                     let mode = match kind {
                         CheckKind::LocalIntegrity => SyncMode::FastCheck,
