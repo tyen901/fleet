@@ -205,7 +205,7 @@ impl DefaultSyncEngine {
     }
 
     /// Builds a plan without any network I/O by comparing current local state against the last
-    /// saved local summary (captured at the end of a successful sync).
+    /// persisted local summary stored in `fleet.redb` (captured at the end of a successful sync).
     pub fn compute_local_integrity_plan(
         &self,
         req: &SyncRequest,

@@ -3,7 +3,7 @@ use fleet_app_core::{AppState, Profile};
 use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
 
 #[test]
-fn dashboard_state_is_unknown_when_no_baseline_or_cache_files_exist() {
+fn dashboard_state_is_unknown_when_fleet_redb_is_missing() {
     let dir = tempfile::tempdir().unwrap();
 
     let profile = Profile {
@@ -28,7 +28,7 @@ fn dashboard_state_is_unknown_when_no_baseline_or_cache_files_exist() {
 }
 
 #[test]
-fn dashboard_state_is_not_unknown_when_any_cache_file_exists() {
+fn dashboard_state_is_not_unknown_when_fleet_redb_exists() {
     let dir = tempfile::tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
     let store = RedbFleetDataStore;
