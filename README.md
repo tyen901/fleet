@@ -18,8 +18,17 @@ cargo run -p fleet-cli -- profile list
 # Add a profile (ID is a unique slug)
 cargo run -p fleet-cli -- profile add --id my-server "My Server" https://example.com/repo C:\Mods
 
-# Check (dry-run) using a profile
-cargo run -p fleet-cli -- check --profile my-server
+# One-time bootstrap if the folder has no local baseline/cache ("Unknown" state in the UI)
+# This verifies local files (generates per-mod `.fleet-cache.json`) and persists:
+# - `.fleet-local-manifest.json`
+# - `.fleet-local-summary.json`
+cargo run -p fleet-cli -- repair --profile my-server
+
+# Local integrity check (no network). Compares local files to the persisted baseline.
+cargo run -p fleet-cli -- local-check --profile my-server
+
+# Check for updates (fetches remote manifest and compares to local state)
+cargo run -p fleet-cli -- check-for-updates --profile my-server
 
 # Sync using a profile
 cargo run -p fleet-cli -- sync --profile my-server

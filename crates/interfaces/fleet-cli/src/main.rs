@@ -29,15 +29,29 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CliScanStrategy::Smart)]
         strategy: CliScanStrategy,
     },
-    Check {
+    #[command(name = "check-for-updates", alias = "check")]
+    CheckForUpdates {
         #[arg(long, required_unless_present = "profile")]
         repo: Option<String>,
         #[arg(long, required_unless_present = "profile")]
         path: Option<Utf8PathBuf>,
         #[arg(short, long, help = "Use settings from a named profile")]
         profile: Option<String>,
-        #[arg(long, value_enum, default_value_t = CliSyncMode::Smart)]
-        mode: CliSyncMode,
+    },
+    #[command(name = "local-check")]
+    LocalCheck {
+        #[arg(long, required_unless_present = "profile")]
+        path: Option<Utf8PathBuf>,
+        #[arg(short, long, help = "Use settings from a named profile")]
+        profile: Option<String>,
+    },
+    Repair {
+        #[arg(long, required_unless_present = "profile")]
+        repo: Option<String>,
+        #[arg(long, required_unless_present = "profile")]
+        path: Option<Utf8PathBuf>,
+        #[arg(short, long, help = "Use settings from a named profile")]
+        profile: Option<String>,
     },
     Sync {
         #[arg(long, required_unless_present = "profile")]
@@ -126,18 +140,38 @@ async fn main() -> anyhow::Result<()> {
             output,
             strategy,
         } => commands::cmd_scan(path, output, strategy).await?,
-        Commands::Check {
+        Commands::CheckForUpdates {
             repo,
             path,
             profile,
-            mode,
         } => {
             let (final_repo, final_path) = if let Some(p_name) = profile {
                 resolve_profile(&p_name)?
             } else {
                 (repo.unwrap(), path.unwrap())
             };
-            commands::cmd_check(final_repo, final_path, mode).await?;
+            commands::cmd_check_for_updates(final_repo, final_path).await?;
+        }
+        Commands::LocalCheck { path, profile } => {
+            let final_path = if let Some(p_name) = profile {
+                let (_repo, path) = resolve_profile(&p_name)?;
+                path
+            } else {
+                path.unwrap()
+            };
+            commands::cmd_local_check(final_path).await?;
+        }
+        Commands::Repair {
+            repo,
+            path,
+            profile,
+        } => {
+            let (final_repo, final_path) = if let Some(p_name) = profile {
+                resolve_profile(&p_name)?
+            } else {
+                (repo.unwrap(), path.unwrap())
+            };
+            commands::cmd_repair(final_repo, final_path).await?;
         }
         Commands::Sync {
             repo,

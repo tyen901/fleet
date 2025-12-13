@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use fleet_core::formats::RepositoryExternal;
 use fleet_core::repo::Repository;
-use fleet_pipeline::sync::{SyncOptions, SyncRequest};
+use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
 use fleet_scanner::{ScanStats, Scanner};
 use humansize::{format_size, DECIMAL};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -87,6 +87,153 @@ pub async fn cmd_check(
     println!("   Verified Files:    {}", plan.checks.len());
 
     Ok(plan)
+}
+
+pub async fn cmd_check_for_updates(repo: String, local_path: Utf8PathBuf) -> anyhow::Result<()> {
+    println!(":: Checking for updates...");
+    println!("   Repo:  {}", repo);
+    println!("   Local: {}", local_path);
+
+    let has_baseline = local_path.join(".fleet-local-manifest.json").exists()
+        && local_path.join(".fleet-local-summary.json").exists();
+    let mode = if has_baseline {
+        SyncMode::FastCheck
+    } else {
+        SyncMode::SmartVerify
+    };
+
+    let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
+    let engine = fleet_pipeline::default_engine(client);
+
+    let req = SyncRequest {
+        repo_url: repo,
+        local_root: local_path,
+        mode,
+        options: SyncOptions::default(),
+        profile_id: None,
+    };
+
+    let plan = engine.plan(&req).await?;
+
+    println!("\n:: Update Check Result");
+    println!("   Pending Downloads: {}", plan.downloads.len());
+    println!("   Pending Deletes:   {}", plan.deletes.len());
+
+    if plan.downloads.is_empty() && plan.deletes.is_empty() {
+        println!("   Status:            Up to date");
+    } else {
+        println!("   Status:            Updates available (run `sync`)");
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_local_check(local_path: Utf8PathBuf) -> anyhow::Result<()> {
+    println!(":: Local integrity check...");
+    println!("   Local: {}", local_path);
+
+    let has_baseline = local_path.join(".fleet-local-summary.json").exists();
+    if !has_baseline {
+        anyhow::bail!(
+            "Unknown local state: missing `.fleet-local-summary.json` (run `repair` first)"
+        );
+    }
+
+    let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
+    let engine = fleet_pipeline::default_engine(client);
+
+    let req = SyncRequest {
+        repo_url: String::new(),
+        local_root: local_path,
+        mode: SyncMode::MetadataOnly,
+        options: SyncOptions::default(),
+        profile_id: None,
+    };
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+
+    let cb = {
+        let pb = pb.clone();
+        Box::new(move |stats: ScanStats| {
+            pb.set_message(format!(
+                "Scanned {} files ({})",
+                stats.files_scanned,
+                format_size(stats.bytes_processed, DECIMAL)
+            ));
+        })
+    };
+
+    let local_state = engine.scan_local_state(&req, Some(cb)).await?;
+    pb.finish_with_message("Scan complete.");
+
+    let plan = engine.compute_local_integrity_plan(&req, &local_state)?;
+
+    println!("\n:: Local Integrity Result");
+    println!("   Missing/Changed: {}", plan.downloads.len());
+    println!("   Extra Files:     {}", plan.deletes.len());
+
+    if plan.downloads.is_empty() && plan.deletes.is_empty() {
+        println!("   Status:          Clean");
+    } else {
+        println!("   Status:          Dirty (run `sync` or investigate)");
+    }
+
+    Ok(())
+}
+
+pub async fn cmd_repair(repo: String, local_path: Utf8PathBuf) -> anyhow::Result<()> {
+    println!(":: Repairing local state...");
+    println!("   Repo:  {}", repo);
+    println!("   Local: {}", local_path);
+
+    let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
+    let engine = fleet_pipeline::default_engine(client);
+
+    let req = SyncRequest {
+        repo_url: repo,
+        local_root: local_path,
+        mode: SyncMode::SmartVerify,
+        options: SyncOptions::default(),
+        profile_id: None,
+    };
+
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(100));
+
+    let cb = {
+        let pb = pb.clone();
+        Box::new(move |stats: ScanStats| {
+            pb.set_message(format!(
+                "Verified {} files ({})",
+                stats.files_scanned,
+                format_size(stats.bytes_processed, DECIMAL)
+            ));
+        })
+    };
+
+    let _ = engine.scan_local_state(&req, Some(cb)).await?;
+    pb.finish_with_message("Local scan complete.");
+
+    println!(":: Fetching remote manifest...");
+    let remote = engine.fetch_remote_state(&req).await?;
+
+    engine.persist_remote_snapshot(&req.local_root, &remote.manifest)?;
+
+    println!(":: Repair complete.");
+    println!("   Wrote `.fleet-local-manifest.json` and `.fleet-local-summary.json`");
+
+    Ok(())
 }
 
 pub async fn cmd_sync(
