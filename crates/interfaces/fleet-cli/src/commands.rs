@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use fleet_core::formats::RepositoryExternal;
 use fleet_core::repo::Repository;
+use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
 use fleet_scanner::{ScanStats, Scanner};
 use humansize::{format_size, DECIMAL};
@@ -94,12 +95,16 @@ pub async fn cmd_check_for_updates(repo: String, local_path: Utf8PathBuf) -> any
     println!("   Repo:  {}", repo);
     println!("   Local: {}", local_path);
 
-    let has_baseline = local_path.join(".fleet-local-manifest.json").exists()
-        && local_path.join(".fleet-local-summary.json").exists();
-    let mode = if has_baseline {
-        SyncMode::FastCheck
-    } else {
-        SyncMode::SmartVerify
+    let store = RedbFleetDataStore;
+    let mode = match store.validate(&local_path)? {
+        DbState::Valid => SyncMode::FastCheck,
+        DbState::Missing | DbState::Corrupt => SyncMode::SmartVerify,
+        DbState::Busy => anyhow::bail!(
+            "Local database is busy (another Fleet instance may be running). Close it and try again."
+        ),
+        DbState::NewerSchema { found, supported } => anyhow::bail!(
+            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+        ),
     };
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
@@ -132,11 +137,18 @@ pub async fn cmd_local_check(local_path: Utf8PathBuf) -> anyhow::Result<()> {
     println!(":: Local integrity check...");
     println!("   Local: {}", local_path);
 
-    let has_baseline = local_path.join(".fleet-local-summary.json").exists();
-    if !has_baseline {
-        anyhow::bail!(
-            "Unknown local state: missing `.fleet-local-summary.json` (run `repair` first)"
-        );
+    let store = RedbFleetDataStore;
+    match store.validate(&local_path)? {
+        DbState::Valid => {}
+        DbState::Missing | DbState::Corrupt => {
+            anyhow::bail!("Unknown local state: missing `fleet.redb` (run `repair` first)")
+        }
+        DbState::Busy => anyhow::bail!(
+            "Local database is busy (another Fleet instance may be running). Close it and try again."
+        ),
+        DbState::NewerSchema { found, supported } => anyhow::bail!(
+            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
+        ),
     }
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
@@ -231,7 +243,7 @@ pub async fn cmd_repair(repo: String, local_path: Utf8PathBuf) -> anyhow::Result
     engine.persist_remote_snapshot(&req.local_root, &remote.manifest)?;
 
     println!(":: Repair complete.");
-    println!("   Wrote `.fleet-local-manifest.json` and `.fleet-local-summary.json`");
+    println!("   Wrote `fleet.redb`");
 
     Ok(())
 }

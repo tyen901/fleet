@@ -1,62 +1,28 @@
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use fleet_core::path_utils::FleetPath;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::io;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct FileCacheEntry {
     pub mtime: u64,
-    pub len: u64,
+    pub size: u64,
     pub checksum: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScanCache {
     /// Map relative_path (Unix style) -> Entry
     pub entries: HashMap<String, FileCacheEntry>,
-    #[serde(skip)]
     dirty: bool,
 }
 
 impl ScanCache {
-    pub fn load(path: &Utf8Path) -> Self {
-        match fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str::<ScanCache>(&s).map_or_else(
-                |e| {
-                    tracing::warn!("Cache corrupted at {}, resetting: {}", path, e);
-                    Self::default()
-                },
-                |mut c| {
-                    c.dirty = false;
-                    c
-                },
-            ),
-            Err(_) => Self::default(),
-        }
-    }
-
-    pub fn save(&self, path: &Utf8Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let s = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        // Atomic write
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, s)?;
-        fs::rename(&tmp_path, path)?;
-        Ok(())
-    }
-
     /// Insert or update an entry. Returns true if something actually changed.
-    pub fn update(&mut self, rel_path: &str, mtime: u64, len: u64, checksum: String) {
+    pub fn update(&mut self, rel_path: &str, mtime: u64, size: u64, checksum: String) {
         let path_key = FleetPath::normalize(rel_path);
         let entry = FileCacheEntry {
             mtime,
-            len,
+            size,
             checksum,
         };
         self.entries.insert(path_key, entry);
@@ -76,11 +42,6 @@ impl ScanCache {
         {
             self.dirty = true;
         }
-    }
-
-    pub fn get_path(cache_root: &Utf8Path, mod_name: &str) -> Utf8PathBuf {
-        let safe = mod_name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        cache_root.join(format!("{}.json", safe))
     }
 
     /// Remove entries that point to non-existent files.

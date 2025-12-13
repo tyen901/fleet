@@ -1,56 +1,85 @@
-use async_trait::async_trait;
+use axum::extract::Path;
+use axum::response::IntoResponse;
+use axum::{body::Body, routing::get, Router};
 use camino::Utf8PathBuf;
 use fleet_core::{Manifest, Mod};
-use fleet_pipeline::sync::remote::RemoteStateProvider;
-use fleet_pipeline::sync::storage::{FileManifestStore, ManifestStore};
-use fleet_pipeline::sync::{DefaultSyncEngine, SyncError, SyncMode, SyncOptions, SyncRequest};
+use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
+use fleet_pipeline::sync::{DefaultSyncEngine, SyncMode, SyncOptions, SyncRequest};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-// Mock Remote
-struct MockRemote {
-    repo_ext: fleet_core::formats::RepositoryExternal,
-    srf_calls: Arc<Mutex<Vec<String>>>, // Track which mods were fetched
+async fn serve_repo_json(body: String) -> impl IntoResponse {
+    Body::from(body)
 }
 
-#[async_trait]
-impl RemoteStateProvider for MockRemote {
-    async fn head_repo_json_mtime(&self, _: &str) -> Result<Option<String>, SyncError> {
-        Ok(None)
-    }
+async fn serve_mod_srf(
+    Path(mod_name): Path<String>,
+    calls: Arc<Mutex<Vec<String>>>,
+) -> impl IntoResponse {
+    calls.lock().unwrap().push(mod_name.clone());
+    let srf = format!(r#"{{"Name":"{mod_name}","Checksum":"hash","Files":[]}}"#);
+    Body::from(srf)
+}
 
-    async fn fetch_repo_json(
-        &self,
-        _: &str,
-    ) -> Result<fleet_core::formats::RepositoryExternal, SyncError> {
-        Ok(self.repo_ext.clone())
-    }
+async fn start_server(
+    repo_json: String,
+    calls: Arc<Mutex<Vec<String>>>,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let repo_body = repo_json.clone();
+    let calls_clone = calls.clone();
 
-    async fn fetch_mod_srf(&self, _: &reqwest::Url, mod_name: &str) -> Result<Mod, SyncError> {
-        self.srf_calls.lock().unwrap().push(mod_name.to_string());
-        // Return dummy mod
-        Ok(Mod {
-            name: mod_name.into(),
-            checksum: "hash".into(),
-            files: vec![],
-        })
-    }
+    let app = Router::new()
+        .route(
+            "/repo.json",
+            get(move || {
+                let body = repo_body.clone();
+                serve_repo_json(body)
+            })
+            .head(move || {
+                let body = repo_json.clone();
+                serve_repo_json(body)
+            }),
+        )
+        .route(
+            "/:mod_name/mod.srf",
+            get(move |path| {
+                let calls = calls_clone.clone();
+                serve_mod_srf(path, calls)
+            }),
+        );
 
-    async fn fetch_remote(
-        &self,
-        _: &str,
-    ) -> Result<fleet_pipeline::sync::remote::RemoteState, SyncError> {
-        unimplemented!("Not needed for plan()")
-    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, handle)
 }
 
 #[tokio::test]
-async fn test_differential_fetch_skips_unchanged_mods() {
-    let root = tempdir().unwrap();
-    let root_path = Utf8PathBuf::from_path_buf(root.path().to_path_buf()).unwrap();
+async fn differential_fetch_skips_unchanged_mods() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let repo_json = r#"{
+        "repoName": "test",
+        "checksum": "abc",
+        "requiredMods": [
+            {"modName": "@mod_unchanged", "checksum": "hash_A", "enabled": true},
+            {"modName": "@mod_changed", "checksum": "hash_NEW", "enabled": true},
+            {"modName": "@mod_new", "checksum": "hash_B", "enabled": true}
+        ],
+        "optionalMods": []
+    }"#
+    .to_string();
 
-    // 1. Setup Local State (Simulate previous sync)
-    let manifest_store = Arc::new(FileManifestStore::new());
+    let (addr, server_handle) = start_server(repo_json, calls.clone()).await;
+    let repo_url = format!("http://{addr}/repo.json");
+
+    let work_dir = tempdir().unwrap();
+    let local_root = Utf8PathBuf::from_path_buf(work_dir.path().to_path_buf()).unwrap();
+
+    // Seed the last known manifest so differential fetch can reuse unchanged mods.
+    let store = RedbFleetDataStore;
     let local_manifest = Manifest {
         version: "1.0".into(),
         mods: vec![
@@ -66,75 +95,25 @@ async fn test_differential_fetch_skips_unchanged_mods() {
             },
         ],
     };
-    manifest_store.save(&root_path, &local_manifest).unwrap();
+    store
+        .commit_repair_snapshot(&local_root, &local_manifest, &[])
+        .unwrap();
 
-    // 2. Setup Remote State
-    let srf_calls = Arc::new(Mutex::new(Vec::new()));
-    let repo_ext = fleet_core::formats::RepositoryExternal {
-        repo_name: "test".into(),
-        checksum: "abc".into(),
-        required_mods: vec![
-            fleet_core::formats::repo::RepoModExternal {
-                mod_name: "@mod_unchanged".into(),
-                checksum: "hash_A".into(),
-                enabled: true,
-            },
-            fleet_core::formats::repo::RepoModExternal {
-                mod_name: "@mod_changed".into(),
-                checksum: "hash_NEW".into(),
-                enabled: true,
-            },
-            fleet_core::formats::repo::RepoModExternal {
-                mod_name: "@mod_new".into(),
-                checksum: "hash_B".into(),
-                enabled: true,
-            },
-        ],
-        optional_mods: vec![],
-    };
-
-    let remote = MockRemote {
-        repo_ext,
-        srf_calls: srf_calls.clone(),
-    };
-
-    // 3. Init Engine
-    let engine = DefaultSyncEngine::with_components(
-        Box::new(remote),
-        Box::new(fleet_pipeline::sync::local::DefaultLocalStateProvider::new(
-            None,
-            manifest_store.clone(),
-        )),
-        Box::new(fleet_pipeline::sync::execute::DefaultPlanExecutor::new(
-            reqwest::Client::new(),
-        )),
-        manifest_store,
-        Arc::new(fleet_pipeline::sync::storage::FileRepoSummaryStore::new()),
-    );
-
+    let engine = DefaultSyncEngine::new(reqwest::Client::new());
     let req = SyncRequest {
-        repo_url: "http://fake".into(),
-        local_root: root_path,
+        repo_url,
+        local_root,
         mode: SyncMode::FastCheck,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: Some("differential_fetch_test".into()),
     };
 
-    // 4. Run
     let _ = engine.fetch_remote_state(&req).await.unwrap();
 
-    // 5. Verify
-    let calls = srf_calls.lock().unwrap();
-    assert!(
-        calls.contains(&"@mod_changed".to_string()),
-        "Must fetch changed mod"
-    );
-    assert!(
-        calls.contains(&"@mod_new".to_string()),
-        "Must fetch new mod"
-    );
-    assert!(
-        !calls.contains(&"@mod_unchanged".to_string()),
-        "Must NOT fetch unchanged mod"
-    );
+    let calls = calls.lock().unwrap();
+    assert!(calls.contains(&"@mod_changed".to_string()));
+    assert!(calls.contains(&"@mod_new".to_string()));
+    assert!(!calls.contains(&"@mod_unchanged".to_string()));
+
+    server_handle.abort();
 }

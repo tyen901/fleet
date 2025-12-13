@@ -23,7 +23,7 @@ pub struct FetchResult {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SyncMode {
-    /// No disk I/O; trust last persisted local manifest.
+    /// No disk I/O; trust last persisted local manifest from `fleet.redb`.
     CacheOnly,
     /// Walk filesystem + use ScanCache; no hashing.
     MetadataOnly,

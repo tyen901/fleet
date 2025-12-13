@@ -2,6 +2,7 @@ use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
 use camino::Utf8Path;
 use fleet_infra::hashing::compute_file_checksum;
+use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
 use fleet_pipeline::sync::{default_engine, SyncMode, SyncOptions, SyncRequest};
 use std::net::SocketAddr;
 use tempfile::tempdir;
@@ -119,18 +120,16 @@ async fn sync_normalizes_paths_preventing_check_loop() {
     let file_path = root.join("@win_mod").join("addons").join("data.bin");
     assert!(file_path.exists(), "File should exist at normalized path");
 
-    let summary_path = root.join(".fleet-local-summary.json");
-    let summary_content = std::fs::read_to_string(summary_path).expect("Summary file missing");
-
-    assert!(
-        summary_content.contains("addons/data.bin"),
-        "Summary must contain normalized path 'addons/data.bin'. Content:\n{}",
-        summary_content
-    );
-    assert!(
-        !summary_content.contains("addons\\\\data.bin"),
-        "Summary must NOT contain backslash path"
-    );
+    let store = RedbFleetDataStore;
+    let summary = store
+        .load_baseline_summary(&root)
+        .expect("Summary missing from fleet.redb");
+    let win_mod = summary.iter().find(|m| m.mod_name == "@win_mod").unwrap();
+    assert!(win_mod
+        .files
+        .iter()
+        .any(|f| f.rel_path == "addons/data.bin"));
+    assert!(!win_mod.files.iter().any(|f| f.rel_path.contains("\\\\")));
 
     println!("--- Step 2: Fast Check ---");
     let check_req = SyncRequest {
