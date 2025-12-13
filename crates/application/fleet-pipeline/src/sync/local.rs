@@ -64,12 +64,19 @@ impl DefaultLocalStateProvider {
         })
     }
 
-    async fn metadata_only(&self, root: &Utf8Path) -> Result<LocalState, SyncError> {
+    async fn metadata_only(
+        &self,
+        root: &Utf8Path,
+        on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
+    ) -> Result<LocalState, SyncError> {
         let cache_root = self.cache_root.clone();
         let root = root.to_owned();
         let (manifest, summaries) = tokio::task::spawn_blocking(move || {
             let mut mods = Vec::new();
             let mut summaries = Vec::new();
+            let mut files_total: u64 = 0;
+            let mut bytes_total: u64 = 0;
+            let mut cached_files: u64 = 0;
 
             for entry in std::fs::read_dir(&root).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
@@ -111,12 +118,17 @@ impl DefaultLocalStateProvider {
                     let meta = std::fs::metadata(&fs_path).map_err(|e| e.to_string())?;
                     let len = meta.len();
                     let mtime = Scanner::mtime(&meta);
+                    files_total += 1;
+                    bytes_total += len;
 
                     let checksum = cache
                         .get(&rel)
                         .filter(|entry| entry.len == len && entry.mtime == mtime)
                         .map(|entry| entry.checksum.clone())
                         .unwrap_or_default();
+                    if !checksum.is_empty() {
+                        cached_files += 1;
+                    }
 
                     files.push(File {
                         path: rel.clone(),
@@ -143,6 +155,16 @@ impl DefaultLocalStateProvider {
                 summaries.push(LocalManifestSummary {
                     mod_name,
                     files: summary_files,
+                });
+            }
+
+            if let Some(cb) = on_progress {
+                cb(fleet_scanner::ScanStats {
+                    files_scanned: files_total,
+                    files_cached: cached_files,
+                    total_files: files_total,
+                    bytes_processed: bytes_total,
+                    total_bytes: bytes_total,
                 });
             }
 
@@ -193,7 +215,11 @@ impl DefaultLocalStateProvider {
         .await
     }
 
-    async fn fast_check(&self, root: &Utf8Path) -> Result<LocalState, SyncError> {
+    async fn fast_check(
+        &self,
+        root: &Utf8Path,
+        on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
+    ) -> Result<LocalState, SyncError> {
         let cache_root = self.cache_root.clone();
         let manifest_store = self.manifest_store.clone();
 
@@ -202,18 +228,25 @@ impl DefaultLocalStateProvider {
         // metadata-only scan so callers still see the on-disk files.
         let contract = match manifest_store.load(root) {
             Ok(m) if !m.mods.is_empty() => m,
-            _ => return self.metadata_only(root).await,
+            _ => return self.metadata_only(root, on_progress).await,
         };
 
         let root = root.to_owned();
         let (manifest, summary) = tokio::task::spawn_blocking(move || {
-
             // Process mods in parallel for performance.
             let results: Vec<_> = contract
                 .mods
                 .par_iter()
                 .map(|contract_mod| {
                     let mod_path = root.join(&contract_mod.name);
+                    let mut expected_files: u64 = 0;
+                    let mut expected_bytes: u64 = 0;
+                    let mut cached_files: u64 = 0;
+
+                    for f in &contract_mod.files {
+                        expected_files += 1;
+                        expected_bytes += f.length;
+                    }
 
                     if !mod_path.exists() {
                         // If the directory is gone, the whole mod is missing.
@@ -229,6 +262,7 @@ impl DefaultLocalStateProvider {
                                 mod_name: contract_mod.name.clone(),
                                 files: Vec::new(),
                             },
+                            (expected_files, expected_bytes, cached_files),
                         );
                     }
 
@@ -278,6 +312,7 @@ impl DefaultLocalStateProvider {
                         }
 
                         if is_valid {
+                            cached_files += 1;
                             valid_files.push(contract_file.clone());
                             summary_files.push(LocalFileSummary {
                                 rel_path: contract_file.path.clone(),
@@ -312,12 +347,35 @@ impl DefaultLocalStateProvider {
                             mod_name: contract_mod.name.clone(),
                             files: summary_files,
                         },
+                        (expected_files, expected_bytes, cached_files),
                     )
                 })
                 .collect();
 
             // Unzip the parallel results
-            let (actual_mods, actual_summary): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+            let mut actual_mods = Vec::with_capacity(results.len());
+            let mut actual_summary = Vec::with_capacity(results.len());
+            let mut expected_files_total: u64 = 0;
+            let mut expected_bytes_total: u64 = 0;
+            let mut cached_files_total: u64 = 0;
+
+            for (m, s, (ef, eb, cf)) in results {
+                actual_mods.push(m);
+                actual_summary.push(s);
+                expected_files_total += ef;
+                expected_bytes_total += eb;
+                cached_files_total += cf;
+            }
+
+            if let Some(cb) = on_progress {
+                cb(fleet_scanner::ScanStats {
+                    files_scanned: expected_files_total,
+                    files_cached: cached_files_total,
+                    total_files: expected_files_total,
+                    bytes_processed: expected_bytes_total,
+                    total_bytes: expected_bytes_total,
+                });
+            }
 
             Ok::<(Manifest, Vec<LocalManifestSummary>), String>((
                 Manifest {
@@ -409,10 +467,10 @@ impl LocalStateProvider for DefaultLocalStateProvider {
     ) -> Result<LocalState, SyncError> {
         match mode {
             SyncMode::CacheOnly => self.cache_only(root).await,
-            SyncMode::MetadataOnly => self.metadata_only(root).await,
+            SyncMode::MetadataOnly => self.metadata_only(root, on_progress).await,
             SyncMode::SmartVerify => self.smart_verify(root, on_progress).await,
             SyncMode::FullRehash => self.full_rehash(root, on_progress).await,
-            SyncMode::FastCheck => self.fast_check(root).await,
+            SyncMode::FastCheck => self.fast_check(root, on_progress).await,
         }
     }
 }
@@ -448,7 +506,7 @@ mod tests {
             None,
             Arc::new(crate::sync::storage::FileManifestStore::new()),
         );
-        let state = provider.metadata_only(&root).await.unwrap();
+        let state = provider.metadata_only(&root, None).await.unwrap();
 
         assert_eq!(state.trust, LocalTrustLevel::MetadataOnly);
         let f = state.manifest.mods[0]
@@ -484,7 +542,7 @@ mod tests {
             None,
             Arc::new(crate::sync::storage::FileManifestStore::new()),
         );
-        let state = provider.metadata_only(&root).await.unwrap();
+        let state = provider.metadata_only(&root, None).await.unwrap();
         let f = state.manifest.mods[0]
             .files
             .iter()

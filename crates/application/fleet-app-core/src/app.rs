@@ -10,6 +10,7 @@ use crate::ports::SyncPipelinePort;
 
 use fleet_core::repo::Repository;
 use fleet_core::SyncPlan;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -21,6 +22,7 @@ pub struct FleetApplication {
     persistence: FilePersistence,
     launcher: LauncherImpl,
     orchestrator: PipelineOrchestrator,
+    auto_local_checked: HashSet<ProfileId>,
 
     msg_rx: mpsc::Receiver<DomainEvent>,
     msg_tx: mpsc::Sender<DomainEvent>,
@@ -44,6 +46,7 @@ impl FleetApplication {
             persistence: FilePersistence::new(),
             launcher: LauncherImpl::new(),
             orchestrator: PipelineOrchestrator::new(engine, msg_tx.clone()),
+            auto_local_checked: HashSet::new(),
             msg_rx,
             msg_tx,
         }
@@ -62,43 +65,61 @@ impl FleetApplication {
         } else {
             Route::ProfileHub
         };
+
+        if let Some(id) = self.state.selected_profile_id.clone() {
+            self.ensure_local_integrity_checked(&id);
+        }
         Ok(())
     }
 
     // --- Actions ---
 
-    /// Full remote check - fetch remote manifest and compare against local state.
-    pub fn start_check(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
+    pub fn check_for_updates(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
         let profile = self.get_profile(profile_id)?.clone();
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
         self.state.last_plan = None;
 
-        if let Err(e) = self
-            .orchestrator
-            .start_check(profile, self.state.settings.clone(), run_id, false)
-        {
+        if let Err(e) = self.orchestrator.start_remote_update_check(
+            profile,
+            self.state.settings.clone(),
+            run_id,
+        ) {
             self.state = reduce(self.state.clone(), DomainEvent::UserError(e.to_string()));
             return Err(e);
         }
         Ok(())
     }
 
-    /// Fast local-only check - compares local files against cached local state.
-    pub fn start_local_check(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
+    pub fn local_check(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
         let profile = self.get_profile(profile_id)?.clone();
+        let profile_id = profile.id.clone();
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
-        // Do not clear last_plan here; remote comparison is unchanged.
+        self.state.last_plan = None;
 
-        if let Err(e) = self
-            .orchestrator
-            .start_check(profile, self.state.settings.clone(), run_id, true)
-        {
+        if let Err(e) = self.orchestrator.start_local_integrity_check(
+            profile,
+            self.state.settings.clone(),
+            run_id,
+        ) {
             self.state = reduce(self.state.clone(), DomainEvent::UserError(e.to_string()));
             return Err(e);
         }
+        self.auto_local_checked.insert(profile_id);
         Ok(())
+    }
+
+    fn ensure_local_integrity_checked(&mut self, profile_id: &ProfileId) {
+        if self.is_pipeline_running() {
+            return;
+        }
+        if self.auto_local_checked.contains(profile_id) {
+            return;
+        }
+        if self.local_check(profile_id.clone()).is_err() {
+            // Best-effort: local check should never block navigation/UI.
+        }
     }
 
     pub fn execute_sync(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
@@ -228,7 +249,14 @@ impl FleetApplication {
         if !matches!(route, Route::Settings) {
             self.state.settings_draft = None;
         }
+        let dashboard_id = match &route {
+            Route::ProfileDashboard(id) => Some(id.clone()),
+            _ => None,
+        };
         self.state.route = route;
+        if let Some(id) = dashboard_id {
+            self.ensure_local_integrity_checked(&id);
+        }
     }
     pub fn editor_draft(&self) -> Option<&Profile> {
         self.state.editor_draft.as_ref()

@@ -19,8 +19,8 @@ fn check_does_not_panic_without_tokio_runtime() {
     app.state.selected_profile_id = Some(profile.id.clone());
     app.state.profiles = vec![profile.clone()];
 
-    app.start_check(profile.id.clone())
-        .expect("start_check should not panic");
+    app.local_check(profile.id.clone())
+        .expect("local_check should not panic");
 
     let started_by = Instant::now() + Duration::from_secs(3);
     while Instant::now() < started_by {

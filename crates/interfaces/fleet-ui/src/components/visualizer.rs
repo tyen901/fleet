@@ -145,9 +145,9 @@ impl Visualizer {
 
                 let block_status_fn = |idx: usize| -> (egui::Color32, f32, bool) {
                     let has_overlay = overlays.get(idx).copied().flatten().is_some();
-                    let is_active_check =
-                        (vm.phase == VisualizerPhase::Scanning && idx == scan_active)
-                            || (vm.phase == VisualizerPhase::Review && has_overlay);
+                    let is_active_check = (vm.phase == VisualizerPhase::Scanning
+                        && idx == scan_active)
+                        || (vm.phase == VisualizerPhase::Review && has_overlay);
                     match vm.phase {
                         VisualizerPhase::Scanning => {
                             if idx < scan_processed {

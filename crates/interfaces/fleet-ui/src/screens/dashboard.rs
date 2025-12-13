@@ -70,12 +70,12 @@ pub fn draw<'a>(
 
         let cmd_resp = command::draw(&mut *tui, &vm.state);
         if cmd_resp.check_local {
-            if let Err(e) = app.start_local_check(vm.profile.id.clone()) {
+            if let Err(e) = app.local_check(vm.profile.id.clone()) {
                 tracing::error!("Failed to start local check: {e}");
             }
         }
         if cmd_resp.check_remote {
-            if let Err(e) = app.start_check(vm.profile.id.clone()) {
+            if let Err(e) = app.check_for_updates(vm.profile.id.clone()) {
                 tracing::error!("Failed to start remote check: {e}");
             }
         }

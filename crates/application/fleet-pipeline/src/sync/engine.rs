@@ -220,6 +220,32 @@ impl DefaultSyncEngine {
         Ok(diff_manifests(remote, &local.manifest))
     }
 
+    /// Builds a plan without any network I/O by comparing current local state against the last
+    /// saved local summary (captured at the end of a successful sync).
+    pub fn compute_local_integrity_plan(
+        &self,
+        req: &SyncRequest,
+        local: &LocalState,
+    ) -> Result<SyncPlan, SyncError> {
+        let empty = || SyncPlan {
+            renames: Vec::new(),
+            checks: Vec::new(),
+            downloads: Vec::new(),
+            deletes: Vec::new(),
+        };
+
+        let expected = match self.manifest_store.load_summary(&req.local_root) {
+            Ok(s) => s,
+            Err(_) => return Ok(empty()),
+        };
+        let current = match local.summary.clone() {
+            Some(s) => s,
+            None => return Ok(empty()),
+        };
+
+        Ok(build_fast_plan(&expected, &current))
+    }
+
     /// Pure planning step - fetch remote, scan local, diff.
     pub async fn plan(&self, req: &SyncRequest) -> Result<SyncPlan, SyncError> {
         let fetch_res = self.fetch_remote_state(req).await?;
