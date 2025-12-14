@@ -118,7 +118,7 @@ impl FleetApplication {
         }
 
         if let Some(id) = self.state.selected_profile_id.clone() {
-            self.ensure_local_integrity_checked(&id);
+            self.ensure_profile_initialized(&id);
         }
         Ok(())
     }
@@ -183,21 +183,28 @@ impl FleetApplication {
         Ok(())
     }
 
-    fn ensure_local_integrity_checked(&mut self, profile_id: &ProfileId) {
+    fn ensure_profile_initialized(&mut self, profile_id: &ProfileId) {
         if self.is_pipeline_running() {
             return;
         }
         if self.auto_local_checked.contains(profile_id) {
             return;
         }
-        // A local integrity check requires a baseline; for new profiles the UI should stay in
-        // `Unknown` and offer `Repair` rather than auto-running a check that will fail.
-        if !self.db().has_baseline(profile_id).unwrap_or(false) {
+        let has_baseline = self.db().has_baseline(profile_id).unwrap_or(false);
+
+        // New profiles should not require a manual "repair". If we don't have a baseline yet,
+        // auto-run a remote update check so the user immediately gets a plan to sync.
+        let res = if has_baseline {
+            self.local_check(profile_id.clone())
+        } else {
+            self.check_for_updates(profile_id.clone())
+        };
+
+        if res.is_err() {
+            // Best-effort: initialization should never block navigation/UI.
             return;
         }
-        if self.local_check(profile_id.clone()).is_err() {
-            // Best-effort: local check should never block navigation/UI.
-        }
+        self.auto_local_checked.insert(profile_id.clone());
     }
 
     pub fn execute_sync(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
@@ -450,7 +457,7 @@ impl FleetApplication {
                 selected_profile_id: Some(id.clone()),
                 route: None,
             });
-            self.ensure_local_integrity_checked(&id);
+            self.ensure_profile_initialized(&id);
         }
     }
     pub fn editor_draft(&self) -> Option<&Profile> {
