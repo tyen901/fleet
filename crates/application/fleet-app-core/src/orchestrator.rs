@@ -8,7 +8,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app_core::DomainEvent;
 use crate::domain::{AppSettings, Profile};
-use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus};
+use crate::pipeline::{
+    PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus, SyncProgressSeed,
+};
 use crate::ports::SyncPipelinePort;
 
 use fleet_core::SyncPlan;
@@ -29,6 +31,30 @@ enum CheckKind {
     LocalIntegrity,
     RemoteUpdate,
     Repair,
+}
+
+fn progress_seed_from_remote_manifest(
+    manifest: &fleet_core::Manifest,
+    plan: &SyncPlan,
+) -> SyncProgressSeed {
+    let mut total_files: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    for m in &manifest.mods {
+        for f in &m.files {
+            total_files += 1;
+            total_bytes += f.length;
+        }
+    }
+
+    let planned_files = plan.downloads.len() as u64;
+    let planned_bytes = plan.downloads.iter().map(|d| d.size).sum::<u64>();
+
+    SyncProgressSeed {
+        total_files,
+        total_bytes,
+        base_files: total_files.saturating_sub(planned_files),
+        base_bytes: total_bytes.saturating_sub(planned_bytes),
+    }
 }
 
 impl PipelineOrchestrator {
@@ -303,6 +329,7 @@ impl PipelineOrchestrator {
                                                 plan,
                                                 diff_stats,
                                                 existing_mods: existing_mods(),
+                                                progress_seed: None,
                                             },
                                         })
                                         .await;
@@ -413,6 +440,8 @@ impl PipelineOrchestrator {
                     match plan_res {
                         Ok(plan) => {
                             let diff_stats = (plan.downloads.len(), plan.deletes.len());
+                            let progress_seed =
+                                progress_seed_from_remote_manifest(&fetch_res.manifest, &plan);
                             let _ = tx
                                 .send(DomainEvent::PipelineEvent {
                                     run_id,
@@ -420,6 +449,7 @@ impl PipelineOrchestrator {
                                         plan,
                                         diff_stats,
                                         existing_mods: existing_mods(),
+                                        progress_seed: Some(progress_seed),
                                     },
                                 })
                                 .await;

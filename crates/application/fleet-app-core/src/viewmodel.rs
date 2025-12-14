@@ -191,9 +191,24 @@ fn pipeline_steps(state: &PipelineState) -> Vec<PipelineStepVm> {
 
 fn pipeline_progress_bar(state: &PipelineState) -> Option<(f32, String)> {
     if let Some(tp) = &state.stats.transfer {
-        if tp.total_bytes > 0 {
-            let ratio = tp.downloaded_bytes as f32 / tp.total_bytes as f32;
-            let label = format!("{} / {} files", tp.downloaded_files, tp.total_files);
+        let (numerator, denom, label_total_files) = if let Some(seed) = state.sync_progress {
+            (
+                seed.base_bytes.saturating_add(tp.downloaded_bytes),
+                seed.total_bytes,
+                seed.total_files,
+            )
+        } else {
+            (tp.downloaded_bytes, tp.total_bytes, tp.total_files)
+        };
+
+        if denom > 0 {
+            let ratio = (numerator as f32 / denom as f32).clamp(0.0, 1.0);
+            let effective_done_files = if let Some(seed) = state.sync_progress {
+                seed.base_files.saturating_add(tp.downloaded_files)
+            } else {
+                tp.downloaded_files
+            };
+            let label = format!("{effective_done_files} / {label_total_files} files");
             return Some((ratio, label));
         }
     }
@@ -358,21 +373,32 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         // Map pipeline steps to a simple "Busy" view
         let (task, detail, prog) = if pl.sync_status == StepStatus::Running {
             let (p, l) = if let Some(stats) = &pl.stats.transfer {
-                if stats.total_bytes > 0 {
+                let (numerator, denom, total_files) = if let Some(seed) = pl.sync_progress {
+                    (
+                        seed.base_bytes.saturating_add(stats.downloaded_bytes),
+                        seed.total_bytes,
+                        seed.total_files,
+                    )
+                } else {
+                    (stats.downloaded_bytes, stats.total_bytes, stats.total_files)
+                };
+
+                if denom > 0 {
                     let rate = format_rate(stats.speed_bps);
-                    let eta =
-                        format_eta(stats.total_bytes, stats.downloaded_bytes, stats.speed_bps);
-                    let mut label = format!("{}/{}", stats.downloaded_files, stats.total_files);
+                    let eta = format_eta(denom, numerator, stats.speed_bps);
+                    let done_files = if let Some(seed) = pl.sync_progress {
+                        seed.base_files.saturating_add(stats.downloaded_files)
+                    } else {
+                        stats.downloaded_files
+                    };
+                    let mut label = format!("{done_files}/{total_files}");
                     if let Some(rate) = rate {
                         label.push_str(&format!(" • {rate}"));
                     }
                     if let Some(eta) = eta {
                         label.push_str(&format!(" • ETA {eta}"));
                     }
-                    (
-                        stats.downloaded_bytes as f32 / stats.total_bytes as f32,
-                        label,
-                    )
+                    ((numerator as f32 / denom as f32).clamp(0.0, 1.0), label)
                 } else {
                     (0.0, "Starting...".into())
                 }
