@@ -99,6 +99,7 @@ pub struct AppState {
 
     pub pipeline: PipelineState,
     pub last_plan: Option<fleet_core::SyncPlan>,
+    pub last_plan_profile_id: Option<ProfileId>,
 }
 
 impl Default for AppState {
@@ -114,6 +115,7 @@ impl Default for AppState {
             editor_draft: None,
             pipeline: PipelineState::idle(),
             last_plan: None,
+            last_plan_profile_id: None,
         }
     }
 }

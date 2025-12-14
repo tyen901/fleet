@@ -270,6 +270,12 @@ pub struct ProfileDashboardVm {
 pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<ProfileDashboardVm> {
     let profile = state.profiles.iter().find(|p| p.id == profile_id)?;
     let pl = &state.pipeline;
+    let pipeline_applies = pl.active_profile_id.as_deref() == Some(profile.id.as_str());
+    let plan = if state.last_plan_profile_id.as_deref() == Some(profile.id.as_str()) {
+        state.last_plan.as_ref()
+    } else {
+        None
+    };
     let local_root = Path::new(&profile.local_path);
 
     let store = RedbFleetDataStore;
@@ -304,9 +310,11 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     });
 
     // 1. Determine High-Level State
-    let dashboard_state = if let Some(err) = &pl.error {
-        DashboardState::Error { msg: err.clone() }
-    } else if pl.is_running() {
+    let dashboard_state = if pipeline_applies && pl.error.is_some() {
+        DashboardState::Error {
+            msg: pl.error.clone().unwrap(),
+        }
+    } else if pipeline_applies && pl.is_running() {
         // Map pipeline steps to a simple "Busy" view
         let (task, detail, prog) = if pl.sync_status == StepStatus::Running {
             let (p, l) = if let Some(stats) = &pl.stats.transfer {
@@ -363,13 +371,38 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             progress: prog,
             can_cancel: true,
         }
-    } else if local_root.is_dir() {
-        if let Some(msg) = db_error {
-            DashboardState::Error {
-                msg: format!("Failed to open local database: {msg}"),
+    } else if !local_root.is_dir() {
+        DashboardState::Error {
+            msg: format!(
+                "Profile path does not exist: {}. Edit the profile path or create the folder.",
+                profile.local_path
+            ),
+        }
+    } else if let Some(plan) = plan {
+        // We have a plan, check if it has changes
+        let total_changes = plan.downloads.len() + plan.deletes.len();
+        if total_changes > 0 {
+            DashboardState::Review {
+                changes_summary: format!(
+                    "{} downloads, {} deletions pending.",
+                    plan.downloads.len(),
+                    plan.deletes.len()
+                ),
+                can_launch: true,
             }
         } else {
-            match db_state {
+            // Plan exists but empty -> We are synced.
+            DashboardState::Synced {
+                msg: "All files are up to date.".into(),
+                can_launch: true,
+            }
+        }
+    } else if let Some(msg) = db_error {
+        DashboardState::Error {
+            msg: format!("Failed to open local database: {msg}"),
+        }
+    } else {
+        match db_state {
             DbState::Valid => DashboardState::Idle {
                 last_check_msg: if profile.last_synced.is_some() {
                     Some("Files verified.".into())
@@ -389,36 +422,6 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
                     "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
                 ),
             },
-            }
-        }
-    } else if let Some(plan) = &state.last_plan {
-        // We have a plan, check if it has changes
-        let total_changes = plan.downloads.len() + plan.deletes.len();
-        if total_changes > 0 {
-            DashboardState::Review {
-                changes_summary: format!(
-                    "{} downloads, {} deletions pending.",
-                    plan.downloads.len(),
-                    plan.deletes.len()
-                ),
-                can_launch: true,
-            }
-        } else {
-            // Plan exists but empty -> We are synced.
-            DashboardState::Synced {
-                msg: "All files are up to date.".into(),
-                can_launch: true,
-            }
-        }
-    } else {
-        // Totally Idle
-        DashboardState::Idle {
-            last_check_msg: if profile.last_synced.is_some() {
-                Some("Files verified.".into())
-            } else {
-                None
-            },
-            can_launch: true,
         }
     };
 
@@ -429,17 +432,17 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         VisualizerPhase::Idle
     };
 
-    let phase = if pl.error.is_some() {
+    let phase = if pipeline_applies && pl.error.is_some() {
         VisualizerPhase::Error
-    } else if pl.sync_status == StepStatus::Running {
+    } else if pipeline_applies && pl.sync_status == StepStatus::Running {
         VisualizerPhase::Executing
-    } else if pl.scan_status == StepStatus::Running {
+    } else if pipeline_applies && pl.scan_status == StepStatus::Running {
         VisualizerPhase::Scanning
     } else if matches!(dashboard_state, DashboardState::Review { .. }) {
         VisualizerPhase::Review
     } else if matches!(dashboard_state, DashboardState::Synced { .. }) {
         VisualizerPhase::Synced
-    } else if pl.is_running() {
+    } else if pipeline_applies && pl.is_running() {
         // Keep the local-file visualization stable during remote fetch/diff.
         baseline_phase
     } else if matches!(dashboard_state, DashboardState::Idle { .. }) {
@@ -454,10 +457,22 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         state: dashboard_state,
         visualizer: VisualizerVm {
             phase,
-            scan: pl.stats.scan.clone(),
-            transfer: pl.stats.transfer.clone(),
-            plan: state.last_plan.clone(),
-            existing_mods: pl.plan_existing_mods.clone().unwrap_or_default(),
+            scan: if pipeline_applies {
+                pl.stats.scan.clone()
+            } else {
+                None
+            },
+            transfer: if pipeline_applies {
+                pl.stats.transfer.clone()
+            } else {
+                None
+            },
+            plan: plan.cloned(),
+            existing_mods: if pipeline_applies {
+                pl.plan_existing_mods.clone().unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         },
     })
 }

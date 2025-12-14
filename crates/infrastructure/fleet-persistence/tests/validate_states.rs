@@ -28,7 +28,8 @@ fn validate_reports_newer_schema_without_quarantine() {
         let mut meta = write_tx.open_table(META).unwrap();
         let schema_version = (CURRENT_SCHEMA + 1).to_string();
         meta.insert("format", "fleet-redb").unwrap();
-        meta.insert("schema_version", schema_version.as_str()).unwrap();
+        meta.insert("schema_version", schema_version.as_str())
+            .unwrap();
         meta.insert("created_at", "2020-01-01T00:00:00Z").unwrap();
         meta.insert("hashing_algo_version", "1").unwrap();
     }
