@@ -395,6 +395,10 @@ impl FleetApplication {
 
                 match ev {
                     PipelineRunEvent::PlanReady { plan, .. } => {
+                        // We just produced a plan using a fresh scan; local state is no longer
+                        // considered stale.
+                        status.local_state_dirty = false;
+
                         let summary = fleet_db::types::PlanSummary {
                             downloads: plan.downloads.len() as u64,
                             deletes: plan.deletes.len() as u64,
