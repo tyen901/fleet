@@ -5,7 +5,6 @@ pub mod domain;
 pub mod kernel;
 pub mod launcher;
 pub mod orchestrator;
-pub mod persistence;
 pub mod pipeline;
 pub mod ports;
 pub mod viewmodel;

@@ -1,7 +1,9 @@
 use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
+use fleet_db::AppDb;
 use fleet_pipeline::sync::{default_engine, SyncMode, SyncOptions, SyncRequest};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn tiny_repo_json() -> String {
@@ -82,7 +84,9 @@ async fn plan_against_local_repo_is_hermetic() {
     .await;
 
     let repo_url = format!("http://{addr}");
-    let engine = default_engine(reqwest::Client::new());
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(reqwest::Client::new(), db);
 
     let root = tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(root.path().to_path_buf()).unwrap();
@@ -92,7 +96,7 @@ async fn plan_against_local_repo_is_hermetic() {
         local_root: root,
         mode: SyncMode::MetadataOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:delta_repo".into(),
     };
 
     let plan = engine.plan(&req).await.expect("plan should succeed");

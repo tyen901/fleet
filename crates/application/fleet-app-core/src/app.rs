@@ -4,7 +4,6 @@ use crate::app_core::{reduce, DomainEvent};
 use crate::domain::{AppSettings, AppState, FlatpakSteamAvailability, Profile, ProfileId, Route};
 use crate::launcher::LauncherImpl;
 use crate::orchestrator::PipelineOrchestrator;
-use crate::persistence::FilePersistence;
 use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus};
 use crate::ports::SyncPipelinePort;
 
@@ -12,32 +11,25 @@ use fleet_core::formats::RepositoryExternal;
 use fleet_core::repo::Repository;
 use fleet_core::repo::Server;
 use fleet_core::SyncPlan;
-use fleet_pipeline::sync::storage::{FileRepoSummaryStore, RepoSummary, RepoSummaryStore};
-use std::collections::{HashMap, HashSet};
+use fleet_db::types::{ProfileRecord, UiState};
+use fleet_db::AppDb;
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub struct FleetApplication {
     pub state: AppState,
 
     // Concrete Implementations
-    persistence: FilePersistence,
+    db: AppDb,
     launcher: LauncherImpl,
     orchestrator: PipelineOrchestrator,
     auto_local_checked: HashSet<ProfileId>,
-    repo_summary_store: FileRepoSummaryStore,
-    server_cache: HashMap<ProfileId, ServerCacheEntry>,
 
     msg_rx: mpsc::Receiver<DomainEvent>,
     msg_tx: mpsc::Sender<DomainEvent>,
-}
-
-#[derive(Clone)]
-struct ServerCacheEntry {
-    server: Option<Server>,
-    last_refresh_attempt: Instant,
 }
 
 impl Default for FleetApplication {
@@ -48,42 +40,90 @@ impl Default for FleetApplication {
 impl FleetApplication {
     pub fn new() -> Self {
         let (msg_tx, msg_rx) = mpsc::channel(100);
+        let db = AppDb::open().expect("failed to open fleet db");
+        let db_arc = std::sync::Arc::new(db.clone());
         let client =
             fleet_infra::net::default_http_client().unwrap_or_else(|_| reqwest::Client::new());
-        let engine = fleet_pipeline::default_engine(client);
+        let engine = fleet_pipeline::default_engine(client, db_arc.clone());
         let engine = std::sync::Arc::new(engine);
 
         Self {
             state: AppState::default(),
-            persistence: FilePersistence::new(),
+            db,
             launcher: LauncherImpl::new(),
-            orchestrator: PipelineOrchestrator::new(engine, msg_tx.clone()),
+            orchestrator: PipelineOrchestrator::new(engine, db_arc, msg_tx.clone()),
             auto_local_checked: HashSet::new(),
-            repo_summary_store: FileRepoSummaryStore::new(),
-            server_cache: HashMap::new(),
             msg_rx,
             msg_tx,
         }
     }
 
     pub fn load_initial_state(&mut self) -> anyhow::Result<()> {
-        let profiles = self.persistence.load_profiles()?;
-        let settings = self.persistence.load_settings()?;
+        let profiles = self
+            .db
+            .list_profiles()?
+            .into_iter()
+            .map(|p| Profile {
+                id: p.id,
+                name: p.name,
+                repo_url: p.repo_url,
+                local_path: p.local_path,
+                last_synced: None,
+                last_scan: None,
+            })
+            .collect::<Vec<_>>();
+
+        let settings = self
+            .db
+            .load_settings()?
+            .map(|s| AppSettings {
+                max_threads: s.max_threads,
+                speed_limit_enabled: s.speed_limit_enabled,
+                max_speed_bytes: s.max_speed_bytes,
+                launch_params: s.launch_params,
+                launch_template: s.launch_template,
+            })
+            .unwrap_or_default();
+
+        let ui_state = self.db.load_ui_state()?.unwrap_or_default();
 
         self.state.profiles = profiles;
         self.state.settings = settings;
         self.state.flatpak_steam = detect_flatpak_steam_availability();
-        self.state.selected_profile_id = self.state.profiles.first().map(|p| p.id.clone());
+        self.state.selected_profile_id = ui_state
+            .selected_profile_id
+            .clone()
+            .or_else(|| self.state.profiles.first().map(|p| p.id.clone()));
         self.state.route = if let Some(ref id) = self.state.selected_profile_id {
             Route::ProfileDashboard(id.clone())
         } else {
             Route::ProfileHub
         };
 
+        for p in &self.state.profiles {
+            if let Ok(Some(status)) = self.db.load_status(&p.id) {
+                self.state.status_by_profile.insert(p.id.clone(), status);
+            } else if let Ok(status) = self.db.compute_profile_status(&p.id, &p.local_path) {
+                let _ = self.db.save_status(&p.id, &status);
+                self.state.status_by_profile.insert(p.id.clone(), status);
+            }
+            if let Ok(Some(plan)) = self.db.load_plan(&p.id) {
+                self.state.plan_by_profile.insert(p.id.clone(), plan);
+            }
+            if let Ok(Some(choice)) = self.db.load_server_choice(&p.id) {
+                self.state
+                    .server_choice_by_profile
+                    .insert(p.id.clone(), choice);
+            }
+        }
+
         if let Some(id) = self.state.selected_profile_id.clone() {
             self.ensure_local_integrity_checked(&id);
         }
         Ok(())
+    }
+    fn db(&self) -> &AppDb {
+        &self.db
     }
 
     // --- Actions ---
@@ -232,8 +272,7 @@ impl FleetApplication {
             discover_mod_dirs(&profile.local_path)
         };
 
-        let server = self
-            .server_for_profile(&profile.id)
+        let server = self.server_for_profile(&profile.id)
             .ok_or_else(|| anyhow::anyhow!("No servers found (run Check for Updates or ensure local repo.json contains a server list)"))?;
 
         let mut params = self.state.settings.launch_params.trim().to_string();
@@ -263,21 +302,97 @@ impl FleetApplication {
                 }
             }
 
-            if let DomainEvent::PipelineEvent {
-                ev:
-                    PipelineRunEvent::StepChanged {
-                        step: PipelineStep::Fetch,
-                        status: StepStatus::Succeeded,
-                        ..
-                    },
-                ..
-            } = &ev
-            {
-                if let Some(active_id) = self.state.pipeline.active_profile_id.clone() {
-                    self.server_cache.remove(&active_id);
-                }
-            }
+            self.persist_for_event(&ev);
             self.state = reduce(self.state.clone(), ev);
+        }
+    }
+
+    fn persist_for_event(&mut self, ev: &DomainEvent) {
+        let DomainEvent::PipelineEvent { ev, .. } = ev else {
+            return;
+        };
+
+        let active_profile_id = match ev {
+            PipelineRunEvent::Started { profile_id } => profile_id.clone(),
+            _ => match self.state.pipeline.active_profile_id.clone() {
+                Some(pid) => pid,
+                None => return,
+            },
+        };
+
+        if let Some(profile) = self.state.profiles.iter().find(|p| p.id == active_profile_id) {
+            if let Ok(mut status) = self.db().compute_profile_status(&profile.id, &profile.local_path)
+            {
+                status.last_error = None;
+                status.plan_summary = None;
+
+                if let Ok(Some(existing)) = self.db().load_status(&profile.id) {
+                    status.last_check = existing.last_check;
+                    status.remote_ref = existing.remote_ref;
+                    status.server = existing.server;
+                }
+
+                match ev {
+                    PipelineRunEvent::Started { .. } => {
+                        let _ = self.db().clear_plan(&profile.id);
+                    }
+                    PipelineRunEvent::PlanReady { plan, .. } => {
+                        let summary = fleet_db::types::PlanSummary {
+                            downloads: plan.downloads.len() as u64,
+                            deletes: plan.deletes.len() as u64,
+                            renames: plan.renames.len() as u64,
+                            bytes_download: plan.downloads.iter().map(|d| d.size).sum(),
+                        };
+
+                            let remote_ref = self
+                                .db()
+                                .load_remote_repo(&profile.id)
+                                .ok()
+                                .flatten()
+                                .map(|r| fleet_db::types::RemoteRepoRef {
+                                    repo_url: r.repo_url,
+                                    fetched_at: r.fetched_at,
+                                    last_modified: r.last_modified,
+                                    repo_checksum: r.repo_checksum,
+                                });
+
+                        let snap = fleet_db::types::PlanSnapshot {
+                            profile_id: profile.id.clone(),
+                            created_at: chrono::Utc::now(),
+                            remote_ref: remote_ref.clone(),
+                            summary: summary.clone(),
+                            plan_json: None,
+                        };
+                        let _ = self.db().save_plan(&profile.id, &snap);
+                        self.state.plan_by_profile.insert(profile.id.clone(), snap);
+
+                        status.plan_summary = Some(summary);
+                        status.remote_ref = remote_ref;
+                        status.server = self
+                            .db()
+                            .load_server_choice(&profile.id)
+                            .ok()
+                            .flatten()
+                            .and_then(|c| c.server);
+                    }
+                    PipelineRunEvent::Completed => {
+                        let _ = self.db().clear_plan(&profile.id);
+                        self.state.plan_by_profile.remove(&profile.id);
+                    }
+                    PipelineRunEvent::Failed { message } => {
+                        status.last_error = Some(message.clone());
+                    }
+                    PipelineRunEvent::Cancelled => {
+                        status.last_error = Some("Operation cancelled by user".into());
+                    }
+                    _ => {}
+                }
+
+                self.state
+                    .status_by_profile
+                    .insert(profile.id.clone(), status.clone());
+                let _ = self.db().save_status(&profile.id, &status);
+            }
         }
     }
 
@@ -291,83 +406,28 @@ impl FleetApplication {
     }
 
     fn server_for_profile(&mut self, profile_id: &ProfileId) -> Option<Server> {
-        if let Some(cached) = self.server_cache.get(profile_id).cloned() {
-            if cached.server.is_some() {
-                return cached.server;
-            }
-
-            if cached.last_refresh_attempt.elapsed() < Duration::from_secs(2) {
-                return None;
-            }
+        if let Some(choice) = self.state.server_choice_by_profile.get(profile_id).cloned() {
+            return choice.server.map(|s| Server {
+                name: s.name.unwrap_or_default(),
+                address: s.address,
+                port: s.port,
+                password: s.password,
+                battle_eye: false,
+            });
         }
 
-        let profile = self.state.profiles.iter().find(|p| &p.id == profile_id)?;
+        let choice = self.db().load_server_choice(profile_id).ok().flatten()?;
+        self.state
+            .server_choice_by_profile
+            .insert(profile_id.clone(), choice.clone());
 
-        let from_summary = self.server_from_repo_summary(profile_id);
-        if from_summary.is_some() {
-            self.server_cache.insert(
-                profile_id.clone(),
-                ServerCacheEntry {
-                    server: from_summary.clone(),
-                    last_refresh_attempt: Instant::now(),
-                },
-            );
-            return from_summary;
-        }
-
-        let from_local = load_local_repo_json(&profile.local_path)
-            .and_then(|repo| repo.servers.into_iter().next());
-
-        if from_local.is_some() {
-            self.refresh_repo_summary_from_local_repo_json(profile_id, &profile.local_path);
-        }
-
-        self.server_cache.insert(
-            profile_id.clone(),
-            ServerCacheEntry {
-                server: from_local.clone(),
-                last_refresh_attempt: Instant::now(),
-            },
-        );
-        from_local
-    }
-
-    fn server_from_repo_summary(&self, profile_id: &str) -> Option<Server> {
-        let summary = self
-            .repo_summary_store
-            .load_repo_summary(profile_id)
-            .ok()
-            .flatten()?;
-
-        let repo_ext: RepositoryExternal = serde_json::from_str(&summary.repo_json).ok()?;
-        let repo: Repository = repo_ext.into();
-        repo.servers.into_iter().next()
-    }
-
-    fn refresh_repo_summary_from_local_repo_json(&self, profile_id: &str, local_root: &str) {
-        let repo_path = Path::new(local_root).join("repo.json");
-        let content = match fs::read_to_string(repo_path) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-
-        let repo_ext: RepositoryExternal = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-
-        let repo_json = match serde_json::to_string(&repo_ext) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-
-        let summary = RepoSummary {
-            last_modified: None,
-            repo_json,
-        };
-        let _ = self
-            .repo_summary_store
-            .save_repo_summary(profile_id, &summary);
+        choice.server.map(|s| Server {
+            name: s.name.unwrap_or_default(),
+            address: s.address,
+            port: s.port,
+            password: s.password,
+            battle_eye: false,
+        })
     }
 
     // --- CRUD boilerplate (simplified) ---
@@ -394,6 +454,11 @@ impl FleetApplication {
         };
         self.state.route = route;
         if let Some(id) = dashboard_id {
+            self.state.selected_profile_id = Some(id.clone());
+            let _ = self.db().save_ui_state(&UiState {
+                selected_profile_id: Some(id.clone()),
+                route: None,
+            });
             self.ensure_local_integrity_checked(&id);
         }
     }
@@ -429,6 +494,7 @@ impl FleetApplication {
             let reopen_id = draft.id.clone();
             let reopen_draft_for_thread = reopen_draft.clone();
             let reopen_id_for_thread = reopen_id.clone();
+            let db = self.db().clone();
 
             let spawn_res = std::thread::Builder::new()
                 .name("fleet-save-profile".into())
@@ -436,12 +502,19 @@ impl FleetApplication {
                     let res: anyhow::Result<()> = (|| {
                         let client = fleet_infra::net::default_http_client()
                             .unwrap_or_else(|_| reqwest::Client::new());
-                        let engine = fleet_pipeline::default_engine(client);
-                        crate::async_runtime::runtime()?
-                            .block_on(engine.validate_repo_url(&repo_url))?;
+                        crate::async_runtime::runtime()?.block_on(
+                            fleet_pipeline::validate_repo_url(client, &repo_url),
+                        )?;
 
-                        let persistence = FilePersistence::new();
-                        persistence.save_profiles(&profiles_snapshot)?;
+                        for p in profiles_snapshot {
+                            let rec = ProfileRecord {
+                                id: p.id,
+                                name: p.name,
+                                repo_url: p.repo_url,
+                                local_path: p.local_path,
+                            };
+                            db.upsert_profile(&rec)?;
+                        }
                         Ok(())
                     })();
 
@@ -471,13 +544,21 @@ impl FleetApplication {
     }
     pub fn delete_profile(&mut self, id: ProfileId) -> anyhow::Result<()> {
         self.state.profiles.retain(|p| p.id != id);
-        self.persistence.save_profiles(&self.state.profiles)?;
+        let _ = self.db().delete_profile(&id);
         Ok(())
     }
     pub fn update_settings(&mut self, s: AppSettings) -> anyhow::Result<()> {
         self.state.pipeline.error = None;
         self.state.settings = s.clone();
-        self.persistence.save_settings(&s)
+        let rec = fleet_db::types::AppSettings {
+            max_threads: s.max_threads,
+            speed_limit_enabled: s.speed_limit_enabled,
+            max_speed_bytes: s.max_speed_bytes,
+            launch_params: s.launch_params.clone(),
+            launch_template: s.launch_template.clone(),
+        };
+        self.db().save_settings(&rec)?;
+        Ok(())
     }
 }
 

@@ -1,7 +1,9 @@
 use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
+use fleet_db::AppDb;
 use fleet_pipeline::sync::{default_engine, SyncMode, SyncOptions, SyncRequest};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn tiny_repo_json() -> String {
@@ -84,7 +86,9 @@ async fn sync_accepts_repo_base_without_trailing_slash_in_subpath() {
     // NOTE: No trailing slash. Historically this broke `repo.json` resolution because
     // `Url::join("repo.json")` treated the base as a file path.
     let repo_url = format!("http://{addr}/data/pca_2.2.9");
-    let engine = default_engine(reqwest::Client::new());
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(reqwest::Client::new(), db);
 
     let dir = tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
@@ -94,7 +98,7 @@ async fn sync_accepts_repo_base_without_trailing_slash_in_subpath() {
         local_root: root.clone(),
         mode: SyncMode::MetadataOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:url_normalization:1".into(),
     };
 
     let result = engine.plan_and_execute(&req, None).await.unwrap();
@@ -122,7 +126,9 @@ async fn sync_accepts_explicit_repo_json_url() {
     .await;
 
     let repo_url = format!("http://{addr}/data/pca_2.2.9/repo.json");
-    let engine = default_engine(reqwest::Client::new());
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(reqwest::Client::new(), db);
 
     let dir = tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
@@ -132,7 +138,7 @@ async fn sync_accepts_explicit_repo_json_url() {
         local_root: root.clone(),
         mode: SyncMode::MetadataOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:url_normalization:2".into(),
     };
 
     let result = engine.plan_and_execute(&req, None).await.unwrap();

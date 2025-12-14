@@ -12,13 +12,14 @@ use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus}
 use crate::ports::SyncPipelinePort;
 
 use fleet_core::SyncPlan;
-use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
+use fleet_db::AppDb;
 use fleet_pipeline::{
     DefaultSyncEngine, ProgressTracker, SyncMode, SyncOptions, SyncRequest, TransferSnapshot,
 };
 
 pub struct PipelineOrchestrator {
     engine: Arc<DefaultSyncEngine>,
+    db: Arc<AppDb>,
     tx: mpsc::Sender<DomainEvent>,
     cancel: Option<CancellationToken>,
 }
@@ -31,9 +32,10 @@ enum CheckKind {
 }
 
 impl PipelineOrchestrator {
-    pub fn new(engine: Arc<DefaultSyncEngine>, tx: mpsc::Sender<DomainEvent>) -> Self {
+    pub fn new(engine: Arc<DefaultSyncEngine>, db: Arc<AppDb>, tx: mpsc::Sender<DomainEvent>) -> Self {
         Self {
             engine,
+            db,
             tx,
             cancel: None,
         }
@@ -85,6 +87,7 @@ impl PipelineOrchestrator {
 
         let tx = self.tx.clone();
         let engine = self.engine.clone();
+        let db = self.db.clone();
 
         let thread_name = match kind {
             CheckKind::LocalIntegrity => "fleet-check-local",
@@ -119,49 +122,7 @@ impl PipelineOrchestrator {
                         .await;
 
                     let local_root = camino::Utf8PathBuf::from(profile.local_path.clone());
-                    let store = RedbFleetDataStore;
-                    let db_state = match store.validate(&local_root) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            let _ = tx
-                                .send(DomainEvent::PipelineEvent {
-                                    run_id,
-                                    ev: PipelineRunEvent::Failed {
-                                        message: format!("Failed to open local database: {e}"),
-                                    },
-                                })
-                                .await;
-                            return;
-                        }
-                    };
-
-                    let is_cold = matches!(db_state, DbState::Missing | DbState::Corrupt);
-
-                    if matches!(db_state, DbState::Busy) {
-                        let _ = tx
-                            .send(DomainEvent::PipelineEvent {
-                                run_id,
-                                ev: PipelineRunEvent::Failed {
-                                    message: "Local database is busy (another Fleet instance may be running). Close it and try again.".into(),
-                                },
-                            })
-                            .await;
-                        return;
-                    }
-
-                    if let DbState::NewerSchema { found, supported } = db_state {
-                        let _ = tx
-                            .send(DomainEvent::PipelineEvent {
-                                run_id,
-                                ev: PipelineRunEvent::Failed {
-                                    message: format!(
-                                        "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
-                                    ),
-                                },
-                            })
-                            .await;
-                        return;
-                    }
+                    let is_cold = !db.has_baseline(&profile.id).unwrap_or(false);
 
                     if matches!(kind, CheckKind::LocalIntegrity) && is_cold {
                         let _ = tx
@@ -198,7 +159,7 @@ impl PipelineOrchestrator {
                         local_root,
                         mode,
                         options,
-                        profile_id: Some(profile.id.clone()),
+                        profile_id: profile.id.clone(),
                     };
 
                     let _ = tx
@@ -399,9 +360,11 @@ impl PipelineOrchestrator {
                                 },
                             })
                             .await;
-                        if let Err(e) =
-                            engine.persist_remote_snapshot(&req.local_root, &fetch_res.manifest)
-                        {
+                        if let Err(e) = engine.persist_remote_snapshot(
+                            &req.profile_id,
+                            &req.local_root,
+                            &fetch_res.manifest,
+                        ) {
                             let _ = tx
                                 .send(DomainEvent::PipelineEvent {
                                     run_id,
@@ -500,7 +463,7 @@ impl PipelineOrchestrator {
                             },
                             cache_root: None,
                         },
-                        profile_id: Some(profile.id.clone()),
+                        profile_id: profile.id.clone(),
                     };
 
                     let _ = tx
@@ -566,7 +529,7 @@ impl PipelineOrchestrator {
                             rate_limit_bytes: None,
                             cache_root: None,
                         },
-                        profile_id: Some(profile.id.clone()),
+                        profile_id: profile.id.clone(),
                     };
 
                     let latest_stats: Arc<std::sync::Mutex<Option<fleet_scanner::ScanStats>>> =
