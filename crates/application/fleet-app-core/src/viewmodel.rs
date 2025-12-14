@@ -329,13 +329,6 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         DashboardState::Error {
             msg: "Profile path is not valid UTF-8 on this platform.".into(),
         }
-    } else if pipeline_applies
-        && !pl.is_running()
-        && matches!(status.map(|s| &s.db_state), Some(DbState::MissingBaseline))
-    {
-        DashboardState::Unknown {
-            msg: "Local state not initialized. Run Repair.".into(),
-        }
     } else if pipeline_applies && pl.error.is_some() {
         DashboardState::Error {
             msg: pl.error.clone().unwrap(),
@@ -432,8 +425,9 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             }
         }
     } else if matches!(status.map(|s| &s.db_state), Some(DbState::MissingBaseline)) {
-        DashboardState::Unknown {
-            msg: "Local state not initialized. Run Repair.".into(),
+        DashboardState::Idle {
+            last_check_msg: Some("Baseline missing: run Check for Updates or Sync.".into()),
+            can_launch: false,
         }
     } else {
         DashboardState::Idle {
