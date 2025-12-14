@@ -329,7 +329,6 @@ impl FleetApplication {
                 if let Ok(Some(existing)) = self.db().load_status(&profile.id) {
                     status.last_check = existing.last_check;
                     status.remote_ref = existing.remote_ref;
-                    status.server = existing.server;
                 }
 
                 match ev {
@@ -353,28 +352,21 @@ impl FleetApplication {
                                     repo_url: r.repo_url,
                                     fetched_at: r.fetched_at,
                                     last_modified: r.last_modified,
-                                    repo_checksum: r.repo_checksum,
+                                    repo_checksum: Some(r.repo_checksum),
                                 });
 
-                        let snap = fleet_db::types::PlanSnapshot {
-                            profile_id: profile.id.clone(),
-                            created_at: chrono::Utc::now(),
-                            remote_ref: remote_ref.clone(),
-                            summary: summary.clone(),
-                            plan_json: None,
-                        };
-                        let _ = self.db().save_plan(&profile.id, &snap);
-                        self.state.plan_by_profile.insert(profile.id.clone(), snap);
+                            let snap = fleet_db::types::PlanSnapshot {
+                                profile_id: profile.id.clone(),
+                                created_at: chrono::Utc::now(),
+                                remote_ref: remote_ref.clone(),
+                                summary: summary.clone(),
+                            };
+                            let _ = self.db().save_plan(&profile.id, &snap);
+                            self.state.plan_by_profile.insert(profile.id.clone(), snap);
 
-                        status.plan_summary = Some(summary);
-                        status.remote_ref = remote_ref;
-                        status.server = self
-                            .db()
-                            .load_server_choice(&profile.id)
-                            .ok()
-                            .flatten()
-                            .and_then(|c| c.server);
-                    }
+                            status.plan_summary = Some(summary);
+                            status.remote_ref = remote_ref;
+                        }
                     PipelineRunEvent::Completed => {
                         let _ = self.db().clear_plan(&profile.id);
                         self.state.plan_by_profile.remove(&profile.id);
@@ -407,13 +399,7 @@ impl FleetApplication {
 
     fn server_for_profile(&mut self, profile_id: &ProfileId) -> Option<Server> {
         if let Some(choice) = self.state.server_choice_by_profile.get(profile_id).cloned() {
-            return choice.server.map(|s| Server {
-                name: s.name.unwrap_or_default(),
-                address: s.address,
-                port: s.port,
-                password: s.password,
-                battle_eye: false,
-            });
+            return self.server_from_choice(profile_id, choice.selected_index);
         }
 
         let choice = self.db().load_server_choice(profile_id).ok().flatten()?;
@@ -421,13 +407,13 @@ impl FleetApplication {
             .server_choice_by_profile
             .insert(profile_id.clone(), choice.clone());
 
-        choice.server.map(|s| Server {
-            name: s.name.unwrap_or_default(),
-            address: s.address,
-            port: s.port,
-            password: s.password,
-            battle_eye: false,
-        })
+        self.server_from_choice(profile_id, choice.selected_index)
+    }
+
+    fn server_from_choice(&self, profile_id: &ProfileId, selected_index: usize) -> Option<Server> {
+        let remote = self.db().load_remote_repo(profile_id).ok().flatten()?;
+        let server = remote.repo.servers.get(selected_index)?;
+        Some(server.clone())
     }
 
     // --- CRUD boilerplate (simplified) ---

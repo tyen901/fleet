@@ -606,7 +606,6 @@ impl AppDb {
             last_check: None,
             plan_summary: None,
             remote_ref: None,
-            server: None,
         })
     }
 }
