@@ -5,15 +5,19 @@ use crate::domain::{AppSettings, AppState, FlatpakSteamAvailability, Profile, Pr
 use crate::launcher::LauncherImpl;
 use crate::orchestrator::PipelineOrchestrator;
 use crate::persistence::FilePersistence;
-use crate::pipeline::{PipelineRunEvent, PipelineRunId, StepStatus};
+use crate::pipeline::{PipelineRunEvent, PipelineRunId, PipelineStep, StepStatus};
 use crate::ports::SyncPipelinePort;
 
+use fleet_core::formats::RepositoryExternal;
 use fleet_core::repo::Repository;
+use fleet_core::repo::Server;
 use fleet_core::SyncPlan;
-use std::collections::HashSet;
+use fleet_pipeline::sync::storage::{FileRepoSummaryStore, RepoSummary, RepoSummaryStore};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub struct FleetApplication {
     pub state: AppState,
@@ -23,9 +27,17 @@ pub struct FleetApplication {
     launcher: LauncherImpl,
     orchestrator: PipelineOrchestrator,
     auto_local_checked: HashSet<ProfileId>,
+    repo_summary_store: FileRepoSummaryStore,
+    server_cache: HashMap<ProfileId, ServerCacheEntry>,
 
     msg_rx: mpsc::Receiver<DomainEvent>,
     msg_tx: mpsc::Sender<DomainEvent>,
+}
+
+#[derive(Clone)]
+struct ServerCacheEntry {
+    server: Option<Server>,
+    last_refresh_attempt: Instant,
 }
 
 impl Default for FleetApplication {
@@ -47,6 +59,8 @@ impl FleetApplication {
             launcher: LauncherImpl::new(),
             orchestrator: PipelineOrchestrator::new(engine, msg_tx.clone()),
             auto_local_checked: HashSet::new(),
+            repo_summary_store: FileRepoSummaryStore::new(),
+            server_cache: HashMap::new(),
             msg_rx,
             msg_tx,
         }
@@ -79,6 +93,7 @@ impl FleetApplication {
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
         self.state.last_plan = None;
+        self.state.last_plan_profile_id = None;
 
         if let Err(e) = self.orchestrator.start_remote_update_check(
             profile,
@@ -97,6 +112,7 @@ impl FleetApplication {
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
         self.state.last_plan = None;
+        self.state.last_plan_profile_id = None;
 
         if let Err(e) = self.orchestrator.start_local_integrity_check(
             profile,
@@ -115,6 +131,7 @@ impl FleetApplication {
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
         self.state.last_plan = None;
+        self.state.last_plan_profile_id = None;
 
         if let Err(e) = self
             .orchestrator
@@ -140,7 +157,9 @@ impl FleetApplication {
 
     pub fn execute_sync(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
         // Do not start sync if no plan is available
-        if self.state.last_plan.is_none() {
+        if self.state.last_plan.is_none()
+            || self.state.last_plan_profile_id.as_deref() != Some(profile_id.as_str())
+        {
             return Ok(());
         }
 
@@ -200,22 +219,22 @@ impl FleetApplication {
     }
 
     pub fn join_profile(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
-        let profile = self.get_profile(profile_id)?;
+        let profile = self.get_profile(profile_id)?.clone();
 
-        let repo = load_local_repo_json(&profile.local_path)
-            .ok_or_else(|| anyhow::anyhow!("No repo.json found in {}", profile.local_path))?;
-
-        let mods_from_repo = enabled_mod_paths(&repo, &profile.local_path);
+        let repo = load_local_repo_json(&profile.local_path);
+        let mods_from_repo = repo
+            .as_ref()
+            .map(|repo| enabled_mod_paths(repo, &profile.local_path))
+            .unwrap_or_default();
         let mods = if !mods_from_repo.is_empty() {
             mods_from_repo
         } else {
             discover_mod_dirs(&profile.local_path)
         };
 
-        let server = repo
-            .servers
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("No servers configured in repo.json"))?;
+        let server = self
+            .server_for_profile(&profile.id)
+            .ok_or_else(|| anyhow::anyhow!("No servers found (run Check for Updates or ensure local repo.json contains a server list)"))?;
 
         let mut params = self.state.settings.launch_params.trim().to_string();
         let mut join_args = format!("-connect={} -port={}", server.address, server.port);
@@ -243,8 +262,112 @@ impl FleetApplication {
                     continue;
                 }
             }
+
+            if let DomainEvent::PipelineEvent {
+                ev:
+                    PipelineRunEvent::StepChanged {
+                        step: PipelineStep::Fetch,
+                        status: StepStatus::Succeeded,
+                        ..
+                    },
+                ..
+            } = &ev
+            {
+                if let Some(active_id) = self.state.pipeline.active_profile_id.clone() {
+                    self.server_cache.remove(&active_id);
+                }
+            }
             self.state = reduce(self.state.clone(), ev);
         }
+    }
+
+    pub fn server_url_for_profile(&mut self, profile_id: &ProfileId) -> Option<String> {
+        let server = self.server_for_profile(profile_id)?;
+        let address = server.address.trim();
+        if address.is_empty() {
+            return None;
+        }
+        Some(format!("{address}:{}", server.port))
+    }
+
+    fn server_for_profile(&mut self, profile_id: &ProfileId) -> Option<Server> {
+        if let Some(cached) = self.server_cache.get(profile_id).cloned() {
+            if cached.server.is_some() {
+                return cached.server;
+            }
+
+            if cached.last_refresh_attempt.elapsed() < Duration::from_secs(2) {
+                return None;
+            }
+        }
+
+        let profile = self.state.profiles.iter().find(|p| &p.id == profile_id)?;
+
+        let from_summary = self.server_from_repo_summary(profile_id);
+        if from_summary.is_some() {
+            self.server_cache.insert(
+                profile_id.clone(),
+                ServerCacheEntry {
+                    server: from_summary.clone(),
+                    last_refresh_attempt: Instant::now(),
+                },
+            );
+            return from_summary;
+        }
+
+        let from_local = load_local_repo_json(&profile.local_path)
+            .and_then(|repo| repo.servers.into_iter().next());
+
+        if from_local.is_some() {
+            self.refresh_repo_summary_from_local_repo_json(profile_id, &profile.local_path);
+        }
+
+        self.server_cache.insert(
+            profile_id.clone(),
+            ServerCacheEntry {
+                server: from_local.clone(),
+                last_refresh_attempt: Instant::now(),
+            },
+        );
+        from_local
+    }
+
+    fn server_from_repo_summary(&self, profile_id: &str) -> Option<Server> {
+        let summary = self
+            .repo_summary_store
+            .load_repo_summary(profile_id)
+            .ok()
+            .flatten()?;
+
+        let repo_ext: RepositoryExternal = serde_json::from_str(&summary.repo_json).ok()?;
+        let repo: Repository = repo_ext.into();
+        repo.servers.into_iter().next()
+    }
+
+    fn refresh_repo_summary_from_local_repo_json(&self, profile_id: &str, local_root: &str) {
+        let repo_path = Path::new(local_root).join("repo.json");
+        let content = match fs::read_to_string(repo_path) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let repo_ext: RepositoryExternal = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let repo_json = match serde_json::to_string(&repo_ext) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let summary = RepoSummary {
+            last_modified: None,
+            repo_json,
+        };
+        let _ = self
+            .repo_summary_store
+            .save_repo_summary(profile_id, &summary);
     }
 
     // --- CRUD boilerplate (simplified) ---
@@ -361,7 +484,7 @@ impl FleetApplication {
 fn detect_flatpak_steam_availability() -> FlatpakSteamAvailability {
     #[cfg(not(target_os = "linux"))]
     {
-        return FlatpakSteamAvailability::Unavailable("Flatpak is only supported on Linux".into());
+        FlatpakSteamAvailability::Unavailable("Flatpak is only supported on Linux".into())
     }
 
     #[cfg(target_os = "linux")]

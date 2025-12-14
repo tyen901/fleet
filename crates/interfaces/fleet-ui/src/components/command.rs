@@ -17,7 +17,11 @@ pub struct CommandInterfaceResponse {
     pub ack: bool,
 }
 
-pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> CommandInterfaceResponse {
+pub fn draw<'a>(
+    tui: impl TuiBuilderLogic<'a>,
+    state: &DashboardState,
+    can_join_server: bool,
+) -> CommandInterfaceResponse {
     let mut resp = CommandInterfaceResponse {
         sync: false,
         check_remote: false,
@@ -220,8 +224,12 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                         {
                             resp.launch = true;
                         }
+                        let join_enabled = *can_launch && can_join_server;
                         if tui
-                            .ui(|ui| cmd_button(ui, "JOIN", "outline", *can_launch))
+                            .ui(|ui| {
+                                cmd_button(ui, "JOIN", "outline", join_enabled)
+                                    .on_disabled_hover_text("No server found in repo.json")
+                            })
                             .clicked()
                         {
                             resp.join = true;
@@ -234,8 +242,12 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                         {
                             resp.launch = true;
                         }
+                        let join_enabled = *can_launch && can_join_server;
                         if tui
-                            .ui(|ui| cmd_button(ui, "JOIN", "outline", *can_launch))
+                            .ui(|ui| {
+                                cmd_button(ui, "JOIN", "outline", join_enabled)
+                                    .on_disabled_hover_text("No server found in repo.json")
+                            })
                             .clicked()
                         {
                             resp.join = true;
@@ -276,8 +288,12 @@ pub fn draw<'a>(tui: impl TuiBuilderLogic<'a>, state: &DashboardState) -> Comman
                         {
                             resp.launch = true;
                         }
+                        let join_enabled = *can_launch && can_join_server;
                         if tui
-                            .ui(|ui| cmd_button(ui, "JOIN", "outline", *can_launch))
+                            .ui(|ui| {
+                                cmd_button(ui, "JOIN", "outline", join_enabled)
+                                    .on_disabled_hover_text("No server found in repo.json")
+                            })
                             .clicked()
                         {
                             resp.join = true;
