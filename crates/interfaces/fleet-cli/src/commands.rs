@@ -3,12 +3,16 @@ use anyhow::{Context, Result};
 use camino::Utf8PathBuf;
 use fleet_core::formats::RepositoryExternal;
 use fleet_core::repo::Repository;
-use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
+use fleet_db::AppDb;
 use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
 use fleet_scanner::{ScanStats, Scanner};
 use humansize::{format_size, DECIMAL};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::time::Duration;
+
+fn cli_profile_id(local_path: &Utf8PathBuf) -> String {
+    format!("cli:{:x}", md5::compute(local_path.as_str().as_bytes()))
+}
 
 pub async fn cmd_scan(
     path: Utf8PathBuf,
@@ -70,14 +74,16 @@ pub async fn cmd_check(
     println!("   Local: {}", local_path);
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
-    let engine = fleet_pipeline::default_engine(client);
+    let db = std::sync::Arc::new(AppDb::open()?);
+    let engine = fleet_pipeline::default_engine(client, db);
 
+    let profile_id = cli_profile_id(&local_path);
     let req = SyncRequest {
         repo_url: repo,
         local_root: local_path,
         mode: mode.into(),
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id,
     };
 
     let plan = engine.plan(&req).await?;
@@ -95,27 +101,23 @@ pub async fn cmd_check_for_updates(repo: String, local_path: Utf8PathBuf) -> any
     println!("   Repo:  {}", repo);
     println!("   Local: {}", local_path);
 
-    let store = RedbFleetDataStore;
-    let mode = match store.validate(&local_path)? {
-        DbState::Valid => SyncMode::FastCheck,
-        DbState::Missing | DbState::Corrupt => SyncMode::SmartVerify,
-        DbState::Busy => anyhow::bail!(
-            "Local database is busy (another Fleet instance may be running). Close it and try again."
-        ),
-        DbState::NewerSchema { found, supported } => anyhow::bail!(
-            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
-        ),
+    let db = std::sync::Arc::new(AppDb::open()?);
+    let profile_id = cli_profile_id(&local_path);
+    let mode = if db.has_baseline(&profile_id).unwrap_or(false) {
+        SyncMode::FastCheck
+    } else {
+        SyncMode::SmartVerify
     };
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
-    let engine = fleet_pipeline::default_engine(client);
+    let engine = fleet_pipeline::default_engine(client, db);
 
     let req = SyncRequest {
         repo_url: repo,
         local_root: local_path,
         mode,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id,
     };
 
     let plan = engine.plan(&req).await?;
@@ -137,29 +139,21 @@ pub async fn cmd_local_check(local_path: Utf8PathBuf) -> anyhow::Result<()> {
     println!(":: Local integrity check...");
     println!("   Local: {}", local_path);
 
-    let store = RedbFleetDataStore;
-    match store.validate(&local_path)? {
-        DbState::Valid => {}
-        DbState::Missing | DbState::Corrupt => {
-            anyhow::bail!("Unknown local state: missing `fleet.redb` (run `repair` first)")
-        }
-        DbState::Busy => anyhow::bail!(
-            "Local database is busy (another Fleet instance may be running). Close it and try again."
-        ),
-        DbState::NewerSchema { found, supported } => anyhow::bail!(
-            "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
-        ),
+    let db = std::sync::Arc::new(AppDb::open()?);
+    let profile_id = cli_profile_id(&local_path);
+    if !db.has_baseline(&profile_id).unwrap_or(false) {
+        anyhow::bail!("Unknown local state: missing baseline (run `repair` first)");
     }
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
-    let engine = fleet_pipeline::default_engine(client);
+    let engine = fleet_pipeline::default_engine(client, db);
 
     let req = SyncRequest {
         repo_url: String::new(),
         local_root: local_path,
         mode: SyncMode::MetadataOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id,
     };
 
     let pb = ProgressBar::new_spinner();
@@ -205,14 +199,16 @@ pub async fn cmd_repair(repo: String, local_path: Utf8PathBuf) -> anyhow::Result
     println!("   Local: {}", local_path);
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
-    let engine = fleet_pipeline::default_engine(client);
+    let db = std::sync::Arc::new(AppDb::open()?);
+    let engine = fleet_pipeline::default_engine(client, db);
 
+    let profile_id = cli_profile_id(&local_path);
     let req = SyncRequest {
         repo_url: repo,
         local_root: local_path,
         mode: SyncMode::SmartVerify,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id,
     };
 
     let pb = ProgressBar::new_spinner();
@@ -240,10 +236,10 @@ pub async fn cmd_repair(repo: String, local_path: Utf8PathBuf) -> anyhow::Result
     println!(":: Fetching remote manifest...");
     let remote = engine.fetch_remote_state(&req).await?;
 
-    engine.persist_remote_snapshot(&req.local_root, &remote.manifest)?;
+    engine.persist_remote_snapshot(&req.profile_id, &req.local_root, &remote.manifest)?;
 
     println!(":: Repair complete.");
-    println!("   Wrote `fleet.redb`");
+    println!("   Wrote baseline to app DB");
 
     Ok(())
 }
@@ -260,7 +256,8 @@ pub async fn cmd_sync(
     println!("   Target: {}", path);
 
     let client = fleet_infra::net::default_http_client().context("Failed to build HTTP client")?;
-    let engine = fleet_pipeline::default_engine(client);
+    let db = std::sync::Arc::new(AppDb::open()?);
+    let engine = fleet_pipeline::default_engine(client, db);
 
     let options = SyncOptions {
         max_threads: threads.clamp(1, 32),
@@ -268,12 +265,13 @@ pub async fn cmd_sync(
         cache_root: cache_dir,
     };
 
+    let profile_id = cli_profile_id(&path);
     let req = SyncRequest {
         repo_url: repo,
         local_root: path,
         mode: mode.into(),
         options,
-        profile_id: None,
+        profile_id,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);

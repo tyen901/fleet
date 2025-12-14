@@ -1,21 +1,34 @@
 use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use fleet_app_core::domain::Profile;
-use fleet_app_core::persistence::FilePersistence;
+use fleet_db::types::ProfileRecord;
+use fleet_db::AppDb;
 
 pub struct ProfileManager {
-    persistence: FilePersistence,
+    db: AppDb,
 }
 
 impl ProfileManager {
     pub fn new() -> Self {
         Self {
-            persistence: FilePersistence::new(),
+            db: AppDb::open().expect("failed to open fleet db"),
         }
     }
 
     pub fn list(&self) -> Result<Vec<Profile>> {
-        self.persistence.load_profiles()
+        Ok(self
+            .db
+            .list_profiles()?
+            .into_iter()
+            .map(|p| Profile {
+                id: p.id,
+                name: p.name,
+                repo_url: p.repo_url,
+                local_path: p.local_path,
+                last_synced: None,
+                last_scan: None,
+            })
+            .collect())
     }
 
     pub fn find(&self, name_or_id: &str) -> Result<Profile> {
@@ -33,8 +46,6 @@ impl ProfileManager {
         repo_url: String,
         local_path: Utf8PathBuf,
     ) -> Result<Profile> {
-        let mut profiles = self.list()?;
-
         if id.trim().is_empty() {
             return Err(anyhow!("Profile ID cannot be empty"));
         }
@@ -44,34 +55,51 @@ impl ProfileManager {
         {
             return Err(anyhow!("Profile ID must use only a-z, 0-9, - and _"));
         }
-        if profiles.iter().any(|p| p.id == id) {
+        if self
+            .db
+            .get_profile(&id)
+            .map(|p| p.is_some())
+            .unwrap_or(false)
+        {
             return Err(anyhow!("A profile with ID '{}' already exists", id));
         }
 
         let profile = Profile {
-            id,
-            name,
-            repo_url,
+            id: id.clone(),
+            name: name.clone(),
+            repo_url: repo_url.clone(),
             local_path: local_path.to_string(),
             last_synced: None,
             last_scan: None,
         };
 
-        profiles.push(profile.clone());
-        self.persistence.save_profiles(&profiles)?;
+        let record = ProfileRecord {
+            id,
+            name,
+            repo_url,
+            local_path: local_path.to_string(),
+        };
+        self.db.upsert_profile(&record)?;
         Ok(profile)
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {
-        let mut profiles = self.list()?;
-        let original_len = profiles.len();
-        profiles.retain(|p| p.id != name && !p.name.eq_ignore_ascii_case(name));
+        let profiles = self.list()?;
+        let pid = profiles
+            .into_iter()
+            .find(|p| p.id == name || p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.id)
+            .ok_or_else(|| anyhow!("Profile '{}' not found", name))?;
 
-        if profiles.len() == original_len {
-            return Err(anyhow!("Profile '{}' not found", name));
+        self.db.delete_profile(&pid)?;
+        if let Ok(Some(ui_state)) = self.db.load_ui_state() {
+            if ui_state.selected_profile_id.as_deref() == Some(pid.as_str()) {
+                let _ = self.db.save_ui_state(&fleet_db::types::UiState {
+                    selected_profile_id: None,
+                    route: ui_state.route,
+                });
+            }
         }
-
-        self.persistence.save_profiles(&profiles)?;
         Ok(())
     }
 }

@@ -19,7 +19,7 @@ fleet-core = { workspace = true }
 fleet-scanner = { workspace = true }
 fleet-infra = { workspace = true }
 fleet-app-core = { workspace = true }
-fleet-persistence = { workspace = true }
+fleet-db = { workspace = true }
 
 # Utilities
 anyhow = { workspace = true }
@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+md5 = { workspace = true }
 
 # CLI & UX
 clap = { workspace = true, features = ["derive", "env"] }

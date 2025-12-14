@@ -1559,8 +1559,8 @@ dependencies = [
  "directories",
  "fleet-config",
  "fleet-core",
+ "fleet-db",
  "fleet-infra",
- "fleet-persistence",
  "fleet-pipeline",
  "fleet-scanner",
  "reqwest",
@@ -1583,12 +1583,13 @@ dependencies = [
  "fleet-app-core",
  "fleet-config",
  "fleet-core",
+ "fleet-db",
  "fleet-infra",
- "fleet-persistence",
  "fleet-pipeline",
  "fleet-scanner",
  "humansize",
  "indicatif",
+ "md5",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -1608,6 +1609,22 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "fleet-db"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "chrono",
+ "directories",
+ "fleet-core",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1650,11 +1667,12 @@ dependencies = [
  "async-trait",
  "axum",
  "camino",
+ "chrono",
  "directories",
  "filetime",
  "fleet-core",
+ "fleet-db",
  "fleet-infra",
- "fleet-persistence",
  "fleet-scanner",
  "futures",
  "hyper",

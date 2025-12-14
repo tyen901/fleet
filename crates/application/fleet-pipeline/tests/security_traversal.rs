@@ -1,6 +1,8 @@
 use fleet_core::{DeleteAction, DownloadAction, SyncPlan};
+use fleet_db::AppDb;
 use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
-use fleet_pipeline::DefaultSyncEngine;
+use fleet_pipeline::sync::default_engine;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
@@ -9,14 +11,15 @@ async fn execute_blocks_directory_traversal() {
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().into()).unwrap();
 
     // Engine setup (using dummy client as we don't expect network calls to succeed if we block early)
-    let engine = DefaultSyncEngine::new(reqwest::Client::new());
+    let db = Arc::new(AppDb::open_at(dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(reqwest::Client::new(), db);
 
     let req = SyncRequest {
         repo_url: "http://localhost".into(),
         local_root: root.clone(),
         mode: SyncMode::CacheOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:security_traversal".into(),
     };
 
     // Case 1: Download trying to write to ../malicious

@@ -1,7 +1,9 @@
 use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
+use fleet_db::AppDb;
 use fleet_pipeline::sync::{default_engine, SyncMode, SyncOptions, SyncRequest};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn tiny_repo_json() -> String {
@@ -79,7 +81,9 @@ async fn metadata_sync_then_cache_only_is_noop() {
 
     let base_url = format!("http://{addr}");
     let client = reqwest::Client::new();
-    let engine = default_engine(client.clone());
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(client.clone(), db);
 
     let dir = tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
@@ -89,7 +93,7 @@ async fn metadata_sync_then_cache_only_is_noop() {
         local_root: root.clone(),
         mode: SyncMode::MetadataOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:sync_integration:1".into(),
     };
 
     let result = engine.plan_and_execute(&req, None).await.unwrap();
@@ -105,7 +109,7 @@ async fn metadata_sync_then_cache_only_is_noop() {
         local_root: root.clone(),
         mode: SyncMode::CacheOnly,
         options: SyncOptions::default(),
-        profile_id: None,
+        profile_id: "test:sync_integration:1".into(),
     };
 
     let plan = engine.plan(&cache_req).await.unwrap();
@@ -126,7 +130,9 @@ async fn full_rehash_sync_then_fast_check_is_noop() {
 
     let base_url = format!("http://{addr}");
     let client = reqwest::Client::new();
-    let engine = default_engine(client.clone());
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
+    let engine = default_engine(client.clone(), db);
 
     let dir = tempdir().unwrap();
     let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
@@ -138,7 +144,7 @@ async fn full_rehash_sync_then_fast_check_is_noop() {
         local_root: root.clone(),
         mode: SyncMode::FullRehash,
         options: SyncOptions::default(),
-        profile_id: Some(profile_id.clone()),
+        profile_id: profile_id.clone(),
     };
 
     let full_result = engine.plan_and_execute(&full_req, None).await.unwrap();
@@ -155,7 +161,7 @@ async fn full_rehash_sync_then_fast_check_is_noop() {
         local_root: root.clone(),
         mode: SyncMode::FastCheck,
         options: SyncOptions::default(),
-        profile_id: Some(profile_id.clone()),
+        profile_id: profile_id.clone(),
     };
 
     let fast_plan = engine.plan(&fast_req).await.unwrap();

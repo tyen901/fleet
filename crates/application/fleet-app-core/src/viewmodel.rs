@@ -2,8 +2,7 @@ use crate::app::FleetApplication;
 use crate::domain::{AppSettings, AppState, Profile, ProfileId};
 use crate::pipeline::{PipelineState, StepStatus};
 use chrono::{DateTime, Utc};
-use fleet_persistence::{DbState, FleetDataStore, RedbFleetDataStore};
-use std::path::Path;
+use fleet_db::types::{DbState, LocalPathState};
 
 fn format_last_synced(ts: Option<DateTime<Utc>>) -> Option<String> {
     ts.map(|t| t.to_rfc3339())
@@ -72,17 +71,18 @@ pub struct ProfileSummaryVm {
 
 impl From<&Profile> for ProfileSummaryVm {
     fn from(p: &Profile) -> Self {
+        let status_label = if p.last_synced.is_some() {
+            "Ready".into()
+        } else {
+            "Unknown".into()
+        };
         Self {
             id: p.id.clone(),
             name: p.name.clone(),
             repo_url: p.repo_url.clone(),
             local_path: p.local_path.clone(),
             last_synced_human: format_last_synced(p.last_synced),
-            status_label: if p.last_synced.is_some() {
-                "Ready".into()
-            } else {
-                "Unknown".into()
-            },
+            status_label,
         }
     }
 }
@@ -271,21 +271,13 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     let profile = state.profiles.iter().find(|p| p.id == profile_id)?;
     let pl = &state.pipeline;
     let pipeline_applies = pl.active_profile_id.as_deref() == Some(profile.id.as_str());
-    let plan = if state.last_plan_profile_id.as_deref() == Some(profile.id.as_str()) {
+    let active_plan = if state.last_plan_profile_id.as_deref() == Some(profile.id.as_str()) {
         state.last_plan.as_ref()
     } else {
         None
     };
-    let local_root = Path::new(&profile.local_path);
-
-    let store = RedbFleetDataStore;
-    let (db_state, db_error) = match camino::Utf8PathBuf::from_path_buf(local_root.to_path_buf()) {
-        Ok(p) => match store.validate(&p) {
-            Ok(s) => (s, None),
-            Err(e) => (DbState::Missing, Some(e.to_string())),
-        },
-        Err(_) => (DbState::Missing, Some("Non-UTF local path".into())),
-    };
+    let status = state.status_by_profile.get(&profile.id);
+    let plan = active_plan;
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -310,7 +302,34 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     });
 
     // 1. Determine High-Level State
-    let dashboard_state = if pipeline_applies && pl.error.is_some() {
+    let dashboard_state = if matches!(
+        status.map(|s| &s.local_path_state),
+        Some(LocalPathState::Missing)
+    ) {
+        DashboardState::Error {
+            msg: format!(
+                "Profile path does not exist: {}. Edit the profile path or create the folder.",
+                profile.local_path
+            ),
+        }
+    } else if matches!(
+        status.map(|s| &s.local_path_state),
+        Some(LocalPathState::NotDir)
+    ) {
+        DashboardState::Error {
+            msg: format!(
+                "Profile path is not a directory: {}. Edit the profile path.",
+                profile.local_path
+            ),
+        }
+    } else if matches!(
+        status.map(|s| &s.local_path_state),
+        Some(LocalPathState::NonUtf)
+    ) {
+        DashboardState::Error {
+            msg: "Profile path is not valid UTF-8 on this platform.".into(),
+        }
+    } else if pipeline_applies && pl.error.is_some() {
         DashboardState::Error {
             msg: pl.error.clone().unwrap(),
         }
@@ -371,16 +390,25 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             progress: prog,
             can_cancel: true,
         }
-    } else if !local_root.is_dir() {
-        DashboardState::Error {
-            msg: format!(
-                "Profile path does not exist: {}. Edit the profile path or create the folder.",
-                profile.local_path
-            ),
+    } else if let Some(msg) = status.and_then(|s| s.last_error.clone()) {
+        DashboardState::Error { msg }
+    } else if let Some(plan_summary) = status.and_then(|s| s.plan_summary.clone()) {
+        if plan_summary.has_changes() {
+            DashboardState::Review {
+                changes_summary: format!(
+                    "{} downloads, {} deletions pending.",
+                    plan_summary.downloads, plan_summary.deletes
+                ),
+                can_launch: true,
+            }
+        } else {
+            DashboardState::Synced {
+                msg: "All files are up to date.".into(),
+                can_launch: true,
+            }
         }
     } else if let Some(plan) = plan {
-        // We have a plan, check if it has changes
-        let total_changes = plan.downloads.len() + plan.deletes.len();
+        let total_changes = plan.downloads.len() + plan.deletes.len() + plan.renames.len();
         if total_changes > 0 {
             DashboardState::Review {
                 changes_summary: format!(
@@ -391,41 +419,23 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
                 can_launch: true,
             }
         } else {
-            // Plan exists but empty -> We are synced.
             DashboardState::Synced {
                 msg: "All files are up to date.".into(),
                 can_launch: true,
             }
         }
-    } else if let Some(msg) = db_error {
-        DashboardState::Error {
-            msg: format!("Failed to open local database: {msg}"),
+    } else if matches!(status.map(|s| &s.db_state), Some(DbState::MissingBaseline)) {
+        DashboardState::Unknown {
+            msg: "Local state not initialized. Run Repair.".into(),
         }
     } else {
-        match db_state {
-            DbState::Valid => DashboardState::Idle {
-                last_check_msg: if profile.last_synced.is_some() {
-                    Some("Files verified.".into())
-                } else {
-                    None
-                },
-                can_launch: true,
-            },
-            DbState::Missing | DbState::Corrupt => DashboardState::Unknown {
-                msg: "Local state not initialized. Run Repair.".into(),
-            },
-            DbState::Busy => DashboardState::Error {
-                msg: "Local database is busy (another Fleet instance may be running). Close it and try again.".into(),
-            },
-            DbState::NewerSchema { found, supported } => DashboardState::Error {
-                msg: format!(
-                    "Local database is from a newer Fleet (schema_version={found}, supported={supported}). Update Fleet and try again."
-                ),
-            },
+        DashboardState::Idle {
+            last_check_msg: None,
+            can_launch: true,
         }
     };
 
-    let has_known_state = profile.last_synced.is_some() || profile.last_scan.is_some();
+    let has_known_state = matches!(status.map(|s| &s.db_state), Some(DbState::Valid));
     let baseline_phase = if has_known_state {
         VisualizerPhase::Synced
     } else {
