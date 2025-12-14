@@ -73,12 +73,21 @@ pub enum PipelineRunEvent {
         plan: fleet_core::SyncPlan,
         diff_stats: (usize, usize),
         existing_mods: Vec<String>,
+        progress_seed: Option<SyncProgressSeed>,
     },
     Completed,
     Failed {
         message: String,
     },
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SyncProgressSeed {
+    pub total_files: u64,
+    pub total_bytes: u64,
+    pub base_files: u64,
+    pub base_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +103,7 @@ pub struct PipelineState {
     pub stats: PipelineStats,
     pub details: HashMap<PipelineStep, String>,
     pub plan_existing_mods: Option<Vec<String>>,
+    pub sync_progress: Option<SyncProgressSeed>,
     pub error: Option<String>,
 }
 
@@ -109,6 +119,7 @@ impl PipelineState {
             stats: PipelineStats::default(),
             details: HashMap::new(),
             plan_existing_mods: None,
+            sync_progress: None,
             error: None,
         }
     }
@@ -131,6 +142,7 @@ impl PipelineState {
             stats: PipelineStats::default(),
             details: HashMap::new(),
             plan_existing_mods: None,
+            sync_progress: None,
             error: None,
         }
     }

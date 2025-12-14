@@ -102,11 +102,13 @@ fn apply_pipeline_event(state: &mut AppState, ev: PipelineRunEvent) {
             plan,
             diff_stats,
             existing_mods,
+            progress_seed,
         } => {
             state.last_plan = Some(plan);
             state.last_plan_profile_id = state.pipeline.active_profile_id.clone();
             state.pipeline.stats.diff = Some(diff_stats);
             state.pipeline.plan_existing_mods = Some(existing_mods);
+            state.pipeline.sync_progress = progress_seed;
             state
                 .pipeline
                 .set_step_status(PipelineStep::Diff, StepStatus::Succeeded);
