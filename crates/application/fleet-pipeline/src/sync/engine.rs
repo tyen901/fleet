@@ -11,7 +11,7 @@ use crate::sync::remote::{HttpRemoteStateProvider, RemoteStateProvider};
 use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 use crate::sync::{SyncError, SyncMode, SyncOptions, SyncRequest, SyncResult, SyncStats};
 use chrono::Utc;
-use fleet_db::types::{RemoteRepoSnapshot, ServerChoice, ServerSnapshot};
+use fleet_db::types::{RemoteRepoSnapshot, ServerChoice};
 use fleet_db::AppDb;
 use fleet_core::path_utils::FleetPath;
 use fleet_scanner::Scanner;
@@ -63,55 +63,38 @@ impl DefaultSyncEngine {
             .head_repo_json_mtime(&req.repo_url)
             .await
             .unwrap_or(None);
-
-        let mut repo_external: Option<fleet_core::formats::RepositoryExternal> = None;
-
         if let Ok(Some(cached)) = self.db.load_remote_repo(&req.profile_id) {
             if remote_mtime.is_some() && cached.last_modified == remote_mtime {
-                if let Ok(repo_ext) = serde_json::from_str::<fleet_core::formats::RepositoryExternal>(
-                    &cached.repo_json_external,
-                ) {
-                    repo_external = Some(repo_ext);
-                }
+                return self.fetch_from_repository(req, cached.repo.clone()).await;
             }
         }
 
-        if repo_external.is_none() {
-            let fetched = self.remote.fetch_repo_json(&req.repo_url).await?;
+        let fetched = self.remote.fetch_repo_json(&req.repo_url).await?;
+        let repository: fleet_core::repo::Repository = fetched.clone().into();
 
-            let repo_json = serde_json::to_string(&fetched)
-                .map_err(|e| SyncError::Remote(format!("serialize repo.json: {e}")))?;
+        let snapshot = RemoteRepoSnapshot {
+            repo_url: req.repo_url.clone(),
+            fetched_at: Utc::now(),
+            last_modified: remote_mtime.clone(),
+            repo_checksum: repository.checksum.clone(),
+            repo: repository.clone(),
+        };
+        let _ = self.db.save_remote_repo(&req.profile_id, &snapshot);
 
-            let snapshot = RemoteRepoSnapshot {
-                repo_url: req.repo_url.clone(),
-                fetched_at: Utc::now(),
-                last_modified: remote_mtime.clone(),
-                repo_checksum: None,
-                repo_json_external: repo_json.clone(),
-            };
-            let _ = self.db.save_remote_repo(&req.profile_id, &snapshot);
+        let choice = ServerChoice {
+            selected_index: 0,
+            updated_at: Utc::now(),
+        };
+        let _ = self.db.save_server_choice(&req.profile_id, &choice);
 
-            let repo: fleet_core::repo::Repository = fetched.clone().into();
-            let server = repo.servers.into_iter().next().map(|s| ServerSnapshot {
-                name: Some(s.name),
-                address: s.address,
-                port: s.port,
-                password: s.password,
-            });
-            let choice = ServerChoice {
-                selected_index: 0,
-                server,
-                updated_at: Utc::now(),
-            };
-            let _ = self.db.save_server_choice(&req.profile_id, &choice);
+        self.fetch_from_repository(req, repository).await
+    }
 
-            repo_external = Some(fetched);
-        }
-
-        let repository: fleet_core::repo::Repository = repo_external
-            .clone()
-            .ok_or_else(|| SyncError::Remote("repository unavailable".into()))?
-            .into();
+    async fn fetch_from_repository(
+        &self,
+        req: &SyncRequest,
+        repository: fleet_core::repo::Repository,
+    ) -> Result<crate::sync::FetchResult, SyncError> {
         let base = crate::sync::remote::normalize_repo_base(&req.repo_url)?;
 
         let mut mods = Vec::new();

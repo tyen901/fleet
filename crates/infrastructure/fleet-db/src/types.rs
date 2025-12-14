@@ -34,27 +34,18 @@ pub struct RemoteRepoRef {
     pub repo_checksum: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteRepoSnapshot {
     pub repo_url: String,
     pub fetched_at: DateTime<Utc>,
     pub last_modified: Option<String>,
-    pub repo_checksum: Option<String>,
-    pub repo_json_external: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServerSnapshot {
-    pub name: Option<String>,
-    pub address: String,
-    pub port: u16,
-    pub password: String,
+    pub repo_checksum: String,
+    pub repo: fleet_core::repo::Repository,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerChoice {
     pub selected_index: usize,
-    pub server: Option<ServerSnapshot>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -78,7 +69,6 @@ pub struct PlanSnapshot {
     pub created_at: DateTime<Utc>,
     pub remote_ref: Option<RemoteRepoRef>,
     pub summary: PlanSummary,
-    pub plan_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,6 +95,4 @@ pub struct ProfileStatusSnapshot {
     pub last_check: Option<String>,
     pub plan_summary: Option<PlanSummary>,
     pub remote_ref: Option<RemoteRepoRef>,
-    pub server: Option<ServerSnapshot>,
 }
-
