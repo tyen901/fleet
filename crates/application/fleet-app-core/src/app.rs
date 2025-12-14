@@ -190,6 +190,11 @@ impl FleetApplication {
         if self.auto_local_checked.contains(profile_id) {
             return;
         }
+        // A local integrity check requires a baseline; for new profiles the UI should stay in
+        // `Unknown` and offer `Repair` rather than auto-running a check that will fail.
+        if !self.db().has_baseline(profile_id).unwrap_or(false) {
+            return;
+        }
         if self.local_check(profile_id.clone()).is_err() {
             // Best-effort: local check should never block navigation/UI.
         }
