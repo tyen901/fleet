@@ -1646,21 +1646,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet-persistence"
-version = "0.1.0"
-dependencies = [
- "camino",
- "chrono",
- "fleet-core",
- "redb",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.17",
- "tracing",
-]
-
-[[package]]
 name = "fleet-pipeline"
 version = "0.1.0"
 dependencies = [
