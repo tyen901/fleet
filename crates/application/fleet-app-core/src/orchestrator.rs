@@ -133,7 +133,7 @@ impl PipelineOrchestrator {
                             .send(DomainEvent::PipelineEvent {
                                 run_id,
                                 ev: PipelineRunEvent::Failed {
-                                    message: "Local state not initialized. Run Repair first.".into(),
+                                    message: "Local baseline missing. Run Check for Updates first.".into(),
                                 },
                             })
                             .await;

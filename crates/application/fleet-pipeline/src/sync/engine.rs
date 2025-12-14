@@ -200,7 +200,7 @@ impl DefaultSyncEngine {
             .db
             .load_baseline_summary::<Vec<LocalManifestSummary>>(&req.profile_id)
             .map_err(|_| {
-                SyncError::Local("Local baseline missing (run `repair` to initialize)".into())
+                SyncError::Local("Local baseline missing (run Check for Updates first)".into())
             })?;
 
         let current = local

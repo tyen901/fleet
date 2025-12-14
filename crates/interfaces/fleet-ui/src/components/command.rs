@@ -4,7 +4,7 @@ use eframe::egui;
 use egui_taffy::bg::simple::{TuiBackground, TuiBuilderLogicWithBackground};
 use egui_taffy::taffy::prelude::{auto, length, percent};
 use egui_taffy::{taffy, TuiBuilderLogic};
-use fleet_app_core::viewmodel::DashboardState;
+use fleet_app_core::viewmodel::{DashboardActionsVm, DashboardState};
 
 pub struct CommandInterfaceResponse {
     pub sync: bool,
@@ -20,6 +20,7 @@ pub struct CommandInterfaceResponse {
 pub fn draw<'a>(
     tui: impl TuiBuilderLogic<'a>,
     state: &DashboardState,
+    actions: &DashboardActionsVm,
     can_join_server: bool,
 ) -> CommandInterfaceResponse {
     let mut resp = CommandInterfaceResponse {
@@ -205,7 +206,14 @@ pub fn draw<'a>(
                 .add(|tui| match state {
                     DashboardState::Busy { can_cancel, .. } => {
                         if tui
-                            .ui(|ui| cmd_button(ui, "CANCEL", "danger", *can_cancel))
+                            .ui(|ui| {
+                                cmd_button(
+                                    ui,
+                                    "CANCEL",
+                                    "danger",
+                                    *can_cancel && actions.can_cancel,
+                                )
+                            })
                             .clicked()
                         {
                             resp.cancel = true;
@@ -213,7 +221,7 @@ pub fn draw<'a>(
                     }
                     DashboardState::Review { can_launch, .. } => {
                         if tui
-                            .ui(|ui| cmd_button(ui, "SYNC", "primary", true))
+                            .ui(|ui| cmd_button(ui, "SYNC", "primary", actions.can_sync))
                             .clicked()
                         {
                             resp.sync = true;
@@ -253,13 +261,22 @@ pub fn draw<'a>(
                             resp.join = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "LOCAL CHECK", "outline", true))
+                            .ui(|ui| {
+                                cmd_button(ui, "LOCAL CHECK", "outline", actions.can_check_local)
+                            })
                             .clicked()
                         {
                             resp.check_local = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "CHECK FOR UPDATES", "outline", true))
+                            .ui(|ui| {
+                                cmd_button(
+                                    ui,
+                                    "CHECK FOR UPDATES",
+                                    "outline",
+                                    actions.can_check_remote,
+                                )
+                            })
                             .clicked()
                         {
                             resp.check_remote = true;
@@ -267,7 +284,7 @@ pub fn draw<'a>(
                     }
                     DashboardState::Error { .. } => {
                         if tui
-                            .ui(|ui| cmd_button(ui, "ACK", "outline", true))
+                            .ui(|ui| cmd_button(ui, "ACK", "outline", actions.can_ack))
                             .clicked()
                         {
                             resp.ack = true;
@@ -299,13 +316,22 @@ pub fn draw<'a>(
                             resp.join = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "LOCAL CHECK", "outline", true))
+                            .ui(|ui| {
+                                cmd_button(ui, "LOCAL CHECK", "outline", actions.can_check_local)
+                            })
                             .clicked()
                         {
                             resp.check_local = true;
                         }
                         if tui
-                            .ui(|ui| cmd_button(ui, "CHECK FOR UPDATES", "outline", true))
+                            .ui(|ui| {
+                                cmd_button(
+                                    ui,
+                                    "CHECK FOR UPDATES",
+                                    "outline",
+                                    actions.can_check_remote,
+                                )
+                            })
                             .clicked()
                         {
                             resp.check_remote = true;

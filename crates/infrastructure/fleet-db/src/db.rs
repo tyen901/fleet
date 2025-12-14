@@ -623,6 +623,7 @@ impl AppDb {
             computed_at: Utc::now(),
             local_path_state,
             db_state,
+            local_state_dirty: false,
             last_error: None,
             last_check: None,
             plan_summary: None,

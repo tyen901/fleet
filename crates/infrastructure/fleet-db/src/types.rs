@@ -93,6 +93,8 @@ pub struct ProfileStatusSnapshot {
     pub computed_at: DateTime<Utc>,
     pub local_path_state: LocalPathState,
     pub db_state: DbState,
+    #[serde(default)]
+    pub local_state_dirty: bool,
     pub last_error: Option<String>,
     pub last_check: Option<String>,
     pub plan_summary: Option<PlanSummary>,

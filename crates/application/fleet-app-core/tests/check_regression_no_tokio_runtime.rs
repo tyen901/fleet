@@ -1,12 +1,15 @@
 use std::time::{Duration, Instant};
 
 use fleet_app_core::{FleetApplication, Profile};
+use fleet_db::AppDb;
 
 #[test]
 fn check_does_not_panic_without_tokio_runtime() {
     let dir = tempfile::tempdir().expect("create temp dir");
+    let db_dir = tempfile::tempdir().expect("create temp db dir");
+    let db = AppDb::open_at(db_dir.path().join("fleet_state.redb")).expect("open temp db");
 
-    let mut app = FleetApplication::new();
+    let mut app = FleetApplication::new_with_db(db);
     let profile = Profile {
         id: "p1".to_string(),
         name: "Test Profile".to_string(),
