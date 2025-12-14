@@ -240,6 +240,7 @@ pub enum DashboardState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualizerPhase {
     Idle,
+    Dirty,
     Scanning,
     Fetching,
     Diffing,
@@ -410,6 +411,13 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             progress: prog,
             can_cancel: true,
         }
+    } else if local_dirty {
+        // Local files may have changed (cancelled sync / interrupted execution); previously
+        // computed summaries/plans may not be trustworthy.
+        DashboardState::Idle {
+            last_check_msg: Some("Local state is stale; run Check for Updates.".into()),
+            can_launch: true,
+        }
     } else if let Some(msg) = status.and_then(|s| s.last_error.clone()) {
         DashboardState::Error { msg }
     } else if let Some(plan_summary) = status.and_then(|s| s.plan_summary.clone()) {
@@ -444,11 +452,6 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
                 can_launch: true,
             }
         }
-    } else if status.map(|s| s.local_state_dirty).unwrap_or(false) {
-        DashboardState::Idle {
-            last_check_msg: Some("Local state changed; run Check for Updates.".into()),
-            can_launch: true,
-        }
     } else if let Some(msg) = status.and_then(|s| s.last_check.clone()) {
         DashboardState::Idle {
             last_check_msg: Some(msg),
@@ -476,10 +479,10 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     let can_ack = matches!(dashboard_state, DashboardState::Error { .. }) && !pl.is_running();
     let can_sync = !pl.is_running() && local_path_ok && plan_has_changes;
     let can_check_remote = !pl.is_running() && local_path_ok;
-    let can_check_local = !pl.is_running() && local_path_ok && has_baseline && !local_dirty;
+    let can_check_local = !pl.is_running() && local_path_ok && has_baseline;
 
     let has_known_state = matches!(status.map(|s| &s.db_state), Some(DbState::Valid));
-    let baseline_phase = if has_known_state {
+    let baseline_phase = if has_known_state && !local_dirty {
         VisualizerPhase::Synced
     } else {
         VisualizerPhase::Idle
@@ -498,6 +501,8 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     } else if pipeline_applies && pl.is_running() {
         // Keep the local-file visualization stable during remote fetch/diff.
         baseline_phase
+    } else if local_dirty {
+        VisualizerPhase::Dirty
     } else if matches!(dashboard_state, DashboardState::Idle { .. }) {
         baseline_phase
     } else {
@@ -527,7 +532,7 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             } else {
                 None
             },
-            plan: plan.cloned(),
+            plan: if local_dirty { None } else { plan.cloned() },
             existing_mods: if pipeline_applies {
                 pl.plan_existing_mods.clone().unwrap_or_default()
             } else {

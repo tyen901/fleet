@@ -298,6 +298,7 @@ impl DefaultLocalStateProvider {
 
                     let mut valid_files = Vec::new();
                     let mut summary_files = Vec::new();
+                    let mut cache_updates: Vec<(String, DbFileCacheEntry)> = Vec::new();
 
                     for contract_file in &contract_mod.files {
                         let fs_path = mod_path.join(&contract_file.path);
@@ -323,6 +324,16 @@ impl DefaultLocalStateProvider {
                                 }
                             }
 
+                            // 2b. If cache can't prove checksum, compute it (battle-tested: trust
+                            // cache when metadata matches; otherwise verify).
+                            if current_checksum.is_empty() {
+                                let logical = Utf8Path::new(&contract_file.path);
+                                current_checksum = compute_file_checksum(&fs_path, logical)
+                                    .map_err(|e| {
+                                        format!("checksum compute failed for {}: {e}", fs_path)
+                                    })?;
+                            }
+
                             // 3. Validate Contract Requirement
                             // If the derived checksum matches the contract, the file is healthy.
                             if !current_checksum.is_empty()
@@ -341,6 +352,14 @@ impl DefaultLocalStateProvider {
                                 size: current_size,
                                 checksum: contract_file.checksum.clone(),
                             });
+                            cache_updates.push((
+                                contract_file.path.clone(),
+                                DbFileCacheEntry {
+                                    mtime: current_mtime,
+                                    size: current_size,
+                                    checksum: contract_file.checksum.clone(),
+                                },
+                            ));
                         } else if fs_path.exists() {
                             // Exists but invalid (size/mtime mismatch OR hash mismatch)
                             valid_files.push(File {
@@ -351,11 +370,26 @@ impl DefaultLocalStateProvider {
                                 rel_path: contract_file.path.clone(),
                                 mtime: current_mtime,
                                 size: current_size,
-                                checksum: current_checksum, // Might be empty if cache missed
+                                checksum: current_checksum.clone(), // Might be empty if cache missed
                             });
+                            if !current_checksum.is_empty() {
+                                cache_updates.push((
+                                    contract_file.path.clone(),
+                                    DbFileCacheEntry {
+                                        mtime: current_mtime,
+                                        size: current_size,
+                                        checksum: current_checksum.clone(),
+                                    },
+                                ));
+                            }
                         } else {
                             // File missing entirely - omit from valid_files so diff sees it as missing
                         }
+                    }
+
+                    if !cache_updates.is_empty() {
+                        db.scan_cache_upsert_batch(&profile_id, &contract_mod.name, &cache_updates)
+                            .map_err(|e| format!("scan cache upsert failed: {e}"))?;
                     }
 
                     Ok((

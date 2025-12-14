@@ -198,17 +198,15 @@ impl DefaultSyncEngine {
     ) -> Result<SyncPlan, SyncError> {
         let expected = self
             .db
-            .load_baseline_summary::<Vec<LocalManifestSummary>>(&req.profile_id)
+            .load_baseline_manifest::<fleet_core::Manifest>(&req.profile_id)
             .map_err(|_| {
                 SyncError::Local("Local baseline missing (run Check for Updates first)".into())
             })?;
 
-        let current = local
-            .summary
-            .clone()
-            .ok_or_else(|| SyncError::Local("Local scan did not produce a summary".into()))?;
-
-        Ok(build_fast_plan(&expected, &current))
+        // Local integrity is defined as "local matches the last known good baseline".
+        // Compare by checksum/path (not mtime) so harmless timestamp changes don't cause false
+        // negatives and to keep this consistent with remote update checks.
+        Ok(diff_manifests(&expected, &local.manifest))
     }
 
     /// Pure planning step - fetch remote, scan local, diff.

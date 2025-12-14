@@ -396,11 +396,209 @@ async fn cancel_sync_does_not_dead_end_and_plan_remains_actionable() {
     );
     assert!(
         !vm.actions.can_check_local,
-        "local check should be disabled when dirty"
+        "local check requires baseline; this profile has none"
     );
     assert!(
         vm.actions.can_check_remote,
         "remote check should remain available"
+    );
+    assert!(
+        matches!(
+            vm.visualizer.phase,
+            fleet_app_core::viewmodel::VisualizerPhase::Dirty
+        ),
+        "visualizer should reflect stale local state after cancel"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn cancel_then_local_check_recovers_known_state_without_network() {
+    let file_bytes = b"hello".to_vec();
+    let part_checksum = "5D41402ABC4B2A76B9719D911017C592";
+    let file_checksum = "F872A18EB88181EB00816510E762FEE6";
+    let (addr, handle) = start_server_with_delayed_file(
+        tiny_repo_json(),
+        tiny_mod_srf(file_checksum, part_checksum),
+        file_bytes.clone(),
+        Duration::from_millis(750),
+    )
+    .await;
+
+    let local_dir = tempdir().unwrap();
+    let db_dir = tempdir().unwrap();
+    let db = AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap();
+
+    let profile = Profile {
+        id: "p1".to_string(),
+        name: "Test Profile".to_string(),
+        repo_url: format!("http://{addr}"),
+        local_path: local_dir.path().to_string_lossy().to_string(),
+        last_synced: None,
+        last_scan: None,
+    };
+    db.upsert_profile(&ProfileRecord {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        repo_url: profile.repo_url.clone(),
+        local_path: profile.local_path.clone(),
+    })
+    .unwrap();
+
+    // 1) Create a baseline by syncing once.
+    let mut app = FleetApplication::new_with_db(db.clone());
+    app.state.selected_profile_id = Some(profile.id.clone());
+    app.state.profiles = vec![profile.clone()];
+    app.check_for_updates(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        plan_snapshot(a, &profile.id).is_some()
+    })
+    .await;
+    app.execute_sync(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(10), |_| {
+        db.has_baseline(&profile.id).unwrap_or(false)
+    })
+    .await;
+
+    // 2) Make local diverge so we can start a sync and cancel it.
+    std::fs::remove_file(local_dir.path().join("@tiny").join("file.txt")).unwrap();
+
+    app.check_for_updates(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        plan_snapshot(a, &profile.id)
+            .map(|p| p.summary.has_changes())
+            .unwrap_or(false)
+    })
+    .await;
+
+    app.execute_sync(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        a.state.pipeline.is_running()
+    })
+    .await;
+    app.cancel_pipeline();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        !a.state.pipeline.is_running()
+    })
+    .await;
+    app.acknowledge_pipeline_completion();
+
+    // 3) Local state should be marked dirty, but local check should be available and should clear
+    // it without needing the network.
+    let vm = profile_dashboard_vm(&app.state, profile.id.clone()).unwrap();
+    assert!(matches!(
+        vm.visualizer.phase,
+        fleet_app_core::viewmodel::VisualizerPhase::Dirty
+    ));
+    assert!(vm.actions.can_check_local);
+
+    app.local_check(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(10), |a| {
+        a.state
+            .status_by_profile
+            .get(&profile.id)
+            .map(|s| !s.local_state_dirty)
+            .unwrap_or(false)
+    })
+    .await;
+
+    let vm2 = profile_dashboard_vm(&app.state, profile.id.clone()).unwrap();
+    assert!(
+        !matches!(
+            vm2.visualizer.phase,
+            fleet_app_core::viewmodel::VisualizerPhase::Dirty
+        ),
+        "local check should clear dirty visualizer state"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn check_for_updates_and_local_check_agree_after_mtime_only_change() {
+    let file_bytes = b"hello".to_vec();
+    let part_checksum = "5D41402ABC4B2A76B9719D911017C592";
+    let file_checksum = "F872A18EB88181EB00816510E762FEE6";
+    let (addr, handle) = start_server(
+        tiny_repo_json(),
+        tiny_mod_srf(file_checksum, part_checksum),
+        file_bytes.clone(),
+    )
+    .await;
+
+    let local_dir = tempdir().unwrap();
+    let db_dir = tempdir().unwrap();
+    let db = AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap();
+
+    let profile = Profile {
+        id: "p1".to_string(),
+        name: "Test Profile".to_string(),
+        repo_url: format!("http://{addr}"),
+        local_path: local_dir.path().to_string_lossy().to_string(),
+        last_synced: None,
+        last_scan: None,
+    };
+    db.upsert_profile(&ProfileRecord {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        repo_url: profile.repo_url.clone(),
+        local_path: profile.local_path.clone(),
+    })
+    .unwrap();
+
+    // Create baseline via sync.
+    let mut app = FleetApplication::new_with_db(db.clone());
+    app.state.selected_profile_id = Some(profile.id.clone());
+    app.state.profiles = vec![profile.clone()];
+    app.check_for_updates(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        plan_snapshot(a, &profile.id).is_some()
+    })
+    .await;
+    app.execute_sync(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(10), |_| {
+        db.has_baseline(&profile.id).unwrap_or(false)
+    })
+    .await;
+
+    // Touch the file without changing contents (mtime changes).
+    let file_path = local_dir.path().join("@tiny").join("file.txt");
+    let existing = std::fs::read(&file_path).unwrap();
+    std::fs::write(&file_path, existing).unwrap();
+
+    // Remote check should still be clean.
+    app.check_for_updates(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        a.state
+            .status_by_profile
+            .get(&profile.id)
+            .and_then(|s| s.plan_summary.as_ref())
+            .map(|ps| !ps.has_changes())
+            .unwrap_or(false)
+    })
+    .await;
+    let vm_remote = profile_dashboard_vm(&app.state, profile.id.clone()).unwrap();
+    assert!(
+        matches!(vm_remote.state, DashboardState::Synced { .. }),
+        "remote check should consider mtime-only changes up to date"
+    );
+
+    // Local check should also be clean (no false invalid due to mtime).
+    app.local_check(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        a.state
+            .status_by_profile
+            .get(&profile.id)
+            .and_then(|s| s.plan_summary.as_ref())
+            .map(|ps| !ps.has_changes())
+            .unwrap_or(false)
+    })
+    .await;
+    let vm_local = profile_dashboard_vm(&app.state, profile.id.clone()).unwrap();
+    assert!(
+        matches!(vm_local.state, DashboardState::Synced { .. }),
+        "local check should not report invalid when checksums match"
     );
 
     handle.abort();
