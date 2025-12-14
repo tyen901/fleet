@@ -28,8 +28,8 @@ pub enum DbError {
     RedbStorage(#[from] StorageError),
     #[error("redb table error: {0}")]
     RedbTable(#[from] TableError),
-    #[error("serde error: {0}")]
-    Serde(#[from] serde_json::Error),
+    #[error("codec error: {0}")]
+    Codec(#[from] postcard::Error),
     #[error("schema mismatch: expected {expected}, found {found}")]
     SchemaMismatch { expected: u32, found: u32 },
     #[error("invariant violation: {0}")]
@@ -48,12 +48,12 @@ fn config_dir() -> DbResult<PathBuf> {
     Ok(dir)
 }
 
-fn jser<T: serde::Serialize>(v: &T) -> DbResult<Vec<u8>> {
-    Ok(serde_json::to_vec(v)?)
+fn encode<T: serde::Serialize>(v: &T) -> DbResult<Vec<u8>> {
+    Ok(postcard::to_stdvec(v)?)
 }
 
-fn jdes<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> DbResult<T> {
-    Ok(serde_json::from_slice(bytes)?)
+fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> DbResult<T> {
+    Ok(postcard::from_bytes(bytes)?)
 }
 
 fn key_bytes(s: &str) -> &[u8] {
@@ -100,17 +100,28 @@ impl AppDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = if path.exists() {
-            Database::open(&path)?
-        } else {
-            Database::create(&path)?
+        let open_once = || -> DbResult<Self> {
+            let db = if path.exists() {
+                Database::open(&path)?
+            } else {
+                Database::create(&path)?
+            };
+            let this = Self {
+                db: Arc::new(db),
+                path: path.clone(),
+            };
+            this.ensure_initialized()?;
+            Ok(this)
         };
-        let this = Self {
-            db: Arc::new(db),
-            path,
-        };
-        this.ensure_initialized()?;
-        Ok(this)
+
+        match open_once() {
+            Ok(db) => Ok(db),
+            Err(DbError::SchemaMismatch { .. }) => {
+                let _ = std::fs::remove_file(&path);
+                open_once()
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -169,7 +180,7 @@ impl AppDb {
         let mut out = Vec::new();
         for row in table.iter()? {
             let (_, v) = row?;
-            out.push(jdes(v.value())?);
+            out.push(decode(v.value())?);
         }
         Ok(out)
     }
@@ -179,7 +190,7 @@ impl AppDb {
         let table = read.open_table(schema::PROFILES)?;
         table
             .get(profile_id.as_bytes())?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -187,7 +198,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::PROFILES)?;
-            table.insert(profile.id.as_bytes(), jser(profile)?.as_slice())?;
+            table.insert(profile.id.as_bytes(), encode(profile)?.as_slice())?;
         }
         write.commit()?;
         Ok(())
@@ -246,7 +257,7 @@ impl AppDb {
         let table = read.open_table(schema::SETTINGS)?;
         table
             .get(key_bytes("settings"))?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -254,7 +265,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::SETTINGS)?;
-            let bytes = jser(settings)?;
+            let bytes = encode(settings)?;
             table.insert(key_bytes("settings"), bytes.as_slice())?;
         }
         write.commit()?;
@@ -266,7 +277,7 @@ impl AppDb {
         let table = read.open_table(schema::UI_STATE)?;
         table
             .get(key_bytes("ui_state"))?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -274,7 +285,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::UI_STATE)?;
-            let bytes = jser(ui_state)?;
+            let bytes = encode(ui_state)?;
             table.insert(key_bytes("ui_state"), bytes.as_slice())?;
         }
         write.commit()?;
@@ -287,7 +298,7 @@ impl AppDb {
         let table = read.open_table(schema::REMOTE_REPO)?;
         table
             .get(profile_id.as_bytes())?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -299,7 +310,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::REMOTE_REPO)?;
-            let bytes = jser(snapshot)?;
+            let bytes = encode(snapshot)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -321,7 +332,7 @@ impl AppDb {
         let table = read.open_table(schema::SERVER_CHOICE)?;
         table
             .get(profile_id.as_bytes())?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -329,7 +340,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::SERVER_CHOICE)?;
-            let bytes = jser(choice)?;
+            let bytes = encode(choice)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -352,7 +363,7 @@ impl AppDb {
         let table = read.open_table(schema::PLAN)?;
         table
             .get(profile_id.as_bytes())?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -360,7 +371,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::PLAN)?;
-            let bytes = jser(plan)?;
+            let bytes = encode(plan)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -382,7 +393,7 @@ impl AppDb {
         let table = read.open_table(schema::STATUS)?;
         table
             .get(profile_id.as_bytes())?
-            .map(|v| jdes(v.value()))
+            .map(|v| decode(v.value()))
             .transpose()
     }
 
@@ -394,7 +405,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::STATUS)?;
-            let bytes = jser(status)?;
+            let bytes = encode(status)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -417,7 +428,7 @@ impl AppDb {
         let v = table
             .get(profile_id.as_bytes())?
             .ok_or_else(|| DbError::Invariant("baseline manifest missing".into()))?;
-        jdes(v.value())
+        decode(v.value())
     }
 
     pub fn save_baseline_manifest<T: serde::Serialize>(
@@ -428,7 +439,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::LOCAL_BASELINE_MANIFEST)?;
-            let bytes = jser(manifest)?;
+            let bytes = encode(manifest)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -444,7 +455,7 @@ impl AppDb {
         let v = table
             .get(profile_id.as_bytes())?
             .ok_or_else(|| DbError::Invariant("baseline summary missing".into()))?;
-        jdes(v.value())
+        decode(v.value())
     }
 
     pub fn save_baseline_summary<T: serde::Serialize>(
@@ -455,7 +466,7 @@ impl AppDb {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::LOCAL_BASELINE_SUMMARY)?;
-            let bytes = jser(summary)?;
+            let bytes = encode(summary)?;
             table.insert(profile_id.as_bytes(), bytes.as_slice())?;
         }
         write.commit()?;
@@ -479,7 +490,7 @@ impl AppDb {
             let rel = std::str::from_utf8(&key[prefix.len()..])
                 .map_err(|_| DbError::Invariant("non-utf scan cache rel path".into()))?
                 .to_string();
-            out.insert(rel, jdes(v.value())?);
+            out.insert(rel, decode(v.value())?);
         }
         Ok(out)
     }
@@ -495,7 +506,7 @@ impl AppDb {
             let mut table = write.open_table(schema::SCAN_CACHE)?;
             for (rel_path, entry) in entries {
                 let key = scan_cache_key(profile_id, mod_name, rel_path);
-                let bytes = jser(entry)?;
+                let bytes = encode(entry)?;
                 table.insert(key.as_slice(), bytes.as_slice())?;
             }
         }
