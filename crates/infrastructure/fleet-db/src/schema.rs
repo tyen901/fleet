@@ -2,7 +2,7 @@ use redb::TableDefinition;
 
 pub const DB_FILENAME: &str = "fleet_state.redb";
 pub const META_FORMAT: &str = "fleet-state-redb";
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub const META: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("meta");
@@ -25,4 +25,3 @@ pub const LOCAL_BASELINE_SUMMARY: TableDefinition<'static, &'static [u8], &'stat
     TableDefinition::new("local_baseline_summary");
 pub const SCAN_CACHE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("scan_cache");
-
