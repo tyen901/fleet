@@ -4,8 +4,8 @@ pub mod tracker;
 
 // Re-export core engine components
 pub use sync::{
-    default_engine, DefaultSyncEngine, FetchResult, FetchStats, SyncError, SyncMode, SyncOptions,
-    validate_repo_url, SyncRequest, SyncResult, SyncStats,
+    default_engine, validate_repo_url, DefaultSyncEngine, FetchResult, FetchStats, SyncError,
+    SyncMode, SyncOptions, SyncRequest, SyncResult, SyncStats,
 };
 pub use tracker::{ProgressTracker, TransferSnapshot};
 

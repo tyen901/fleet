@@ -8,8 +8,8 @@ use walkdir::WalkDir;
 
 use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 use crate::sync::{SyncError, SyncMode, SyncRequest};
-use fleet_infra::hashing::compute_file_checksum;
 use fleet_db::AppDb;
+use fleet_infra::hashing::compute_file_checksum;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,8 +98,8 @@ impl DefaultLocalStateProvider {
                     continue;
                 }
                 let mod_name = utf.file_name().unwrap().to_string();
-                let cache =
-                    match db.scan_cache_load_mod::<DbFileCacheEntry>(&profile_id, &mod_name) {
+                let cache = match db.scan_cache_load_mod::<DbFileCacheEntry>(&profile_id, &mod_name)
+                {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!("Cache unavailable for {mod_name}: {e}");
@@ -242,7 +242,11 @@ impl DefaultLocalStateProvider {
             .load_baseline_manifest::<Manifest>(&profile_id.to_string())
         {
             Ok(m) if !m.mods.is_empty() => m,
-            _ => return self.metadata_only(profile_id.to_string(), root, on_progress).await,
+            _ => {
+                return self
+                    .metadata_only(profile_id.to_string(), root, on_progress)
+                    .await
+            }
         };
 
         let root = root.to_owned();
@@ -282,10 +286,9 @@ impl DefaultLocalStateProvider {
                         ));
                     }
 
-                    let cache = match db.scan_cache_load_mod::<DbFileCacheEntry>(
-                        &profile_id,
-                        &contract_mod.name,
-                    ) {
+                    let cache = match db
+                        .scan_cache_load_mod::<DbFileCacheEntry>(&profile_id, &contract_mod.name)
+                    {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!("Cache unavailable for {}: {e}", contract_mod.name);

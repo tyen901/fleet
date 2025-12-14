@@ -276,8 +276,12 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
     } else {
         None
     };
+    let persisted_plan = state
+        .plan_by_profile
+        .get(&profile.id)
+        .and_then(|p| p.plan.as_ref());
     let status = state.status_by_profile.get(&profile.id);
-    let plan = active_plan;
+    let plan = active_plan.or(persisted_plan);
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -423,6 +427,11 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
                 msg: "All files are up to date.".into(),
                 can_launch: true,
             }
+        }
+    } else if let Some(msg) = status.and_then(|s| s.last_check.clone()) {
+        DashboardState::Idle {
+            last_check_msg: Some(msg),
+            can_launch: true,
         }
     } else if matches!(status.map(|s| &s.db_state), Some(DbState::MissingBaseline)) {
         DashboardState::Idle {

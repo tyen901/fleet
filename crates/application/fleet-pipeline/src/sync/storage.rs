@@ -13,4 +13,3 @@ pub struct LocalManifestSummary {
     pub mod_name: String,
     pub files: Vec<LocalFileSummary>,
 }
-

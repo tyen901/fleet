@@ -11,9 +11,9 @@ use crate::sync::remote::{HttpRemoteStateProvider, RemoteStateProvider};
 use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 use crate::sync::{SyncError, SyncMode, SyncOptions, SyncRequest, SyncResult, SyncStats};
 use chrono::Utc;
+use fleet_core::path_utils::FleetPath;
 use fleet_db::types::{RemoteRepoSnapshot, ServerChoice};
 use fleet_db::AppDb;
-use fleet_core::path_utils::FleetPath;
 use fleet_scanner::Scanner;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -199,7 +199,9 @@ impl DefaultSyncEngine {
         let expected = self
             .db
             .load_baseline_summary::<Vec<LocalManifestSummary>>(&req.profile_id)
-            .map_err(|_| SyncError::Local("Local baseline missing (run `repair` to initialize)".into()))?;
+            .map_err(|_| {
+                SyncError::Local("Local baseline missing (run `repair` to initialize)".into())
+            })?;
 
         let current = local
             .summary
@@ -371,17 +373,14 @@ impl DefaultSyncEngine {
 
         let mut by_mod: HashMap<String, Vec<(String, DbFileCacheEntry)>> = HashMap::new();
         for u in cache_updates {
-            by_mod
-                .entry(u.mod_name.clone())
-                .or_default()
-                .push((
-                    u.rel_path.clone(),
-                    DbFileCacheEntry {
-                        mtime: u.mtime,
-                        size: u.size,
-                        checksum: u.checksum.clone(),
-                    },
-                ));
+            by_mod.entry(u.mod_name.clone()).or_default().push((
+                u.rel_path.clone(),
+                DbFileCacheEntry {
+                    mtime: u.mtime,
+                    size: u.size,
+                    checksum: u.checksum.clone(),
+                },
+            ));
         }
         for (mod_name, entries) in by_mod {
             let _ = self
