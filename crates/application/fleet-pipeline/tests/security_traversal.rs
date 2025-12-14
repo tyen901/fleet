@@ -1,7 +1,7 @@
 use fleet_core::{DeleteAction, DownloadAction, SyncPlan};
 use fleet_db::AppDb;
-use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
 use fleet_pipeline::sync::default_engine;
+use fleet_pipeline::sync::{SyncMode, SyncOptions, SyncRequest};
 use std::sync::Arc;
 use tempfile::tempdir;
 

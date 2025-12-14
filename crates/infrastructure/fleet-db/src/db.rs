@@ -5,7 +5,10 @@ use crate::types::{
 };
 use chrono::Utc;
 use directories::ProjectDirs;
-use redb::{CommitError, Database, DatabaseError, ReadableTable, StorageError, TableError, TransactionError};
+use redb::{
+    CommitError, Database, DatabaseError, ReadableTable, StorageError, TableError,
+    TransactionError, WriteTransaction,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -235,16 +238,7 @@ impl AppDb {
             baseline_s.remove(profile_id.as_bytes())?;
         }
         {
-            let prefix = scan_cache_prefix(profile_id, "");
-            let upper = prefix_upper_bound(prefix.clone());
-            let mut scan_cache = write.open_table(schema::SCAN_CACHE)?;
-            let keys: Vec<Vec<u8>> = scan_cache
-                .range(prefix.as_slice()..upper.as_slice())?
-                .map(|row| row.map(|(k, _)| k.value().to_vec()))
-                .collect::<Result<_, _>>()?;
-            for k in keys {
-                scan_cache.remove(k.as_slice())?;
-            }
+            scan_cache_clear_profile_txn(&write, profile_id)?;
         }
 
         write.commit()?;
@@ -336,7 +330,11 @@ impl AppDb {
             .transpose()
     }
 
-    pub fn save_server_choice(&self, profile_id: &ProfileId, choice: &ServerChoice) -> DbResult<()> {
+    pub fn save_server_choice(
+        &self,
+        profile_id: &ProfileId,
+        choice: &ServerChoice,
+    ) -> DbResult<()> {
         let write = self.db.begin_write()?;
         {
             let mut table = write.open_table(schema::SERVER_CHOICE)?;
@@ -417,6 +415,20 @@ impl AppDb {
         let read = self.db.begin_read()?;
         let table = read.open_table(schema::LOCAL_BASELINE_MANIFEST)?;
         Ok(table.get(profile_id.as_bytes())?.is_some())
+    }
+
+    pub fn clear_baseline(&self, profile_id: &ProfileId) -> DbResult<()> {
+        let write = self.db.begin_write()?;
+        {
+            let mut baseline_m = write.open_table(schema::LOCAL_BASELINE_MANIFEST)?;
+            baseline_m.remove(profile_id.as_bytes())?;
+        }
+        {
+            let mut baseline_s = write.open_table(schema::LOCAL_BASELINE_SUMMARY)?;
+            baseline_s.remove(profile_id.as_bytes())?;
+        }
+        write.commit()?;
+        Ok(())
     }
 
     pub fn load_baseline_manifest<T: serde::de::DeserializeOwned>(
@@ -549,6 +561,15 @@ impl AppDb {
         Ok(())
     }
 
+    pub fn scan_cache_clear_profile(&self, profile_id: &ProfileId) -> DbResult<()> {
+        let write = self.db.begin_write()?;
+        {
+            scan_cache_clear_profile_txn(&write, profile_id)?;
+        }
+        write.commit()?;
+        Ok(())
+    }
+
     pub fn scan_cache_rename_file(
         &self,
         profile_id: &ProfileId,
@@ -608,4 +629,18 @@ impl AppDb {
             remote_ref: None,
         })
     }
+}
+
+fn scan_cache_clear_profile_txn(write: &WriteTransaction, profile_id: &ProfileId) -> DbResult<()> {
+    let prefix = scan_cache_prefix(profile_id, "");
+    let upper = prefix_upper_bound(prefix.clone());
+    let mut scan_cache = write.open_table(schema::SCAN_CACHE)?;
+    let keys: Vec<Vec<u8>> = scan_cache
+        .range(prefix.as_slice()..upper.as_slice())?
+        .map(|row| row.map(|(k, _)| k.value().to_vec()))
+        .collect::<Result<_, _>>()?;
+    for k in keys {
+        scan_cache.remove(k.as_slice())?;
+    }
+    Ok(())
 }

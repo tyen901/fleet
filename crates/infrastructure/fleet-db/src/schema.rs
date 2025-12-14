@@ -16,7 +16,8 @@ pub const REMOTE_REPO: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("remote_repo");
 pub const SERVER_CHOICE: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("server_choice");
-pub const PLAN: TableDefinition<'static, &'static [u8], &'static [u8]> = TableDefinition::new("plan");
+pub const PLAN: TableDefinition<'static, &'static [u8], &'static [u8]> =
+    TableDefinition::new("plan");
 pub const STATUS: TableDefinition<'static, &'static [u8], &'static [u8]> =
     TableDefinition::new("status");
 pub const LOCAL_BASELINE_MANIFEST: TableDefinition<'static, &'static [u8], &'static [u8]> =

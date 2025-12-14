@@ -51,7 +51,7 @@ pub struct FilePart {
     pub checksum: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncPlan {
     pub renames: Vec<RenameAction>,
     pub checks: Vec<VerificationAction>,
@@ -59,13 +59,13 @@ pub struct SyncPlan {
     pub deletes: Vec<DeleteAction>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenameAction {
     pub old_path: String,
     pub new_path: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DownloadAction {
     pub mod_name: String,
     pub rel_path: String,
@@ -73,12 +73,12 @@ pub struct DownloadAction {
     pub expected_checksum: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeleteAction {
     pub path: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationAction {
     pub path: String,
     pub expected_checksum: String,

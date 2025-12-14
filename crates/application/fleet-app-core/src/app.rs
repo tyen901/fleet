@@ -41,6 +41,19 @@ impl FleetApplication {
     pub fn new() -> Self {
         let (msg_tx, msg_rx) = mpsc::channel(100);
         let db = AppDb::open().expect("failed to open fleet db");
+        Self::new_with_db_and_channel(db, msg_tx, msg_rx)
+    }
+
+    pub fn new_with_db(db: AppDb) -> Self {
+        let (msg_tx, msg_rx) = mpsc::channel(100);
+        Self::new_with_db_and_channel(db, msg_tx, msg_rx)
+    }
+
+    fn new_with_db_and_channel(
+        db: AppDb,
+        msg_tx: mpsc::Sender<DomainEvent>,
+        msg_rx: mpsc::Receiver<DomainEvent>,
+    ) -> Self {
         let db_arc = std::sync::Arc::new(db.clone());
         let client =
             fleet_infra::net::default_http_client().unwrap_or_else(|_| reqwest::Client::new());
@@ -190,6 +203,11 @@ impl FleetApplication {
         if self.auto_local_checked.contains(profile_id) {
             return;
         }
+        if let Some(status) = self.state.status_by_profile.get(profile_id) {
+            if status.local_path_state != fleet_db::types::LocalPathState::Ok {
+                return;
+            }
+        }
         let has_baseline = self.db().has_baseline(profile_id).unwrap_or(false);
 
         // New profiles should not require a manual "repair". If we don't have a baseline yet,
@@ -208,15 +226,30 @@ impl FleetApplication {
     }
 
     pub fn execute_sync(&mut self, profile_id: ProfileId) -> anyhow::Result<()> {
-        // Do not start sync if no plan is available
-        if self.state.last_plan.is_none()
-            || self.state.last_plan_profile_id.as_deref() != Some(profile_id.as_str())
-        {
-            return Ok(());
-        }
-
         let profile = self.get_profile(profile_id)?.clone();
-        let plan = self.state.last_plan.clone().unwrap();
+        let plan = if self.state.last_plan_profile_id.as_deref() == Some(profile.id.as_str()) {
+            self.state.last_plan.clone()
+        } else {
+            None
+        }
+        .or_else(|| {
+            self.state
+                .plan_by_profile
+                .get(&profile.id)
+                .and_then(|p| p.plan.clone())
+        })
+        .or_else(|| {
+            self.db()
+                .load_plan(&profile.id)
+                .ok()
+                .flatten()
+                .and_then(|p| p.plan)
+        });
+
+        let Some(plan) = plan else {
+            // No plan available (nothing to sync).
+            return Ok(());
+        };
 
         let run_id: PipelineRunId = uuid::Uuid::new_v4();
         self.state.pipeline.run_id = Some(run_id);
@@ -244,6 +277,15 @@ impl FleetApplication {
     }
 
     pub fn acknowledge_pipeline_completion(&mut self) {
+        if let Some(profile_id) = self.state.selected_profile_id.clone() {
+            if let Some(mut status) = self.state.status_by_profile.get(&profile_id).cloned() {
+                if matches!(status.last_check.as_deref(), Some("Cancelled by user")) {
+                    status.last_error = None;
+                    let _ = self.db().save_status(&profile_id, &status);
+                    self.state.status_by_profile.insert(profile_id, status);
+                }
+            }
+        }
         self.state.pipeline =
             crate::pipeline::PipelineState::idle_for(self.state.selected_profile_id.clone())
                 .with_run_id(self.state.pipeline.run_id);
@@ -332,8 +374,15 @@ impl FleetApplication {
             },
         };
 
-        if let Some(profile) = self.state.profiles.iter().find(|p| p.id == active_profile_id) {
-            if let Ok(mut status) = self.db().compute_profile_status(&profile.id, &profile.local_path)
+        if let Some(profile) = self
+            .state
+            .profiles
+            .iter()
+            .find(|p| p.id == active_profile_id)
+        {
+            if let Ok(mut status) = self
+                .db()
+                .compute_profile_status(&profile.id, &profile.local_path)
             {
                 status.last_error = None;
                 status.plan_summary = None;
@@ -344,9 +393,6 @@ impl FleetApplication {
                 }
 
                 match ev {
-                    PipelineRunEvent::Started { .. } => {
-                        let _ = self.db().clear_plan(&profile.id);
-                    }
                     PipelineRunEvent::PlanReady { plan, .. } => {
                         let summary = fleet_db::types::PlanSummary {
                             downloads: plan.downloads.len() as u64,
@@ -355,30 +401,31 @@ impl FleetApplication {
                             bytes_download: plan.downloads.iter().map(|d| d.size).sum(),
                         };
 
-                            let remote_ref = self
-                                .db()
-                                .load_remote_repo(&profile.id)
-                                .ok()
-                                .flatten()
-                                .map(|r| fleet_db::types::RemoteRepoRef {
-                                    repo_url: r.repo_url,
-                                    fetched_at: r.fetched_at,
-                                    last_modified: r.last_modified,
-                                    repo_checksum: Some(r.repo_checksum),
-                                });
+                        let remote_ref = self
+                            .db()
+                            .load_remote_repo(&profile.id)
+                            .ok()
+                            .flatten()
+                            .map(|r| fleet_db::types::RemoteRepoRef {
+                                repo_url: r.repo_url,
+                                fetched_at: r.fetched_at,
+                                last_modified: r.last_modified,
+                                repo_checksum: Some(r.repo_checksum),
+                            });
 
-                            let snap = fleet_db::types::PlanSnapshot {
-                                profile_id: profile.id.clone(),
-                                created_at: chrono::Utc::now(),
-                                remote_ref: remote_ref.clone(),
-                                summary: summary.clone(),
-                            };
-                            let _ = self.db().save_plan(&profile.id, &snap);
-                            self.state.plan_by_profile.insert(profile.id.clone(), snap);
+                        let snap = fleet_db::types::PlanSnapshot {
+                            profile_id: profile.id.clone(),
+                            created_at: chrono::Utc::now(),
+                            remote_ref: remote_ref.clone(),
+                            summary: summary.clone(),
+                            plan: Some(plan.clone()),
+                        };
+                        let _ = self.db().save_plan(&profile.id, &snap);
+                        self.state.plan_by_profile.insert(profile.id.clone(), snap);
 
-                            status.plan_summary = Some(summary);
-                            status.remote_ref = remote_ref;
-                        }
+                        status.plan_summary = Some(summary);
+                        status.remote_ref = remote_ref;
+                    }
                     PipelineRunEvent::Completed => {
                         let _ = self.db().clear_plan(&profile.id);
                         self.state.plan_by_profile.remove(&profile.id);
@@ -387,7 +434,18 @@ impl FleetApplication {
                         status.last_error = Some(message.clone());
                     }
                     PipelineRunEvent::Cancelled => {
-                        status.last_error = Some("Operation cancelled by user".into());
+                        // Cancellation is a user-controlled stop, not an error state that should
+                        // block further actions.
+                        status.last_error = None;
+                        status.last_check = Some("Cancelled by user".into());
+
+                        // A cancelled run may have partially modified local files (e.g. partial
+                        // downloads). Invalidate any cached local state so the next check
+                        // re-scans from disk and re-computes a plan.
+                        let _ = self.db().scan_cache_clear_profile(&profile.id);
+                        let _ = self.db().clear_baseline(&profile.id);
+                        let _ = self.db().clear_plan(&profile.id);
+                        self.state.plan_by_profile.remove(&profile.id);
                     }
                     _ => {}
                 }
@@ -500,9 +558,8 @@ impl FleetApplication {
                     let res: anyhow::Result<()> = (|| {
                         let client = fleet_infra::net::default_http_client()
                             .unwrap_or_else(|_| reqwest::Client::new());
-                        crate::async_runtime::runtime()?.block_on(
-                            fleet_pipeline::validate_repo_url(client, &repo_url),
-                        )?;
+                        crate::async_runtime::runtime()?
+                            .block_on(fleet_pipeline::validate_repo_url(client, &repo_url))?;
 
                         for p in profiles_snapshot {
                             let rec = ProfileRecord {
