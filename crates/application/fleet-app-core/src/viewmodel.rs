@@ -264,7 +264,17 @@ pub struct ProfileDashboardVm {
     pub profile: ProfileSummaryVm,
     pub stats: Option<ProfileStatsVm>,
     pub state: DashboardState,
+    pub actions: DashboardActionsVm,
     pub visualizer: VisualizerVm,
+}
+
+#[derive(Debug, Clone)]
+pub struct DashboardActionsVm {
+    pub can_sync: bool,
+    pub can_check_local: bool,
+    pub can_check_remote: bool,
+    pub can_cancel: bool,
+    pub can_ack: bool,
 }
 
 pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<ProfileDashboardVm> {
@@ -282,6 +292,12 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         .and_then(|p| p.plan.as_ref());
     let status = state.status_by_profile.get(&profile.id);
     let plan = active_plan.or(persisted_plan);
+    let local_path_ok = matches!(
+        status.map(|s| &s.local_path_state),
+        Some(LocalPathState::Ok)
+    );
+    let has_baseline = matches!(status.map(|s| &s.db_state), Some(DbState::Valid));
+    let local_dirty = status.map(|s| s.local_state_dirty).unwrap_or(false);
 
     // Stats Logic
     let stats_vm = profile.last_scan.as_ref().map(|s| {
@@ -428,6 +444,11 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
                 can_launch: true,
             }
         }
+    } else if status.map(|s| s.local_state_dirty).unwrap_or(false) {
+        DashboardState::Idle {
+            last_check_msg: Some("Local state changed; run Check for Updates.".into()),
+            can_launch: true,
+        }
     } else if let Some(msg) = status.and_then(|s| s.last_check.clone()) {
         DashboardState::Idle {
             last_check_msg: Some(msg),
@@ -444,6 +465,18 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
             can_launch: true,
         }
     };
+
+    let plan_has_changes = status
+        .and_then(|s| s.plan_summary.as_ref())
+        .map(|s| s.has_changes())
+        .or_else(|| plan.map(|p| (p.downloads.len() + p.deletes.len() + p.renames.len()) > 0))
+        .unwrap_or(false);
+
+    let can_cancel = pipeline_applies && pl.is_running();
+    let can_ack = matches!(dashboard_state, DashboardState::Error { .. }) && !pl.is_running();
+    let can_sync = !pl.is_running() && local_path_ok && plan_has_changes;
+    let can_check_remote = !pl.is_running() && local_path_ok;
+    let can_check_local = !pl.is_running() && local_path_ok && has_baseline && !local_dirty;
 
     let has_known_state = matches!(status.map(|s| &s.db_state), Some(DbState::Valid));
     let baseline_phase = if has_known_state {
@@ -475,6 +508,13 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         profile: ProfileSummaryVm::from(profile),
         stats: stats_vm,
         state: dashboard_state,
+        actions: DashboardActionsVm {
+            can_sync,
+            can_check_local,
+            can_check_remote,
+            can_cancel,
+            can_ack,
+        },
         visualizer: VisualizerVm {
             phase,
             scan: if pipeline_applies {

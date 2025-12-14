@@ -79,7 +79,7 @@ pub fn draw<'a>(
 
         readout::draw(&mut *tui, &vm.stats);
 
-        let cmd_resp = command::draw(&mut *tui, &vm.state, server_url.is_some());
+        let cmd_resp = command::draw(&mut *tui, &vm.state, &vm.actions, server_url.is_some());
         if cmd_resp.check_local {
             if let Err(e) = app.local_check(vm.profile.id.clone()) {
                 tracing::error!("Failed to start local check: {e}");

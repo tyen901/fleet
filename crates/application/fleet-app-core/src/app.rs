@@ -390,6 +390,7 @@ impl FleetApplication {
                 if let Ok(Some(existing)) = self.db().load_status(&profile.id) {
                     status.last_check = existing.last_check;
                     status.remote_ref = existing.remote_ref;
+                    status.local_state_dirty = existing.local_state_dirty;
                 }
 
                 match ev {
@@ -426,9 +427,20 @@ impl FleetApplication {
                         status.plan_summary = Some(summary);
                         status.remote_ref = remote_ref;
                     }
+                    PipelineRunEvent::StepChanged {
+                        step: PipelineStep::Execute,
+                        status: StepStatus::Running,
+                        ..
+                    } => {
+                        // Local files may be mutated; treat cached local state as dirty until a
+                        // successful sync completes.
+                        status.local_state_dirty = true;
+                        let _ = self.db().scan_cache_clear_profile(&profile.id);
+                    }
                     PipelineRunEvent::Completed => {
                         let _ = self.db().clear_plan(&profile.id);
                         self.state.plan_by_profile.remove(&profile.id);
+                        status.local_state_dirty = false;
                     }
                     PipelineRunEvent::Failed { message } => {
                         status.last_error = Some(message.clone());
@@ -440,10 +452,10 @@ impl FleetApplication {
                         status.last_check = Some("Cancelled by user".into());
 
                         // A cancelled run may have partially modified local files (e.g. partial
-                        // downloads). Invalidate any cached local state so the next check
-                        // re-scans from disk and re-computes a plan.
+                        // downloads). Mark local state dirty and invalidate scan caches so the
+                        // next run re-scans from disk.
+                        status.local_state_dirty = true;
                         let _ = self.db().scan_cache_clear_profile(&profile.id);
-                        let _ = self.db().clear_baseline(&profile.id);
                         let _ = self.db().clear_plan(&profile.id);
                         self.state.plan_by_profile.remove(&profile.id);
                     }
