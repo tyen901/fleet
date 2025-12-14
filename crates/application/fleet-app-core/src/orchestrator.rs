@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tokio::sync::mpsc;
@@ -116,6 +116,19 @@ impl PipelineOrchestrator {
                 };
 
                 rt.block_on(async move {
+                    let started_at = Instant::now();
+
+                    async fn enforce_min_local_check_duration(started_at: Instant, kind: CheckKind) {
+                        if !matches!(kind, CheckKind::LocalIntegrity) {
+                            return;
+                        }
+                        let min = Duration::from_millis(500);
+                        let elapsed = started_at.elapsed();
+                        if elapsed < min {
+                            tokio::time::sleep(min - elapsed).await;
+                        }
+                    }
+
                     let _ = tx
                         .send(DomainEvent::PipelineEvent {
                             run_id,
@@ -127,8 +140,15 @@ impl PipelineOrchestrator {
 
                     let local_root = camino::Utf8PathBuf::from(profile.local_path.clone());
                     let is_cold = !db.has_baseline(&profile.id).unwrap_or(false);
+                    let is_dirty = db
+                        .load_status(&profile.id)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.local_state_dirty)
+                        .unwrap_or(false);
 
                     if matches!(kind, CheckKind::LocalIntegrity) && is_cold {
+                        enforce_min_local_check_duration(started_at, kind).await;
                         let _ = tx
                             .send(DomainEvent::PipelineEvent {
                                 run_id,
@@ -141,9 +161,15 @@ impl PipelineOrchestrator {
                     }
 
                     let mode = match kind {
-                        CheckKind::LocalIntegrity => SyncMode::FastCheck,
+                        CheckKind::LocalIntegrity => {
+                            if is_dirty {
+                                SyncMode::SmartVerify
+                            } else {
+                                SyncMode::FastCheck
+                            }
+                        }
                         CheckKind::RemoteUpdate => {
-                            if is_cold {
+                            if is_cold || is_dirty {
                                 SyncMode::SmartVerify
                             } else {
                                 SyncMode::FastCheck
@@ -268,6 +294,7 @@ impl PipelineOrchestrator {
                             let plan_res = engine.compute_local_integrity_plan(&req, &local_state);
                             match plan_res {
                                 Ok(plan) => {
+                                    enforce_min_local_check_duration(started_at, kind).await;
                                     let diff_stats = (plan.downloads.len(), plan.deletes.len());
                                     let _ = tx
                                         .send(DomainEvent::PipelineEvent {
@@ -281,6 +308,7 @@ impl PipelineOrchestrator {
                                         .await;
                                 }
                                 Err(e) => {
+                                    enforce_min_local_check_duration(started_at, kind).await;
                                     let _ = tx
                                         .send(DomainEvent::PipelineEvent {
                                             run_id,

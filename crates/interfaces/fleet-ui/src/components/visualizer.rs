@@ -158,6 +158,7 @@ impl Visualizer {
                                 (COL_BG, 0.18, is_active_check)
                             }
                         }
+                        VisualizerPhase::Dirty => (COL_WARN, 0.35, false),
                         VisualizerPhase::Executing => {
                             if in_flight_flags.get(idx).copied().unwrap_or(false) {
                                 return (COL_ACCENT, 0.95, false);
