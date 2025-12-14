@@ -394,6 +394,14 @@ async fn cancel_sync_does_not_dead_end_and_plan_remains_actionable() {
         "after cancelling sync, UI should return to Idle with a message (got: {:?})",
         vm.state
     );
+    assert!(
+        !vm.actions.can_check_local,
+        "local check should be disabled when dirty"
+    );
+    assert!(
+        vm.actions.can_check_remote,
+        "remote check should remain available"
+    );
 
     handle.abort();
 }
@@ -420,6 +428,7 @@ fn no_dead_end_state_when_path_ok_and_no_active_run() {
             computed_at: chrono::Utc::now(),
             local_path_state: fleet_db::types::LocalPathState::Ok,
             db_state: fleet_db::types::DbState::MissingBaseline,
+            local_state_dirty: false,
             last_error: None,
             last_check: None,
             plan_summary: None,
