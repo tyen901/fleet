@@ -53,6 +53,7 @@ fn apply_pipeline_event(state: &mut AppState, ev: PipelineRunEvent) {
         PipelineRunEvent::Started { profile_id } => {
             state.pipeline.error = None;
             state.last_plan = None;
+            state.last_plan_profile_id = None;
             state.pipeline = crate::pipeline::PipelineState::starting(profile_id)
                 .with_run_id(state.pipeline.run_id);
         }
@@ -103,6 +104,7 @@ fn apply_pipeline_event(state: &mut AppState, ev: PipelineRunEvent) {
             existing_mods,
         } => {
             state.last_plan = Some(plan);
+            state.last_plan_profile_id = state.pipeline.active_profile_id.clone();
             state.pipeline.stats.diff = Some(diff_stats);
             state.pipeline.plan_existing_mods = Some(existing_mods);
             state

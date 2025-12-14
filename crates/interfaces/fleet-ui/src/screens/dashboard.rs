@@ -11,6 +11,7 @@ pub fn draw<'a>(
     tui: impl TuiBuilderLogic<'a>,
     vm: &ProfileDashboardVm,
     app: &mut FleetApplication,
+    server_url: Option<&str>,
 ) {
     tui.style(taffy::Style {
         flex_direction: taffy::FlexDirection::Column,
@@ -63,12 +64,22 @@ pub fn draw<'a>(
                     .color(COL_TEXT_DIM),
             );
 
+            let server_text = match server_url {
+                Some(url) => format!("SERVER: {url}"),
+                None => "SERVER: —".to_string(),
+            };
+            tui.label(
+                egui::RichText::new(server_text)
+                    .size(10.0)
+                    .color(COL_TEXT_DIM),
+            );
+
             tui.separator();
         });
 
         readout::draw(&mut *tui, &vm.stats);
 
-        let cmd_resp = command::draw(&mut *tui, &vm.state);
+        let cmd_resp = command::draw(&mut *tui, &vm.state, server_url.is_some());
         if cmd_resp.check_local {
             if let Err(e) = app.local_check(vm.profile.id.clone()) {
                 tracing::error!("Failed to start local check: {e}");

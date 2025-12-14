@@ -178,7 +178,14 @@ impl eframe::App for FleetUiApp {
                                         &self.core.state,
                                         pid.clone(),
                                     ) {
-                                        dashboard::draw(tui, &vm, &mut self.core);
+                                        let server_url =
+                                            self.core.server_url_for_profile(&vm.profile.id);
+                                        dashboard::draw(
+                                            tui,
+                                            &vm,
+                                            &mut self.core,
+                                            server_url.as_deref(),
+                                        );
                                     } else {
                                         tui.label("Profile not found");
                                     }
