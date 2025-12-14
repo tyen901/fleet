@@ -32,7 +32,11 @@ enum CheckKind {
 }
 
 impl PipelineOrchestrator {
-    pub fn new(engine: Arc<DefaultSyncEngine>, db: Arc<AppDb>, tx: mpsc::Sender<DomainEvent>) -> Self {
+    pub fn new(
+        engine: Arc<DefaultSyncEngine>,
+        db: Arc<AppDb>,
+        tx: mpsc::Sender<DomainEvent>,
+    ) -> Self {
         Self {
             engine,
             db,

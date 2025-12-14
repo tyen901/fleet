@@ -1590,6 +1590,7 @@ name = "fleet-app-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "camino",
  "chrono",
  "directories",

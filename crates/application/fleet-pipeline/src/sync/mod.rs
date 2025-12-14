@@ -94,7 +94,10 @@ pub use engine::DefaultSyncEngine;
 pub use local::{LocalState, LocalStateProvider, LocalTrustLevel};
 
 /// Convenience constructor for the default engine.
-pub fn default_engine(client: reqwest::Client, db: std::sync::Arc<fleet_db::AppDb>) -> DefaultSyncEngine {
+pub fn default_engine(
+    client: reqwest::Client,
+    db: std::sync::Arc<fleet_db::AppDb>,
+) -> DefaultSyncEngine {
     DefaultSyncEngine::new(client, db)
 }
 

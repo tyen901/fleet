@@ -69,6 +69,8 @@ pub struct PlanSnapshot {
     pub created_at: DateTime<Utc>,
     pub remote_ref: Option<RemoteRepoRef>,
     pub summary: PlanSummary,
+    #[serde(default)]
+    pub plan: Option<fleet_core::SyncPlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

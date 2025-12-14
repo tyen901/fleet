@@ -16,10 +16,11 @@ fleet-db = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-util = "0.7"
 uuid = { workspace = true, features = ["v4", "serde"] }
 reqwest = { workspace = true }
 
 [dev-dependencies]
+axum = { workspace = true }
 tempfile = { workspace = true }
