@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::pipeline::PipelineState;
 use fleet_scanner::ScanStats;
+use std::collections::HashMap;
+
+use fleet_db::types::{PlanSnapshot, ProfileStatusSnapshot, ServerChoice};
 
 pub type ProfileId = String;
 
@@ -100,6 +103,10 @@ pub struct AppState {
     pub pipeline: PipelineState,
     pub last_plan: Option<fleet_core::SyncPlan>,
     pub last_plan_profile_id: Option<ProfileId>,
+
+    pub status_by_profile: HashMap<ProfileId, ProfileStatusSnapshot>,
+    pub plan_by_profile: HashMap<ProfileId, PlanSnapshot>,
+    pub server_choice_by_profile: HashMap<ProfileId, ServerChoice>,
 }
 
 impl Default for AppState {
@@ -116,6 +123,9 @@ impl Default for AppState {
             pipeline: PipelineState::idle(),
             last_plan: None,
             last_plan_profile_id: None,
+            status_by_profile: HashMap::new(),
+            plan_by_profile: HashMap::new(),
+            server_choice_by_profile: HashMap::new(),
         }
     }
 }

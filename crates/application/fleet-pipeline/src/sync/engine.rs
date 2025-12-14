@@ -8,14 +8,12 @@ use tokio::sync::mpsc::Sender;
 use crate::sync::execute::{DefaultPlanExecutor, PlanExecutor};
 use crate::sync::local::{DefaultLocalStateProvider, LocalState, LocalStateProvider};
 use crate::sync::remote::{HttpRemoteStateProvider, RemoteStateProvider};
-use crate::sync::storage::{
-    FileRepoSummaryStore, LocalFileSummary, LocalManifestSummary, RepoSummary, RepoSummaryStore,
-};
+use crate::sync::storage::{LocalFileSummary, LocalManifestSummary};
 use crate::sync::{SyncError, SyncMode, SyncOptions, SyncRequest, SyncResult, SyncStats};
+use chrono::Utc;
+use fleet_db::types::{RemoteRepoSnapshot, ServerChoice, ServerSnapshot};
+use fleet_db::AppDb;
 use fleet_core::path_utils::FleetPath;
-use fleet_persistence::{
-    CacheDeleteRecord, CacheRenameRecord, CacheUpsertRecord, FleetDataStore, RedbFleetDataStore,
-};
 use fleet_scanner::Scanner;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,23 +22,19 @@ pub struct DefaultSyncEngine {
     remote: Box<dyn RemoteStateProvider>,
     local: Box<dyn LocalStateProvider>,
     executor: Box<dyn PlanExecutor>,
-    fleet_data: Arc<dyn FleetDataStore>,
-    repo_summary_store: Arc<dyn RepoSummaryStore>,
+    db: Arc<AppDb>,
 }
 
 impl DefaultSyncEngine {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: reqwest::Client, db: Arc<AppDb>) -> Self {
         let remote = Box::new(HttpRemoteStateProvider::new(client.clone()));
-        let fleet_data: Arc<dyn FleetDataStore> = Arc::new(RedbFleetDataStore);
-        let local = Box::new(DefaultLocalStateProvider::new(fleet_data.clone()));
+        let local = Box::new(DefaultLocalStateProvider::new(db.clone()));
         let executor = Box::new(DefaultPlanExecutor::new(client));
-        let repo_summary_store: Arc<dyn RepoSummaryStore> = Arc::new(FileRepoSummaryStore::new());
         Self {
             remote,
             local,
             executor,
-            fleet_data,
-            repo_summary_store,
+            db,
         }
     }
 
@@ -48,15 +42,13 @@ impl DefaultSyncEngine {
         remote: Box<dyn RemoteStateProvider>,
         local: Box<dyn LocalStateProvider>,
         executor: Box<dyn PlanExecutor>,
-        fleet_data: Arc<dyn FleetDataStore>,
-        repo_summary_store: Arc<dyn RepoSummaryStore>,
+        db: Arc<AppDb>,
     ) -> Self {
         Self {
             remote,
             local,
             executor,
-            fleet_data,
-            repo_summary_store,
+            db,
         }
     }
 
@@ -66,14 +58,6 @@ impl DefaultSyncEngine {
         &self,
         req: &SyncRequest,
     ) -> Result<crate::sync::FetchResult, SyncError> {
-        let cached_repo_summary = if let Some(pid) = req.profile_id.as_deref() {
-            self.repo_summary_store
-                .load_repo_summary(pid)
-                .map_err(|e| SyncError::Remote(format!("load repo summary failed: {e}")))?
-        } else {
-            None
-        };
-
         let remote_mtime = self
             .remote
             .head_repo_json_mtime(&req.repo_url)
@@ -82,10 +66,10 @@ impl DefaultSyncEngine {
 
         let mut repo_external: Option<fleet_core::formats::RepositoryExternal> = None;
 
-        if let (Some(cached), Some(ref mtime)) = (&cached_repo_summary, &remote_mtime) {
-            if cached.last_modified.as_ref() == Some(mtime) {
+        if let Ok(Some(cached)) = self.db.load_remote_repo(&req.profile_id) {
+            if remote_mtime.is_some() && cached.last_modified == remote_mtime {
                 if let Ok(repo_ext) = serde_json::from_str::<fleet_core::formats::RepositoryExternal>(
-                    &cached.repo_json,
+                    &cached.repo_json_external,
                 ) {
                     repo_external = Some(repo_ext);
                 }
@@ -95,14 +79,31 @@ impl DefaultSyncEngine {
         if repo_external.is_none() {
             let fetched = self.remote.fetch_repo_json(&req.repo_url).await?;
 
-            if let Some(pid) = req.profile_id.as_deref() {
-                let summary = RepoSummary {
-                    last_modified: remote_mtime.clone(),
-                    repo_json: serde_json::to_string(&fetched)
-                        .map_err(|e| SyncError::Remote(format!("serialize repo.json: {e}")))?,
-                };
-                let _ = self.repo_summary_store.save_repo_summary(pid, &summary);
-            }
+            let repo_json = serde_json::to_string(&fetched)
+                .map_err(|e| SyncError::Remote(format!("serialize repo.json: {e}")))?;
+
+            let snapshot = RemoteRepoSnapshot {
+                repo_url: req.repo_url.clone(),
+                fetched_at: Utc::now(),
+                last_modified: remote_mtime.clone(),
+                repo_checksum: None,
+                repo_json_external: repo_json.clone(),
+            };
+            let _ = self.db.save_remote_repo(&req.profile_id, &snapshot);
+
+            let repo: fleet_core::repo::Repository = fetched.clone().into();
+            let server = repo.servers.into_iter().next().map(|s| ServerSnapshot {
+                name: Some(s.name),
+                address: s.address,
+                port: s.port,
+                password: s.password,
+            });
+            let choice = ServerChoice {
+                selected_index: 0,
+                server,
+                updated_at: Utc::now(),
+            };
+            let _ = self.db.save_server_choice(&req.profile_id, &choice);
 
             repo_external = Some(fetched);
         }
@@ -118,7 +119,10 @@ impl DefaultSyncEngine {
         let mut mods_to_fetch = Vec::new();
 
         // Try to load the last known manifest we synced to
-        let last_known_manifest = self.fleet_data.load_baseline_manifest(&req.local_root).ok();
+        let last_known_manifest = self
+            .db
+            .load_baseline_manifest::<fleet_core::Manifest>(&req.profile_id)
+            .ok();
 
         let total_mods = repository.required_mods.len();
 
@@ -189,9 +193,7 @@ impl DefaultSyncEngine {
         req: &SyncRequest,
         on_progress: Option<Box<dyn Fn(fleet_scanner::ScanStats) + Send + Sync>>,
     ) -> Result<LocalState, SyncError> {
-        self.local
-            .local_state(&req.local_root, req.mode, on_progress)
-            .await
+        self.local.local_state(req, on_progress).await
     }
 
     /// Step 3: CPU only. Diff remote + local into a SyncPlan.
@@ -205,30 +207,16 @@ impl DefaultSyncEngine {
     }
 
     /// Builds a plan without any network I/O by comparing current local state against the last
-    /// persisted local summary stored in `fleet.redb` (captured at the end of a successful sync).
+    /// persisted local summary baseline (captured at the end of a successful sync).
     pub fn compute_local_integrity_plan(
         &self,
         req: &SyncRequest,
         local: &LocalState,
     ) -> Result<SyncPlan, SyncError> {
         let expected = self
-            .fleet_data
-            .load_baseline_summary(&req.local_root)
-            .map_err(|e| match e.kind() {
-                fleet_persistence::StorageErrorKind::Missing => {
-                    SyncError::Local("Local baseline missing (run `repair` to initialize)".into())
-                }
-                fleet_persistence::StorageErrorKind::Busy => SyncError::Local(
-                    "Local database is busy (another Fleet instance may be running)".into(),
-                ),
-                fleet_persistence::StorageErrorKind::NewerSchema => SyncError::Local(
-                    "Local database is from a newer Fleet; update Fleet and try again".into(),
-                ),
-                fleet_persistence::StorageErrorKind::Corrupt => {
-                    SyncError::Local("Local database is corrupt; run `repair` to recreate".into())
-                }
-                _ => SyncError::Local(format!("fleet.redb baseline load failed: {e}")),
-            })?;
+            .db
+            .load_baseline_summary::<Vec<LocalManifestSummary>>(&req.profile_id)
+            .map_err(|_| SyncError::Local("Local baseline missing (run `repair` to initialize)".into()))?;
 
         let current = local
             .summary
@@ -342,16 +330,14 @@ impl DefaultSyncEngine {
             })
             .collect::<Vec<_>>();
 
-        self.fleet_data
-            .commit_sync_snapshot(
-                &req.local_root,
-                &manifest_to_save,
-                &summary,
-                &cache_updates,
-                &cache_deletes,
-                &cache_renames,
-            )
-            .map_err(|e| SyncError::Local(format!("fleet.redb commit failed: {e}")))?;
+        self.persist_sync_snapshot(
+            &req.profile_id,
+            &manifest_to_save,
+            &summary,
+            &cache_updates,
+            &cache_deletes,
+            &cache_renames,
+        )?;
 
         Ok(SyncResult {
             plan,
@@ -361,19 +347,120 @@ impl DefaultSyncEngine {
     }
 
     /// Persist the given manifest as the local baseline and write a matching summary file.
-    /// This is used by "repair" to bootstrap `fleet.redb` without executing a sync.
+    /// This is used by "repair" to bootstrap baseline state without executing a sync.
     pub fn persist_remote_snapshot(
         &self,
+        profile_id: &str,
         root: &Utf8Path,
         manifest: &fleet_core::Manifest,
     ) -> Result<(), SyncError> {
         let summary = compute_summary_from_manifest(root, manifest);
-        self.fleet_data
-            .commit_repair_snapshot(root, manifest, &summary)
-            .map_err(|e| SyncError::Local(format!("fleet.redb repair commit failed: {e}")))?;
+        self.persist_repair_snapshot(profile_id, manifest, &summary)?;
 
         Ok(())
     }
+
+    fn persist_repair_snapshot(
+        &self,
+        profile_id: &str,
+        manifest: &fleet_core::Manifest,
+        summary: &[LocalManifestSummary],
+    ) -> Result<(), SyncError> {
+        self.db
+            .save_baseline_manifest(&profile_id.to_string(), manifest)
+            .map_err(|e| SyncError::Local(format!("baseline manifest save failed: {e}")))?;
+        self.db
+            .save_baseline_summary(&profile_id.to_string(), &summary.to_vec())
+            .map_err(|e| SyncError::Local(format!("baseline summary save failed: {e}")))?;
+        Ok(())
+    }
+
+    fn persist_sync_snapshot(
+        &self,
+        profile_id: &str,
+        manifest: &fleet_core::Manifest,
+        summary: &[LocalManifestSummary],
+        cache_updates: &[CacheUpsertRecord],
+        cache_deletes: &[CacheDeleteRecord],
+        cache_renames: &[CacheRenameRecord],
+    ) -> Result<(), SyncError> {
+        self.persist_repair_snapshot(profile_id, manifest, summary)?;
+
+        let mut by_mod: HashMap<String, Vec<(String, DbFileCacheEntry)>> = HashMap::new();
+        for u in cache_updates {
+            by_mod
+                .entry(u.mod_name.clone())
+                .or_default()
+                .push((
+                    u.rel_path.clone(),
+                    DbFileCacheEntry {
+                        mtime: u.mtime,
+                        size: u.size,
+                        checksum: u.checksum.clone(),
+                    },
+                ));
+        }
+        for (mod_name, entries) in by_mod {
+            let _ = self
+                .db
+                .scan_cache_upsert_batch(&profile_id.to_string(), &mod_name, &entries);
+        }
+
+        for d in cache_deletes {
+            match &d.rel_path {
+                Some(p) => {
+                    let _ = self
+                        .db
+                        .scan_cache_delete_file(&profile_id.to_string(), &d.mod_name, p);
+                }
+                None => {
+                    let _ = self
+                        .db
+                        .scan_cache_delete_mod(&profile_id.to_string(), &d.mod_name);
+                }
+            }
+        }
+
+        for r in cache_renames {
+            let _ = self.db.scan_cache_rename_file(
+                &profile_id.to_string(),
+                &r.mod_name,
+                &r.old_rel_path,
+                &r.new_rel_path,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CacheUpsertRecord {
+    mod_name: String,
+    rel_path: String,
+    mtime: u64,
+    size: u64,
+    checksum: String,
+}
+
+#[derive(Debug, Clone)]
+struct CacheDeleteRecord {
+    mod_name: String,
+    rel_path: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CacheRenameRecord {
+    mod_name: String,
+    old_rel_path: String,
+    new_rel_path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+struct DbFileCacheEntry {
+    mtime: u64,
+    size: u64,
+    checksum: String,
 }
 
 fn split_mod_rel(path: &str) -> Option<(String, Option<String>)> {

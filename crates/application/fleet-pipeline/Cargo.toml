@@ -5,14 +5,15 @@ edition = "2021"
 
 [dependencies]
 fleet-core = { workspace = true }
+fleet-db = { workspace = true }
 fleet-infra = { workspace = true }
-fleet-persistence = { workspace = true }
 fleet-scanner = { workspace = true }
 
 reqwest = { workspace = true, features = ["json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
+chrono = { workspace = true }
 
 async-trait = { workspace = true }
 walkdir = { workspace = true }

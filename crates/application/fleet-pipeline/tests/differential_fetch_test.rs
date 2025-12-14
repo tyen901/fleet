@@ -2,9 +2,9 @@ use axum::extract::Path;
 use axum::response::IntoResponse;
 use axum::{body::Body, routing::get, Router};
 use camino::Utf8PathBuf;
+use fleet_db::AppDb;
 use fleet_core::{Manifest, Mod};
-use fleet_persistence::{FleetDataStore, RedbFleetDataStore};
-use fleet_pipeline::sync::{DefaultSyncEngine, SyncMode, SyncOptions, SyncRequest};
+use fleet_pipeline::sync::{default_engine, SyncMode, SyncOptions, SyncRequest};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -79,7 +79,8 @@ async fn differential_fetch_skips_unchanged_mods() {
     let local_root = Utf8PathBuf::from_path_buf(work_dir.path().to_path_buf()).unwrap();
 
     // Seed the last known manifest so differential fetch can reuse unchanged mods.
-    let store = RedbFleetDataStore;
+    let db_dir = tempdir().unwrap();
+    let db = Arc::new(AppDb::open_at(db_dir.path().join("fleet_state.redb")).unwrap());
     let local_manifest = Manifest {
         version: "1.0".into(),
         mods: vec![
@@ -95,17 +96,21 @@ async fn differential_fetch_skips_unchanged_mods() {
             },
         ],
     };
-    store
-        .commit_repair_snapshot(&local_root, &local_manifest, &[])
+    db.save_baseline_manifest(&"differential_fetch_test".to_string(), &local_manifest)
         .unwrap();
+    db.save_baseline_summary::<Vec<fleet_pipeline::sync::storage::LocalManifestSummary>>(
+        &"differential_fetch_test".to_string(),
+        &Vec::new(),
+    )
+    .unwrap();
 
-    let engine = DefaultSyncEngine::new(reqwest::Client::new());
+    let engine = default_engine(reqwest::Client::new(), db);
     let req = SyncRequest {
         repo_url,
         local_root,
         mode: SyncMode::FastCheck,
         options: SyncOptions::default(),
-        profile_id: Some("differential_fetch_test".into()),
+        profile_id: "differential_fetch_test".into(),
     };
 
     let _ = engine.fetch_remote_state(&req).await.unwrap();

@@ -23,7 +23,7 @@ pub struct FetchResult {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SyncMode {
-    /// No disk I/O; trust last persisted local manifest from `fleet.redb`.
+    /// No disk I/O; trust last persisted local manifest baseline.
     CacheOnly,
     /// Walk filesystem + use ScanCache; no hashing.
     MetadataOnly,
@@ -58,7 +58,7 @@ pub struct SyncRequest {
     pub local_root: Utf8PathBuf,
     pub mode: SyncMode,
     pub options: SyncOptions,
-    pub profile_id: Option<String>,
+    pub profile_id: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -94,6 +94,13 @@ pub use engine::DefaultSyncEngine;
 pub use local::{LocalState, LocalStateProvider, LocalTrustLevel};
 
 /// Convenience constructor for the default engine.
-pub fn default_engine(client: reqwest::Client) -> DefaultSyncEngine {
-    DefaultSyncEngine::new(client)
+pub fn default_engine(client: reqwest::Client, db: std::sync::Arc<fleet_db::AppDb>) -> DefaultSyncEngine {
+    DefaultSyncEngine::new(client, db)
+}
+
+pub async fn validate_repo_url(client: reqwest::Client, repo_url: &str) -> Result<(), SyncError> {
+    use crate::sync::remote::RemoteStateProvider;
+    let remote = crate::sync::remote::HttpRemoteStateProvider::new(client);
+    let _ = remote.fetch_repo_json(repo_url).await?;
+    Ok(())
 }
