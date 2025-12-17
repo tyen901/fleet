@@ -1,2 +1,9 @@
-target/
-assets/icon.ico
+/target
+**/*.rs.bk
+Cargo.lock
+.idea
+.vscode
+*.iml
+*.redb
+**/*.pyc
+**/__pycache__

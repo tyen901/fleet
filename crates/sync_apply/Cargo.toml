@@ -1,0 +1,25 @@
+[package]
+name = "sync_apply"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1"
+camino = "1.1"
+futures-util = "0.3"
+manifest_types = { path = "../manifest_types" }
+md-5 = "0.10"
+atomicwrites = "0.4"
+local_index = { path = "../local_index" }
+remote_core = { path = "../remote_core" }
+relative-path = "1.9"
+sync_plan = { path = "../sync_plan" }
+thiserror = "2"
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"
+async-trait = "0.1"
