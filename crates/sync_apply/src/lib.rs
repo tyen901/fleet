@@ -10,6 +10,7 @@ use md5::{Digest, Md5};
 use relative_path::RelativePath;
 use remote_core::{RemoteError, RemoteSession};
 use staging::StagingFile;
+use std::collections::HashMap;
 use sync_plan::{Op, SyncPlan};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
@@ -98,6 +99,19 @@ pub async fn apply_plan_observed<S: RemoteSession>(
     opts: ApplyOptions,
     observer: Option<&dyn ApplyObserver>,
 ) -> Result<(), ApplyError> {
+    let preflight = preflight_transfer_plan(checkout_root, plan, &opts).await?;
+    if let Some(obs) = observer {
+        obs.on_event(ApplyEvent::TransferPlanned {
+            total_bytes: preflight.total_bytes,
+        });
+        obs.on_event(ApplyEvent::TransferProgress {
+            transferred_bytes: 0,
+            total_bytes: preflight.total_bytes,
+        });
+    }
+
+    let transfer = TransferReporter::new(preflight.total_bytes);
+
     let file_sem = std::sync::Arc::new(Semaphore::new(opts.max_concurrent_files));
     let range_sem = std::sync::Arc::new(Semaphore::new(opts.max_concurrent_range_requests));
 
@@ -109,6 +123,8 @@ pub async fn apply_plan_observed<S: RemoteSession>(
         let checkout_root = checkout_root.to_owned();
         let range_sem = range_sem.clone();
         let opts = opts.clone();
+        let preflight = preflight.clone();
+        let transfer = transfer.clone();
 
         let fut = async move {
             let _permit = file_sem.acquire_owned().await.expect("semaphore closed");
@@ -123,6 +139,10 @@ pub async fn apply_plan_observed<S: RemoteSession>(
                         range_sem,
                         &opts,
                         observer,
+                        preflight
+                            .decisions
+                            .get(&PreflightKey::new(&mod_name, file.path.as_str())),
+                        &transfer,
                     )
                     .await
                 }
@@ -170,6 +190,144 @@ fn file_mtime_ns(meta: &std::fs::Metadata) -> i64 {
     }
 }
 
+#[derive(Clone)]
+struct TransferReporter {
+    total_bytes: u64,
+    transferred: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl TransferReporter {
+    fn new(total_bytes: u64) -> Self {
+        Self {
+            total_bytes,
+            transferred: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    fn add(&self, delta: u64, observer: Option<&dyn ApplyObserver>) {
+        if delta == 0 {
+            return;
+        }
+
+        let transferred_bytes = self
+            .transferred
+            .fetch_add(delta, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(delta);
+
+        if let Some(obs) = observer {
+            obs.on_event(ApplyEvent::TransferProgress {
+                transferred_bytes,
+                total_bytes: self.total_bytes,
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PreflightKey {
+    mod_name: String,
+    rel_path: String,
+}
+
+impl PreflightKey {
+    fn new(mod_name: &str, rel_path: &str) -> Self {
+        Self {
+            mod_name: mod_name.to_string(),
+            rel_path: rel_path.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum PreflightDecision {
+    SkipClean,
+    FullDownload,
+    Patch { mismatched_parts: Vec<PartManifest> },
+}
+
+#[derive(Clone, Debug, Default)]
+struct PreflightPlan {
+    total_bytes: u64,
+    decisions: HashMap<PreflightKey, PreflightDecision>,
+}
+
+async fn preflight_transfer_plan(
+    checkout_root: &Utf8Path,
+    plan: &SyncPlan,
+    opts: &ApplyOptions,
+) -> Result<PreflightPlan, ApplyError> {
+    let mut out = PreflightPlan::default();
+
+    for op in &plan.ops {
+        let Op::EnsureFileFromParts { mod_name, file } = op else {
+            continue;
+        };
+
+        let rel = RelativePath::new(file.path.as_str());
+        let final_path = file_abs_path(checkout_root, mod_name, rel);
+        let key = PreflightKey::new(mod_name, file.path.as_str());
+
+        // Mirror ensure_file's fast-path: if index says it's clean, skip.
+        if final_path.exists() {
+            if let Ok(meta) = tokio::fs::metadata(&final_path).await {
+                if meta.len() == file.length {
+                    if let Some(index) = &opts.index {
+                        let mtime_ns = file_mtime_ns(&meta);
+                        let key_idx = local_index::FileKey {
+                            mod_name,
+                            rel_path: rel,
+                        };
+                        if let Some(rec) = index
+                            .get(key_idx)
+                            .await
+                            .map_err(|e| ApplyError::Io(std::io::Error::other(e.to_string())))?
+                        {
+                            if rec.size == meta.len() as i64
+                                && rec.mtime_ns == mtime_ns
+                                && rec.expected == file.checksum
+                            {
+                                out.decisions.insert(key, PreflightDecision::SkipClean);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let (mismatched_parts, mismatched_bytes) =
+            detect_mismatched_parts(&final_path, &file.parts, opts.io_buffer_bytes).await?;
+
+        if mismatched_parts.is_empty() {
+            out.decisions.insert(key, PreflightDecision::SkipClean);
+            continue;
+        }
+
+        let mismatch_ratio = if file.length == 0 {
+            0.0
+        } else {
+            (mismatched_bytes as f64) / (file.length as f64)
+        };
+
+        let do_full_download = mismatched_parts.len() >= opts.full_download_part_threshold
+            || mismatch_ratio >= opts.full_download_byte_ratio_threshold;
+
+        if do_full_download {
+            // Stable, non-trickling total: count full file length as transfer requirement.
+            let transfer_bytes = file.length;
+            out.total_bytes = out.total_bytes.saturating_add(transfer_bytes);
+            out.decisions.insert(key, PreflightDecision::FullDownload);
+        } else {
+            let transfer_bytes = mismatched_bytes;
+            out.total_bytes = out.total_bytes.saturating_add(transfer_bytes);
+            out.decisions
+                .insert(key, PreflightDecision::Patch { mismatched_parts });
+        }
+    }
+
+    Ok(out)
+}
+
 async fn delete_file(
     checkout_root: &Utf8Path,
     mod_name: &str,
@@ -184,6 +342,7 @@ async fn delete_file(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_file<S: RemoteSession>(
     session: &S,
     checkout_root: &Utf8Path,
@@ -192,6 +351,8 @@ async fn ensure_file<S: RemoteSession>(
     range_sem: std::sync::Arc<Semaphore>,
     opts: &ApplyOptions,
     observer: Option<&dyn ApplyObserver>,
+    decision: Option<&PreflightDecision>,
+    transfer: &TransferReporter,
 ) -> Result<(), ApplyError> {
     let rel = RelativePath::new(file.path.as_str());
     let final_path = file_abs_path(checkout_root, mod_name, rel);
@@ -211,8 +372,10 @@ async fn ensure_file<S: RemoteSession>(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut applied = false;
-    if final_path.exists() {
+    let mut applied = matches!(decision, Some(PreflightDecision::SkipClean));
+    if applied {
+        // No work needed.
+    } else if final_path.exists() {
         let meta = tokio::fs::metadata(&final_path).await?;
         if meta.len() == file.length {
             if let Some(index) = &opts.index {
@@ -237,8 +400,15 @@ async fn ensure_file<S: RemoteSession>(
         }
 
         if !applied {
-            let (mismatched_parts, mismatched_bytes) =
-                detect_mismatched_parts(&final_path, &file.parts, opts.io_buffer_bytes).await?;
+            let (mismatched_parts, mismatched_bytes) = match decision {
+                Some(PreflightDecision::Patch { mismatched_parts }) => (
+                    mismatched_parts.clone(),
+                    mismatched_parts.iter().map(|p| p.length).sum(),
+                ),
+                _ => {
+                    detect_mismatched_parts(&final_path, &file.parts, opts.io_buffer_bytes).await?
+                }
+            };
 
             if mismatched_parts.is_empty() {
                 let meta = tokio::fs::metadata(&final_path).await?;
@@ -269,6 +439,7 @@ async fn ensure_file<S: RemoteSession>(
                         range_sem,
                         opts,
                         observer,
+                        transfer,
                     )
                     .await?;
                 } else {
@@ -284,6 +455,7 @@ async fn ensure_file<S: RemoteSession>(
                         range_sem,
                         opts,
                         observer,
+                        transfer,
                     )
                     .await?;
                 }
@@ -302,6 +474,7 @@ async fn ensure_file<S: RemoteSession>(
             range_sem,
             opts,
             observer,
+            transfer,
         )
         .await?;
         applied = true;
@@ -406,6 +579,7 @@ async fn patch_ranges_to_atomic<S: RemoteSession>(
     range_sem: std::sync::Arc<Semaphore>,
     opts: &ApplyOptions,
     observer: Option<&dyn ApplyObserver>,
+    transfer: &TransferReporter,
 ) -> Result<(), ApplyError> {
     let staging = StagingFile::new(final_path, None)?;
     let tmp_path = staging.path().to_owned();
@@ -444,6 +618,7 @@ async fn patch_ranges_to_atomic<S: RemoteSession>(
                 &expected,
                 expected_len,
                 observer,
+                transfer,
             )
             .await
         };
@@ -477,6 +652,7 @@ async fn download_full_to_atomic<S: RemoteSession>(
     range_sem: std::sync::Arc<Semaphore>,
     opts: &ApplyOptions,
     observer: Option<&dyn ApplyObserver>,
+    transfer: &TransferReporter,
 ) -> Result<(), ApplyError> {
     #[allow(clippy::too_many_arguments)]
     if let Some(parent) = final_path.parent() {
@@ -553,6 +729,7 @@ async fn download_full_to_atomic<S: RemoteSession>(
                 part,
                 expected_len,
                 observer,
+                transfer,
             )
             .await;
             match r {
@@ -584,6 +761,7 @@ async fn download_full_to_atomic<S: RemoteSession>(
             }
             tmp.write_all(&chunk).await?;
             written += chunk.len() as u64;
+            transfer.add(chunk.len() as u64, observer);
 
             if let Some(obs) = observer {
                 obs.on_event(ApplyEvent::FileProgress {
@@ -617,6 +795,7 @@ async fn download_full_to_atomic<S: RemoteSession>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_part_to_file<S: RemoteSession>(
     session: &S,
     mod_name: &str,
@@ -625,6 +804,7 @@ async fn download_part_to_file<S: RemoteSession>(
     part: &PartManifest,
     expected_len: u64,
     observer: Option<&dyn ApplyObserver>,
+    transfer: &TransferReporter,
 ) -> Result<(), ApplyError> {
     if part.length == 0 {
         let empty =
@@ -664,6 +844,7 @@ async fn download_part_to_file<S: RemoteSession>(
         tmp.write_all(&chunk[..take]).await?;
         remaining -= take as u64;
         written += take as u64;
+        transfer.add(take as u64, observer);
 
         if let Some(obs) = observer {
             obs.on_event(ApplyEvent::FileProgress {

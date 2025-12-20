@@ -215,6 +215,20 @@ impl sync_apply::ApplyObserver for ApplyEventAdapter {
         tokio::spawn(async move {
             use crate::events::Event;
             match ev {
+                sync_apply::ApplyEvent::TransferPlanned { total_bytes } => {
+                    let _ = tx.send(Event::TransferPlanned { total_bytes }).await;
+                }
+                sync_apply::ApplyEvent::TransferProgress {
+                    transferred_bytes,
+                    total_bytes,
+                } => {
+                    let _ = tx
+                        .send(Event::TransferProgress {
+                            transferred_bytes,
+                            total_bytes,
+                        })
+                        .await;
+                }
                 sync_apply::ApplyEvent::FileStarted {
                     mod_name,
                     rel_path,

@@ -9,6 +9,14 @@ pub enum Event {
         version: String,
     },
 
+    TransferPlanned {
+        total_bytes: u64,
+    },
+    TransferProgress {
+        transferred_bytes: u64,
+        total_bytes: u64,
+    },
+
     ModSkippedClean {
         mod_name: String,
     },

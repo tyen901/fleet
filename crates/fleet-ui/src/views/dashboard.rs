@@ -14,7 +14,6 @@ pub struct DashboardProps<'a> {
     pub profile: &'a ProfileSpec,
     pub task: Option<&'a store::TaskState>,
     pub download_summary: &'a store::DownloadSummary,
-    pub download_rows: &'a [store::DownloadRow],
     pub logs: &'a VecDeque<store::LogLine>,
     pub sync_active: bool,
 }
@@ -189,13 +188,11 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                         ui.add(widgets::InlineHint::new(
                             kit,
                             &format!(
-                                "{} / {} • {} • {} • files: {} active, {} done",
+                                "{} / {} • {} • {}",
                                 fmt_bytes(props.download_summary.downloaded_bytes),
                                 fmt_bytes(props.download_summary.total_bytes),
                                 speed,
                                 eta,
-                                props.download_summary.active_files,
-                                props.download_summary.done_files
                             ),
                         ));
                     } else {
@@ -208,73 +205,6 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
             });
 
             ui.add_space(kit.layout.gap);
-
-            // Per-download progress list.
-            if props.sync_active {
-                widgets::card_frame(kit).show(ui, |ui| {
-                    ui.add(widgets::FieldLabel::new(kit, "Downloads"));
-                    ui.add(widgets::Divider::new(kit));
-                    ui.add_space(kit.theme.spacing.sm);
-
-                    if props.download_rows.is_empty() {
-                        ui.add(widgets::InlineHint::new(kit, "No downloads yet."));
-                        return;
-                    }
-
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(240.0)
-                        .show(ui, |ui| {
-                            for row in props.download_rows.iter().take(60) {
-                                ui.push_id(&row.id, |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(&row.label)
-                                                .size(kit.theme.type_scale.mono)
-                                                .monospace()
-                                                .color(kit.theme.colors.text),
-                                        )
-                                        .truncate(),
-                                    );
-
-                                    if let Some(p) = row.progress {
-                                        ui.add(egui::ProgressBar::new(p).desired_height(10.0));
-                                    } else {
-                                        ui.horizontal(|ui| {
-                                            ui.add(egui::Spinner::new().size(12.0));
-                                            ui.add(widgets::InlineHint::new(kit, "Downloading…"));
-                                        });
-                                    }
-
-                                    let speed = fmt_speed(row.speed_bps);
-                                    let eta =
-                                        row.eta_s.map(fmt_eta).unwrap_or_else(|| "ETA —".into());
-                                    let right = if row.total_bytes > 0 {
-                                        format!(
-                                            "{} / {} • {} • {}",
-                                            fmt_bytes(row.downloaded_bytes),
-                                            fmt_bytes(row.total_bytes),
-                                            speed,
-                                            eta
-                                        )
-                                    } else {
-                                        format!(
-                                            "{} • {} • {}",
-                                            fmt_bytes(row.downloaded_bytes),
-                                            speed,
-                                            eta
-                                        )
-                                    };
-
-                                    ui.add(widgets::InlineHint::new(kit, &right));
-                                    ui.add_space(kit.theme.spacing.sm);
-                                });
-                            }
-                        });
-                });
-
-                ui.add_space(kit.layout.gap);
-            }
 
             // Log card (simple, utilitarian, extremely helpful for flow/debug)
             widgets::card_frame(kit).show(ui, |ui| {

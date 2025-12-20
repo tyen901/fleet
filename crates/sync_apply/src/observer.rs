@@ -3,6 +3,13 @@ use relative_path::RelativePathBuf;
 
 #[derive(Debug, Clone)]
 pub enum ApplyEvent {
+    TransferPlanned {
+        total_bytes: u64,
+    },
+    TransferProgress {
+        transferred_bytes: u64,
+        total_bytes: u64,
+    },
     FileStarted {
         mod_name: String,
         rel_path: RelativePathBuf,

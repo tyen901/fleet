@@ -311,8 +311,6 @@ impl eframe::App for FleetUiApp {
                             return;
                         };
 
-                        let download_rows = store::download_rows(&self.state);
-
                         if let Some(cmd) = views::dashboard::draw(
                             ui,
                             &self.kit,
@@ -320,7 +318,6 @@ impl eframe::App for FleetUiApp {
                                 profile: &p,
                                 task: self.state.task.as_ref(),
                                 download_summary: &self.state.download_summary,
-                                download_rows: &download_rows,
                                 logs: &self.state.logs,
                                 sync_active: self.active_sync.is_some(),
                             },
