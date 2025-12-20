@@ -11,6 +11,14 @@ pub enum SyncEvent {
         mods_enabled: usize,
     },
 
+    TransferPlanned {
+        total_bytes: u64,
+    },
+    TransferProgress {
+        transferred_bytes: u64,
+        total_bytes: u64,
+    },
+
     ModStarted {
         mod_id: String,
     },

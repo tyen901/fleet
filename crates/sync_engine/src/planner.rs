@@ -62,7 +62,7 @@ impl PlanBuilder {
         }
     }
 
-    pub async fn build_stream(self, repo: RepoSpec) -> Result<PlannedOpStream> {
+    pub async fn build_stream(self, repo: RepoSpec) -> Result<(PlannedOpStream, u64)> {
         let enabled: HashSet<String> = self.enabled_mods.iter().cloned().collect();
         let available: HashSet<String> = repo.mods.iter().map(|m| m.mod_id.clone()).collect();
 
@@ -124,6 +124,12 @@ impl PlanBuilder {
                 let target =
                     plan_file_target(&abs_path, fe, self.checksummer.as_ref(), &self.tuning);
 
+                let estimated_bytes = if target.strategy.is_patch() {
+                    target.parts_to_fetch.iter().map(|p| p.len).sum()
+                } else {
+                    fe.size
+                };
+
                 ops.push(PlannedOp {
                     mod_id: mod_id.clone(),
                     kind: OpKind::EnsureFile {
@@ -132,7 +138,7 @@ impl PlanBuilder {
                         abs_path,
                         manifest: target,
                     },
-                    estimated_bytes: fe.size,
+                    estimated_bytes,
                 });
             }
 
@@ -150,7 +156,8 @@ impl PlanBuilder {
             self.sink.push(SyncEvent::ModFinished { mod_id });
         }
 
-        Ok(Box::pin(futures::stream::iter(ops)))
+        let total_bytes: u64 = ops.iter().map(|o| o.estimated_bytes).sum();
+        Ok((Box::pin(futures::stream::iter(ops)), total_bytes))
     }
 }
 

@@ -8,6 +8,7 @@ members = [
   "crates/remote_adapter",
   "crates/pbo_parse",
   "crates/manifest_scan",
+  "crates/fleet-ui",
   "crates/sync_engine",
   "apps/fleet",
 ]

@@ -353,7 +353,7 @@ impl FleetApp {
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
                     remote: Arc::new(remote),
-                    checksummer: Arc::new(remote_adapter::Md5Checksummer::default()),
+                    checksummer: Arc::new(remote_adapter::Md5Checksummer),
                     tuning: Some(engine_tuning),
                 };
 

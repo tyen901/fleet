@@ -14,7 +14,13 @@ use anyhow::{Context, Result};
 use events::{EventSink, SyncEvent};
 use futures::StreamExt;
 use planner::{PlanBuilder, PlannedOp, PlannedOpStream};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::sync::Semaphore;
 use types::{SyncReport, SyncRequest, SyncTuning};
 
@@ -62,7 +68,17 @@ pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<Sync
     .await
     .context("build plan stream")?;
 
-    let report = execute_stream(plan_stream, request, tuning, sink, &mut idx).await?;
+    let (plan_stream, planned_bytes) = plan_stream;
+    sink.push(SyncEvent::TransferPlanned {
+        total_bytes: planned_bytes,
+    });
+    sink.push(SyncEvent::TransferProgress {
+        transferred_bytes: 0,
+        total_bytes: planned_bytes,
+    });
+    let transfer = TransferCounter::new(planned_bytes);
+
+    let report = execute_stream(plan_stream, request, tuning, sink, &mut idx, transfer).await?;
     idx.compact_if_needed().ok(); // best effort
 
     let elapsed = start.elapsed();
@@ -74,12 +90,43 @@ struct ApplyResult {
     index_update: Option<(std::path::PathBuf, types::FileTarget)>,
 }
 
+#[derive(Clone)]
+struct TransferCounter {
+    total_bytes: u64,
+    transferred_bytes: Arc<AtomicU64>,
+}
+
+impl TransferCounter {
+    fn new(total_bytes: u64) -> Self {
+        Self {
+            total_bytes,
+            transferred_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn add(&self, delta: u64, sink: &Arc<dyn EventSink>) {
+        if delta == 0 {
+            return;
+        }
+        let next = self
+            .transferred_bytes
+            .fetch_add(delta, Ordering::Relaxed)
+            .saturating_add(delta);
+
+        sink.push(SyncEvent::TransferProgress {
+            transferred_bytes: next,
+            total_bytes: self.total_bytes,
+        });
+    }
+}
+
 async fn execute_stream(
     mut stream: PlannedOpStream,
     request: SyncRequest,
     tuning: SyncTuning,
     sink: Arc<dyn EventSink>,
     idx: &mut index::LocalIndex,
+    transfer: TransferCounter,
 ) -> Result<SyncReport> {
     let file_workers = tuning.file_concurrency.max(1);
     let range_workers = tuning.range_concurrency.max(1);
@@ -97,10 +144,11 @@ async fn execute_stream(
         let tuning = tuning.clone();
         let sink = sink.clone();
         let range_sem = range_sem.clone();
+        let transfer = transfer.clone();
 
         in_flight.push(tokio::spawn(async move {
             let _permit = permit;
-            apply_one(planned, request, tuning, sink, range_sem).await
+            apply_one(planned, request, tuning, sink, range_sem, transfer).await
         }));
 
         if in_flight.len() >= file_workers {
@@ -137,6 +185,7 @@ async fn apply_one(
     tuning: SyncTuning,
     sink: Arc<dyn EventSink>,
     range_sem: Arc<Semaphore>,
+    transfer: TransferCounter,
 ) -> Result<ApplyResult> {
     use planner::OpKind;
     use types::SyncReportDelta;
@@ -204,13 +253,13 @@ async fn apply_one(
             let (delta, index_update) = if manifest.strategy.is_patch() && supports_ranges {
                 apply_patch(
                     &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
-                    &manifest,
+                    &manifest, &transfer,
                 )
                 .await?
             } else {
                 apply_full(
                     &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
-                    &manifest,
+                    &manifest, &transfer,
                 )
                 .await?
             };
@@ -223,6 +272,7 @@ async fn apply_one(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_full(
     request: &SyncRequest,
     tuning: &SyncTuning,
@@ -233,6 +283,7 @@ async fn apply_full(
     abs_path: &std::path::Path,
     stage: &std::path::Path,
     manifest: &types::FileTarget,
+    transfer: &TransferCounter,
 ) -> Result<(SyncReport, Option<(std::path::PathBuf, types::FileTarget)>)> {
     use tokio::io::AsyncWriteExt;
     use types::SyncReportDelta;
@@ -246,6 +297,7 @@ async fn apply_full(
     while let Some(chunk) = stream.next_chunk().await? {
         tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
         written += chunk.len() as u64;
+        transfer.add(chunk.len() as u64, sink);
         if tuning.emit_progress {
             sink.push(types::progress_event(
                 mod_id,
@@ -275,6 +327,7 @@ async fn apply_full(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_patch(
     request: &SyncRequest,
     tuning: &SyncTuning,
@@ -285,6 +338,7 @@ async fn apply_patch(
     abs_path: &std::path::Path,
     stage: &std::path::Path,
     manifest: &types::FileTarget,
+    transfer: &TransferCounter,
 ) -> Result<(SyncReport, Option<(std::path::PathBuf, types::FileTarget)>)> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use types::SyncReportDelta;
@@ -327,6 +381,7 @@ async fn apply_patch(
             stage_file.write_all(&chunk[..take]).await?;
             patched_bytes += take as u64;
             remaining -= take as u64;
+            transfer.add(take as u64, sink);
 
             if tuning.emit_progress {
                 sink.push(types::progress_event(
