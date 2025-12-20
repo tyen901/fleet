@@ -1,4 +1,4 @@
-use coordinator::events::Event;
+use fleet_app::events::SyncEvent;
 use eframe::egui;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
@@ -39,7 +39,7 @@ enum SyncState {
 
 pub struct FleetGuiApp {
     rt: tokio::runtime::Runtime,
-    ev_rx: Option<mpsc::Receiver<Event>>,
+    ev_rx: Option<mpsc::Receiver<SyncEvent>>,
     done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     sync_job: Option<SyncJob>,
     launch_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
@@ -119,7 +119,7 @@ impl FleetGuiApp {
     fn start_sync(&mut self) {
         self.error_banner = None;
 
-        let (ev_tx, ev_rx) = mpsc::channel::<Event>(2048);
+        let (ev_tx, ev_rx) = mpsc::channel::<SyncEvent>(2048);
         let tuning = SyncTuning::default();
         let mut job = match self
             .app
@@ -192,70 +192,67 @@ impl FleetGuiApp {
         self.delete_confirm = false;
     }
 
-    fn handle_event(&mut self, ev: Event) {
+    fn handle_event(&mut self, ev: SyncEvent) {
         match &ev {
-            Event::Started => self.push_log("Started."),
-            Event::RepoFetched { repo_name, version } => {
-                self.repo_name = Some(repo_name.clone());
-                self.repo_version = Some(version.clone());
-                self.push_log(format!("Repo: {repo_name} (v{version})"));
+            SyncEvent::RepoStarted { repo } => {
+                self.repo_name = Some(repo.clone());
+                self.repo_version = None;
+                self.push_log(format!("Repo: {repo}"));
+            }
+            SyncEvent::RemoteCapabilities { supports_ranges } => self.push_log(format!(
+                "Remote: ranges_supported={supports_ranges}"
+            )),
+            SyncEvent::RepoReady {
+                mods_available,
+                mods_enabled,
+            } => self.push_log(format!(
+                "Repo ready: {mods_enabled}/{mods_available} mods"
+            )),
+
+            SyncEvent::ModStarted { mod_id } => {
+                self.current_mod = Some(mod_id.clone());
+                self.push_log(format!("Checking {mod_id}..."));
+            }
+            SyncEvent::ModFinished { mod_id } => {
+                self.push_log(format!("Finished {mod_id}"));
             }
 
-            Event::ModChecking { mod_name } => {
-                self.current_mod = Some(mod_name.clone());
-                self.push_log(format!("Checking {mod_name}..."));
-            }
-            Event::ModPlanned {
-                mod_name,
-                downloads,
-                deletes,
-            } => {
-                self.push_log(format!(
-                    "Plan {mod_name}: {downloads} files, {deletes} deletes"
-                ));
-            }
-            Event::ModApplied { mod_name } => self.push_log(format!("Applied {mod_name}")),
-            Event::ModFinished { mod_name, checksum } => {
-                self.push_log(format!("Finished {mod_name} checksum={checksum:?}"));
-            }
-
-            Event::FileStarted {
-                mod_name: _,
-                rel_path,
-                total_bytes,
-                resume_from,
+            SyncEvent::FileStarted {
+                mod_id,
+                path,
+                bytes_total,
             } => {
                 self.file_progress = Some(FileProgress {
-                    rel_path: rel_path.as_str().to_string(),
-                    downloaded: *resume_from,
-                    total: *total_bytes,
-                    resume_from: *resume_from,
-                    last_progress_total: *total_bytes,
+                    rel_path: format!("{mod_id}/{path}"),
+                    downloaded: 0,
+                    total: *bytes_total,
+                    resume_from: 0,
+                    last_progress_total: *bytes_total,
                 });
             }
-            Event::FileProgress {
-                mod_name: _,
-                rel_path: _,
-                downloaded_bytes,
-                total_bytes,
+            SyncEvent::FileProgress {
+                mod_id,
+                path,
+                bytes_done,
+                bytes_total,
             } => {
                 if let Some(fp) = &mut self.file_progress {
-                    fp.downloaded = *downloaded_bytes;
-                    fp.last_progress_total = *total_bytes;
+                    fp.rel_path = format!("{mod_id}/{path}");
+                    fp.downloaded = *bytes_done;
+                    fp.last_progress_total = *bytes_total;
+                    fp.total = *bytes_total;
                 }
             }
-            Event::FileVerified { mod_name, rel_path } => {
-                self.push_log(format!("Verified {mod_name}/{}", rel_path.as_str()));
+            SyncEvent::FileVerified { mod_id, path } => {
+                self.push_log(format!("Verified {mod_id}/{path}"));
                 self.file_progress = None;
             }
-            Event::FileDeleted { mod_name, rel_path } => {
-                self.push_log(format!("Deleted {mod_name}/{}", rel_path.as_str()));
-            }
 
-            Event::Finished => self.push_log("Finished."),
-            _ => {
-                self.push_log(format!("{ev:?}"));
-            }
+            SyncEvent::DirEnsured { .. } => {}
+            SyncEvent::PathDeleted { path } => self.push_log(format!("Deleted {path}")),
+
+            SyncEvent::Warning { message } => self.push_log(format!("Warning: {message}")),
+            SyncEvent::Error { message } => self.push_log(format!("Error: {message}")),
         }
     }
 

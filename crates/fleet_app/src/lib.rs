@@ -1,4 +1,5 @@
 mod arma3;
+pub mod events;
 mod registry;
 
 use std::fmt;
@@ -6,8 +7,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use manifest_types::Md5Digest;
-use relative_path::RelativePathBuf;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -20,7 +19,6 @@ pub enum AppError {
     InvalidInput(String),
     NoProfileSelected,
     NotFound(String),
-    Coordinator(coordinator::CoordinatorError),
     SyncEngine(String),
     Launch(LaunchError),
 }
@@ -32,7 +30,6 @@ impl fmt::Display for AppError {
             AppError::InvalidInput(msg) => write!(f, "{msg}"),
             AppError::NoProfileSelected => write!(f, "no profile selected"),
             AppError::NotFound(msg) => write!(f, "{msg}"),
-            AppError::Coordinator(err) => write!(f, "{err}"),
             AppError::SyncEngine(err) => write!(f, "sync error: {err}"),
             AppError::Launch(err) => write!(f, "{err}"),
         }
@@ -44,12 +41,6 @@ impl std::error::Error for AppError {}
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         AppError::Io(err)
-    }
-}
-
-impl From<coordinator::CoordinatorError> for AppError {
-    fn from(err: coordinator::CoordinatorError) -> Self {
-        AppError::Coordinator(err)
     }
 }
 
@@ -292,7 +283,7 @@ impl FleetApp {
         &mut self,
         handle: tokio::runtime::Handle,
         tuning: SyncTuning,
-        ev_tx: mpsc::Sender<coordinator::events::Event>,
+        ev_tx: mpsc::Sender<events::SyncEvent>,
     ) -> Result<SyncJob, AppError> {
         let profile = self.selected_profile().ok_or(AppError::NoProfileSelected)?;
         let checkout_root = Utf8PathBuf::from(profile.checkout_root.clone());
@@ -313,7 +304,7 @@ impl FleetApp {
         handle: tokio::runtime::Handle,
         tuning: SyncTuning,
         profile_id_to_update: Option<String>,
-        ev_tx: mpsc::Sender<coordinator::events::Event>,
+        ev_tx: mpsc::Sender<events::SyncEvent>,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
         registry::setup_checkout_root(checkout_root)?;
@@ -332,11 +323,10 @@ impl FleetApp {
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
-                let _ = ev_tx.send(coordinator::events::Event::Started).await;
+                let repo_name = raw_spec.repo_name.clone();
                 let _ = ev_tx
-                    .send(coordinator::events::Event::RepoFetched {
-                        repo_name: raw_spec.repo_name.clone(),
-                        version: raw_spec.version.clone(),
+                    .send(sync_engine::events::SyncEvent::RepoStarted {
+                        repo: format!("{} (v{})", raw_spec.repo_name, raw_spec.version),
                     })
                     .await;
 
@@ -345,13 +335,6 @@ impl FleetApp {
                     .iter()
                     .filter(|m| m.enabled)
                     .map(|m| m.mod_name.clone())
-                    .collect();
-
-                let enabled_checksums: std::collections::HashMap<String, Md5Digest> = raw_spec
-                    .required_mods
-                    .iter()
-                    .filter(|m| m.enabled)
-                    .map(|m| (m.mod_name.clone(), m.checksum))
                     .collect();
 
                 let engine_tuning = sync_engine::types::SyncTuning {
@@ -368,14 +351,10 @@ impl FleetApp {
                     patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
                 };
 
-                let sink = CoordinatorEventSink {
-                    tx: ev_tx.clone(),
-                    checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
-                    mod_checksums: enabled_checksums,
-                };
+                let sink = SyncEventSink { tx: ev_tx.clone() };
 
                 let request = sync_engine::types::SyncRequest {
-                    repo_name: raw_spec.repo_name,
+                    repo_name,
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
                     remote: Arc::new(remote),
@@ -386,8 +365,6 @@ impl FleetApp {
                 let _report = sync_engine::sync(request, Arc::new(sink))
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
-
-                let _ = ev_tx.send(coordinator::events::Event::Finished).await;
                 Ok(())
             }
             .await;
@@ -438,91 +415,14 @@ impl FleetApp {
     }
 }
 
-struct CoordinatorEventSink {
-    tx: mpsc::Sender<coordinator::events::Event>,
-    checkout_root: std::path::PathBuf,
-    mod_checksums: std::collections::HashMap<String, Md5Digest>,
+struct SyncEventSink {
+    tx: mpsc::Sender<events::SyncEvent>,
 }
 
-impl sync_engine::events::EventSink for CoordinatorEventSink {
+impl sync_engine::events::EventSink for SyncEventSink {
     fn push(&self, ev: sync_engine::events::SyncEvent) {
-        use coordinator::events::Event;
-        use sync_engine::events::SyncEvent;
-
-        let mapped = match ev {
-            SyncEvent::RepoStarted { .. } => None, // handled by caller for parity
-            SyncEvent::RemoteCapabilities { .. } => None,
-            SyncEvent::RepoReady { .. } => None,
-
-            SyncEvent::ModStarted { mod_id } => Some(Event::ModChecking { mod_name: mod_id }),
-            SyncEvent::ModFinished { mod_id } => {
-                let checksum = self
-                    .mod_checksums
-                    .get(&mod_id)
-                    .cloned()
-                    .unwrap_or_default();
-                let _ = self.tx.try_send(Event::ModApplied {
-                    mod_name: mod_id.clone(),
-                });
-                Some(Event::ModFinished {
-                    mod_name: mod_id,
-                    checksum,
-                })
-            }
-
-            SyncEvent::DirEnsured { .. } => None,
-            SyncEvent::PathDeleted { path } => {
-                let Some((mod_name, rel_path)) = split_mod_rel(&self.checkout_root, &path) else {
-                    return;
-                };
-                Some(Event::FileDeleted { mod_name, rel_path })
-            }
-
-            SyncEvent::FileStarted {
-                mod_id,
-                path,
-                bytes_total,
-            } => Some(Event::FileStarted {
-                mod_name: mod_id,
-                rel_path: RelativePathBuf::from(path),
-                total_bytes: bytes_total,
-                resume_from: 0,
-            }),
-
-            SyncEvent::FileProgress {
-                mod_id,
-                path,
-                bytes_done,
-                bytes_total,
-            } => Some(Event::FileProgress {
-                mod_name: mod_id,
-                rel_path: RelativePathBuf::from(path),
-                downloaded_bytes: bytes_done,
-                total_bytes: bytes_total,
-            }),
-
-            SyncEvent::FileVerified { mod_id, path } => Some(Event::FileVerified {
-                mod_name: mod_id,
-                rel_path: RelativePathBuf::from(path),
-            }),
-
-            SyncEvent::Warning { .. } => None,
-            SyncEvent::Error { .. } => None,
-        };
-
-        if let Some(ev) = mapped {
-            let _ = self.tx.try_send(ev);
-        }
+        let _ = self.tx.try_send(ev);
     }
-}
-
-fn split_mod_rel(checkout_root: &std::path::Path, abs: &str) -> Option<(String, RelativePathBuf)> {
-    let p = std::path::Path::new(abs);
-    let rel = p.strip_prefix(checkout_root).ok()?;
-    let mut comps = rel.components();
-    let mod_name = comps.next()?.as_os_str().to_string_lossy().to_string();
-    let rest = comps.as_path().to_string_lossy().replace('\\', "/");
-    Some((mod_name, RelativePathBuf::from(rest)))
 }
 
 fn update_last_sync_on_disk(path: &Utf8Path, profile_id: &str) -> Result<(), AppError> {
