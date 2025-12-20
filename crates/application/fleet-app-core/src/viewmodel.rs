@@ -350,6 +350,16 @@ pub fn profile_dashboard_vm(state: &AppState, profile_id: ProfileId) -> Option<P
         }
     } else if matches!(
         status.map(|s| &s.local_path_state),
+        Some(LocalPathState::NoAccess)
+    ) {
+        DashboardState::Error {
+            msg: format!(
+                "Profile path is not accessible (permission denied): {}. If you're running Fleet in a sandbox (e.g. Flatpak), grant filesystem access or choose a different folder.",
+                profile.local_path
+            ),
+        }
+    } else if matches!(
+        status.map(|s| &s.local_path_state),
         Some(LocalPathState::NotDir)
     ) {
         DashboardState::Error {

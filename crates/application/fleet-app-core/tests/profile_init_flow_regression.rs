@@ -216,6 +216,60 @@ fn plan_snapshot(app: &FleetApplication, profile_id: &str) -> Option<PlanSnapsho
     app.state.plan_by_profile.get(profile_id).cloned()
 }
 
+#[test]
+fn load_initial_state_recomputes_stale_path_state() {
+    let local_dir = tempdir().unwrap();
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("fleet_state.redb");
+    let db = AppDb::open_at(db_path.clone()).unwrap();
+
+    let profile = Profile {
+        id: "p1".to_string(),
+        name: "Test Profile".to_string(),
+        repo_url: "http://example.invalid".to_string(),
+        local_path: local_dir.path().to_string_lossy().to_string(),
+        last_synced: None,
+        last_scan: None,
+    };
+
+    db.upsert_profile(&ProfileRecord {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        repo_url: profile.repo_url.clone(),
+        local_path: profile.local_path.clone(),
+    })
+    .unwrap();
+
+    // Simulate a stale persisted status where the folder used to be missing.
+    db.save_status(
+        &profile.id,
+        &fleet_db::types::ProfileStatusSnapshot {
+            profile_id: profile.id.clone(),
+            computed_at: chrono::Utc::now(),
+            local_path_state: fleet_db::types::LocalPathState::Missing,
+            db_state: fleet_db::types::DbState::MissingBaseline,
+            local_state_dirty: false,
+            last_error: None,
+            last_check: None,
+            plan_summary: None,
+            remote_ref: None,
+        },
+    )
+    .unwrap();
+
+    drop(db);
+
+    let mut app = FleetApplication::new_with_db(AppDb::open_at(db_path).unwrap());
+    app.load_initial_state().unwrap();
+
+    let status = app.state.status_by_profile.get(&profile.id).unwrap();
+    assert_eq!(
+        status.local_path_state,
+        fleet_db::types::LocalPathState::Ok,
+        "startup should recompute local_path_state from the filesystem"
+    );
+}
+
 #[tokio::test]
 async fn new_profile_empty_folder_check_produces_persisted_plan_and_review() {
     let file_bytes = b"hello".to_vec();
