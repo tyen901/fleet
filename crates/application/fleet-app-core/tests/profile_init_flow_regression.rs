@@ -403,6 +403,171 @@ async fn sync_without_baseline_creates_baseline_and_clears_plan() {
 }
 
 #[tokio::test]
+async fn remote_check_on_preseeded_folder_bootstraps_baseline() {
+    let file_bytes = b"hello".to_vec();
+    let part_checksum = "5D41402ABC4B2A76B9719D911017C592";
+    let file_checksum = "F872A18EB88181EB00816510E762FEE6";
+    let (addr, handle) = start_server(
+        tiny_repo_json(),
+        tiny_mod_srf(file_checksum, part_checksum),
+        file_bytes.clone(),
+    )
+    .await;
+
+    let local_dir = tempdir().unwrap();
+    let tiny_root = local_dir.path().join("@tiny");
+    std::fs::create_dir_all(&tiny_root).unwrap();
+    let local_file = tiny_root.join("file.txt");
+    std::fs::write(&local_file, &file_bytes).unwrap();
+
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("fleet_state.redb");
+    let db = AppDb::open_at(db_path.clone()).unwrap();
+
+    let profile = Profile {
+        id: "p1".to_string(),
+        name: "Test Profile".to_string(),
+        repo_url: format!("http://{addr}"),
+        local_path: local_dir.path().to_string_lossy().to_string(),
+        last_synced: None,
+        last_scan: None,
+    };
+    db.upsert_profile(&ProfileRecord {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        repo_url: profile.repo_url.clone(),
+        local_path: profile.local_path.clone(),
+    })
+    .unwrap();
+
+    let mut app = FleetApplication::new_with_db(db.clone());
+    app.state.selected_profile_id = Some(profile.id.clone());
+    app.state.profiles = vec![profile.clone()];
+
+    assert!(!db.has_baseline(&profile.id).unwrap());
+    app.check_for_updates(profile.id.clone()).unwrap();
+
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        let Some(snap) = plan_snapshot(a, &profile.id) else {
+            return false;
+        };
+        // The key assertion: we found local files and decided to keep them (no downloads),
+        // even though the profile started without a baseline/index.
+        let has_no_changes = snap.summary.downloads == 0 && snap.summary.deletes == 0 && snap.summary.renames == 0;
+        has_no_changes && db.has_baseline(&profile.id).unwrap_or(false)
+    })
+    .await;
+
+    assert!(db.has_baseline(&profile.id).unwrap());
+    let snap = plan_snapshot(&app, &profile.id).unwrap();
+    let plan = snap.plan.as_ref().unwrap();
+    assert!(
+        plan.downloads.is_empty() && plan.deletes.is_empty() && plan.renames.is_empty(),
+        "pre-seeded folder should yield no mutating actions"
+    );
+    assert!(
+        !plan.checks.is_empty(),
+        "pre-seeded folder should produce verification checks (proof we saw matching files)"
+    );
+    let on_disk = std::fs::read(&local_file).unwrap();
+    assert_eq!(on_disk, file_bytes);
+
+    drop(app);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn sync_with_empty_plan_bootstraps_baseline() {
+    let file_bytes = b"hello".to_vec();
+    let part_checksum = "5D41402ABC4B2A76B9719D911017C592";
+    let file_checksum = "F872A18EB88181EB00816510E762FEE6";
+    let (addr, handle) = start_server(
+        tiny_repo_json(),
+        tiny_mod_srf(file_checksum, part_checksum),
+        file_bytes.clone(),
+    )
+    .await;
+
+    let local_dir = tempdir().unwrap();
+    let tiny_root = local_dir.path().join("@tiny");
+    std::fs::create_dir_all(&tiny_root).unwrap();
+    let local_file = tiny_root.join("file.txt");
+    std::fs::write(&local_file, &file_bytes).unwrap();
+
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("fleet_state.redb");
+    let db = AppDb::open_at(db_path.clone()).unwrap();
+
+    let profile = Profile {
+        id: "p1".to_string(),
+        name: "Test Profile".to_string(),
+        repo_url: format!("http://{addr}"),
+        local_path: local_dir.path().to_string_lossy().to_string(),
+        last_synced: None,
+        last_scan: None,
+    };
+    db.upsert_profile(&ProfileRecord {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        repo_url: profile.repo_url.clone(),
+        local_path: profile.local_path.clone(),
+    })
+    .unwrap();
+
+    let mut app = FleetApplication::new_with_db(db.clone());
+    app.state.selected_profile_id = Some(profile.id.clone());
+    app.state.profiles = vec![profile.clone()];
+
+    // First, run a real check so we prove the planner sees the existing local file
+    // and produces a no-op plan (only verification checks).
+    app.check_for_updates(profile.id.clone()).unwrap();
+    pump_until(&mut app, Duration::from_secs(5), |a| {
+        plan_snapshot(a, &profile.id).is_some()
+    })
+    .await;
+    let snap = plan_snapshot(&app, &profile.id).unwrap();
+    let plan = snap.plan.as_ref().unwrap();
+    assert!(
+        plan.downloads.is_empty() && plan.deletes.is_empty() && plan.renames.is_empty(),
+        "pre-seeded folder should yield no mutating actions"
+    );
+
+    // Now simulate the problematic state: a stored empty plan but missing baseline.
+    db.clear_baseline(&profile.id).unwrap();
+    assert!(!db.has_baseline(&profile.id).unwrap());
+    db.save_plan(
+        &profile.id,
+        &PlanSnapshot {
+            profile_id: snap.profile_id.clone(),
+            created_at: snap.created_at,
+            remote_ref: snap.remote_ref.clone(),
+            summary: snap.summary.clone(),
+            plan: Some(fleet_core::SyncPlan {
+                downloads: Vec::new(),
+                deletes: Vec::new(),
+                renames: Vec::new(),
+                checks: Vec::new(),
+            }),
+        },
+    )
+    .unwrap();
+
+    app.execute_sync(profile.id.clone()).unwrap();
+
+    pump_until(&mut app, Duration::from_secs(5), |_| {
+        db.has_baseline(&profile.id).unwrap_or(false)
+    })
+    .await;
+
+    assert!(db.has_baseline(&profile.id).unwrap());
+    let on_disk = std::fs::read(&local_file).unwrap();
+    assert_eq!(on_disk, file_bytes);
+
+    drop(app);
+    handle.abort();
+}
+
+#[tokio::test]
 async fn cancel_sync_does_not_dead_end_and_plan_remains_actionable() {
     let file_bytes = b"hello".to_vec();
     let part_checksum = "5D41402ABC4B2A76B9719D911017C592";

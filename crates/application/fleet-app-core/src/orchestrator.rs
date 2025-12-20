@@ -439,6 +439,32 @@ impl PipelineOrchestrator {
                     let plan_res = engine.compute_plan(&fetch_res.manifest, &local_state, &req);
                     match plan_res {
                         Ok(plan) => {
+                            // Cold-start UX: if the profile has no baseline yet and the diff is empty,
+                            // bootstrap the baseline anyway so the UI doesn't dead-end on
+                            // "MissingBaseline" with no actionable sync.
+                            if matches!(kind, CheckKind::RemoteUpdate)
+                                && is_cold
+                                && plan.downloads.is_empty()
+                                && plan.deletes.is_empty()
+                                && plan.renames.is_empty()
+                            {
+                                if let Err(e) = engine.persist_remote_snapshot(
+                                    &req.profile_id,
+                                    &req.local_root,
+                                    &fetch_res.manifest,
+                                ) {
+                                    let _ = tx
+                                        .send(DomainEvent::PipelineEvent {
+                                            run_id,
+                                            ev: PipelineRunEvent::Failed {
+                                                message: e.to_string(),
+                                            },
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+
                             let diff_stats = (plan.downloads.len(), plan.deletes.len());
                             let progress_seed =
                                 progress_seed_from_remote_manifest(&fetch_res.manifest, &plan);
