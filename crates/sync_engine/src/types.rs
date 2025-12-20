@@ -31,6 +31,16 @@ pub trait Checksummer: Send + Sync {
     fn hash_bytes(&self, data: &[u8]) -> Result<Vec<u8>>;
     fn hash_file(&self, path: &Path) -> Result<Vec<u8>>;
     fn hash_range(&self, path: &Path, offset: u64, len: u64) -> Result<Vec<u8>>;
+
+    /// Bulk range hashing for performance; default is correct but may be slow.
+    /// Implementations SHOULD override to avoid per-range open/alloc.
+    fn hash_ranges(&self, path: &Path, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u8>>> {
+        let mut out = Vec::with_capacity(ranges.len());
+        for (off, len) in ranges {
+            out.push(self.hash_range(path, *off, *len)?);
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,7 +101,7 @@ pub enum Durability {
 pub struct SyncTuning {
     pub file_concurrency: usize,
     pub range_concurrency: usize,
-    pub range_buffer_bytes: u64,
+    pub scan_concurrency: usize,
     pub delete_extraneous: bool,
     pub emit_progress: bool,
     pub durability: Durability,
@@ -102,10 +112,15 @@ pub struct SyncTuning {
 
 impl Default for SyncTuning {
     fn default() -> Self {
+        let scan_default = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
+
         Self {
             file_concurrency: 4,
             range_concurrency: 8,
-            range_buffer_bytes: 256 * 1024,
+            scan_concurrency: scan_default,
             delete_extraneous: false,
             emit_progress: true,
             durability: Durability::BestEffort,
@@ -125,6 +140,7 @@ pub struct FileTarget {
 
 #[derive(Clone, Copy, Debug)]
 pub enum RepairStrategy {
+    Skip,
     Full,
     Patch,
 }
@@ -133,13 +149,16 @@ impl RepairStrategy {
     pub fn is_patch(self) -> bool {
         matches!(self, RepairStrategy::Patch)
     }
+
+    pub fn is_skip(self) -> bool {
+        matches!(self, RepairStrategy::Skip)
+    }
 }
 
 #[derive(Default, Debug, Clone)]
 pub struct SyncReport {
     pub files_downloaded: u64,
     pub files_patched: u64,
-    pub dirs_created: u64,
     pub paths_deleted: u64,
     pub bytes_downloaded: u64,
     pub bytes_patched: u64,
@@ -150,7 +169,6 @@ impl SyncReport {
     pub fn merge(&mut self, other: SyncReport) {
         self.files_downloaded += other.files_downloaded;
         self.files_patched += other.files_patched;
-        self.dirs_created += other.dirs_created;
         self.paths_deleted += other.paths_deleted;
         self.bytes_downloaded += other.bytes_downloaded;
         self.bytes_patched += other.bytes_patched;
@@ -178,12 +196,6 @@ impl SyncReportDelta {
         SyncReport {
             files_patched: 1,
             bytes_patched: bytes,
-            ..Default::default()
-        }
-    }
-    pub fn dir_created() -> SyncReport {
-        SyncReport {
-            dirs_created: 1,
             ..Default::default()
         }
     }

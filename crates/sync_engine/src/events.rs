@@ -11,6 +11,14 @@ pub enum SyncEvent {
         mods_enabled: usize,
     },
 
+    PlanningStarted {
+        mods_enabled: usize,
+    },
+    PlanningFinished {
+        ops: usize,
+        total_bytes: u64,
+    },
+
     TransferPlanned {
         total_bytes: u64,
     },
@@ -26,9 +34,6 @@ pub enum SyncEvent {
         mod_id: String,
     },
 
-    DirEnsured {
-        path: String,
-    },
     PathDeleted {
         path: String,
     },
@@ -43,6 +48,11 @@ pub enum SyncEvent {
         path: String,
         bytes_done: u64,
         bytes_total: u64,
+    },
+    /// File is already correct locally; no transfer needed.
+    FileUpToDate {
+        mod_id: String,
+        path: String,
     },
     FileVerified {
         mod_id: String,

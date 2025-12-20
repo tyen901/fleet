@@ -20,18 +20,17 @@ pub fn verify_file_target(
         );
     }
 
-    for part in &target.parts {
-        let got = checksummer
-            .hash_range(path, part.offset, part.len)
-            .with_context(|| {
-                format!(
-                    "hash_range {} @{}+{}",
-                    path.display(),
-                    part.offset,
-                    part.len
-                )
-            })?;
-        if got != part.checksum.bytes {
+    let ranges: Vec<(u64, u64)> = target.parts.iter().map(|p| (p.offset, p.len)).collect();
+    let got = checksummer.hash_ranges(path, &ranges).with_context(|| {
+        format!(
+            "hash_ranges {} ({} parts)",
+            path.display(),
+            target.parts.len()
+        )
+    })?;
+
+    for (i, part) in target.parts.iter().enumerate() {
+        if got[i] != part.checksum.bytes {
             bail!(
                 "part checksum mismatch: path={} algo={} @{}+{}",
                 path.display(),

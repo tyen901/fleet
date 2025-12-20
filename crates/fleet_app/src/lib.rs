@@ -339,7 +339,7 @@ impl FleetApp {
                     range_concurrency: tuning
                         .max_concurrent_range_requests
                         .unwrap_or(sync_engine::types::SyncTuning::default().range_concurrency),
-                    range_buffer_bytes: tuning.io_buffer_bytes as u64,
+                    scan_concurrency: sync_engine::types::SyncTuning::default().scan_concurrency,
                     delete_extraneous: true,
                     emit_progress: true,
                     durability: sync_engine::types::Durability::BestEffort,

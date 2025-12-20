@@ -5,7 +5,6 @@ pub mod fs_atomic;
 pub mod index;
 pub mod planner;
 pub mod remote;
-pub mod retry;
 pub mod safe_path;
 pub mod types;
 pub mod verify;
@@ -13,7 +12,7 @@ pub mod verify;
 use anyhow::{Context, Result};
 use events::{EventSink, SyncEvent};
 use futures::StreamExt;
-use planner::{PlanBuilder, PlannedOp, PlannedOpStream};
+use planner::{OpKind, PlanBuilder, PlannedOp};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -24,7 +23,7 @@ use std::{
 use tokio::sync::Semaphore;
 use types::{SyncReport, SyncRequest, SyncTuning};
 
-/// Primary entrypoint (breaking change vs legacy coordinator/apply).
+/// Primary entrypoint (v0.2).
 pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<SyncReport> {
     let start = Instant::now();
     sink.push(SyncEvent::RepoStarted {
@@ -35,7 +34,6 @@ pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<Sync
         .await
         .context("create .fleet directory")?;
 
-    // Open or recover local index (best-effort optimization).
     let mut idx = index::LocalIndex::open_or_recover(&request.checkout_root, sink.clone())
         .context("open local index")?;
 
@@ -56,7 +54,7 @@ pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<Sync
 
     let tuning = request.tuning.clone().unwrap_or_default();
 
-    let plan_stream = PlanBuilder::new(
+    let plan = PlanBuilder::new(
         request.remote.clone(),
         request.checkout_root.clone(),
         request.enabled_mods.clone(),
@@ -64,30 +62,23 @@ pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<Sync
         request.checksummer.clone(),
         sink.clone(),
     )
-    .build_stream(repo_spec)
+    .build(repo_spec, &mut idx, caps.supports_ranges)
     .await
-    .context("build plan stream")?;
+    .context("build plan")?;
 
-    let (plan_stream, planned_bytes) = plan_stream;
     sink.push(SyncEvent::TransferPlanned {
-        total_bytes: planned_bytes,
+        total_bytes: plan.total_bytes,
     });
     sink.push(SyncEvent::TransferProgress {
         transferred_bytes: 0,
-        total_bytes: planned_bytes,
+        total_bytes: plan.total_bytes,
     });
-    let transfer = TransferCounter::new(planned_bytes);
+    let transfer = TransferCounter::new(plan.total_bytes);
 
-    let report = execute_stream(plan_stream, request, tuning, sink, &mut idx, transfer).await?;
-    idx.compact_if_needed().ok(); // best effort
+    let report = execute_plan(plan.ops, request, tuning, sink, &mut idx, transfer).await?;
+    idx.compact_if_needed().ok();
 
-    let elapsed = start.elapsed();
-    Ok(report.with_elapsed(elapsed))
-}
-
-struct ApplyResult {
-    report: SyncReport,
-    index_update: Option<(std::path::PathBuf, types::FileTarget)>,
+    Ok(report.with_elapsed(start.elapsed()))
 }
 
 #[derive(Clone)]
@@ -120,8 +111,25 @@ impl TransferCounter {
     }
 }
 
-async fn execute_stream(
-    mut stream: PlannedOpStream,
+enum IndexMutation {
+    Upsert {
+        abs_path: std::path::PathBuf,
+        size: u64,
+        mtime_ns: u128,
+        checksum: Vec<u8>,
+    },
+    Delete {
+        abs_path: std::path::PathBuf,
+    },
+}
+
+struct ApplyResult {
+    report: SyncReport,
+    index_mut: Option<IndexMutation>,
+}
+
+async fn execute_plan(
+    ops: Vec<PlannedOp>,
     request: SyncRequest,
     tuning: SyncTuning,
     sink: Arc<dyn EventSink>,
@@ -135,48 +143,66 @@ async fn execute_stream(
     let range_sem = Arc::new(Semaphore::new(range_workers));
 
     let mut report = SyncReport::default();
-
     let mut in_flight = futures::stream::FuturesUnordered::new();
 
-    while let Some(planned) = stream.next().await {
+    for planned in ops {
         let permit = file_sem.clone().acquire_owned().await?;
         let request = request.clone();
         let tuning = tuning.clone();
-        let sink = sink.clone();
+        let sink_for_task = sink.clone();
         let range_sem = range_sem.clone();
         let transfer = transfer.clone();
 
         in_flight.push(tokio::spawn(async move {
             let _permit = permit;
-            apply_one(planned, request, tuning, sink, range_sem, transfer).await
+            apply_one(planned, request, tuning, sink_for_task, range_sem, transfer).await
         }));
 
         if in_flight.len() >= file_workers {
             if let Some(res) = in_flight.next().await {
-                let ApplyResult {
-                    report: delta,
-                    index_update,
-                } = res??;
+                let ApplyResult { report: delta, index_mut } = res??;
                 report.merge(delta);
-                if let Some((path, target)) = index_update {
-                    let _ = idx.upsert(&path, &target);
-                }
+                apply_index_mutation(idx, index_mut, &sink);
             }
         }
     }
 
     while let Some(res) = in_flight.next().await {
-        let ApplyResult {
-            report: delta,
-            index_update,
-        } = res??;
+        let ApplyResult { report: delta, index_mut } = res??;
         report.merge(delta);
-        if let Some((path, target)) = index_update {
-            let _ = idx.upsert(&path, &target);
-        }
+        apply_index_mutation(idx, index_mut, &sink);
     }
 
     Ok(report)
+}
+
+fn apply_index_mutation(
+    idx: &mut index::LocalIndex,
+    muta: Option<IndexMutation>,
+    sink: &Arc<dyn EventSink>,
+) {
+    let Some(m) = muta else { return; };
+    match m {
+        IndexMutation::Upsert {
+            abs_path,
+            size,
+            mtime_ns,
+            checksum,
+        } => {
+            if let Err(e) = idx.upsert_known(&abs_path, size, mtime_ns, &checksum) {
+                sink.push(SyncEvent::Warning {
+                    message: format!("index upsert failed for {}: {e}", abs_path.display()),
+                });
+            }
+        }
+        IndexMutation::Delete { abs_path } => {
+            if let Err(e) = idx.delete(&abs_path) {
+                sink.push(SyncEvent::Warning {
+                    message: format!("index delete failed for {}: {e}", abs_path.display()),
+                });
+            }
+        }
+    }
 }
 
 async fn apply_one(
@@ -187,20 +213,9 @@ async fn apply_one(
     range_sem: Arc<Semaphore>,
     transfer: TransferCounter,
 ) -> Result<ApplyResult> {
-    use planner::OpKind;
     use types::SyncReportDelta;
 
     match planned.kind {
-        OpKind::EnsureDir { abs_path } => {
-            tokio::fs::create_dir_all(&abs_path).await?;
-            sink.push(SyncEvent::DirEnsured {
-                path: abs_path.display().to_string(),
-            });
-            Ok(ApplyResult {
-                report: SyncReportDelta::dir_created(),
-                index_update: None,
-            })
-        }
         OpKind::DeletePath { abs_path } => {
             let md = tokio::fs::symlink_metadata(&abs_path).await;
             if let Ok(md) = md {
@@ -212,23 +227,36 @@ async fn apply_one(
                 sink.push(SyncEvent::PathDeleted {
                     path: abs_path.display().to_string(),
                 });
+
                 Ok(ApplyResult {
                     report: SyncReportDelta::path_deleted(),
-                    index_update: None,
+                    index_mut: Some(IndexMutation::Delete { abs_path }),
                 })
             } else {
                 Ok(ApplyResult {
                     report: SyncReport::default(),
-                    index_update: None,
+                    index_mut: None,
                 })
             }
         }
+
         OpKind::EnsureFile {
             mod_id,
             rel_path,
             abs_path,
             manifest,
         } => {
+            if manifest.strategy.is_skip() {
+                sink.push(SyncEvent::FileUpToDate {
+                    mod_id,
+                    path: rel_path,
+                });
+                return Ok(ApplyResult {
+                    report: SyncReport::default(),
+                    index_mut: None,
+                });
+            }
+
             sink.push(SyncEvent::FileStarted {
                 mod_id: mod_id.clone(),
                 path: rel_path.clone(),
@@ -250,24 +278,37 @@ async fn apply_one(
                 .unwrap_or_default()
                 .supports_ranges;
 
-            let (delta, index_update) = if manifest.strategy.is_patch() && supports_ranges {
+            let (delta, index_mut) = if manifest.strategy.is_patch() && supports_ranges {
                 apply_patch(
-                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
-                    &manifest, &transfer,
+                    &request,
+                    &tuning,
+                    &sink,
+                    &range_sem,
+                    &mod_id,
+                    &rel_path,
+                    &abs_path,
+                    &stage,
+                    &manifest,
+                    &transfer,
                 )
                 .await?
             } else {
                 apply_full(
-                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
-                    &manifest, &transfer,
+                    &request,
+                    &tuning,
+                    &sink,
+                    &range_sem,
+                    &mod_id,
+                    &rel_path,
+                    &abs_path,
+                    &stage,
+                    &manifest,
+                    &transfer,
                 )
                 .await?
             };
 
-            Ok(ApplyResult {
-                report: delta,
-                index_update,
-            })
+            Ok(ApplyResult { report: delta, index_mut })
         }
     }
 }
@@ -284,7 +325,7 @@ async fn apply_full(
     stage: &std::path::Path,
     manifest: &types::FileTarget,
     transfer: &TransferCounter,
-) -> Result<(SyncReport, Option<(std::path::PathBuf, types::FileTarget)>)> {
+) -> Result<(SyncReport, Option<IndexMutation>)> {
     use tokio::io::AsyncWriteExt;
     use types::SyncReportDelta;
 
@@ -295,16 +336,12 @@ async fn apply_full(
     let mut written: u64 = 0;
 
     while let Some(chunk) = stream.next_chunk().await? {
-        tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
+        f.write_all(&chunk).await?;
         written += chunk.len() as u64;
         transfer.add(chunk.len() as u64, sink);
+
         if tuning.emit_progress {
-            sink.push(types::progress_event(
-                mod_id,
-                rel_path,
-                written,
-                manifest.size,
-            ));
+            sink.push(types::progress_event(mod_id, rel_path, written, manifest.size));
         }
     }
 
@@ -312,8 +349,12 @@ async fn apply_full(
     fs_atomic::maybe_fsync(&mut f, tuning.durability).await?;
     drop(f);
 
-    verify::verify_file_target(stage, manifest, request.checksummer.as_ref())
-        .context("verify downloaded file")?;
+    if let Err(e) = verify::verify_file_target(stage, manifest, request.checksummer.as_ref())
+        .context("verify downloaded file")
+    {
+        let _ = tokio::fs::remove_file(stage).await;
+        return Err(e);
+    }
 
     fs_atomic::atomic_replace(stage, abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
@@ -321,9 +362,17 @@ async fn apply_full(
         path: rel_path.to_string(),
     });
 
+    let md = tokio::fs::metadata(abs_path).await?;
+    let mtime_ns = index::file_mtime_ns(&md).unwrap_or(0);
+
     Ok((
         SyncReportDelta::file_downloaded(manifest.size),
-        Some((abs_path.to_path_buf(), manifest.clone())),
+        Some(IndexMutation::Upsert {
+            abs_path: abs_path.to_path_buf(),
+            size: md.len(),
+            mtime_ns,
+            checksum: manifest.file_checksum.bytes.clone(),
+        }),
     ))
 }
 
@@ -339,67 +388,93 @@ async fn apply_patch(
     stage: &std::path::Path,
     manifest: &types::FileTarget,
     transfer: &TransferCounter,
-) -> Result<(SyncReport, Option<(std::path::PathBuf, types::FileTarget)>)> {
+) -> Result<(SyncReport, Option<IndexMutation>)> {
+    use std::sync::atomic::AtomicU64;
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
     use types::SyncReportDelta;
 
-    if tokio::fs::metadata(stage).await.is_err() {
-        fs_atomic::clone_or_copy(abs_path, stage, manifest.size).await?;
+    let rebuild_stage = match tokio::fs::metadata(stage).await {
+        Ok(md) => md.len() != manifest.size,
+        Err(_) => true,
+    };
+    if rebuild_stage {
+        let _ = tokio::fs::remove_file(stage).await;
+        fs_atomic::copy_baseline(abs_path, stage, manifest.size).await?;
     }
 
     let parts = manifest.parts_to_fetch.clone();
+    let patched_bytes = Arc::new(AtomicU64::new(0));
+    let file_total = manifest.size;
 
-    let mut stage_file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(stage)
-        .await?;
-
-    let mut patched_bytes: u64 = 0;
-
+    let mut tasks = futures::stream::FuturesUnordered::new();
     for part in parts {
-        let _permit = range_sem.clone().acquire_owned().await?;
-        let mut rs = request
-            .remote
-            .fetch_range(mod_id, rel_path, part.offset, part.len)
-            .await?;
+        let permit = range_sem.clone().acquire_owned().await?;
+        let remote = request.remote.clone();
+        let stage_path = stage.to_path_buf();
+        let sink = sink.clone();
+        let tuning = tuning.clone();
+        let patched_bytes = patched_bytes.clone();
+        let transfer = transfer.clone();
 
-        stage_file
-            .seek(std::io::SeekFrom::Start(part.offset))
-            .await?;
+        let mod_id = mod_id.to_string();
+        let rel_path = rel_path.to_string();
 
-        let mut remaining = part.len;
-        while remaining > 0 {
-            let chunk = rs
-                .next_chunk()
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("unexpected EOF from remote range stream"))?;
-            if chunk.is_empty() {
-                continue;
+        tasks.push(tokio::spawn(async move {
+            let _permit = permit;
+
+            let mut rs = remote
+                .fetch_range(&mod_id, &rel_path, part.offset, part.len)
+                .await?;
+
+            let mut stage_file = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&stage_path)
+                .await?;
+
+            stage_file.seek(std::io::SeekFrom::Start(part.offset)).await?;
+
+            let mut remaining = part.len;
+            while remaining > 0 {
+                let chunk = rs
+                    .next_chunk()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("unexpected EOF from remote range stream"))?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                let take = std::cmp::min(chunk.len() as u64, remaining) as usize;
+                stage_file.write_all(&chunk[..take]).await?;
+
+                remaining -= take as u64;
+                transfer.add(take as u64, &sink);
+
+                let done = patched_bytes.fetch_add(take as u64, Ordering::Relaxed) + (take as u64);
+                if tuning.emit_progress {
+                    sink.push(types::progress_event(&mod_id, &rel_path, done, file_total));
+                }
             }
-            let take = std::cmp::min(chunk.len() as u64, remaining) as usize;
-            stage_file.write_all(&chunk[..take]).await?;
-            patched_bytes += take as u64;
-            remaining -= take as u64;
-            transfer.add(take as u64, sink);
 
-            if tuning.emit_progress {
-                sink.push(types::progress_event(
-                    mod_id,
-                    rel_path,
-                    patched_bytes,
-                    manifest.size,
-                ));
-            }
-        }
+            stage_file.flush().await?;
+            Ok::<(), anyhow::Error>(())
+        }));
     }
 
-    stage_file.flush().await?;
-    fs_atomic::maybe_fsync(&mut stage_file, tuning.durability).await?;
-    drop(stage_file);
+    while let Some(res) = tasks.next().await {
+        res??;
+    }
 
-    verify::verify_file_target(stage, manifest, request.checksummer.as_ref())
-        .context("verify patched file")?;
+    if matches!(tuning.durability, types::Durability::Strict) {
+        let mut f = tokio::fs::OpenOptions::new().read(true).open(stage).await?;
+        fs_atomic::maybe_fsync(&mut f, tuning.durability).await?;
+    }
+
+    if let Err(e) = verify::verify_file_target(stage, manifest, request.checksummer.as_ref())
+        .context("verify patched file")
+    {
+        let _ = tokio::fs::remove_file(stage).await;
+        return Err(e);
+    }
 
     fs_atomic::atomic_replace(stage, abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
@@ -407,8 +482,18 @@ async fn apply_patch(
         path: rel_path.to_string(),
     });
 
+    let md = tokio::fs::metadata(abs_path).await?;
+    let mtime_ns = index::file_mtime_ns(&md).unwrap_or(0);
+
+    let total_patched = patched_bytes.load(Ordering::Relaxed);
+
     Ok((
-        SyncReportDelta::file_patched(patched_bytes),
-        Some((abs_path.to_path_buf(), manifest.clone())),
+        SyncReportDelta::file_patched(total_patched),
+        Some(IndexMutation::Upsert {
+            abs_path: abs_path.to_path_buf(),
+            size: md.len(),
+            mtime_ns,
+            checksum: manifest.file_checksum.bytes.clone(),
+        }),
     ))
 }

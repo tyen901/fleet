@@ -1,5 +1,4 @@
 use crate::events::{EventSink, SyncEvent};
-use crate::types::FileTarget;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -67,17 +66,29 @@ impl LocalIndex {
         Ok(row)
     }
 
-    pub fn upsert(&mut self, abs_path: &Path, target: &FileTarget) -> Result<()> {
-        let md = std::fs::metadata(abs_path)?;
-        let mtime_ns = file_mtime_ns(&md).unwrap_or(0);
-
+    /// Preferred: caller already knows size+mtime from metadata.
+    pub fn upsert_known(
+        &mut self,
+        abs_path: &Path,
+        size: u64,
+        mtime_ns: u128,
+        checksum: &[u8],
+    ) -> Result<()> {
         let p = abs_path.to_string_lossy().to_string();
         self.conn.execute(
             "INSERT INTO file_state(abs_path, size, mtime_ns, checksum) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(abs_path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, checksum=excluded.checksum",
-            params![p, md.len() as i64, mtime_ns as i64, target.file_checksum.bytes.clone()],
+            params![p, size as i64, mtime_ns as i64, checksum.to_vec()],
         )?;
 
+        self.writes += 1;
+        Ok(())
+    }
+
+    pub fn delete(&mut self, abs_path: &Path) -> Result<()> {
+        let p = abs_path.to_string_lossy().to_string();
+        self.conn
+            .execute("DELETE FROM file_state WHERE abs_path = ?1", params![p])?;
         self.writes += 1;
         Ok(())
     }
@@ -97,7 +108,7 @@ pub struct IndexedFile {
     pub checksum: Vec<u8>,
 }
 
-fn file_mtime_ns(md: &std::fs::Metadata) -> Option<u128> {
+pub(crate) fn file_mtime_ns(md: &std::fs::Metadata) -> Option<u128> {
     md.modified()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)

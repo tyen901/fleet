@@ -298,6 +298,21 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     None,
                 ),
 
+                SyncEvent::PlanningStarted { mods_enabled } => set_task(
+                    state,
+                    &format!("Planning ({mods_enabled} mods)"),
+                    None,
+                    true,
+                    None,
+                ),
+                SyncEvent::PlanningFinished { ops, total_bytes } => set_task(
+                    state,
+                    &format!("Plan ready ({ops} ops, {total_bytes} bytes)"),
+                    None,
+                    true,
+                    None,
+                ),
+
                 SyncEvent::TransferPlanned { total_bytes } => {
                     state.download_summary.total_bytes = total_bytes;
                     state.download_summary.downloaded_bytes = 0;
@@ -335,6 +350,14 @@ pub fn reduce(state: &mut AppState, action: Action) {
                         None,
                     );
                 }
+
+                SyncEvent::FileUpToDate { mod_id, path } => set_task(
+                    state,
+                    &format!("Up-to-date {mod_id}/{path}"),
+                    None,
+                    true,
+                    None,
+                ),
 
                 SyncEvent::FileProgress {
                     mod_id,
@@ -452,6 +475,12 @@ fn format_sync_event(ev: &SyncEvent) -> String {
             mods_available,
             mods_enabled,
         } => format!("RepoReady enabled={mods_enabled} available={mods_available}"),
+        SyncEvent::PlanningStarted { mods_enabled } => {
+            format!("PlanningStarted mods_enabled={mods_enabled}")
+        }
+        SyncEvent::PlanningFinished { ops, total_bytes } => {
+            format!("PlanningFinished ops={ops} total_bytes={total_bytes}")
+        }
         SyncEvent::TransferPlanned { total_bytes } => {
             format!("TransferPlanned total_bytes={total_bytes}")
         }
@@ -461,7 +490,6 @@ fn format_sync_event(ev: &SyncEvent) -> String {
         } => format!("TransferProgress {transferred_bytes}/{total_bytes}"),
         SyncEvent::ModStarted { mod_id } => format!("ModStarted {mod_id}"),
         SyncEvent::ModFinished { mod_id } => format!("ModFinished {mod_id}"),
-        SyncEvent::DirEnsured { path } => format!("DirEnsured {path}"),
         SyncEvent::PathDeleted { path } => format!("PathDeleted {path}"),
         SyncEvent::FileStarted {
             mod_id,
@@ -474,6 +502,7 @@ fn format_sync_event(ev: &SyncEvent) -> String {
             bytes_done,
             bytes_total,
         } => format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}"),
+        SyncEvent::FileUpToDate { mod_id, path } => format!("FileUpToDate {mod_id}/{path}"),
         SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
         SyncEvent::Warning { message } => format!("Warning {message}"),
         SyncEvent::Error { message } => format!("Error {message}"),

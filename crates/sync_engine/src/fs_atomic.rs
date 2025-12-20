@@ -49,7 +49,7 @@ pub async fn create_stage_file(stage: &Path, size: u64) -> Result<tokio::fs::Fil
     Ok(f)
 }
 
-pub async fn clone_or_copy(src: &Path, dst: &Path, expected_size: u64) -> Result<()> {
+pub async fn copy_baseline(src: &Path, dst: &Path, expected_size: u64) -> Result<()> {
     tokio::fs::copy(src, dst).await?;
     let md = tokio::fs::metadata(dst).await?;
     if md.len() != expected_size {
