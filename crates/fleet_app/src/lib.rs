@@ -209,7 +209,16 @@ impl FleetApp {
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = std::path::PathBuf::from(profile.checkout_root);
         let s = build_arma3_commandline(&base_path, &profile.arma3.enabled_mods, &extra)?;
-        Ok(s)
+
+        #[cfg(target_os = "linux")]
+        {
+            Ok(format!("steam steam://rungameid/107410 {s}"))
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(s)
+        }
     }
 
     pub fn list_profiles(&self) -> Vec<ProfileSpec> {

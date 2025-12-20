@@ -57,12 +57,25 @@ pub struct Profile {
     pub arma3: Arma3Config,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Arma3Config {
     #[serde(default)]
     pub extra_args: String,
     #[serde(default)]
     pub enabled_mods: Vec<String>,
+}
+
+impl Arma3Config {
+    pub const DEFAULT_EXTRA_ARGS: &'static str = "-noPause -noSplash -skipIntro -noLauncher";
+}
+
+impl Default for Arma3Config {
+    fn default() -> Self {
+        Self {
+            extra_args: Self::DEFAULT_EXTRA_ARGS.to_string(),
+            enabled_mods: Vec::new(),
+        }
+    }
 }
 
 impl Default for Registry {

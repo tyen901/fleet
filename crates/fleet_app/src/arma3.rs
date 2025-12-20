@@ -5,6 +5,8 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
 use crate::registry::LaunchMode;
 
+const DEFAULT_ARMA3_ARGS: &str = "-noPause -noSplash -skipIntro -noLauncher";
+
 #[derive(Debug)]
 pub enum LaunchError {
     NoModsFound(String),
@@ -109,11 +111,13 @@ pub fn build_arma3_commandline(
     }
 
     let extra = extra_args.trim();
-    if extra.is_empty() {
-        Ok(format!(r#"-noLauncher -mod="{}""#, mod_list))
+    let effective_extra = if extra.is_empty() {
+        DEFAULT_ARMA3_ARGS
     } else {
-        Ok(format!(r#"-noLauncher -mod="{}" {}"#, mod_list, extra))
-    }
+        extra
+    };
+
+    Ok(format!(r#"{} -mod="{}""#, effective_extra, mod_list))
 }
 
 pub fn build_arma3_steam_url(
@@ -123,12 +127,24 @@ pub fn build_arma3_steam_url(
 ) -> Result<String, LaunchError> {
     let cmdline = build_arma3_commandline(base_path, enabled_mod_dirs, extra_args)?;
     let encoded = utf8_percent_encode(&cmdline, NON_ALPHANUMERIC);
-    Ok(format!("steam://run/107410//{encoded}/"))
+    Ok(format!("steam://rungameid/107410//{encoded}/"))
 }
 
 fn open_target(mode: LaunchMode, target: &str) -> Result<(), LaunchError> {
     match mode {
         LaunchMode::SystemDefault => {
+            #[cfg(target_os = "linux")]
+            {
+                if target.starts_with("steam://") {
+                    use std::process::Command;
+                    Command::new("steam")
+                        .arg(target)
+                        .spawn()
+                        .map_err(LaunchError::OpenFailed)?;
+                    return Ok(());
+                }
+            }
+
             open::that(target)?;
             Ok(())
         }
@@ -137,18 +153,27 @@ fn open_target(mode: LaunchMode, target: &str) -> Result<(), LaunchError> {
             #[cfg(target_os = "linux")]
             {
                 use std::process::Command;
-                let st = Command::new("flatpak-spawn")
-                    .args(["--host", "xdg-open", target])
-                    .status()
-                    .map_err(LaunchError::OpenFailed)?;
 
-                if st.success() {
+                if target.starts_with("steam://") {
+                    Command::new("flatpak-spawn")
+                        .args(["--host", "steam", target])
+                        .spawn()
+                        .map_err(LaunchError::OpenFailed)?;
                     Ok(())
                 } else {
+                    let st = Command::new("flatpak-spawn")
+                        .args(["--host", "xdg-open", target])
+                        .status()
+                        .map_err(LaunchError::OpenFailed)?;
+
+                    if st.success() {
+                        Ok(())
+                    } else {
                     Err(LaunchError::Other(format!(
                         "flatpak-spawn failed (exit={:?})",
                         st.code()
                     )))
+                    }
                 }
             }
 
