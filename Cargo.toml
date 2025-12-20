@@ -6,13 +6,9 @@ members = [
   "crates/remote_core",
   "crates/remote_http",
   "crates/remote_adapter",
-  "crates/local_index",
   "crates/pbo_parse",
   "crates/manifest_scan",
   "crates/sync_engine",
-  "crates/sync_plan",
-  "crates/sync_apply",
-  "crates/coordinator",
   "apps/fleet",
 ]
 
