@@ -2,6 +2,7 @@ mod components;
 mod store;
 mod theme;
 mod ui_kit;
+mod update;
 mod views;
 mod widgets;
 
@@ -16,9 +17,11 @@ use ui_kit::UiKit;
 const WINDOW_W: f32 = 980.0;
 const WINDOW_H: f32 = 720.0;
 
-#[derive(Debug)]
 enum UiMsg {
     SyncFinished(Result<(), String>),
+    UpdateChecked(Result<velopack::UpdateCheck, String>),
+    UpdateProgress(f32),
+    UpdateApplyError(String),
 }
 
 pub struct FleetUiApp {
@@ -76,7 +79,7 @@ impl FleetUiApp {
         let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<SyncEvent>(512);
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel::<UiMsg>(32);
 
-        Self {
+        let mut this = Self {
             kit,
             app,
             state,
@@ -86,7 +89,107 @@ impl FleetUiApp {
             ui_tx,
             ui_rx,
             active_sync: None,
+        };
+
+        if crate::update::update_base_url().is_some() {
+            this.start_update_check();
+        } else {
+            this.state.update.status = "Not configured".into();
         }
+
+        this
+    }
+
+    fn start_update_check(&mut self) {
+        if self.state.update.busy {
+            return;
+        }
+        let Some(base_url) = crate::update::update_base_url() else {
+            reduce(
+                &mut self.state,
+                Action::UpdateCheckFinished {
+                    result: Err("Update feed not configured (FLEET_UPDATE_URL)".into()),
+                },
+            );
+            return;
+        };
+
+        reduce(&mut self.state, Action::UpdateCheckStarted);
+
+        let ui_tx = self.ui_tx.clone();
+        let handle = self.rt.handle().clone();
+
+        handle.spawn_blocking(move || {
+            let res = (|| -> Result<velopack::UpdateCheck, String> {
+                let source = velopack::sources::HttpSource::new(&base_url);
+                let um =
+                    velopack::UpdateManager::new(source, None, None).map_err(|e| e.to_string())?;
+                um.check_for_updates().map_err(|e| e.to_string())
+            })();
+
+            let _ = ui_tx.blocking_send(UiMsg::UpdateChecked(res));
+        });
+    }
+
+    fn start_update_apply(&mut self) {
+        if self.state.update.busy {
+            return;
+        }
+        if self.active_sync.is_some() {
+            reduce(
+                &mut self.state,
+                Action::UpdateApplyError("Stop Sync before updating.".into()),
+            );
+            return;
+        }
+
+        let Some(base_url) = crate::update::update_base_url() else {
+            reduce(
+                &mut self.state,
+                Action::UpdateApplyError("Update feed not configured (FLEET_UPDATE_URL)".into()),
+            );
+            return;
+        };
+
+        let Some(info) = self.state.update.available.clone() else {
+            return;
+        };
+
+        reduce(&mut self.state, Action::UpdateApplyStarted);
+
+        let ui_tx = self.ui_tx.clone();
+        let handle = self.rt.handle().clone();
+
+        handle.spawn_blocking(move || {
+            let res = (|| -> Result<(), String> {
+                let source = velopack::sources::HttpSource::new(&base_url);
+                let um =
+                    velopack::UpdateManager::new(source, None, None).map_err(|e| e.to_string())?;
+
+                let (ptx, prx) = std::sync::mpsc::channel::<i16>();
+                {
+                    let ui_tx = ui_tx.clone();
+                    std::thread::spawn(move || {
+                        for p in prx {
+                            let p = (p as i32).clamp(0, 100) as f32 / 100.0;
+                            let _ = ui_tx.blocking_send(UiMsg::UpdateProgress(p));
+                        }
+                    });
+                }
+
+                um.download_updates(&info, Some(ptx))
+                    .map_err(|e| e.to_string())?;
+
+                um.apply_updates_and_restart(&info)
+                    .map_err(|e| e.to_string())?;
+
+                Ok(())
+            })();
+
+            if let Err(e) = res {
+                let _ = ui_tx.blocking_send(UiMsg::UpdateApplyError(e));
+            }
+        });
     }
 
     fn refresh_profiles_from_backend(&mut self) {
@@ -198,6 +301,15 @@ impl eframe::App for FleetUiApp {
                         }
                     }
                 }
+                UiMsg::UpdateChecked(result) => {
+                    reduce(&mut self.state, Action::UpdateCheckFinished { result });
+                }
+                UiMsg::UpdateProgress(p) => {
+                    reduce(&mut self.state, Action::UpdateProgress(p));
+                }
+                UiMsg::UpdateApplyError(e) => {
+                    reduce(&mut self.state, Action::UpdateApplyError(e));
+                }
             }
         }
 
@@ -285,7 +397,13 @@ impl eframe::App for FleetUiApp {
                             return;
                         };
 
-                        if let Some(cmd) = views::settings::draw(ui, &self.kit, settings) {
+                        if let Some(cmd) = views::settings::draw(
+                            ui,
+                            &self.kit,
+                            settings,
+                            &self.state.update,
+                            self.active_sync.is_some(),
+                        ) {
                             use views::settings::SettingsCmd as C;
                             match cmd {
                                 C::Save(tuning) => {
@@ -297,6 +415,8 @@ impl eframe::App for FleetUiApp {
                                 C::ResetToDefaults => {
                                     settings.draft = SyncTuning::default();
                                 }
+                                C::CheckUpdates => self.start_update_check(),
+                                C::ApplyUpdate => self.start_update_apply(),
                             }
                         }
                     }

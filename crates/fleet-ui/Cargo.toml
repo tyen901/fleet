@@ -10,5 +10,7 @@ fleet_app = { path = "../fleet_app" }
 eframe = "0.33.3"
 egui = "0.33.3"
 rfd = "0.15"
+serde_json = "1.0"
+velopack = "0.0.1298"
 
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync"] }

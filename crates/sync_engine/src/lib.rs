@@ -160,7 +160,10 @@ async fn execute_plan(
 
         if in_flight.len() >= file_workers {
             if let Some(res) = in_flight.next().await {
-                let ApplyResult { report: delta, index_mut } = res??;
+                let ApplyResult {
+                    report: delta,
+                    index_mut,
+                } = res??;
                 report.merge(delta);
                 apply_index_mutation(idx, index_mut, &sink);
             }
@@ -168,7 +171,10 @@ async fn execute_plan(
     }
 
     while let Some(res) = in_flight.next().await {
-        let ApplyResult { report: delta, index_mut } = res??;
+        let ApplyResult {
+            report: delta,
+            index_mut,
+        } = res??;
         report.merge(delta);
         apply_index_mutation(idx, index_mut, &sink);
     }
@@ -181,7 +187,9 @@ fn apply_index_mutation(
     muta: Option<IndexMutation>,
     sink: &Arc<dyn EventSink>,
 ) {
-    let Some(m) = muta else { return; };
+    let Some(m) = muta else {
+        return;
+    };
     match m {
         IndexMutation::Upsert {
             abs_path,
@@ -280,35 +288,22 @@ async fn apply_one(
 
             let (delta, index_mut) = if manifest.strategy.is_patch() && supports_ranges {
                 apply_patch(
-                    &request,
-                    &tuning,
-                    &sink,
-                    &range_sem,
-                    &mod_id,
-                    &rel_path,
-                    &abs_path,
-                    &stage,
-                    &manifest,
-                    &transfer,
+                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
+                    &manifest, &transfer,
                 )
                 .await?
             } else {
                 apply_full(
-                    &request,
-                    &tuning,
-                    &sink,
-                    &range_sem,
-                    &mod_id,
-                    &rel_path,
-                    &abs_path,
-                    &stage,
-                    &manifest,
-                    &transfer,
+                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
+                    &manifest, &transfer,
                 )
                 .await?
             };
 
-            Ok(ApplyResult { report: delta, index_mut })
+            Ok(ApplyResult {
+                report: delta,
+                index_mut,
+            })
         }
     }
 }
@@ -341,7 +336,12 @@ async fn apply_full(
         transfer.add(chunk.len() as u64, sink);
 
         if tuning.emit_progress {
-            sink.push(types::progress_event(mod_id, rel_path, written, manifest.size));
+            sink.push(types::progress_event(
+                mod_id,
+                rel_path,
+                written,
+                manifest.size,
+            ));
         }
     }
 
@@ -432,7 +432,9 @@ async fn apply_patch(
                 .open(&stage_path)
                 .await?;
 
-            stage_file.seek(std::io::SeekFrom::Start(part.offset)).await?;
+            stage_file
+                .seek(std::io::SeekFrom::Start(part.offset))
+                .await?;
 
             let mut remaining = part.len;
             while remaining > 0 {

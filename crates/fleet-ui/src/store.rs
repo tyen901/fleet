@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use fleet_app::events::SyncEvent;
 use fleet_app::{ProfileSpec, ProfileUpdate, SyncTuning};
+use velopack::{UpdateCheck, UpdateInfo};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditorRoute {
@@ -23,6 +24,27 @@ pub struct TaskState {
     pub progress: Option<f32>, // None = indeterminate
     pub active: bool,
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateState {
+    pub busy: bool,
+    pub progress: Option<f32>, // 0..1
+    pub status: String,
+    pub last_error: Option<String>,
+    pub available: Option<UpdateInfo>,
+}
+
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self {
+            busy: false,
+            progress: None,
+            status: "Not checked".into(),
+            last_error: None,
+            available: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -136,6 +158,9 @@ pub struct AppState {
 
     // Expose tuning in state (kept default/simple; can be extended later)
     pub tuning: SyncTuning,
+
+    // Update UI state (Velopack)
+    pub update: UpdateState,
 }
 
 impl Default for AppState {
@@ -155,6 +180,7 @@ impl Default for AppState {
             warning: None,
             ui_error: None,
             tuning: SyncTuning::default(),
+            update: UpdateState::default(),
         }
     }
 }
@@ -190,6 +216,14 @@ pub enum Action {
         ok: bool,
         message: Option<String>,
     },
+
+    UpdateCheckStarted,
+    UpdateCheckFinished {
+        result: Result<UpdateCheck, String>,
+    },
+    UpdateApplyStarted,
+    UpdateProgress(f32),
+    UpdateApplyError(String),
 }
 
 pub fn reduce(state: &mut AppState, action: Action) {
@@ -407,6 +441,54 @@ pub fn reduce(state: &mut AppState, action: Action) {
             }
             state.download_summary.speed_bps = 0.0;
             state.download_summary.eta_s = None;
+        }
+
+        Action::UpdateCheckStarted => {
+            state.update.busy = true;
+            state.update.progress = None;
+            state.update.last_error = None;
+            state.update.available = None;
+            state.update.status = "Checking…".into();
+        }
+
+        Action::UpdateCheckFinished { result } => {
+            state.update.busy = false;
+            state.update.progress = None;
+
+            match result {
+                Err(e) => {
+                    state.update.last_error = Some(e);
+                    state.update.available = None;
+                    state.update.status = "Check failed".into();
+                }
+                Ok(UpdateCheck::RemoteIsEmpty | UpdateCheck::NoUpdateAvailable) => {
+                    state.update.last_error = None;
+                    state.update.available = None;
+                    state.update.status = "No update available".into();
+                }
+                Ok(UpdateCheck::UpdateAvailable(info)) => {
+                    state.update.last_error = None;
+                    state.update.available = Some(info);
+                    state.update.status = "Update available".into();
+                }
+            }
+        }
+
+        Action::UpdateApplyStarted => {
+            state.update.busy = true;
+            state.update.progress = None;
+            state.update.last_error = None;
+            state.update.status = "Downloading…".into();
+        }
+
+        Action::UpdateProgress(p) => {
+            state.update.progress = Some(p.clamp(0.0, 1.0));
+        }
+
+        Action::UpdateApplyError(e) => {
+            state.update.busy = false;
+            state.update.last_error = Some(e);
+            state.update.status = "Update failed".into();
         }
     }
 }

@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+mod update;
+
 #[derive(Parser, Debug)]
 #[command(name = "fleet", version, about = "Fleet CLI/GUI")]
 struct Args {
@@ -16,6 +18,7 @@ enum Cmd {
     },
     Sync(SyncArgs),
     Launch(LaunchArgs),
+    Update(update::UpdateArgs),
     RegistryPath,
 }
 
@@ -105,6 +108,9 @@ struct LaunchArgs {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Must be the first thing to run; it may restart/exit the process for install/update tasks.
+    velopack::VelopackApp::build().run();
+
     let args = Args::parse();
 
     if args.cmd.is_none() {
@@ -267,6 +273,9 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 return Err("launch requires --profile or --path".into());
             }
+        }
+        Cmd::Update(ua) => {
+            update::run(&ua)?;
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::{store::SettingsState, ui_kit::UiKit, widgets};
+use crate::{store, store::SettingsState, ui_kit::UiKit, update, widgets};
 use eframe::egui;
 use fleet_app::SyncTuning;
 
@@ -6,9 +6,17 @@ pub enum SettingsCmd {
     Save(SyncTuning),
     Cancel,
     ResetToDefaults,
+    CheckUpdates,
+    ApplyUpdate,
 }
 
-pub fn draw(ui: &mut egui::Ui, kit: &UiKit, s: &mut SettingsState) -> Option<SettingsCmd> {
+pub fn draw(
+    ui: &mut egui::Ui,
+    kit: &UiKit,
+    s: &mut SettingsState,
+    upd: &store::UpdateState,
+    sync_active: bool,
+) -> Option<SettingsCmd> {
     let mut cmd = None;
     let dirty = s.is_dirty();
 
@@ -91,6 +99,98 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, s: &mut SettingsState) -> Option<Set
                     kit,
                     "These settings are in-memory and affect future Sync runs.",
                 ));
+            });
+
+            ui.add_space(kit.layout.gap);
+            ui.add(widgets::Divider::new(kit));
+            ui.add_space(kit.theme.spacing.sm);
+
+            section(ui, kit, "Updates", |ui| {
+                let base_url = update::update_base_url();
+                if base_url.is_none() {
+                    ui.add(widgets::InlineHint::new(
+                        kit,
+                        "Updates are not configured in this build. Set FLEET_UPDATE_URL at build-time (recommended) or runtime.",
+                    ));
+                } else {
+                    ui.add(widgets::InlineHint::new(
+                        kit,
+                        "Update feed is configured. This checks GitHub Releases (or any HTTP feed) for a newer version.",
+                    ));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+                    let can_interact = !upd.busy && !sync_active && base_url.is_some();
+
+                    if ui
+                        .add(
+                            widgets::AppButton::new(kit, "Check for updates")
+                                .ghost()
+                                .enabled(can_interact),
+                        )
+                        .clicked()
+                    {
+                        cmd = Some(SettingsCmd::CheckUpdates);
+                    }
+
+                    let can_apply = can_interact && upd.available.is_some();
+                    if ui
+                        .add(
+                            widgets::AppButton::new(kit, "Update now")
+                                .primary()
+                                .enabled(can_apply),
+                        )
+                        .clicked()
+                    {
+                        cmd = Some(SettingsCmd::ApplyUpdate);
+                    }
+                });
+
+                if sync_active {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::InlineHint::new(
+                        kit,
+                        "Stop any active Sync before updating.",
+                    ));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::InlineHint::new(kit, &format!("Status: {}", upd.status)));
+
+                if upd.busy {
+                    if let Some(p) = upd.progress {
+                        ui.add(egui::ProgressBar::new(p).show_percentage());
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.add(widgets::InlineHint::new(kit, "Working…"));
+                        });
+                    }
+                }
+
+                if let Some(e) = upd.last_error.as_deref() {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::InlineError::new(kit, e));
+                }
+
+                if let Some(info) = upd.available.as_ref() {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::FieldLabel::new(kit, "Available update details"));
+                    let pretty =
+                        serde_json::to_string_pretty(info).unwrap_or_else(|_| format!("{info:?}"));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(pretty)
+                                .monospace()
+                                .size(kit.theme.type_scale.mono),
+                        )
+                        .wrap(),
+                    );
+                }
             });
 
             ui.add_space(kit.layout.gap);

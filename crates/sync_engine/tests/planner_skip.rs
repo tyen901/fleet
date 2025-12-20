@@ -8,7 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sync_engine::events::NoopSink;
 use sync_engine::planner::PlanBuilder;
 use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream};
-use sync_engine::types::{Checksum, Checksummer, FileEntry, FilePart, ModManifest, RepoSpec, SyncTuning};
+use sync_engine::types::{
+    Checksum, Checksummer, FileEntry, FilePart, ModManifest, RepoSpec, SyncTuning,
+};
 
 struct TestChecksummer;
 
@@ -160,7 +162,9 @@ async fn planner_skips_up_to_date_files() -> Result<()> {
     .await?;
 
     assert_eq!(plan.total_bytes, 0);
-    assert!(plan.ops.is_empty(), "expected no transfer ops for up-to-date file");
+    assert!(
+        plan.ops.is_empty(),
+        "expected no transfer ops for up-to-date file"
+    );
     Ok(())
 }
-

@@ -393,7 +393,10 @@ fn find_extraneous_files(mod_root: &Path, expected: &HashSet<PathBuf>) -> Result
     if !mod_root.exists() {
         return Ok(out);
     }
-    for ent in walkdir::WalkDir::new(mod_root).into_iter().filter_map(Result::ok) {
+    for ent in walkdir::WalkDir::new(mod_root)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         let p = ent.path().to_path_buf();
         if ent.file_type().is_file() && !expected.contains(&p) {
             out.push(p);
@@ -401,4 +404,3 @@ fn find_extraneous_files(mod_root: &Path, expected: &HashSet<PathBuf>) -> Result
     }
     Ok(out)
 }
-

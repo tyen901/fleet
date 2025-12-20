@@ -1,122 +1,70 @@
-name: Release
+name: Deploy to GitHub Releases (Velopack)
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build + Package (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: windows
-            os: windows-latest
-            app_id: fleet
-            exe_name: fleet.exe
-          - target: linux
-            os: ubuntu-latest
-            app_id: fleet
-            exe_name: fleet
+  deploy-to-github-releases:
+    runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
-
-      - name: Compute version
-        id: ver
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libfuse2
-
-      - name: Build
-        env:
-          FLEET_VERSION: ${{ steps.ver.outputs.version }}
-        shell: bash
-        run: cargo build -p fleet --release
-
-      - name: Stage package directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf packdir
-          mkdir -p packdir
-          cp "target/release/${{ matrix.exe_name }}" packdir/
-
-      - name: Prepare packaging icon
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            python -m pip install --upgrade --quiet pillow
-            python .github/scripts/make_windows_ico.py assets/icon.png assets/icon.ico
-          fi
-
-      - name: Install .NET 8
+      - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
 
-      - name: Install vpk
+      - name: Compute Version
+        id: ver
         shell: bash
         run: |
-          dotnet tool update -g vpk
+          ref="${GITHUB_REF_NAME}"
+          ver="${ref#v}"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Release)
+        shell: bash
+        env:
+          # Compiled into the binary via option_env!("FLEET_UPDATE_URL")
+          # This is the base URL; Velopack HttpSource fetches {baseUrl}/RELEASES
+          FLEET_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+        run: |
+          cargo build --release -p fleet
+
+      - name: Install Velopack CLI
+        shell: bash
+        run: |
+          dotnet tool install -g vpk
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Velopack pack
+      - name: Download previous releases (for deltas)
         shell: bash
         run: |
-          ICON_ARG="assets/icon.png"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            ICON_ARG="assets/icon.ico"
-          fi
-          vpk pack -u "${{ matrix.app_id }}" -v "${{ steps.ver.outputs.version }}" -p packdir -e "${{ matrix.exe_name }}" -i "$ICON_ARG"
-          rm -f Releases/RELEASES || true
+          vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Normalize asset names
+      - name: Pack release
         shell: bash
         run: |
-          set -euo pipefail
-          python .github/scripts/normalize_releases.py
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-          TARGET: ${{ matrix.target }}
+          vpk pack -u fleet -v ${{ steps.ver.outputs.version }} -p target/release -e fleet.exe
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            Releases/*.nupkg
-            Releases/*.zip
-            Releases/*.exe
-            Releases/*.AppImage
-            Releases/releases.*.json
-            Releases/assets.*.json
-          fail_on_unmatched_files: false
+      - name: Upload release to GitHub
+        shell: bash
+        run: |
+          vpk upload github \
+            --repoUrl https://github.com/${{ github.repository }} \
+            --token ${{ secrets.GITHUB_TOKEN }} \
+            --publish \
+            --releaseName "Fleet ${{ steps.ver.outputs.version }}" \
+            --tag v${{ steps.ver.outputs.version }}
+
