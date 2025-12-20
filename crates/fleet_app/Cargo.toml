@@ -1,0 +1,16 @@
+[package]
+name = "fleet_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+camino = "1.1"
+coordinator = { path = "../coordinator" }
+directories = "5.0"
+open = "5.3"
+percent-encoding = "2.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sync_apply = { path = "../sync_apply" }
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
+walkdir = "2.5"

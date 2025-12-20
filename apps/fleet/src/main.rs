@@ -1,176 +1,262 @@
 use clap::{Parser, Subcommand};
 
-mod arma3;
 mod gui;
-mod registry;
 
 #[derive(Parser, Debug)]
-struct CliArgs {
+#[command(name = "fleet", version, about = "Fleet CLI/GUI")]
+struct Args {
     #[command(subcommand)]
-    command: Option<CliCommand>,
-    #[command(flatten)]
-    sync: SyncArgs,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
-enum CliCommand {
+enum Cmd {
+    Gui,
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
+    Sync(SyncArgs),
     Launch(LaunchArgs),
+    RegistryPath,
 }
 
-#[derive(Parser, Debug, Default, Clone)]
-struct SyncArgs {
-    #[clap(long)]
-    repo_url: String,
-    #[clap(long)]
-    path: std::path::PathBuf,
+#[derive(Subcommand, Debug)]
+enum ProfileCmd {
+    List { #[arg(long)] json: bool },
+    Show { id: Option<String>, #[arg(long)] json: bool },
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        repo_url: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long, default_value_t = true)]
+        select: bool,
+    },
+    Edit {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        repo_url: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        select: bool,
+    },
+    Remove { id: String, #[arg(long)] yes: bool },
+    Select { id: String },
+    Init,
+    Path,
+}
 
-    #[clap(long, default_value_t = 256)]
+#[derive(Parser, Debug, Clone)]
+struct SyncArgs {
+    #[arg(long)]
+    profile: Option<String>,
+    #[arg(long)]
+    repo_url: Option<String>,
+    #[arg(long)]
+    path: Option<std::path::PathBuf>,
+
+    #[arg(long, default_value_t = 256)]
     full_download_part_threshold: usize,
 
-    #[clap(long, default_value_t = 0.60)]
+    #[arg(long, default_value_t = 0.60)]
     full_download_byte_ratio_threshold: f64,
 
-    #[clap(long)]
+    #[arg(long)]
     max_concurrent_files: Option<usize>,
 
-    #[clap(long)]
+    #[arg(long)]
     max_concurrent_range_requests: Option<usize>,
 
-    #[clap(long, default_value_t = 1024 * 1024)]
+    #[arg(long, default_value_t = 1024 * 1024)]
     io_buffer_bytes: usize,
+
+    #[arg(long, default_value_t = true)]
+    use_index: bool,
+
+    #[arg(long)]
+    json_events: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 struct LaunchArgs {
-    #[clap(long)]
+    #[arg(long)]
     profile: Option<String>,
-    #[clap(long)]
+    #[arg(long)]
     path: Option<std::path::PathBuf>,
-    #[clap(long, default_value = "")]
+    #[arg(long, default_value = "")]
     extra_args: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let args = Args::parse();
 
-    if argv.len() == 1 {
+    if args.cmd.is_none() {
         return gui::run_gui();
     }
 
-    if argv.get(1).and_then(|s| s.to_str()) == Some("-cli") {
-        let cli = CliArgs::parse_from(argv.iter().take(1).chain(argv.iter().skip(2)));
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(run_cli(cli));
+    if matches!(args.cmd, Some(Cmd::Gui)) {
+        return gui::run_gui();
     }
 
-    eprintln!("Usage:");
-    eprintln!("  fleet               # launch UI");
-    eprintln!("  fleet -cli [options]# run CLI");
-    eprintln!();
-    eprintln!("Example:");
-    eprintln!("  fleet -cli --repo-url https://example/ --path /tmp/fleet");
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move { run_cli(args).await })?;
+
     Ok(())
 }
 
-async fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
-    match args.command {
-        Some(CliCommand::Launch(launch)) => run_launch(launch).await,
-        None => run_sync(args.sync).await,
-    }
-}
+async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = fleet_app::FleetApp::open_default()?;
 
-async fn run_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use camino::Utf8PathBuf;
-    use tokio::sync::mpsc;
-
-    let repo_url = registry::normalize_repo_url(&args.repo_url);
-    let opts = apply_options_from_args(&args);
-
-    let checkout_root = Utf8PathBuf::from_path_buf(args.path.clone()).map_err(|_| {
-        let err: Box<dyn std::error::Error> = "checkout path must be valid UTF-8".into();
-        err
-    })?;
-
-    let (tx, mut rx) = mpsc::channel::<coordinator::events::Event>(1024);
-
-    let sync_task = tokio::spawn({
-        let checkout_root = checkout_root.clone();
-        let repo_url = repo_url.clone();
-        async move {
-            coordinator::sync_checkout_with_events(
-                &repo_url,
-                &checkout_root,
-                coordinator::SyncOptions {
-                    apply: opts,
-                    ..coordinator::SyncOptions::default()
-                },
-                Some(tx),
-            )
-            .await
+    match args.cmd.unwrap() {
+        Cmd::Gui => {
+            gui::run_gui()?;
         }
-    });
+        Cmd::RegistryPath => {
+            println!("{}", app.registry_path());
+        }
+        Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::List { json } => {
+                let profiles = app.list_profiles();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&profiles)?);
+                } else {
+                    for p in profiles {
+                        println!("{}  {}  {}  {}", p.id, p.name, p.repo_url, p.checkout_root);
+                    }
+                }
+            }
+            ProfileCmd::Show { id, json } => {
+                let profile = if let Some(id) = id {
+                    app.get_profile(&id)
+                } else {
+                    app.selected_profile()
+                };
+                let Some(profile) = profile else {
+                    return Err("no such profile".into());
+                };
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&profile)?);
+                } else {
+                    println!("id: {}", profile.id);
+                    println!("name: {}", profile.name);
+                    println!("repo: {}", profile.repo_url);
+                    println!("path: {}", profile.checkout_root);
+                    println!("last_sync_unix_s: {:?}", profile.last_sync_unix_s);
+                }
+            }
+            ProfileCmd::Add {
+                name,
+                repo_url,
+                path,
+                select,
+            } => {
+                let profile = app.add_profile(&name, &repo_url, &path, select)?;
+                println!("{}", profile.id);
+            }
+            ProfileCmd::Edit {
+                id,
+                name,
+                repo_url,
+                path,
+                select,
+            } => {
+                let update = fleet_app::ProfileUpdate {
+                    name,
+                    repo_url,
+                    checkout_root: path,
+                    select: if select { Some(true) } else { None },
+                    arma3_extra_args: None,
+                };
+                app.update_profile(&id, update)?;
+            }
+            ProfileCmd::Remove { id, yes } => {
+                if !yes {
+                    return Err("refusing to remove without --yes".into());
+                }
+                app.remove_profile(&id)?;
+            }
+            ProfileCmd::Select { id } => {
+                app.select_profile(&id)?;
+            }
+            ProfileCmd::Init => {
+                app.init_registry()?;
+            }
+            ProfileCmd::Path => {
+                println!("{}", app.registry_path());
+            }
+        },
+        Cmd::Sync(sa) => {
+            let tuning = fleet_app::SyncTuning {
+                full_download_part_threshold: sa.full_download_part_threshold,
+                full_download_byte_ratio_threshold: sa.full_download_byte_ratio_threshold,
+                max_concurrent_files: sa.max_concurrent_files,
+                max_concurrent_range_requests: sa.max_concurrent_range_requests,
+                io_buffer_bytes: sa.io_buffer_bytes,
+                use_index: sa.use_index,
+            };
 
-    while let Some(ev) = rx.recv().await {
-        println!("{ev:?}");
-        if matches!(ev, coordinator::events::Event::Finished) {
-            break;
+            let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<coordinator::events::Event>(
+                2048,
+            );
+
+            if sa.repo_url.is_some() ^ sa.path.is_some() {
+                return Err("--repo-url and --path must be provided together".into());
+            }
+
+            let handle = tokio::runtime::Handle::current();
+
+            let mut job = if let (Some(repo_url), Some(path)) = (sa.repo_url.as_deref(), sa.path) {
+                let checkout = camino::Utf8PathBuf::from_path_buf(path)
+                    .map_err(|_| "checkout path must be valid UTF-8")?;
+                app.spawn_sync(repo_url, &checkout, handle.clone(), tuning, None, ev_tx)?
+            } else if let Some(profile_id) = sa.profile {
+                app.select_profile(&profile_id)?;
+                app.spawn_sync_selected(handle.clone(), tuning, ev_tx)?
+            } else {
+                app.spawn_sync_selected(handle.clone(), tuning, ev_tx)?
+            };
+
+            let done_rx = job
+                .take_done_rx()
+                .ok_or("sync job missing completion channel")?;
+
+            while let Some(ev) = ev_rx.recv().await {
+                if sa.json_events {
+                    let v = serde_json::json!({ "debug": format!("{ev:?}") });
+                    println!("{}", serde_json::to_string(&v)?);
+                } else {
+                    println!("{ev:?}");
+                }
+                if matches!(ev, coordinator::events::Event::Finished) {
+                    break;
+                }
+            }
+
+            match done_rx.await? {
+                Ok(()) => {}
+                Err(e) => return Err(Box::<dyn std::error::Error>::from(e.to_string())),
+            }
+        }
+        Cmd::Launch(launch) => {
+            if let Some(path) = launch.path {
+                app.launch_arma3_for_path(&path, &launch.extra_args)?;
+            } else if let Some(profile) = launch.profile {
+                app.launch_arma3_for_profile(&profile, Some(launch.extra_args))?;
+            } else {
+                return Err("launch requires --profile or --path".into());
+            }
         }
     }
 
-    sync_task.await??;
     Ok(())
-}
-
-async fn run_launch(args: LaunchArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let (base_path, extra_args, enabled_mods) = if let Some(path) = args.path {
-        (path, args.extra_args, Vec::new())
-    } else if let Some(profile_id) = args.profile {
-        let reg_path = registry::registry_path()?;
-        let reg = registry::load_registry(&reg_path)?;
-        let profile = reg
-            .profiles
-            .into_iter()
-            .find(|p| p.id == profile_id)
-            .ok_or_else(|| format!("profile not found: {profile_id}"))?;
-
-        let extra = if args.extra_args.is_empty() {
-            profile.arma3.extra_args
-        } else {
-            args.extra_args
-        };
-
-        (
-            std::path::PathBuf::from(profile.checkout_root),
-            extra,
-            profile.arma3.enabled_mods,
-        )
-    } else {
-        return Err("launch requires --profile or --path".into());
-    };
-
-    let url = arma3::build_arma3_steam_url(&base_path, &enabled_mods, &extra_args)?;
-    arma3::launch_arma3_via_steam(url)?;
-    Ok(())
-}
-
-fn apply_options_from_args(args: &SyncArgs) -> sync_apply::ApplyOptions {
-    let mut apply = sync_apply::ApplyOptions {
-        full_download_part_threshold: args.full_download_part_threshold,
-        full_download_byte_ratio_threshold: args.full_download_byte_ratio_threshold.clamp(0.0, 1.0),
-        io_buffer_bytes: args.io_buffer_bytes.max(64 * 1024),
-        ..sync_apply::ApplyOptions::default()
-    };
-
-    if let Some(v) = args.max_concurrent_files {
-        apply.max_concurrent_files = v.max(1);
-    }
-    if let Some(v) = args.max_concurrent_range_requests {
-        apply.max_concurrent_range_requests = v.max(1);
-    }
-
-    apply
 }
 
 #[cfg(test)]
@@ -197,23 +283,19 @@ mod tests {
             "1024",
         ]);
 
-        let apply = apply_options_from_args(&args);
-        assert_eq!(apply.full_download_part_threshold, 32);
-        assert_eq!(apply.full_download_byte_ratio_threshold, 1.0);
-        assert_eq!(apply.max_concurrent_files, 1);
-        assert_eq!(apply.max_concurrent_range_requests, 4);
-        assert_eq!(apply.io_buffer_bytes, 64 * 1024);
-    }
+        let tuning = fleet_app::SyncTuning {
+            full_download_part_threshold: args.full_download_part_threshold,
+            full_download_byte_ratio_threshold: args.full_download_byte_ratio_threshold,
+            max_concurrent_files: args.max_concurrent_files,
+            max_concurrent_range_requests: args.max_concurrent_range_requests,
+            io_buffer_bytes: args.io_buffer_bytes,
+            use_index: true,
+        };
 
-    #[test]
-    fn normalize_repo_url_adds_trailing_slash() {
-        assert_eq!(
-            registry::normalize_repo_url("https://host/path"),
-            "https://host/path/"
-        );
-        assert_eq!(
-            registry::normalize_repo_url("https://host/path/"),
-            "https://host/path/"
-        );
+        assert_eq!(tuning.full_download_part_threshold, 32);
+        assert_eq!(tuning.full_download_byte_ratio_threshold, 1.5);
+        assert_eq!(tuning.max_concurrent_files, Some(0));
+        assert_eq!(tuning.max_concurrent_range_requests, Some(4));
+        assert_eq!(tuning.io_buffer_bytes, 1024);
     }
 }

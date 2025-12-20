@@ -4,16 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
 camino = "1.1"
 coordinator = { path = "../../crates/coordinator" }
-clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
-sync_apply = { path = "../../crates/sync_apply" }
 eframe = "0.33.3"
+fleet_app = { path = "../../crates/fleet_app" }
 rfd = "0.16.0"
-directories = "5.0"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-open = "5.3"
-percent-encoding = "2.3"
-walkdir = "2.5"
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }

@@ -1426,11 +1426,22 @@ dependencies = [
  "camino",
  "clap",
  "coordinator",
- "directories",
  "eframe",
+ "fleet_app",
+ "rfd",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fleet_app"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "coordinator",
+ "directories",
  "open",
  "percent-encoding",
- "rfd",
  "serde",
  "serde_json",
  "sync_apply",

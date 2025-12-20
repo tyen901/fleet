@@ -1,12 +1,9 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
-
-use camino::Utf8PathBuf;
 use coordinator::events::Event;
 use eframe::egui;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{arma3, registry};
+use fleet_app::{AppError, FleetApp, ProfileUpdate, SyncJob, SyncTuning};
 
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     let native_options = eframe::NativeOptions::default();
@@ -16,7 +13,7 @@ pub fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
         native_options,
         Box::new(|cc| {
             let _ = cc;
-            Ok(Box::new(FleetApp::new()))
+            Ok(Box::new(FleetGuiApp::new()))
         }),
     )?;
 
@@ -40,16 +37,15 @@ enum SyncState {
     Cancelled,
 }
 
-pub struct FleetApp {
+pub struct FleetGuiApp {
     rt: tokio::runtime::Runtime,
     ev_rx: Option<mpsc::Receiver<Event>>,
     done_rx: Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>>,
-    task: Option<tokio::task::JoinHandle<()>>,
-    launch_rx: Option<oneshot::Receiver<Result<(), arma3::LaunchError>>>,
+    sync_job: Option<SyncJob>,
+    launch_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     launch_in_flight: bool,
 
-    registry_path: Utf8PathBuf,
-    registry: registry::Registry,
+    app: FleetApp,
     show_add_profile: bool,
     add_name: String,
     add_repo_url: String,
@@ -65,39 +61,24 @@ pub struct FleetApp {
     error_banner: Option<String>,
 }
 
-impl FleetApp {
+impl FleetGuiApp {
     fn new() -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("failed to build tokio runtime");
 
-        let (registry_path, mut error_banner) = match registry::registry_path() {
-            Ok(path) => (path, None),
-            Err(e) => (
-                Utf8PathBuf::from("registry.json"),
-                Some(format!("Failed to resolve registry path: {e}")),
-            ),
-        };
+        let (app, error_banner) = FleetApp::open_default_with_recovery();
 
-        let registry = match registry::load_registry(&registry_path) {
-            Ok(reg) => reg,
-            Err(e) => {
-                error_banner = Some(e.to_string());
-                registry::Registry::default()
-            }
-        };
-
-        let mut app = Self {
+        Self {
             rt,
             ev_rx: None,
             done_rx: None,
-            task: None,
+            sync_job: None,
             launch_rx: None,
             launch_in_flight: false,
 
-            registry_path,
-            registry,
+            app,
             show_add_profile: false,
             add_name: String::new(),
             add_repo_url: String::new(),
@@ -111,13 +92,7 @@ impl FleetApp {
             file_progress: None,
             log: VecDeque::with_capacity(200),
             error_banner,
-        };
-
-        if app.registry.selected_profile.is_none() && !app.registry.profiles.is_empty() {
-            app.registry.selected_profile = app.registry.profiles.first().map(|p| p.id.clone());
         }
-
-        app
     }
 
     fn push_log(&mut self, line: impl Into<String>) {
@@ -126,12 +101,6 @@ impl FleetApp {
             self.log.pop_front();
         }
         self.log.push_back(line.into());
-    }
-
-    fn save_registry(&mut self) {
-        if let Err(e) = registry::save_registry_atomic(&self.registry_path, &self.registry) {
-            self.error_banner = Some(format!("Failed to save registry: {e}"));
-        }
     }
 
     fn pick_folder(&mut self) {
@@ -144,67 +113,45 @@ impl FleetApp {
         matches!(
             self.state,
             SyncState::Idle | SyncState::Failed | SyncState::Succeeded | SyncState::Cancelled
-        ) && self.registry.selected().is_some()
+        ) && self.app.selected_profile().is_some()
     }
 
-    fn start_sync(&mut self, profile: &registry::Profile) {
+    fn start_sync(&mut self) {
         self.error_banner = None;
 
-        let repo_url = registry::normalize_repo_url(&profile.repo_url);
-        let folder_path = PathBuf::from(profile.checkout_root.trim());
-
-        let checkout_root = match Utf8PathBuf::from_path_buf(folder_path) {
-            Ok(p) => p,
-            Err(_) => {
-                self.error_banner = Some("Folder path must be valid UTF-8".to_string());
+        let (ev_tx, ev_rx) = mpsc::channel::<Event>(2048);
+        let tuning = SyncTuning::default();
+        let mut job = match self
+            .app
+            .spawn_sync_selected(self.rt.handle().clone(), tuning, ev_tx)
+        {
+            Ok(job) => job,
+            Err(e) => {
+                self.error_banner = Some(e.to_string());
                 self.state = SyncState::Failed;
                 return;
             }
         };
 
-        if let Err(e) = registry::setup_checkout_root(&checkout_root) {
-            self.error_banner = Some(format!("Failed to create folder: {e}"));
-            self.state = SyncState::Failed;
-            return;
-        }
-
-        let (ev_tx, ev_rx) = mpsc::channel::<Event>(2048);
-        let (done_tx, done_rx) = oneshot::channel::<Result<(), coordinator::CoordinatorError>>();
-        let opts = coordinator::SyncOptions::default();
-
         self.ev_rx = Some(ev_rx);
-        self.done_rx = Some(done_rx);
+        self.done_rx = job.take_done_rx();
         self.repo_name = None;
         self.repo_version = None;
         self.current_mod = None;
         self.file_progress = None;
         self.log.clear();
 
-        self.push_log(format!(
-            "Starting sync... repo={repo_url} folder={checkout_root}"
-        ));
+        self.push_log("Starting sync...");
         self.state = SyncState::Running;
 
-        let handle = self.rt.spawn(async move {
-            let res = coordinator::sync_checkout_with_events(
-                &repo_url,
-                &checkout_root,
-                opts,
-                Some(ev_tx),
-            )
-            .await;
-
-            let _ = done_tx.send(res);
-        });
-
-        self.task = Some(handle);
+        self.sync_job = Some(job);
     }
 
     fn cancel_sync(&mut self) {
-        if let Some(t) = &self.task {
-            t.abort();
+        if let Some(job) = &self.sync_job {
+            job.cancel();
         }
-        self.task = None;
+        self.sync_job = None;
         self.ev_rx = None;
         self.done_rx = None;
         self.state = SyncState::Cancelled;
@@ -221,33 +168,13 @@ impl FleetApp {
             return;
         }
 
-        let normalized_repo = registry::normalize_repo_url(repo_url);
-        let folder_path = PathBuf::from(folder);
-        let checkout_root = match Utf8PathBuf::from_path_buf(folder_path) {
-            Ok(p) => p,
-            Err(_) => {
-                self.error_banner = Some("Folder path must be valid UTF-8".to_string());
-                return;
-            }
-        };
-
-        if let Err(e) = registry::setup_checkout_root(&checkout_root) {
-            self.error_banner = Some(format!("Failed to create folder: {e}"));
+        if let Err(e) = self
+            .app
+            .add_profile(name, repo_url, folder, true)
+        {
+            self.error_banner = Some(e.to_string());
             return;
         }
-
-        let profile = registry::Profile {
-            id: String::new(),
-            name: name.to_string(),
-            repo_url: normalized_repo,
-            checkout_root: checkout_root.to_string(),
-            created_unix_s: unix_now(),
-            last_sync_unix_s: None,
-            arma3: registry::Arma3Config::default(),
-        };
-
-        self.registry.add_profile(profile);
-        self.save_registry();
 
         self.add_name.clear();
         self.add_repo_url.clear();
@@ -257,12 +184,12 @@ impl FleetApp {
     }
 
     fn delete_selected_profile(&mut self) {
-        let Some(id) = self.registry.selected_profile.clone() else {
+        let Some(profile) = self.app.selected_profile() else {
             return;
         };
 
-        if self.registry.remove_profile(&id) {
-            self.save_registry();
+        if let Err(e) = self.app.remove_profile(&profile.id) {
+            self.error_banner = Some(e.to_string());
         }
 
         self.delete_confirm = false;
@@ -354,20 +281,19 @@ impl FleetApp {
             match done.try_recv() {
                 Ok(Ok(())) => {
                     self.state = SyncState::Succeeded;
-                    if let Some(p) = self.registry.selected_mut() {
-                        p.last_sync_unix_s = Some(unix_now());
-                        self.save_registry();
+                    if let Err(e) = self.app.refresh_registry() {
+                        self.error_banner = Some(e.to_string());
                     }
                     self.ev_rx = None;
                     self.done_rx = None;
-                    self.task = None;
+                    self.sync_job = None;
                 }
                 Ok(Err(e)) => {
                     self.error_banner = Some(e.to_string());
                     self.state = SyncState::Failed;
                     self.ev_rx = None;
                     self.done_rx = None;
-                    self.task = None;
+                    self.sync_job = None;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
@@ -375,7 +301,7 @@ impl FleetApp {
                     self.state = SyncState::Failed;
                     self.ev_rx = None;
                     self.done_rx = None;
-                    self.task = None;
+                    self.sync_job = None;
                 }
             }
         }
@@ -410,11 +336,11 @@ impl FleetApp {
     }
 }
 
-impl eframe::App for FleetApp {
+impl eframe::App for FleetGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_async(ctx);
 
-        let selected_id = self.registry.selected_profile.clone();
+        let selected_id = self.app.selected_profile().map(|p| p.id);
 
         egui::SidePanel::left("profiles").show(ctx, |ui| {
             ui.heading("Profiles");
@@ -423,10 +349,9 @@ impl eframe::App for FleetApp {
             let mut select_id = None;
 
             ui.add_space(6.0);
-            for profile in &self.registry.profiles {
-                let selected = self
-                    .registry
-                    .selected_profile
+            let profiles = self.app.list_profiles();
+            for profile in profiles {
+                let selected = selected_id
                     .as_deref()
                     .map(|id| id == profile.id)
                     .unwrap_or(false);
@@ -436,7 +361,7 @@ impl eframe::App for FleetApp {
                     .add_enabled(!running, egui::Button::new(label).selected(selected))
                     .clicked()
                 {
-                    select_id = Some(profile.id.clone());
+                    select_id = Some(profile.id);
                 }
             }
 
@@ -451,7 +376,7 @@ impl eframe::App for FleetApp {
                 ui.checkbox(&mut self.delete_confirm, "Confirm delete");
                 if ui
                     .add_enabled(
-                        !running && self.delete_confirm && self.registry.selected().is_some(),
+                        !running && self.delete_confirm && self.app.selected_profile().is_some(),
                         egui::Button::new("Delete"),
                     )
                     .clicked()
@@ -461,9 +386,11 @@ impl eframe::App for FleetApp {
             });
 
             if let Some(id) = select_id {
-                self.registry.selected_profile = Some(id);
-                self.save_registry();
-                self.delete_confirm = false;
+                if let Err(e) = self.app.select_profile(&id) {
+                    self.error_banner = Some(e.to_string());
+                } else {
+                    self.delete_confirm = false;
+                }
             }
         });
 
@@ -480,12 +407,7 @@ impl eframe::App for FleetApp {
             let running = matches!(self.state, SyncState::Running);
 
             if let Some(profile_id) = &selected_id {
-                let profile = self
-                    .registry
-                    .profiles
-                    .iter()
-                    .find(|p| &p.id == profile_id)
-                    .cloned();
+                let profile = self.app.get_profile(profile_id);
 
                 if let Some(profile) = profile {
                     ui.label(format!("Repo URL: {}", profile.repo_url));
@@ -501,27 +423,31 @@ impl eframe::App for FleetApp {
             }
 
             if let Some(profile_id) = &selected_id {
-                if let Some(profile) = self
-                    .registry
-                    .profiles
-                    .iter_mut()
-                    .find(|p| &p.id == profile_id)
-                {
+                if let Some(profile) = self.app.get_profile(profile_id) {
                     let mut changed = false;
+                    let mut extra_args = profile.arma3.extra_args.clone();
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label("Extra launch args:");
                         let resp = ui.add_enabled(
                             !running && !self.launch_in_flight,
-                            egui::TextEdit::singleline(&mut profile.arma3.extra_args)
-                                .desired_width(280.0),
+                            egui::TextEdit::singleline(&mut extra_args).desired_width(280.0),
                         );
                         if resp.changed() {
                             changed = true;
                         }
                     });
                     if changed {
-                        self.save_registry();
+                        let update = ProfileUpdate {
+                            name: None,
+                            repo_url: None,
+                            checkout_root: None,
+                            select: None,
+                            arma3_extra_args: Some(extra_args),
+                        };
+                        if let Err(e) = self.app.update_profile(profile_id, update) {
+                            self.error_banner = Some(e.to_string());
+                        }
                     }
                 }
             }
@@ -533,10 +459,7 @@ impl eframe::App for FleetApp {
                     .add_enabled(self.can_start(), egui::Button::new("Sync"))
                     .clicked()
                 {
-                    if let Some(profile) = self.registry.selected() {
-                        let profile = profile.clone();
-                        self.start_sync(&profile);
-                    }
+                    self.start_sync();
                 }
 
                 if ui
@@ -548,30 +471,28 @@ impl eframe::App for FleetApp {
 
                 if ui
                     .add_enabled(
-                        !self.launch_in_flight && self.registry.selected().is_some(),
+                        !self.launch_in_flight && self.app.selected_profile().is_some(),
                         egui::Button::new("Launch Arma 3"),
                     )
                     .clicked()
                 {
-                    if let Some(profile) = self.registry.selected().cloned() {
+                    if let Some(profile) = self.app.selected_profile() {
                         self.launch_in_flight = true;
                         self.push_log("Launching Arma 3...");
                         let (tx, rx) = oneshot::channel();
+                        let profile_id = profile.id.clone();
                         let extra = profile.arma3.extra_args.clone();
-                        let base = PathBuf::from(profile.checkout_root.clone());
-                        let enabled_mods = profile.arma3.enabled_mods.clone();
+                        let app = self.app.clone();
                         self.launch_rx = Some(rx);
                         self.rt.spawn(async move {
                             let res = tokio::task::spawn_blocking(move || {
-                                let url =
-                                    arma3::build_arma3_steam_url(&base, &enabled_mods, &extra)?;
-                                arma3::launch_arma3_via_steam(url)
+                                app.launch_arma3_for_profile(&profile_id, Some(extra))
                             })
                             .await;
 
                             let res = match res {
                                 Ok(value) => value,
-                                Err(e) => Err(arma3::LaunchError::Other(format!(
+                                Err(e) => Err(AppError::InvalidInput(format!(
                                     "launch task join failed: {e}"
                                 ))),
                             };
@@ -686,13 +607,4 @@ impl eframe::App for FleetApp {
         }
         self.show_add_profile = show_add;
     }
-}
-
-fn unix_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

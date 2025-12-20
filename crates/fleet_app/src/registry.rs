@@ -67,11 +67,6 @@ impl Registry {
         let id = self.selected_profile.as_deref()?;
         self.profiles.iter().find(|p| p.id == id)
     }
-
-    pub fn selected_mut(&mut self) -> Option<&mut Profile> {
-        let id = self.selected_profile.clone()?;
-        self.profiles.iter_mut().find(|p| p.id == id)
-    }
 }
 
 pub fn registry_path() -> Result<Utf8PathBuf, std::io::Error> {
@@ -106,10 +101,13 @@ pub fn load_registry(path: &Utf8Path) -> Result<Registry, std::io::Error> {
             if reg.schema_version < 2 {
                 reg.schema_version = 2;
             }
+            if reg.selected_profile.is_none() && !reg.profiles.is_empty() {
+                reg.selected_profile = reg.profiles.first().map(|p| p.id.clone());
+            }
             Ok(reg)
         }
         Err(e) => {
-            let backup = path.with_extension(format!("corrupt-{}.json", unix_suffix()));
+            let backup = path.with_extension(format!("corrupt-{}.json", unix_now()));
             let _ = std::fs::rename(path.as_std_path(), backup.as_std_path());
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -126,7 +124,8 @@ pub fn save_registry_atomic(path: &Utf8Path, reg: &Registry) -> Result<(), std::
 
     let tmp = path.with_extension("json.tmp");
 
-    let bytes = serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
 
     {
         let mut f = std::fs::File::create(tmp.as_std_path())?;
@@ -196,14 +195,14 @@ pub fn unique_slug(base: &str, existing: impl Iterator<Item = String>) -> String
         }
     }
 
-    format!("{base}-{}", unix_suffix())
+    format!("{base}-{}", unix_now())
 }
 
-fn unix_suffix() -> u64 {
+pub fn unix_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_secs() as i64
 }

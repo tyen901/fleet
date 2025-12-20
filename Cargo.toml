@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/fleet_app",
   "crates/manifest_types",
   "crates/remote_core",
   "crates/remote_http",
