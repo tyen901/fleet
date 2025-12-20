@@ -10,14 +10,16 @@ pub enum DashboardCmd {
     Edit,
 }
 
-pub fn draw(
-    ui: &mut egui::Ui,
-    kit: &UiKit,
-    profile: &ProfileSpec,
-    task: Option<&store::TaskState>,
-    logs: &VecDeque<store::LogLine>,
-    sync_active: bool,
-) -> Option<DashboardCmd> {
+pub struct DashboardProps<'a> {
+    pub profile: &'a ProfileSpec,
+    pub task: Option<&'a store::TaskState>,
+    pub download_summary: &'a store::DownloadSummary,
+    pub download_rows: &'a [store::DownloadRow],
+    pub logs: &'a VecDeque<store::LogLine>,
+    pub sync_active: bool,
+}
+
+pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option<DashboardCmd> {
     let mut cmd = None;
 
     egui::ScrollArea::vertical()
@@ -33,17 +35,23 @@ pub fn draw(
                     .num_columns(2)
                     .spacing([kit.layout.gap, kit.theme.spacing.sm])
                     .show(ui, |ui| {
-                        kv(ui, kit, "Name", &profile.name);
-                        kv(ui, kit, "ID", &profile.id);
-                        kv(ui, kit, "Repo URL", &profile.repo_url);
-                        kv(ui, kit, "Checkout root", &profile.checkout_root);
+                        kv(ui, kit, "Name", &props.profile.name);
+                        kv(ui, kit, "ID", &props.profile.id);
+                        kv(ui, kit, "Repo URL", &props.profile.repo_url);
+                        kv(ui, kit, "Checkout root", &props.profile.checkout_root);
 
-                        kv(ui, kit, "Created", &fmt_unix_age(profile.created_unix_s));
+                        kv(
+                            ui,
+                            kit,
+                            "Created",
+                            &fmt_unix_age(props.profile.created_unix_s),
+                        );
                         kv(
                             ui,
                             kit,
                             "Last sync",
-                            &profile
+                            &props
+                                .profile
                                 .last_sync_unix_s
                                 .map(fmt_unix_age)
                                 .unwrap_or_else(|| "—".into()),
@@ -54,16 +62,16 @@ pub fn draw(
                 ui.add(widgets::FieldLabel::new(kit, "Arma 3"));
                 ui.add(widgets::InlineHint::new(
                     kit,
-                    if profile.arma3.extra_args.trim().is_empty() {
+                    if props.profile.arma3.extra_args.trim().is_empty() {
                         "Extra args: —"
                     } else {
                         "Extra args:"
                     },
                 ));
-                if !profile.arma3.extra_args.trim().is_empty() {
+                if !props.profile.arma3.extra_args.trim().is_empty() {
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(&profile.arma3.extra_args)
+                            egui::RichText::new(&props.profile.arma3.extra_args)
                                 .size(kit.theme.type_scale.mono)
                                 .monospace(),
                         )
@@ -83,7 +91,7 @@ pub fn draw(
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = kit.layout.gap;
 
-                    let can_start = !sync_active;
+                    let can_start = !props.sync_active;
                     if ui
                         .add(
                             widgets::AppButton::new(kit, "Sync")
@@ -100,7 +108,7 @@ pub fn draw(
                             widgets::AppButton::new(kit, "Cancel")
                                 .ghost()
                                 .min_width(90.0)
-                                .enabled(sync_active),
+                                .enabled(props.sync_active),
                         )
                         .clicked()
                     {
@@ -108,7 +116,7 @@ pub fn draw(
                     }
 
                     if ui
-                        .add(widgets::AppButton::new(kit, "Launch").enabled(!sync_active))
+                        .add(widgets::AppButton::new(kit, "Launch").enabled(!props.sync_active))
                         .clicked()
                     {
                         cmd = Some(DashboardCmd::Launch);
@@ -128,7 +136,7 @@ pub fn draw(
                     );
                 });
 
-                if let Some(t) = task {
+                if let Some(t) = props.task {
                     ui.add_space(kit.theme.spacing.sm);
 
                     if t.active {
@@ -155,9 +163,118 @@ pub fn draw(
                         ui.add(widgets::InlineHint::new(kit, "Idle."));
                     }
                 }
+
+                // Global download progress (derived from per-file progress).
+                if props.sync_active {
+                    ui.add_space(kit.layout.gap);
+                    ui.add(widgets::Divider::new(kit));
+                    ui.add_space(kit.theme.spacing.sm);
+
+                    ui.add(widgets::FieldLabel::new(kit, "Overall download"));
+
+                    if props.download_summary.total_bytes > 0 {
+                        let frac = (props.download_summary.downloaded_bytes as f32
+                            / props.download_summary.total_bytes as f32)
+                            .clamp(0.0, 1.0);
+
+                        ui.add(egui::ProgressBar::new(frac).show_percentage());
+
+                        let speed = fmt_speed(props.download_summary.speed_bps);
+                        let eta = props
+                            .download_summary
+                            .eta_s
+                            .map(fmt_eta)
+                            .unwrap_or_else(|| "ETA —".into());
+
+                        ui.add(widgets::InlineHint::new(
+                            kit,
+                            &format!(
+                                "{} / {} • {} • {} • files: {} active, {} done",
+                                fmt_bytes(props.download_summary.downloaded_bytes),
+                                fmt_bytes(props.download_summary.total_bytes),
+                                speed,
+                                eta,
+                                props.download_summary.active_files,
+                                props.download_summary.done_files
+                            ),
+                        ));
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.add(widgets::InlineHint::new(kit, "Waiting for download data…"));
+                        });
+                    }
+                }
             });
 
             ui.add_space(kit.layout.gap);
+
+            // Per-download progress list.
+            if props.sync_active {
+                widgets::card_frame(kit).show(ui, |ui| {
+                    ui.add(widgets::FieldLabel::new(kit, "Downloads"));
+                    ui.add(widgets::Divider::new(kit));
+                    ui.add_space(kit.theme.spacing.sm);
+
+                    if props.download_rows.is_empty() {
+                        ui.add(widgets::InlineHint::new(kit, "No downloads yet."));
+                        return;
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(240.0)
+                        .show(ui, |ui| {
+                            for row in props.download_rows.iter().take(60) {
+                                ui.push_id(&row.id, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&row.label)
+                                                .size(kit.theme.type_scale.mono)
+                                                .monospace()
+                                                .color(kit.theme.colors.text),
+                                        )
+                                        .truncate(),
+                                    );
+
+                                    if let Some(p) = row.progress {
+                                        ui.add(egui::ProgressBar::new(p).desired_height(10.0));
+                                    } else {
+                                        ui.horizontal(|ui| {
+                                            ui.add(egui::Spinner::new().size(12.0));
+                                            ui.add(widgets::InlineHint::new(kit, "Downloading…"));
+                                        });
+                                    }
+
+                                    let speed = fmt_speed(row.speed_bps);
+                                    let eta =
+                                        row.eta_s.map(fmt_eta).unwrap_or_else(|| "ETA —".into());
+                                    let right = if row.total_bytes > 0 {
+                                        format!(
+                                            "{} / {} • {} • {}",
+                                            fmt_bytes(row.downloaded_bytes),
+                                            fmt_bytes(row.total_bytes),
+                                            speed,
+                                            eta
+                                        )
+                                    } else {
+                                        format!(
+                                            "{} • {} • {}",
+                                            fmt_bytes(row.downloaded_bytes),
+                                            speed,
+                                            eta
+                                        )
+                                    };
+
+                                    ui.add(widgets::InlineHint::new(kit, &right));
+                                    ui.add_space(kit.theme.spacing.sm);
+                                });
+                            }
+                        });
+                });
+
+                ui.add_space(kit.layout.gap);
+            }
 
             // Log card (simple, utilitarian, extremely helpful for flow/debug)
             widgets::card_frame(kit).show(ui, |ui| {
@@ -165,7 +282,7 @@ pub fn draw(
                 ui.add(widgets::Divider::new(kit));
                 ui.add_space(kit.theme.spacing.sm);
 
-                if logs.is_empty() {
+                if props.logs.is_empty() {
                     ui.add(widgets::InlineHint::new(kit, "No events yet."));
                     return;
                 }
@@ -174,7 +291,7 @@ pub fn draw(
                     .auto_shrink([false, false])
                     .max_height(220.0)
                     .show(ui, |ui| {
-                        for line in logs.iter().rev().take(120).rev() {
+                        for line in props.logs.iter().rev().take(120).rev() {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(format!(
@@ -242,4 +359,46 @@ fn store_unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.2} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn fmt_speed(bps: f64) -> String {
+    if bps <= 0.5 {
+        "—".into()
+    } else {
+        format!("{}/s", fmt_bytes(bps.round() as u64))
+    }
+}
+
+fn fmt_eta(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "ETA —".into();
+    }
+
+    let s = secs.round() as u64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let ss = s % 60;
+
+    if h > 0 {
+        format!("ETA {h}:{m:02}:{ss:02}")
+    } else {
+        format!("ETA {m:02}:{ss:02}")
+    }
 }

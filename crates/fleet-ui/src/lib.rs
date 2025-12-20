@@ -52,11 +52,7 @@ impl FleetUiApp {
         let profiles = app.list_profiles();
         let selected = app.selected_profile().map(|p| p.id.clone());
 
-        let mut state = AppState {
-            warning,
-            tuning: SyncTuning::default(),
-            ..Default::default()
-        };
+        let mut state = AppState::new(warning, SyncTuning::default());
 
         // Initial route selection
         if let Some(id) = selected.clone() {
@@ -315,13 +311,19 @@ impl eframe::App for FleetUiApp {
                             return;
                         };
 
+                        let download_rows = store::download_rows(&self.state);
+
                         if let Some(cmd) = views::dashboard::draw(
                             ui,
                             &self.kit,
-                            &p,
-                            self.state.task.as_ref(),
-                            &self.state.logs,
-                            self.active_sync.is_some(),
+                            views::dashboard::DashboardProps {
+                                profile: &p,
+                                task: self.state.task.as_ref(),
+                                download_summary: &self.state.download_summary,
+                                download_rows: &download_rows,
+                                logs: &self.state.logs,
+                                sync_active: self.active_sync.is_some(),
+                            },
                         ) {
                             use views::dashboard::DashboardCmd as C;
                             match cmd {
