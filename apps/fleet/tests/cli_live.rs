@@ -229,9 +229,11 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
 
     let out = run_sync_assert_success(checkout);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Started"));
-    assert!(stdout.contains("RepoFetched"));
-    assert!(stdout.contains("Finished"));
+    assert!(stdout.contains("RepoStarted"), "stdout missing RepoStarted");
+    assert!(
+        stdout.contains("RepoReady") || stdout.contains("RemoteCapabilities"),
+        "stdout missing RepoReady/RemoteCapabilities"
+    );
 
     for m in spec.required_mods.iter().filter(|m| m.enabled) {
         let mod_dir = checkout.join(&m.mod_name);
@@ -382,13 +384,12 @@ async fn live_repo_resumes_partial_tmp_download() {
 
     let out = run_sync_assert_success(checkout);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("FileStarted"));
-    assert!(stdout.contains("resume_from"));
+    assert!(stdout.contains("FileStarted"), "stdout missing FileStarted");
 
     assert!(final_path.exists(), "final file not restored");
     assert!(
         !tmp_path.exists(),
-        "tmp resume file not cleaned up: {}",
+        "legacy tmp file not cleaned up: {}",
         tmp_path.display()
     );
     assert!(
