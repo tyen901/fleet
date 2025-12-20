@@ -323,12 +323,7 @@ impl FleetApp {
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
-                let repo_name = raw_spec.repo_name.clone();
-                let _ = ev_tx
-                    .send(sync_engine::events::SyncEvent::RepoStarted {
-                        repo: format!("{} (v{})", raw_spec.repo_name, raw_spec.version),
-                    })
-                    .await;
+                let repo_name = format!("{} (v{})", raw_spec.repo_name, raw_spec.version);
 
                 let enabled_mods: Vec<String> = raw_spec
                     .required_mods
