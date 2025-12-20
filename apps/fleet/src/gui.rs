@@ -6,7 +6,7 @@ use coordinator::events::Event;
 use eframe::egui;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::registry;
+use crate::{arma3, registry};
 
 pub fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     let native_options = eframe::NativeOptions::default();
@@ -45,6 +45,8 @@ pub struct FleetApp {
     ev_rx: Option<mpsc::Receiver<Event>>,
     done_rx: Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    launch_rx: Option<oneshot::Receiver<Result<(), arma3::LaunchError>>>,
+    launch_in_flight: bool,
 
     registry_path: Utf8PathBuf,
     registry: registry::Registry,
@@ -91,6 +93,8 @@ impl FleetApp {
             ev_rx: None,
             done_rx: None,
             task: None,
+            launch_rx: None,
+            launch_in_flight: false,
 
             registry_path,
             registry,
@@ -239,6 +243,7 @@ impl FleetApp {
             checkout_root: checkout_root.to_string(),
             created_unix_s: unix_now(),
             last_sync_unix_s: None,
+            arma3: registry::Arma3Config::default(),
         };
 
         self.registry.add_profile(profile);
@@ -375,7 +380,31 @@ impl FleetApp {
             }
         }
 
+        if let Some(done) = &mut self.launch_rx {
+            match done.try_recv() {
+                Ok(Ok(())) => {
+                    self.launch_in_flight = false;
+                    self.launch_rx = None;
+                    self.push_log("Launch request sent to Steam.");
+                }
+                Ok(Err(e)) => {
+                    self.launch_in_flight = false;
+                    self.launch_rx = None;
+                    self.error_banner = Some(e.to_string());
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    self.launch_in_flight = false;
+                    self.launch_rx = None;
+                    self.error_banner = Some("Launch task ended unexpectedly.".to_string());
+                }
+            }
+        }
+
         if matches!(self.state, SyncState::Running) {
+            ctx.request_repaint();
+        }
+        if self.launch_in_flight {
             ctx.request_repaint();
         }
     }
@@ -384,6 +413,8 @@ impl FleetApp {
 impl eframe::App for FleetApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_async(ctx);
+
+        let selected_id = self.registry.selected_profile.clone();
 
         egui::SidePanel::left("profiles").show(ctx, |ui| {
             ui.heading("Profiles");
@@ -448,14 +479,51 @@ impl eframe::App for FleetApp {
 
             let running = matches!(self.state, SyncState::Running);
 
-            if let Some(profile) = self.registry.selected() {
-                ui.label(format!("Repo URL: {}", profile.repo_url));
-                ui.label(format!("Folder: {}", profile.checkout_root));
-                if let Some(ts) = profile.last_sync_unix_s {
-                    ui.label(format!("Last synced (unix): {ts}"));
+            if let Some(profile_id) = &selected_id {
+                let profile = self
+                    .registry
+                    .profiles
+                    .iter()
+                    .find(|p| &p.id == profile_id)
+                    .cloned();
+
+                if let Some(profile) = profile {
+                    ui.label(format!("Repo URL: {}", profile.repo_url));
+                    ui.label(format!("Folder: {}", profile.checkout_root));
+                    if let Some(ts) = profile.last_sync_unix_s {
+                        ui.label(format!("Last synced (unix): {ts}"));
+                    }
+                } else {
+                    ui.label("No profile selected.");
                 }
             } else {
                 ui.label("No profile selected.");
+            }
+
+            if let Some(profile_id) = &selected_id {
+                if let Some(profile) = self
+                    .registry
+                    .profiles
+                    .iter_mut()
+                    .find(|p| &p.id == profile_id)
+                {
+                    let mut changed = false;
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Extra launch args:");
+                        let resp = ui.add_enabled(
+                            !running && !self.launch_in_flight,
+                            egui::TextEdit::singleline(&mut profile.arma3.extra_args)
+                                .desired_width(280.0),
+                        );
+                        if resp.changed() {
+                            changed = true;
+                        }
+                    });
+                    if changed {
+                        self.save_registry();
+                    }
+                }
             }
 
             ui.add_space(8.0);
@@ -476,6 +544,41 @@ impl eframe::App for FleetApp {
                     .clicked()
                 {
                     self.cancel_sync();
+                }
+
+                if ui
+                    .add_enabled(
+                        !self.launch_in_flight && self.registry.selected().is_some(),
+                        egui::Button::new("Launch Arma 3"),
+                    )
+                    .clicked()
+                {
+                    if let Some(profile) = self.registry.selected().cloned() {
+                        self.launch_in_flight = true;
+                        self.push_log("Launching Arma 3...");
+                        let (tx, rx) = oneshot::channel();
+                        let extra = profile.arma3.extra_args.clone();
+                        let base = PathBuf::from(profile.checkout_root.clone());
+                        let enabled_mods = profile.arma3.enabled_mods.clone();
+                        self.launch_rx = Some(rx);
+                        self.rt.spawn(async move {
+                            let res = tokio::task::spawn_blocking(move || {
+                                let url =
+                                    arma3::build_arma3_steam_url(&base, &enabled_mods, &extra)?;
+                                arma3::launch_arma3_via_steam(url)
+                            })
+                            .await;
+
+                            let res = match res {
+                                Ok(value) => value,
+                                Err(e) => Err(arma3::LaunchError::Other(format!(
+                                    "launch task join failed: {e}"
+                                ))),
+                            };
+
+                            let _ = tx.send(res);
+                        });
+                    }
                 }
 
                 let status = match &self.state {

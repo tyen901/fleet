@@ -1,10 +1,24 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
+mod arma3;
 mod gui;
 mod registry;
 
 #[derive(Parser, Debug)]
 struct CliArgs {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+    #[command(flatten)]
+    sync: SyncArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum CliCommand {
+    Launch(LaunchArgs),
+}
+
+#[derive(Parser, Debug, Default, Clone)]
+struct SyncArgs {
     #[clap(long)]
     repo_url: String,
     #[clap(long)]
@@ -24,6 +38,16 @@ struct CliArgs {
 
     #[clap(long, default_value_t = 1024 * 1024)]
     io_buffer_bytes: usize,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LaunchArgs {
+    #[clap(long)]
+    profile: Option<String>,
+    #[clap(long)]
+    path: Option<std::path::PathBuf>,
+    #[clap(long, default_value = "")]
+    extra_args: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
+    match args.command {
+        Some(CliCommand::Launch(launch)) => run_launch(launch).await,
+        None => run_sync(args.sync).await,
+    }
+}
+
+async fn run_sync(args: SyncArgs) -> Result<(), Box<dyn std::error::Error>> {
     use camino::Utf8PathBuf;
     use tokio::sync::mpsc;
 
@@ -92,7 +123,39 @@ async fn run_cli(args: CliArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn apply_options_from_args(args: &CliArgs) -> sync_apply::ApplyOptions {
+async fn run_launch(args: LaunchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (base_path, extra_args, enabled_mods) = if let Some(path) = args.path {
+        (path, args.extra_args, Vec::new())
+    } else if let Some(profile_id) = args.profile {
+        let reg_path = registry::registry_path()?;
+        let reg = registry::load_registry(&reg_path)?;
+        let profile = reg
+            .profiles
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .ok_or_else(|| format!("profile not found: {profile_id}"))?;
+
+        let extra = if args.extra_args.is_empty() {
+            profile.arma3.extra_args
+        } else {
+            args.extra_args
+        };
+
+        (
+            std::path::PathBuf::from(profile.checkout_root),
+            extra,
+            profile.arma3.enabled_mods,
+        )
+    } else {
+        return Err("launch requires --profile or --path".into());
+    };
+
+    let url = arma3::build_arma3_steam_url(&base_path, &enabled_mods, &extra_args)?;
+    arma3::launch_arma3_via_steam(url)?;
+    Ok(())
+}
+
+fn apply_options_from_args(args: &SyncArgs) -> sync_apply::ApplyOptions {
     let mut apply = sync_apply::ApplyOptions {
         full_download_part_threshold: args.full_download_part_threshold,
         full_download_byte_ratio_threshold: args.full_download_byte_ratio_threshold.clamp(0.0, 1.0),
@@ -116,7 +179,7 @@ mod tests {
 
     #[test]
     fn args_map_into_apply_options() {
-        let args = CliArgs::parse_from([
+        let args = SyncArgs::parse_from([
             "fleet",
             "--repo-url",
             "https://example.test/",

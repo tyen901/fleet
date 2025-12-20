@@ -20,12 +20,22 @@ pub struct Profile {
     pub checkout_root: String,
     pub created_unix_s: i64,
     pub last_sync_unix_s: Option<i64>,
+    #[serde(default)]
+    pub arma3: Arma3Config,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Arma3Config {
+    #[serde(default)]
+    pub extra_args: String,
+    #[serde(default)]
+    pub enabled_mods: Vec<String>,
 }
 
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             selected_profile: None,
             profiles: Vec::new(),
         }
@@ -93,8 +103,8 @@ pub fn load_registry(path: &Utf8Path) -> Result<Registry, std::io::Error> {
 
     match serde_json::from_str::<Registry>(&s) {
         Ok(mut reg) => {
-            if reg.schema_version == 0 {
-                reg.schema_version = 1;
+            if reg.schema_version < 2 {
+                reg.schema_version = 2;
             }
             Ok(reg)
         }
@@ -116,8 +126,7 @@ pub fn save_registry_atomic(path: &Utf8Path, reg: &Registry) -> Result<(), std::
 
     let tmp = path.with_extension("json.tmp");
 
-    let bytes =
-        serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
 
     {
         let mut f = std::fs::File::create(tmp.as_std_path())?;
