@@ -603,13 +603,20 @@ impl AppDb {
         profile_id: &ProfileId,
         local_path: &str,
     ) -> DbResult<ProfileStatusSnapshot> {
+        let local_path = local_path.trim();
         let std = std::path::Path::new(local_path);
-        let local_path_state = if !std.exists() {
-            LocalPathState::Missing
-        } else if !std.is_dir() {
-            LocalPathState::NotDir
-        } else {
-            LocalPathState::Ok
+
+        let local_path_state = match std::fs::metadata(std) {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    LocalPathState::Ok
+                } else {
+                    LocalPathState::NotDir
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => LocalPathState::Missing,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => LocalPathState::NoAccess,
+            Err(_) => LocalPathState::Missing,
         };
 
         let db_state = if self.has_baseline(profile_id)? {

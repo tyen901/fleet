@@ -80,7 +80,8 @@ impl FleetApplication {
                 id: p.id,
                 name: p.name,
                 repo_url: p.repo_url,
-                local_path: p.local_path,
+                // Normalize persisted paths so filesystem checks aren't tripped by whitespace.
+                local_path: p.local_path.trim().to_string(),
                 last_synced: None,
                 last_scan: None,
             })
@@ -114,9 +115,26 @@ impl FleetApplication {
         };
 
         for p in &self.state.profiles {
-            if let Ok(Some(status)) = self.db.load_status(&p.id) {
-                self.state.status_by_profile.insert(p.id.clone(), status);
-            } else if let Ok(status) = self.db.compute_profile_status(&p.id, &p.local_path) {
+            // Always recompute derived fields (local_path_state/db_state) on startup so we don't
+            // get stuck with stale "Missing" results if the folder was created/mounted after a
+            // previous run.
+            let computed = self
+                .db
+                .compute_profile_status(&p.id, &p.local_path)
+                .ok();
+
+            if let Ok(Some(existing)) = self.db.load_status(&p.id) {
+                if let Some(c) = computed {
+                    let mut merged = existing.clone();
+                    merged.computed_at = c.computed_at;
+                    merged.local_path_state = c.local_path_state;
+                    merged.db_state = c.db_state;
+                    let _ = self.db.save_status(&p.id, &merged);
+                    self.state.status_by_profile.insert(p.id.clone(), merged);
+                } else {
+                    self.state.status_by_profile.insert(p.id.clone(), existing);
+                }
+            } else if let Some(status) = computed {
                 let _ = self.db.save_status(&p.id, &status);
                 self.state.status_by_profile.insert(p.id.clone(), status);
             }
@@ -549,6 +567,10 @@ impl FleetApplication {
     }
     pub fn save_profile(&mut self) -> anyhow::Result<()> {
         if let Some(draft) = self.state.editor_draft.clone() {
+            let mut draft = draft;
+            draft.repo_url = draft.repo_url.trim().to_string();
+            draft.local_path = draft.local_path.trim().to_string();
+
             // Optimistically commit and close draft via reducer
             self.state = reduce(
                 self.state.clone(),
