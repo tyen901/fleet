@@ -10,8 +10,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
-pub use arma3::{build_arma3_steam_url, launch_arma3_via_steam, LaunchError};
-pub use registry::{normalize_repo_url, registry_path, Arma3Config, Profile, Registry};
+pub use arma3::{
+    build_arma3_commandline, build_arma3_steam_url, launch_arma3_via_steam,
+    launch_arma3_via_steam_with_mode, open_folder_in_file_manager, LaunchError,
+};
+pub use registry::{
+    normalize_repo_url, registry_path, Arma3Config, LaunchMode, LaunchSettings, Profile, Registry,
+};
 
 #[derive(Debug)]
 pub enum AppError {
@@ -171,6 +176,40 @@ impl FleetApp {
         }
         registry::save_registry_atomic(&self.path, &Registry::default())?;
         Ok(())
+    }
+
+    pub fn launch_settings(&self) -> LaunchSettings {
+        self.registry.launch.clone()
+    }
+
+    pub fn set_launch_settings(&mut self, settings: LaunchSettings) -> Result<(), AppError> {
+        self.registry.launch = settings;
+        registry::save_registry_atomic(&self.path, &self.registry)?;
+        Ok(())
+    }
+
+    pub fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
+        open_folder_in_file_manager(path, self.registry.launch.mode.clone())?;
+        Ok(())
+    }
+
+    pub fn arma3_launch_args_for_profile(
+        &self,
+        id: &str,
+        extra_args_override: Option<String>,
+    ) -> Result<String, AppError> {
+        let profile = self
+            .registry
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("profile not found: {id}")))?;
+
+        let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
+        let base_path = std::path::PathBuf::from(profile.checkout_root);
+        let s = build_arma3_commandline(&base_path, &profile.arma3.enabled_mods, &extra)?;
+        Ok(s)
     }
 
     pub fn list_profiles(&self) -> Vec<ProfileSpec> {
@@ -395,7 +434,7 @@ impl FleetApp {
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = PathBuf::from(profile.checkout_root);
         let url = build_arma3_steam_url(&base_path, &profile.arma3.enabled_mods, &extra)?;
-        launch_arma3_via_steam(url)?;
+        launch_arma3_via_steam_with_mode(url, self.registry.launch.mode.clone())?;
         Ok(())
     }
 
@@ -405,7 +444,7 @@ impl FleetApp {
         extra_args: &str,
     ) -> Result<(), AppError> {
         let url = build_arma3_steam_url(base_path, &[], extra_args)?;
-        launch_arma3_via_steam(url)?;
+        launch_arma3_via_steam_with_mode(url, self.registry.launch.mode.clone())?;
         Ok(())
     }
 }

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
+use crate::registry::LaunchMode;
+
 #[derive(Debug)]
 pub enum LaunchError {
     NoModsFound(String),
@@ -21,7 +23,7 @@ impl fmt::Display for LaunchError {
                 f,
                 "on Linux/Proton, base path must be inside a 'drive_c' directory (got {base})"
             ),
-            LaunchError::OpenFailed(err) => write!(f, "failed to open steam url: {err}"),
+            LaunchError::OpenFailed(err) => write!(f, "failed to open: {err}"),
             LaunchError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -74,7 +76,9 @@ pub fn convert_host_base_path_to_proton_base_path(
     Ok(Path::new("c:/").join(relative))
 }
 
-pub fn build_arma3_steam_url(
+/// Build the actual Arma 3 command line (what goes inside the steam:// url),
+/// including fully expanded mod folder paths.
+pub fn build_arma3_commandline(
     base_path: &Path,
     enabled_mod_dirs: &[String],
     extra_args: &str,
@@ -105,17 +109,71 @@ pub fn build_arma3_steam_url(
     }
 
     let extra = extra_args.trim();
-    let cmdline = if extra.is_empty() {
-        format!(r#"-noLauncher -mod="{}""#, mod_list)
+    if extra.is_empty() {
+        Ok(format!(r#"-noLauncher -mod="{}""#, mod_list))
     } else {
-        format!(r#"-noLauncher -mod="{}" {}"#, mod_list, extra)
-    };
+        Ok(format!(r#"-noLauncher -mod="{}" {}"#, mod_list, extra))
+    }
+}
 
+pub fn build_arma3_steam_url(
+    base_path: &Path,
+    enabled_mod_dirs: &[String],
+    extra_args: &str,
+) -> Result<String, LaunchError> {
+    let cmdline = build_arma3_commandline(base_path, enabled_mod_dirs, extra_args)?;
     let encoded = utf8_percent_encode(&cmdline, NON_ALPHANUMERIC);
     Ok(format!("steam://run/107410//{encoded}/"))
+}
+
+fn open_target(mode: LaunchMode, target: &str) -> Result<(), LaunchError> {
+    match mode {
+        LaunchMode::SystemDefault => {
+            open::that(target)?;
+            Ok(())
+        }
+
+        LaunchMode::LinuxFlatpakHost => {
+            #[cfg(target_os = "linux")]
+            {
+                use std::process::Command;
+                let st = Command::new("flatpak-spawn")
+                    .args(["--host", "xdg-open", target])
+                    .status()
+                    .map_err(LaunchError::OpenFailed)?;
+
+                if st.success() {
+                    Ok(())
+                } else {
+                    Err(LaunchError::Other(format!(
+                        "flatpak-spawn failed (exit={:?})",
+                        st.code()
+                    )))
+                }
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                open::that(target)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 pub fn launch_arma3_via_steam(steam_url: String) -> Result<(), LaunchError> {
     open::that(steam_url)?;
     Ok(())
+}
+
+pub fn launch_arma3_via_steam_with_mode(
+    steam_url: String,
+    mode: LaunchMode,
+) -> Result<(), LaunchError> {
+    open_target(mode, &steam_url)
+}
+
+pub fn open_folder_in_file_manager(path: &Path, mode: LaunchMode) -> Result<(), LaunchError> {
+    let s = path.to_string_lossy();
+    open_target(mode, &s)
 }

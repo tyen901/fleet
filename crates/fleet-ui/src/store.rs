@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use fleet_app::events::SyncEvent;
-use fleet_app::{ProfileSpec, ProfileUpdate, SyncTuning};
+use fleet_app::{LaunchMode, LaunchSettings, ProfileSpec, ProfileUpdate, SyncTuning};
 use velopack::{UpdateCheck, UpdateInfo};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +161,14 @@ pub struct AppState {
 
     // Update UI state (Velopack)
     pub update: UpdateState,
+
+    // Launch settings (persisted in registry; mirrored here for UI)
+    pub launch: LaunchSettings,
+
+    // Dashboard: cached launch-args preview for the currently viewed profile
+    pub launch_args_profile_id: Option<String>,
+    pub launch_args_preview: Option<String>,
+    pub launch_args_error: Option<String>,
 }
 
 impl Default for AppState {
@@ -181,6 +189,10 @@ impl Default for AppState {
             ui_error: None,
             tuning: SyncTuning::default(),
             update: UpdateState::default(),
+            launch: LaunchSettings::default(),
+            launch_args_profile_id: None,
+            launch_args_preview: None,
+            launch_args_error: None,
         }
     }
 }
@@ -224,6 +236,12 @@ pub enum Action {
     UpdateApplyStarted,
     UpdateProgress(f32),
     UpdateApplyError(String),
+
+    SetLaunchMode(LaunchMode),
+    SetLaunchArgsPreview {
+        profile_id: String,
+        result: Result<String, String>,
+    },
 }
 
 pub fn reduce(state: &mut AppState, action: Action) {
@@ -269,6 +287,14 @@ pub fn reduce(state: &mut AppState, action: Action) {
             };
 
             state.route = r;
+
+            if let Route::Dashboard(id) = &state.route {
+                if state.launch_args_profile_id.as_deref() != Some(id.as_str()) {
+                    state.launch_args_profile_id = Some(id.clone());
+                    state.launch_args_preview = None;
+                    state.launch_args_error = None;
+                }
+            }
         }
 
         Action::RefreshProfiles {
@@ -489,6 +515,24 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.update.busy = false;
             state.update.last_error = Some(e);
             state.update.status = "Update failed".into();
+        }
+
+        Action::SetLaunchMode(mode) => {
+            state.launch.mode = mode;
+        }
+
+        Action::SetLaunchArgsPreview { profile_id, result } => {
+            state.launch_args_profile_id = Some(profile_id);
+            match result {
+                Ok(s) => {
+                    state.launch_args_preview = Some(s);
+                    state.launch_args_error = None;
+                }
+                Err(e) => {
+                    state.launch_args_preview = None;
+                    state.launch_args_error = Some(e);
+                }
+            }
         }
     }
 }

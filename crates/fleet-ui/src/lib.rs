@@ -51,11 +51,13 @@ impl FleetUiApp {
         let (mut app, warning) = FleetApp::open_default_with_recovery();
         // Optional: ensure registry exists (safe if already exists)
         let _ = app.init_registry();
+        let launch = app.launch_settings();
 
         let profiles = app.list_profiles();
         let selected = app.selected_profile().map(|p| p.id.clone());
 
         let mut state = AppState::new(warning, SyncTuning::default());
+        state.launch = launch;
 
         // Initial route selection
         if let Some(id) = selected.clone() {
@@ -403,6 +405,7 @@ impl eframe::App for FleetUiApp {
                             settings,
                             &self.state.update,
                             self.active_sync.is_some(),
+                            self.state.launch.mode.clone(),
                         ) {
                             use views::settings::SettingsCmd as C;
                             match cmd {
@@ -417,6 +420,20 @@ impl eframe::App for FleetUiApp {
                                 }
                                 C::CheckUpdates => self.start_update_check(),
                                 C::ApplyUpdate => self.start_update_apply(),
+                                C::SetLaunchMode(mode) => {
+                                    let mut s = self.app.launch_settings();
+                                    s.mode = mode.clone();
+                                    if let Err(e) = self.app.set_launch_settings(s) {
+                                        reduce(
+                                            &mut self.state,
+                                            Action::SetUiError(format!(
+                                                "Failed to save launch settings: {e}"
+                                            )),
+                                        );
+                                    } else {
+                                        reduce(&mut self.state, Action::SetLaunchMode(mode));
+                                    }
+                                }
                             }
                         }
                     }
@@ -428,6 +445,9 @@ impl eframe::App for FleetUiApp {
                             return;
                         };
 
+                        let preview = self.state.launch_args_preview.as_deref();
+                        let err = self.state.launch_args_error.as_deref();
+
                         if let Some(cmd) = views::dashboard::draw(
                             ui,
                             &self.kit,
@@ -437,6 +457,8 @@ impl eframe::App for FleetUiApp {
                                 download_summary: &self.state.download_summary,
                                 logs: &self.state.logs,
                                 sync_active: self.active_sync.is_some(),
+                                launch_args_preview: preview,
+                                launch_args_error: err,
                             },
                         ) {
                             use views::dashboard::DashboardCmd as C;
@@ -455,6 +477,54 @@ impl eframe::App for FleetUiApp {
                                     &mut self.state,
                                     Action::Navigate(Route::Editor(store::EditorRoute::Edit(p.id))),
                                 ),
+                                C::OpenCheckoutFolder => {
+                                    if let Err(e) =
+                                        self.app.open_folder(std::path::Path::new(&p.checkout_root))
+                                    {
+                                        reduce(
+                                            &mut self.state,
+                                            Action::SetUiError(format!("Open folder failed: {e}")),
+                                        );
+                                    }
+                                }
+                                C::OpenFleetFolder => {
+                                    let path =
+                                        std::path::Path::new(&p.checkout_root).join(".fleet");
+                                    if let Err(e) = self.app.open_folder(&path) {
+                                        reduce(
+                                            &mut self.state,
+                                            Action::SetUiError(format!("Open folder failed: {e}")),
+                                        );
+                                    }
+                                }
+                                C::CopyLaunchArgs => {
+                                    if self.active_sync.is_some() {
+                                        reduce(
+                                            &mut self.state,
+                                            Action::SetUiError(
+                                                "Stop Sync before copying launch args.".into(),
+                                            ),
+                                        );
+                                        return;
+                                    }
+
+                                    let res = self
+                                        .app
+                                        .arma3_launch_args_for_profile(&p.id, None)
+                                        .map_err(|e| e.to_string());
+
+                                    if let Ok(s) = &res {
+                                        ctx.copy_text(s.clone());
+                                    }
+
+                                    reduce(
+                                        &mut self.state,
+                                        Action::SetLaunchArgsPreview {
+                                            profile_id: p.id.clone(),
+                                            result: res,
+                                        },
+                                    );
+                                }
                             }
                         }
                     }

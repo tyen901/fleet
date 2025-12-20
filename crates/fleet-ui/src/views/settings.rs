@@ -1,6 +1,6 @@
 use crate::{store, store::SettingsState, ui_kit::UiKit, update, widgets};
 use eframe::egui;
-use fleet_app::SyncTuning;
+use fleet_app::{LaunchMode, SyncTuning};
 
 pub enum SettingsCmd {
     Save(SyncTuning),
@@ -8,6 +8,7 @@ pub enum SettingsCmd {
     ResetToDefaults,
     CheckUpdates,
     ApplyUpdate,
+    SetLaunchMode(LaunchMode),
 }
 
 pub fn draw(
@@ -16,6 +17,7 @@ pub fn draw(
     s: &mut SettingsState,
     upd: &store::UpdateState,
     sync_active: bool,
+    launch_mode: LaunchMode,
 ) -> Option<SettingsCmd> {
     let mut cmd = None;
     let dirty = s.is_dirty();
@@ -98,6 +100,64 @@ pub fn draw(
                 ui.add(widgets::InlineHint::new(
                     kit,
                     "These settings are in-memory and affect future Sync runs.",
+                ));
+            });
+
+            ui.add_space(kit.layout.gap);
+            ui.add(widgets::Divider::new(kit));
+            ui.add_space(kit.theme.spacing.sm);
+
+            section(ui, kit, "Launch configuration", |ui| {
+                let in_flatpak = std::path::Path::new("/.flatpak-info").exists()
+                    || std::env::var("FLATPAK_ID").is_ok();
+
+                ui.add(widgets::InlineHint::new(
+                    kit,
+                    "Controls how Fleet opens steam:// URLs and folders. Use Flatpak mode only if Steam (or Fleet) is Flatpak-sandboxed.",
+                ));
+
+                if in_flatpak {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::InlineHint::new(
+                        kit,
+                        "Detected Flatpak environment. Flatpak host mode is usually required.",
+                    ));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+
+                let mut selected = launch_mode;
+
+                ui.add(widgets::FieldLabel::new(kit, "Windows / Linux native"));
+                if ui
+                    .radio_value(
+                        &mut selected,
+                        LaunchMode::SystemDefault,
+                        "System default (recommended on Windows and native Linux installs)",
+                    )
+                    .clicked()
+                {
+                    cmd = Some(SettingsCmd::SetLaunchMode(LaunchMode::SystemDefault));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+
+                ui.add(widgets::FieldLabel::new(kit, "Linux Flatpak (Steam)"));
+                if ui
+                    .radio_value(
+                        &mut selected,
+                        LaunchMode::LinuxFlatpakHost,
+                        "Flatpak host open (flatpak-spawn --host xdg-open …)",
+                    )
+                    .clicked()
+                {
+                    cmd = Some(SettingsCmd::SetLaunchMode(LaunchMode::LinuxFlatpakHost));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::InlineHint::new(
+                    kit,
+                    "Note: if Flatpak host mode is selected outside Flatpak, it may fail if flatpak-spawn is unavailable.",
                 ));
             });
 

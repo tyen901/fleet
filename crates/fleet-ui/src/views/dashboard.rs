@@ -8,6 +8,10 @@ pub enum DashboardCmd {
     CancelSync,
     Launch,
     Edit,
+
+    OpenCheckoutFolder,
+    OpenFleetFolder,
+    CopyLaunchArgs,
 }
 
 pub struct DashboardProps<'a> {
@@ -16,6 +20,9 @@ pub struct DashboardProps<'a> {
     pub download_summary: &'a store::DownloadSummary,
     pub logs: &'a VecDeque<store::LogLine>,
     pub sync_active: bool,
+
+    pub launch_args_preview: Option<&'a str>,
+    pub launch_args_error: Option<&'a str>,
 }
 
 pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option<DashboardCmd> {
@@ -59,25 +66,105 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                     });
 
                 ui.add_space(kit.theme.spacing.sm);
-                ui.add(widgets::FieldLabel::new(kit, "Arma 3"));
-                ui.add(widgets::InlineHint::new(
-                    kit,
-                    if props.profile.arma3.extra_args.trim().is_empty() {
-                        "Extra args: —"
-                    } else {
-                        "Extra args:"
-                    },
-                ));
-                if !props.profile.arma3.extra_args.trim().is_empty() {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&props.profile.arma3.extra_args)
-                                .size(kit.theme.type_scale.mono)
-                                .monospace(),
-                        )
-                        .truncate(),
-                    );
-                }
+
+                egui::CollapsingHeader::new("Shortcuts")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(kit.theme.spacing.sm);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+                            if ui
+                                .add(
+                                    widgets::AppButton::new(kit, "Open checkout folder")
+                                        .ghost()
+                                        .min_width(170.0),
+                                )
+                                .clicked()
+                            {
+                                cmd = Some(DashboardCmd::OpenCheckoutFolder);
+                            }
+
+                            if ui
+                                .add(
+                                    widgets::AppButton::new(kit, "Open .fleet")
+                                        .ghost()
+                                        .min_width(110.0),
+                                )
+                                .clicked()
+                            {
+                                cmd = Some(DashboardCmd::OpenFleetFolder);
+                            }
+                        });
+                        ui.add_space(kit.theme.spacing.sm);
+                    });
+
+                ui.add_space(kit.theme.spacing.sm);
+
+                egui::CollapsingHeader::new("Arma 3 extra args")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(kit.theme.spacing.sm);
+                        if props.profile.arma3.extra_args.trim().is_empty() {
+                            ui.add(widgets::InlineHint::new(kit, "—"));
+                        } else {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&props.profile.arma3.extra_args)
+                                        .size(kit.theme.type_scale.mono)
+                                        .monospace(),
+                                )
+                                .wrap(),
+                            );
+                        }
+                        ui.add_space(kit.theme.spacing.sm);
+                    });
+
+                ui.add_space(kit.theme.spacing.sm);
+
+                egui::CollapsingHeader::new("Launch args")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.add_space(kit.theme.spacing.sm);
+
+                        let mut txt = props.launch_args_preview.unwrap_or("").to_string();
+                        let can_copy = !props.sync_active;
+
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+                            let copy_btn_w = 140.0_f32;
+                            let text_w =
+                                (ui.available_width() - copy_btn_w - kit.layout.gap).max(120.0);
+
+                            ui.add_sized(
+                                [text_w, 24.0],
+                                egui::TextEdit::singleline(&mut txt)
+                                    .font(egui::TextStyle::Monospace)
+                                    .interactive(false)
+                                    .hint_text("Click Copy to generate"),
+                            );
+
+                            if ui
+                                .add(
+                                    widgets::AppButton::new(kit, "Copy to clipboard")
+                                        .primary()
+                                        .min_width(copy_btn_w)
+                                        .enabled(can_copy),
+                                )
+                                .clicked()
+                            {
+                                cmd = Some(DashboardCmd::CopyLaunchArgs);
+                            }
+                        });
+
+                        if let Some(e) = props.launch_args_error {
+                            ui.add_space(kit.theme.spacing.sm);
+                            ui.add(widgets::InlineError::new(kit, e));
+                        }
+
+                        ui.add_space(kit.theme.spacing.sm);
+                    });
             });
 
             ui.add_space(kit.layout.gap);

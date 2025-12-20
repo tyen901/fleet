@@ -5,11 +5,44 @@ use camino::{Utf8Path, Utf8PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchMode {
+    /// Default OS handler (Windows ShellExecute / Linux xdg-open)
+    SystemDefault,
+    /// When running inside Flatpak, open via host: `flatpak-spawn --host xdg-open ...`
+    LinuxFlatpakHost,
+}
+
+impl Default for LaunchMode {
+    fn default() -> Self {
+        LaunchMode::SystemDefault
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LaunchSettings {
+    #[serde(default)]
+    pub mode: LaunchMode,
+}
+
+impl Default for LaunchSettings {
+    fn default() -> Self {
+        Self {
+            mode: LaunchMode::SystemDefault,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
     pub schema_version: u32,
     pub selected_profile: Option<String>,
     pub profiles: Vec<Profile>,
+
+    /// Global app settings (launch behavior, etc.)
+    #[serde(default)]
+    pub launch: LaunchSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,9 +68,10 @@ pub struct Arma3Config {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             selected_profile: None,
             profiles: Vec::new(),
+            launch: LaunchSettings::default(),
         }
     }
 }
@@ -98,8 +132,8 @@ pub fn load_registry(path: &Utf8Path) -> Result<Registry, std::io::Error> {
 
     match serde_json::from_str::<Registry>(&s) {
         Ok(mut reg) => {
-            if reg.schema_version < 2 {
-                reg.schema_version = 2;
+            if reg.schema_version < 3 {
+                reg.schema_version = 3;
             }
             if reg.selected_profile.is_none() && !reg.profiles.is_empty() {
                 reg.selected_profile = reg.profiles.first().map(|p| p.id.clone());
