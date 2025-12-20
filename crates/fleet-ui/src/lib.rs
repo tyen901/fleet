@@ -258,7 +258,7 @@ impl eframe::App for FleetUiApp {
                             self.refresh_profiles_from_backend();
                         }
                         components::sidebar::SidebarAction::OpenSettings => {
-                            // Reserved; keep flow simple
+                            reduce(&mut self.state, Action::Navigate(Route::Settings));
                         }
                         components::sidebar::SidebarAction::Refresh => {
                             self.refresh_profiles_from_backend();
@@ -282,6 +282,31 @@ impl eframe::App for FleetUiApp {
 
                 match self.state.route.clone() {
                     Route::Hub => views::hub::draw(ui, &self.kit),
+
+                    Route::Settings => {
+                        let Some(settings) = self.state.settings_editor.as_mut() else {
+                            ui.add(widgets::InlineHint::new(
+                                &self.kit,
+                                "Error: settings state missing.",
+                            ));
+                            return;
+                        };
+
+                        if let Some(cmd) = views::settings::draw(ui, &self.kit, settings) {
+                            use views::settings::SettingsCmd as C;
+                            match cmd {
+                                C::Save(tuning) => {
+                                    reduce(&mut self.state, Action::SaveSettings(tuning));
+                                }
+                                C::Cancel => {
+                                    reduce(&mut self.state, Action::CancelSettings);
+                                }
+                                C::ResetToDefaults => {
+                                    settings.draft = SyncTuning::default();
+                                }
+                            }
+                        }
+                    }
 
                     Route::Dashboard(id) => {
                         let Some(p) = self.state.profiles.iter().find(|x| x.id == id).cloned()

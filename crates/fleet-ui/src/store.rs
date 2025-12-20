@@ -12,6 +12,7 @@ pub enum EditorRoute {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Route {
     Hub,
+    Settings,
     Dashboard(String),
     Editor(EditorRoute),
 }
@@ -84,12 +85,33 @@ impl EditorState {
 }
 
 #[derive(Clone, Debug)]
+pub struct SettingsState {
+    pub draft: SyncTuning,
+    pub original: SyncTuning,
+}
+
+impl SettingsState {
+    pub fn is_dirty(&self) -> bool {
+        self.draft.full_download_part_threshold != self.original.full_download_part_threshold
+            || self.draft.full_download_byte_ratio_threshold
+                != self.original.full_download_byte_ratio_threshold
+            || self.draft.max_concurrent_files != self.original.max_concurrent_files
+            || self.draft.max_concurrent_range_requests
+                != self.original.max_concurrent_range_requests
+            || self.draft.io_buffer_bytes != self.original.io_buffer_bytes
+            || self.draft.use_index != self.original.use_index
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct AppState {
     pub profiles: Vec<ProfileSpec>,
     pub route: Route,
+    pub return_route: Route,
 
     pub sidebar_filter: String,
     pub editor: Option<EditorState>,
+    pub settings_editor: Option<SettingsState>,
 
     pub task: Option<TaskState>,
     pub logs: VecDeque<LogLine>,
@@ -109,8 +131,10 @@ impl Default for AppState {
         Self {
             profiles: vec![],
             route: Route::Hub,
+            return_route: Route::Hub,
             sidebar_filter: String::new(),
             editor: None,
+            settings_editor: None,
             task: None,
             logs: VecDeque::new(),
             warning: None,
@@ -129,6 +153,9 @@ pub enum Action {
 
     SetUiError(String),
 
+    SaveSettings(SyncTuning),
+    CancelSettings,
+
     SyncStarted,
     ApplyCoordinatorEvent {
         ev: CoordEvent,
@@ -143,6 +170,8 @@ pub enum Action {
 pub fn reduce(state: &mut AppState, action: Action) {
     match action {
         Action::Navigate(r) => {
+            let prev = state.route.clone();
+
             state.editor = match &r {
                 Route::Editor(EditorRoute::New) => {
                     let draft = ProfileDraft::new_empty();
@@ -169,6 +198,17 @@ pub fn reduce(state: &mut AppState, action: Action) {
                 _ => None,
             };
 
+            state.settings_editor = match &r {
+                Route::Settings => {
+                    state.return_route = prev;
+                    Some(SettingsState {
+                        draft: state.tuning.clone(),
+                        original: state.tuning.clone(),
+                    })
+                }
+                _ => None,
+            };
+
             state.route = r;
         }
 
@@ -187,6 +227,17 @@ pub fn reduce(state: &mut AppState, action: Action) {
         }
 
         Action::SetUiError(msg) => state.ui_error = Some(msg),
+
+        Action::SaveSettings(tuning) => {
+            state.tuning = tuning;
+            state.settings_editor = None;
+            state.route = state.return_route.clone();
+        }
+
+        Action::CancelSettings => {
+            state.settings_editor = None;
+            state.route = state.return_route.clone();
+        }
 
         Action::SyncStarted => {
             state.task = Some(TaskState {
@@ -381,6 +432,7 @@ fn format_coord_event(ev: &CoordEvent) -> String {
 pub fn header_subtitle(state: &AppState) -> String {
     match &state.route {
         Route::Hub => "No profile selected".to_string(),
+        Route::Settings => "Settings".to_string(),
         Route::Dashboard(id) => state
             .profiles
             .iter()
