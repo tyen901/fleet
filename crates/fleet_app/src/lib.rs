@@ -3,8 +3,11 @@ mod registry;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use manifest_types::Md5Digest;
+use relative_path::RelativePathBuf;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,6 +21,7 @@ pub enum AppError {
     NoProfileSelected,
     NotFound(String),
     Coordinator(coordinator::CoordinatorError),
+    SyncEngine(String),
     Launch(LaunchError),
 }
 
@@ -29,6 +33,7 @@ impl fmt::Display for AppError {
             AppError::NoProfileSelected => write!(f, "no profile selected"),
             AppError::NotFound(msg) => write!(f, "{msg}"),
             AppError::Coordinator(err) => write!(f, "{err}"),
+            AppError::SyncEngine(err) => write!(f, "sync error: {err}"),
             AppError::Launch(err) => write!(f, "{err}"),
         }
     }
@@ -112,7 +117,7 @@ impl Default for SyncTuning {
 }
 
 pub struct SyncJob {
-    done_rx: Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>>,
+    done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -121,9 +126,7 @@ impl SyncJob {
         self.handle.abort();
     }
 
-    pub fn take_done_rx(
-        &mut self,
-    ) -> Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>> {
+    pub fn take_done_rx(&mut self) -> Option<oneshot::Receiver<Result<(), AppError>>> {
         self.done_rx.take()
     }
 }
@@ -315,21 +318,78 @@ impl FleetApp {
         let repo_url = normalize_repo_url(repo_url);
         registry::setup_checkout_root(checkout_root)?;
 
-        let apply = apply_options_from_tuning(&tuning);
-        let (done_tx, done_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel::<Result<(), AppError>>();
         let checkout_root_buf = checkout_root.to_owned();
         let path = self.path.clone();
 
         let handle = handle.spawn(async move {
-            let res = coordinator::sync_checkout_with_events(
-                &repo_url,
-                &checkout_root_buf,
-                coordinator::SyncOptions {
-                    apply,
-                    ..coordinator::SyncOptions::default()
-                },
-                Some(ev_tx),
-            )
+            let res: Result<(), AppError> = async {
+                let remote = remote_adapter::HttpRemoteAdapter::new(&repo_url)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let raw_spec = remote
+                    .fetch_raw_repo_spec()
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let _ = ev_tx.send(coordinator::events::Event::Started).await;
+                let _ = ev_tx
+                    .send(coordinator::events::Event::RepoFetched {
+                        repo_name: raw_spec.repo_name.clone(),
+                        version: raw_spec.version.clone(),
+                    })
+                    .await;
+
+                let enabled_mods: Vec<String> = raw_spec
+                    .required_mods
+                    .iter()
+                    .filter(|m| m.enabled)
+                    .map(|m| m.mod_name.clone())
+                    .collect();
+
+                let enabled_checksums: std::collections::HashMap<String, Md5Digest> = raw_spec
+                    .required_mods
+                    .iter()
+                    .filter(|m| m.enabled)
+                    .map(|m| (m.mod_name.clone(), m.checksum))
+                    .collect();
+
+                let engine_tuning = sync_engine::types::SyncTuning {
+                    file_concurrency: tuning
+                        .max_concurrent_files
+                        .unwrap_or(sync_engine::types::SyncTuning::default().file_concurrency),
+                    range_concurrency: tuning.max_concurrent_range_requests.unwrap_or(
+                        sync_engine::types::SyncTuning::default().range_concurrency,
+                    ),
+                    range_buffer_bytes: tuning.io_buffer_bytes as u64,
+                    delete_extraneous: true,
+                    emit_progress: true,
+                    durability: sync_engine::types::Durability::BestEffort,
+                    patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
+                };
+
+                let sink = CoordinatorEventSink {
+                    tx: ev_tx.clone(),
+                    checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                    mod_checksums: enabled_checksums,
+                };
+
+                let request = sync_engine::types::SyncRequest {
+                    repo_name: raw_spec.repo_name,
+                    checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                    enabled_mods,
+                    remote: Arc::new(remote),
+                    checksummer: Arc::new(remote_adapter::Md5Checksummer::default()),
+                    tuning: Some(engine_tuning),
+                };
+
+                let _report = sync_engine::sync(request, Arc::new(sink))
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let _ = ev_tx.send(coordinator::events::Event::Finished).await;
+                Ok(())
+            }
             .await;
 
             if res.is_ok() {
@@ -378,24 +438,91 @@ impl FleetApp {
     }
 }
 
-fn apply_options_from_tuning(tuning: &SyncTuning) -> sync_apply::ApplyOptions {
-    let mut apply = sync_apply::ApplyOptions {
-        full_download_part_threshold: tuning.full_download_part_threshold,
-        full_download_byte_ratio_threshold: tuning
-            .full_download_byte_ratio_threshold
-            .clamp(0.0, 1.0),
-        io_buffer_bytes: tuning.io_buffer_bytes.max(64 * 1024),
-        ..sync_apply::ApplyOptions::default()
-    };
+struct CoordinatorEventSink {
+    tx: mpsc::Sender<coordinator::events::Event>,
+    checkout_root: std::path::PathBuf,
+    mod_checksums: std::collections::HashMap<String, Md5Digest>,
+}
 
-    if let Some(v) = tuning.max_concurrent_files {
-        apply.max_concurrent_files = v.max(1);
-    }
-    if let Some(v) = tuning.max_concurrent_range_requests {
-        apply.max_concurrent_range_requests = v.max(1);
-    }
+impl sync_engine::events::EventSink for CoordinatorEventSink {
+    fn push(&self, ev: sync_engine::events::SyncEvent) {
+        use coordinator::events::Event;
+        use sync_engine::events::SyncEvent;
 
-    apply
+        let mapped = match ev {
+            SyncEvent::RepoStarted { .. } => None, // handled by caller for parity
+            SyncEvent::RemoteCapabilities { .. } => None,
+            SyncEvent::RepoReady { .. } => None,
+
+            SyncEvent::ModStarted { mod_id } => Some(Event::ModChecking { mod_name: mod_id }),
+            SyncEvent::ModFinished { mod_id } => {
+                let checksum = self
+                    .mod_checksums
+                    .get(&mod_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let _ = self.tx.try_send(Event::ModApplied {
+                    mod_name: mod_id.clone(),
+                });
+                Some(Event::ModFinished {
+                    mod_name: mod_id,
+                    checksum,
+                })
+            }
+
+            SyncEvent::DirEnsured { .. } => None,
+            SyncEvent::PathDeleted { path } => {
+                let Some((mod_name, rel_path)) = split_mod_rel(&self.checkout_root, &path) else {
+                    return;
+                };
+                Some(Event::FileDeleted { mod_name, rel_path })
+            }
+
+            SyncEvent::FileStarted {
+                mod_id,
+                path,
+                bytes_total,
+            } => Some(Event::FileStarted {
+                mod_name: mod_id,
+                rel_path: RelativePathBuf::from(path),
+                total_bytes: bytes_total,
+                resume_from: 0,
+            }),
+
+            SyncEvent::FileProgress {
+                mod_id,
+                path,
+                bytes_done,
+                bytes_total,
+            } => Some(Event::FileProgress {
+                mod_name: mod_id,
+                rel_path: RelativePathBuf::from(path),
+                downloaded_bytes: bytes_done,
+                total_bytes: bytes_total,
+            }),
+
+            SyncEvent::FileVerified { mod_id, path } => Some(Event::FileVerified {
+                mod_name: mod_id,
+                rel_path: RelativePathBuf::from(path),
+            }),
+
+            SyncEvent::Warning { .. } => None,
+            SyncEvent::Error { .. } => None,
+        };
+
+        if let Some(ev) = mapped {
+            let _ = self.tx.try_send(ev);
+        }
+    }
+}
+
+fn split_mod_rel(checkout_root: &std::path::Path, abs: &str) -> Option<(String, RelativePathBuf)> {
+    let p = std::path::Path::new(abs);
+    let rel = p.strip_prefix(checkout_root).ok()?;
+    let mut comps = rel.components();
+    let mod_name = comps.next()?.as_os_str().to_string_lossy().to_string();
+    let rest = comps.as_path().to_string_lossy().replace('\\', "/");
+    Some((mod_name, RelativePathBuf::from(rest)))
 }
 
 fn update_last_sync_on_disk(path: &Utf8Path, profile_id: &str) -> Result<(), AppError> {

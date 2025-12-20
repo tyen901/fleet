@@ -40,7 +40,7 @@ enum SyncState {
 pub struct FleetGuiApp {
     rt: tokio::runtime::Runtime,
     ev_rx: Option<mpsc::Receiver<Event>>,
-    done_rx: Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>>,
+    done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     sync_job: Option<SyncJob>,
     launch_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     launch_in_flight: bool,

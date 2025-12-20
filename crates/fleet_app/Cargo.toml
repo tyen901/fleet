@@ -7,10 +7,14 @@ edition = "2021"
 camino = "1.1"
 coordinator = { path = "../coordinator" }
 directories = "5.0"
+manifest_types = { path = "../manifest_types" }
 open = "5.3"
 percent-encoding = "2.3"
+relative-path = "1.9"
+remote_adapter = { path = "../remote_adapter" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sync_apply = { path = "../sync_apply" }
+sync_engine = { path = "../sync_engine" }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
 walkdir = "2.5"

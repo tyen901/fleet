@@ -213,6 +213,10 @@ fn find_extraneous_files(mod_root: &Path, expected: &HashSet<PathBuf>) -> Vec<Pa
         if p.components().any(|c| c.as_os_str() == ".fleet") {
             continue;
         }
+        let file_name = ent.file_name().to_string_lossy();
+        if file_name.starts_with(".fleet_tmp_") || file_name.starts_with(".fleet_stage_") {
+            continue;
+        }
         if ent.file_type().is_file() && !expected.contains(&p) {
             out.push(p);
         }

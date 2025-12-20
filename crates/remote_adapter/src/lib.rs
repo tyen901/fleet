@@ -22,6 +22,11 @@ impl HttpRemoteAdapter {
         })
     }
 
+    pub async fn fetch_raw_repo_spec(&self) -> Result<manifest_types::RepoSpec> {
+        let session = self.session().await?;
+        Ok(session.repo_spec().clone())
+    }
+
     async fn session(&self) -> Result<&remote_http::HttpRemoteSession> {
         self.session
             .get_or_try_init(|| async {
