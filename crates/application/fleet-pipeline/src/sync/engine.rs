@@ -247,7 +247,29 @@ impl DefaultSyncEngine {
         remote_manifest: Option<fleet_core::Manifest>,
         progress_tx: Option<Sender<DownloadEvent>>,
     ) -> Result<SyncResult, SyncError> {
-        if plan.deletes.is_empty() && plan.renames.is_empty() && plan.downloads.is_empty() {
+        if plan.deletes.is_empty()
+            && plan.renames.is_empty()
+            && plan.checks.is_empty()
+            && plan.downloads.is_empty()
+        {
+            // If there's nothing to do but we don't have a baseline yet, we still need to
+            // persist a baseline snapshot. Otherwise the app can get stuck in a state where it
+            // can't run local checks (baseline missing) and also can't "sync" because there are
+            // no changes to execute.
+            let has_baseline = self.db.has_baseline(&req.profile_id).unwrap_or(false);
+            if !has_baseline {
+                let manifest_to_save = if let Some(m) = remote_manifest {
+                    m
+                } else {
+                    self.remote
+                        .fetch_remote(&req.repo_url)
+                        .await
+                        .map_err(|e| SyncError::Remote(format!("{e}")))?
+                        .manifest
+                };
+                self.persist_remote_snapshot(&req.profile_id, &req.local_root, &manifest_to_save)?;
+            }
+
             return Ok(SyncResult {
                 plan,
                 executed: false,
