@@ -214,7 +214,8 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 use_index: sa.use_index,
             };
 
-            let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<coordinator::events::Event>(2048);
+            let (ev_tx, mut ev_rx) =
+                tokio::sync::mpsc::channel::<fleet_app::events::SyncEvent>(2048);
 
             if sa.repo_url.is_some() ^ sa.path.is_some() {
                 return Err("--repo-url and --path must be provided together".into());
@@ -237,21 +238,25 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 .take_done_rx()
                 .ok_or("sync job missing completion channel")?;
 
-            while let Some(ev) = ev_rx.recv().await {
-                if sa.json_events {
-                    let v = serde_json::json!({ "debug": format!("{ev:?}") });
-                    println!("{}", serde_json::to_string(&v)?);
-                } else {
-                    println!("{ev:?}");
+            tokio::pin!(done_rx);
+            loop {
+                tokio::select! {
+                    res = &mut done_rx => {
+                        match res? {
+                            Ok(()) => break,
+                            Err(e) => return Err(Box::<dyn std::error::Error>::from(e.to_string())),
+                        }
+                    }
+                    ev = ev_rx.recv() => {
+                        let Some(ev) = ev else { break; };
+                        if sa.json_events {
+                            let v = serde_json::json!({ "debug": format!("{ev:?}") });
+                            println!("{}", serde_json::to_string(&v)?);
+                        } else {
+                            println!("{ev:?}");
+                        }
+                    }
                 }
-                if matches!(ev, coordinator::events::Event::Finished) {
-                    break;
-                }
-            }
-
-            match done_rx.await? {
-                Ok(()) => {}
-                Err(e) => return Err(Box::<dyn std::error::Error>::from(e.to_string())),
             }
         }
         Cmd::Launch(launch) => {

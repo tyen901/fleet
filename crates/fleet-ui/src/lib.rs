@@ -7,7 +7,7 @@ mod widgets;
 
 use eframe::egui;
 
-use coordinator::events::Event as CoordEvent;
+use fleet_app::events::SyncEvent;
 use fleet_app::{FleetApp, SyncTuning};
 
 use store::{reduce, Action, AppState, Route};
@@ -32,8 +32,8 @@ pub struct FleetUiApp {
 
     // Async runtime + channels for coordinator events and completion notifications
     rt: tokio::runtime::Runtime,
-    coord_tx: tokio::sync::mpsc::Sender<CoordEvent>,
-    coord_rx: tokio::sync::mpsc::Receiver<CoordEvent>,
+    coord_tx: tokio::sync::mpsc::Sender<SyncEvent>,
+    coord_rx: tokio::sync::mpsc::Receiver<SyncEvent>,
     ui_tx: tokio::sync::mpsc::Sender<UiMsg>,
     ui_rx: tokio::sync::mpsc::Receiver<UiMsg>,
 
@@ -73,7 +73,7 @@ impl FleetUiApp {
             .build()
             .expect("tokio runtime");
 
-        let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<CoordEvent>(512);
+        let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<SyncEvent>(512);
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel::<UiMsg>(32);
 
         Self {
@@ -167,10 +167,7 @@ impl eframe::App for FleetUiApp {
         // 1) Drain coordinator events
         let now_s = ctx.input(|i| i.time);
         while let Ok(ev) = self.coord_rx.try_recv() {
-            reduce(
-                &mut self.state,
-                Action::ApplyCoordinatorEvent { ev, ts_s: now_s },
-            );
+            reduce(&mut self.state, Action::ApplySyncEvent { ev, ts_s: now_s });
         }
 
         // 2) Drain UI messages (sync completion)

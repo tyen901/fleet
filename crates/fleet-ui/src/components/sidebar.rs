@@ -66,6 +66,7 @@ pub fn draw(
         let list_h = (ui.available_height() - footer_h).max(0.0);
 
         egui::ScrollArea::vertical()
+            .id_salt("sidebar_profiles_scroll")
             .auto_shrink([false, false])
             .max_height(list_h)
             .show(ui, |ui| {

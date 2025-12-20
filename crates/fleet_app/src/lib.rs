@@ -1,8 +1,10 @@
 mod arma3;
+pub mod events;
 mod registry;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
@@ -17,7 +19,7 @@ pub enum AppError {
     InvalidInput(String),
     NoProfileSelected,
     NotFound(String),
-    Coordinator(coordinator::CoordinatorError),
+    SyncEngine(String),
     Launch(LaunchError),
 }
 
@@ -28,7 +30,7 @@ impl fmt::Display for AppError {
             AppError::InvalidInput(msg) => write!(f, "{msg}"),
             AppError::NoProfileSelected => write!(f, "no profile selected"),
             AppError::NotFound(msg) => write!(f, "{msg}"),
-            AppError::Coordinator(err) => write!(f, "{err}"),
+            AppError::SyncEngine(err) => write!(f, "sync error: {err}"),
             AppError::Launch(err) => write!(f, "{err}"),
         }
     }
@@ -39,12 +41,6 @@ impl std::error::Error for AppError {}
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         AppError::Io(err)
-    }
-}
-
-impl From<coordinator::CoordinatorError> for AppError {
-    fn from(err: coordinator::CoordinatorError) -> Self {
-        AppError::Coordinator(err)
     }
 }
 
@@ -112,7 +108,7 @@ impl Default for SyncTuning {
 }
 
 pub struct SyncJob {
-    done_rx: Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>>,
+    done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -121,9 +117,7 @@ impl SyncJob {
         self.handle.abort();
     }
 
-    pub fn take_done_rx(
-        &mut self,
-    ) -> Option<oneshot::Receiver<Result<(), coordinator::CoordinatorError>>> {
+    pub fn take_done_rx(&mut self) -> Option<oneshot::Receiver<Result<(), AppError>>> {
         self.done_rx.take()
     }
 }
@@ -289,7 +283,7 @@ impl FleetApp {
         &mut self,
         handle: tokio::runtime::Handle,
         tuning: SyncTuning,
-        ev_tx: mpsc::Sender<coordinator::events::Event>,
+        ev_tx: mpsc::Sender<events::SyncEvent>,
     ) -> Result<SyncJob, AppError> {
         let profile = self.selected_profile().ok_or(AppError::NoProfileSelected)?;
         let checkout_root = Utf8PathBuf::from(profile.checkout_root.clone());
@@ -310,26 +304,64 @@ impl FleetApp {
         handle: tokio::runtime::Handle,
         tuning: SyncTuning,
         profile_id_to_update: Option<String>,
-        ev_tx: mpsc::Sender<coordinator::events::Event>,
+        ev_tx: mpsc::Sender<events::SyncEvent>,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
         registry::setup_checkout_root(checkout_root)?;
 
-        let apply = apply_options_from_tuning(&tuning);
-        let (done_tx, done_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel::<Result<(), AppError>>();
         let checkout_root_buf = checkout_root.to_owned();
         let path = self.path.clone();
 
         let handle = handle.spawn(async move {
-            let res = coordinator::sync_checkout_with_events(
-                &repo_url,
-                &checkout_root_buf,
-                coordinator::SyncOptions {
-                    apply,
-                    ..coordinator::SyncOptions::default()
-                },
-                Some(ev_tx),
-            )
+            let res: Result<(), AppError> = async {
+                let remote = remote_adapter::HttpRemoteAdapter::new(&repo_url)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let raw_spec = remote
+                    .fetch_raw_repo_spec()
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let repo_name = format!("{} (v{})", raw_spec.repo_name, raw_spec.version);
+
+                let enabled_mods: Vec<String> = raw_spec
+                    .required_mods
+                    .iter()
+                    .filter(|m| m.enabled)
+                    .map(|m| m.mod_name.clone())
+                    .collect();
+
+                let engine_tuning = sync_engine::types::SyncTuning {
+                    file_concurrency: tuning
+                        .max_concurrent_files
+                        .unwrap_or(sync_engine::types::SyncTuning::default().file_concurrency),
+                    range_concurrency: tuning
+                        .max_concurrent_range_requests
+                        .unwrap_or(sync_engine::types::SyncTuning::default().range_concurrency),
+                    range_buffer_bytes: tuning.io_buffer_bytes as u64,
+                    delete_extraneous: true,
+                    emit_progress: true,
+                    durability: sync_engine::types::Durability::BestEffort,
+                    patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
+                };
+
+                let sink = SyncEventSink { tx: ev_tx.clone() };
+
+                let request = sync_engine::types::SyncRequest {
+                    repo_name,
+                    checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                    enabled_mods,
+                    remote: Arc::new(remote),
+                    checksummer: Arc::new(remote_adapter::Md5Checksummer),
+                    tuning: Some(engine_tuning),
+                };
+
+                let _report = sync_engine::sync(request, Arc::new(sink))
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                Ok(())
+            }
             .await;
 
             if res.is_ok() {
@@ -378,24 +410,14 @@ impl FleetApp {
     }
 }
 
-fn apply_options_from_tuning(tuning: &SyncTuning) -> sync_apply::ApplyOptions {
-    let mut apply = sync_apply::ApplyOptions {
-        full_download_part_threshold: tuning.full_download_part_threshold,
-        full_download_byte_ratio_threshold: tuning
-            .full_download_byte_ratio_threshold
-            .clamp(0.0, 1.0),
-        io_buffer_bytes: tuning.io_buffer_bytes.max(64 * 1024),
-        ..sync_apply::ApplyOptions::default()
-    };
+struct SyncEventSink {
+    tx: mpsc::Sender<events::SyncEvent>,
+}
 
-    if let Some(v) = tuning.max_concurrent_files {
-        apply.max_concurrent_files = v.max(1);
+impl sync_engine::events::EventSink for SyncEventSink {
+    fn push(&self, ev: sync_engine::events::SyncEvent) {
+        let _ = self.tx.try_send(ev);
     }
-    if let Some(v) = tuning.max_concurrent_range_requests {
-        apply.max_concurrent_range_requests = v.max(1);
-    }
-
-    apply
 }
 
 fn update_last_sync_on_disk(path: &Utf8Path, profile_id: &str) -> Result<(), AppError> {

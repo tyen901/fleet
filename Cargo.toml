@@ -5,13 +5,11 @@ members = [
   "crates/manifest_types",
   "crates/remote_core",
   "crates/remote_http",
-  "crates/local_index",
+  "crates/remote_adapter",
   "crates/pbo_parse",
   "crates/manifest_scan",
-  "crates/sync_plan",
-  "crates/sync_apply",
-  "crates/coordinator",
   "crates/fleet-ui",
+  "crates/sync_engine",
   "apps/fleet",
 ]
 

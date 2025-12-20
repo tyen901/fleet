@@ -22,6 +22,7 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
     let mut cmd = None;
 
     egui::ScrollArea::vertical()
+        .id_salt("dashboard_main_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             // Profile card
@@ -218,6 +219,7 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                 }
 
                 egui::ScrollArea::vertical()
+                    .id_salt("dashboard_log_scroll")
                     .auto_shrink([false, false])
                     .max_height(220.0)
                     .show(ui, |ui| {

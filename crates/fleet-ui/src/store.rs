@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use coordinator::events::Event as CoordEvent;
+use fleet_app::events::SyncEvent;
 use fleet_app::{ProfileSpec, ProfileUpdate, SyncTuning};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,8 +182,8 @@ pub enum Action {
     CancelSettings,
 
     SyncStarted,
-    ApplyCoordinatorEvent {
-        ev: CoordEvent,
+    ApplySyncEvent {
+        ev: SyncEvent,
         ts_s: f64,
     },
     SyncFinished {
@@ -277,23 +277,28 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.last_speed_sample_bytes = 0;
         }
 
-        Action::ApplyCoordinatorEvent { ev, ts_s } => {
+        Action::ApplySyncEvent { ev, ts_s } => {
             // Always append a short log line (bounded).
-            let line = format_coord_event(&ev);
+            let line = format_sync_event(&ev);
             push_log(state, ts_s, line);
 
             // Update task display fields (simple, utilitarian).
             match ev {
-                CoordEvent::Started => set_task(state, "Starting", None, true, None),
-                CoordEvent::RepoFetched { repo_name, version } => set_task(
+                SyncEvent::RepoStarted { repo } => {
+                    set_task(state, &format!("Repo: {repo}"), None, true, None)
+                }
+                SyncEvent::RepoReady {
+                    mods_available,
+                    mods_enabled,
+                } => set_task(
                     state,
-                    &format!("Repo {repo_name} v{version}"),
+                    &format!("Repo ready ({mods_enabled}/{mods_available} mods enabled)"),
                     None,
                     true,
                     None,
                 ),
 
-                CoordEvent::TransferPlanned { total_bytes } => {
+                SyncEvent::TransferPlanned { total_bytes } => {
                     state.download_summary.total_bytes = total_bytes;
                     state.download_summary.downloaded_bytes = 0;
                     state.download_summary.speed_bps = 0.0;
@@ -301,7 +306,7 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     state.last_speed_sample_ts_s = Some(ts_s);
                     state.last_speed_sample_bytes = 0;
                 }
-                CoordEvent::TransferProgress {
+                SyncEvent::TransferProgress {
                     transferred_bytes,
                     total_bytes,
                 } => {
@@ -310,87 +315,61 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     recompute_speed_and_eta(state, ts_s);
                 }
 
-                CoordEvent::ModChecking { mod_name } => {
-                    set_task(state, &format!("Checking {mod_name}"), None, true, None)
+                SyncEvent::ModStarted { mod_id } => {
+                    set_task(state, &format!("Mod {mod_id}"), None, true, None)
                 }
-                CoordEvent::ModPlanned {
-                    mod_name,
-                    downloads,
-                    deletes,
-                } => set_task(
-                    state,
-                    &format!("Planned {mod_name} (+{downloads} / -{deletes})"),
-                    None,
-                    true,
-                    None,
-                ),
-                CoordEvent::ModApplied { mod_name } => {
-                    set_task(state, &format!("Applied {mod_name}"), None, true, None)
+                SyncEvent::ModFinished { mod_id } => {
+                    set_task(state, &format!("Finished {mod_id}"), None, true, None)
                 }
 
-                CoordEvent::FileStarted {
-                    mod_name,
-                    rel_path,
-                    total_bytes,
-                    resume_from,
+                SyncEvent::FileStarted {
+                    mod_id,
+                    path,
+                    bytes_total: _,
                 } => {
-                    let frac = if total_bytes == 0 {
+                    set_task(
+                        state,
+                        &format!("Downloading {mod_id}/{path}"),
+                        Some(0.0),
+                        true,
+                        None,
+                    );
+                }
+
+                SyncEvent::FileProgress {
+                    mod_id,
+                    path,
+                    bytes_done,
+                    bytes_total,
+                } => {
+                    let frac = if bytes_total == 0 {
                         None
                     } else {
-                        Some((resume_from as f32 / total_bytes as f32).clamp(0.0, 1.0))
+                        Some((bytes_done as f32 / bytes_total as f32).clamp(0.0, 1.0))
                     };
                     set_task(
                         state,
-                        &format!("Downloading {mod_name}/{}", rel_path.as_str()),
+                        &format!("Downloading {mod_id}/{path}"),
                         frac,
                         true,
                         None,
                     );
                 }
 
-                CoordEvent::FileProgress {
-                    mod_name,
-                    rel_path,
-                    downloaded_bytes,
-                    total_bytes,
-                } => {
-                    let frac = if total_bytes == 0 {
-                        None
-                    } else {
-                        Some((downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0))
-                    };
-                    set_task(
-                        state,
-                        &format!("Downloading {mod_name}/{}", rel_path.as_str()),
-                        frac,
-                        true,
-                        None,
-                    );
+                SyncEvent::FileVerified { mod_id, path } => set_task(
+                    state,
+                    &format!("Verified {mod_id}/{path}"),
+                    None,
+                    true,
+                    None,
+                ),
+
+                SyncEvent::Warning { message } => {
+                    let t = state.task.get_or_insert_with(TaskState::default);
+                    t.last_error = Some(message);
                 }
-
-                CoordEvent::FileVerified { mod_name, rel_path } => set_task(
-                    state,
-                    &format!("Verified {mod_name}/{}", rel_path.as_str()),
-                    None,
-                    true,
-                    None,
-                ),
-
-                CoordEvent::FileDeleted { mod_name, rel_path } => set_task(
-                    state,
-                    &format!("Deleted {mod_name}/{}", rel_path.as_str()),
-                    None,
-                    true,
-                    None,
-                ),
-
-                CoordEvent::Finished => {
-                    // Final success/failure is set by Action::SyncFinished (done channel),
-                    // but this keeps the UI responsive if Finished arrives earlier.
-                    if let Some(t) = &mut state.task {
-                        t.phase = "Finishing".into();
-                        t.progress = Some(1.0);
-                    }
+                SyncEvent::Error { message } => {
+                    set_task(state, "Error", None, false, Some(message));
                 }
 
                 _ => {}
@@ -463,56 +442,41 @@ fn push_log(state: &mut AppState, ts_s: f64, text: String) {
     }
 }
 
-fn format_coord_event(ev: &CoordEvent) -> String {
+fn format_sync_event(ev: &SyncEvent) -> String {
     match ev {
-        CoordEvent::Started => "Started".into(),
-        CoordEvent::RepoFetched { repo_name, version } => {
-            format!("RepoFetched {repo_name} v{version}")
+        SyncEvent::RepoStarted { repo } => format!("RepoStarted {repo}"),
+        SyncEvent::RemoteCapabilities { supports_ranges } => {
+            format!("RemoteCapabilities supports_ranges={supports_ranges}")
         }
-        CoordEvent::TransferPlanned { total_bytes } => {
+        SyncEvent::RepoReady {
+            mods_available,
+            mods_enabled,
+        } => format!("RepoReady enabled={mods_enabled} available={mods_available}"),
+        SyncEvent::TransferPlanned { total_bytes } => {
             format!("TransferPlanned total_bytes={total_bytes}")
         }
-        CoordEvent::TransferProgress {
+        SyncEvent::TransferProgress {
             transferred_bytes,
             total_bytes,
         } => format!("TransferProgress {transferred_bytes}/{total_bytes}"),
-        CoordEvent::ModSkippedClean { mod_name } => format!("ModSkippedClean {mod_name}"),
-        CoordEvent::ModChecking { mod_name } => format!("ModChecking {mod_name}"),
-        CoordEvent::ModAlreadyInSync { mod_name } => format!("ModAlreadyInSync {mod_name}"),
-        CoordEvent::ModPlanned {
-            mod_name,
-            downloads,
-            deletes,
-        } => format!("ModPlanned {mod_name} downloads={downloads} deletes={deletes}"),
-        CoordEvent::ModApplied { mod_name } => format!("ModApplied {mod_name}"),
-        CoordEvent::ModFinished { mod_name, checksum } => {
-            format!("ModFinished {mod_name} checksum={:?}", checksum)
-        }
-        CoordEvent::FileStarted {
-            mod_name,
-            rel_path,
-            total_bytes,
-            resume_from,
-        } => format!(
-            "FileStarted {mod_name}/{} total={total_bytes} resume={resume_from}",
-            rel_path.as_str()
-        ),
-        CoordEvent::FileProgress {
-            mod_name,
-            rel_path,
-            downloaded_bytes,
-            total_bytes,
-        } => format!(
-            "FileProgress {mod_name}/{} {downloaded_bytes}/{total_bytes}",
-            rel_path.as_str()
-        ),
-        CoordEvent::FileVerified { mod_name, rel_path } => {
-            format!("FileVerified {mod_name}/{}", rel_path.as_str())
-        }
-        CoordEvent::FileDeleted { mod_name, rel_path } => {
-            format!("FileDeleted {mod_name}/{}", rel_path.as_str())
-        }
-        CoordEvent::Finished => "Finished".into(),
+        SyncEvent::ModStarted { mod_id } => format!("ModStarted {mod_id}"),
+        SyncEvent::ModFinished { mod_id } => format!("ModFinished {mod_id}"),
+        SyncEvent::DirEnsured { path } => format!("DirEnsured {path}"),
+        SyncEvent::PathDeleted { path } => format!("PathDeleted {path}"),
+        SyncEvent::FileStarted {
+            mod_id,
+            path,
+            bytes_total,
+        } => format!("FileStarted {mod_id}/{path} total={bytes_total}"),
+        SyncEvent::FileProgress {
+            mod_id,
+            path,
+            bytes_done,
+            bytes_total,
+        } => format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}"),
+        SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
+        SyncEvent::Warning { message } => format!("Warning {message}"),
+        SyncEvent::Error { message } => format!("Error {message}"),
     }
 }
 

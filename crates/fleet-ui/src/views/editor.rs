@@ -29,6 +29,7 @@ pub fn draw(
     let is_dirty = editor.is_dirty();
 
     egui::ScrollArea::vertical()
+        .id_salt("editor_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             widgets::card_frame(kit).show(ui, |ui| {

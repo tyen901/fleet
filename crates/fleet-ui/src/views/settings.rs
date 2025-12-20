@@ -13,6 +13,7 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, s: &mut SettingsState) -> Option<Set
     let dirty = s.is_dirty();
 
     egui::ScrollArea::vertical()
+        .id_salt("settings_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add(widgets::FieldLabel::new(kit, "Settings"));
