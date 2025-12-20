@@ -5,6 +5,7 @@ members = [
   "crates/manifest_types",
   "crates/remote_core",
   "crates/remote_http",
+  "crates/remote_adapter",
   "crates/local_index",
   "crates/pbo_parse",
   "crates/manifest_scan",

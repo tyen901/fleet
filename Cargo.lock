@@ -3461,6 +3461,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "remote_adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "futures",
+ "manifest_types",
+ "md-5",
+ "relative-path",
+ "remote_core",
+ "remote_http",
+ "sync_engine",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "remote_core"
 version = "0.1.0"
 dependencies = [
