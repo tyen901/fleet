@@ -2,7 +2,11 @@ use crate::types::{Checksummer, FileTarget};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-pub fn verify_file_target(path: &Path, target: &FileTarget, checksummer: &dyn Checksummer) -> Result<()> {
+pub fn verify_file_target(
+    path: &Path,
+    target: &FileTarget,
+    checksummer: &dyn Checksummer,
+) -> Result<()> {
     let md = std::fs::metadata(path).with_context(|| format!("metadata {}", path.display()))?;
     if !md.is_file() {
         bail!("not a file: {}", path.display());
@@ -19,7 +23,14 @@ pub fn verify_file_target(path: &Path, target: &FileTarget, checksummer: &dyn Ch
     for part in &target.parts {
         let got = checksummer
             .hash_range(path, part.offset, part.len)
-            .with_context(|| format!("hash_range {} @{}+{}", path.display(), part.offset, part.len))?;
+            .with_context(|| {
+                format!(
+                    "hash_range {} @{}+{}",
+                    path.display(),
+                    part.offset,
+                    part.len
+                )
+            })?;
         if got != part.checksum.bytes {
             bail!(
                 "part checksum mismatch: path={} algo={} @{}+{}",

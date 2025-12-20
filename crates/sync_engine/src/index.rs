@@ -28,10 +28,7 @@ impl LocalIndex {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
 
-        let mut idx = Self {
-            conn,
-            writes: 0,
-        };
+        let mut idx = Self { conn, writes: 0 };
         idx.migrate().context("index migrate")?;
         Ok(idx)
     }

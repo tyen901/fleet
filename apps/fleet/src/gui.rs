@@ -1,5 +1,5 @@
-use fleet_app::events::SyncEvent;
 use eframe::egui;
+use fleet_app::events::SyncEvent;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
 
@@ -199,15 +199,13 @@ impl FleetGuiApp {
                 self.repo_version = None;
                 self.push_log(format!("Repo: {repo}"));
             }
-            SyncEvent::RemoteCapabilities { supports_ranges } => self.push_log(format!(
-                "Remote: ranges_supported={supports_ranges}"
-            )),
+            SyncEvent::RemoteCapabilities { supports_ranges } => {
+                self.push_log(format!("Remote: ranges_supported={supports_ranges}"))
+            }
             SyncEvent::RepoReady {
                 mods_available,
                 mods_enabled,
-            } => self.push_log(format!(
-                "Repo ready: {mods_enabled}/{mods_available} mods"
-            )),
+            } => self.push_log(format!("Repo ready: {mods_enabled}/{mods_available} mods")),
 
             SyncEvent::ModStarted { mod_id } => {
                 self.current_mod = Some(mod_id.clone());

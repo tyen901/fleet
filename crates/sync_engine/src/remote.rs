@@ -18,8 +18,13 @@ pub trait RemoteRepo: Send + Sync {
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest>;
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> Result<RemoteStream>;
-    async fn fetch_range(&self, mod_id: &str, rel_path: &str, offset: u64, len: u64)
-        -> Result<RemoteStream>;
+    async fn fetch_range(
+        &self,
+        mod_id: &str,
+        rel_path: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<RemoteStream>;
 }
 
 /// Remote stream interface intentionally avoids tying you to reqwest/hyper.

@@ -4,7 +4,7 @@ use crate::safe_path::{safe_join, validate_rel_path};
 use crate::types::*;
 use anyhow::Result;
 use futures::Stream;
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,14 +18,18 @@ pub struct PlannedOp {
 
 #[derive(Clone, Debug)]
 pub enum OpKind {
-    EnsureDir { abs_path: PathBuf },
+    EnsureDir {
+        abs_path: PathBuf,
+    },
     EnsureFile {
         mod_id: String,
         rel_path: String,
         abs_path: PathBuf,
         manifest: FileTarget,
     },
-    DeletePath { abs_path: PathBuf },
+    DeletePath {
+        abs_path: PathBuf,
+    },
 }
 
 pub type PlannedOpStream = Pin<Box<dyn Stream<Item = PlannedOp> + Send>>;
@@ -117,12 +121,8 @@ impl PlanBuilder {
 
                 expected_paths.insert(abs_path.clone());
 
-                let target = plan_file_target(
-                    &abs_path,
-                    fe,
-                    self.checksummer.as_ref(),
-                    &self.tuning,
-                );
+                let target =
+                    plan_file_target(&abs_path, fe, self.checksummer.as_ref(), &self.tuning);
 
                 ops.push(PlannedOp {
                     mod_id: mod_id.clone(),
@@ -208,7 +208,10 @@ fn verify_part(path: &Path, part: &FilePart, checksummer: &dyn Checksummer) -> R
 
 fn find_extraneous_files(mod_root: &Path, expected: &HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for ent in walkdir::WalkDir::new(mod_root).into_iter().filter_map(Result::ok) {
+    for ent in walkdir::WalkDir::new(mod_root)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         let p = ent.path().to_path_buf();
         if p.components().any(|c| c.as_os_str() == ".fleet") {
             continue;

@@ -38,7 +38,11 @@ pub async fn sync(request: SyncRequest, sink: Arc<dyn EventSink>) -> Result<Sync
         supports_ranges: caps.supports_ranges,
     });
 
-    let repo_spec = request.remote.fetch_repo_spec().await.context("fetch repo spec")?;
+    let repo_spec = request
+        .remote
+        .fetch_repo_spec()
+        .await
+        .context("fetch repo spec")?;
     sink.push(SyncEvent::RepoReady {
         mods_available: repo_spec.mods.len(),
         mods_enabled: request.enabled_mods.len(),
@@ -199,27 +203,13 @@ async fn apply_one(
 
             let (delta, index_update) = if manifest.strategy.is_patch() && supports_ranges {
                 apply_patch(
-                    &request,
-                    &tuning,
-                    &sink,
-                    &range_sem,
-                    &mod_id,
-                    &rel_path,
-                    &abs_path,
-                    &stage,
+                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
                     &manifest,
                 )
                 .await?
             } else {
                 apply_full(
-                    &request,
-                    &tuning,
-                    &sink,
-                    &range_sem,
-                    &mod_id,
-                    &rel_path,
-                    &abs_path,
-                    &stage,
+                    &request, &tuning, &sink, &range_sem, &mod_id, &rel_path, &abs_path, &stage,
                     &manifest,
                 )
                 .await?
@@ -257,7 +247,12 @@ async fn apply_full(
         tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
         written += chunk.len() as u64;
         if tuning.emit_progress {
-            sink.push(types::progress_event(mod_id, rel_path, written, manifest.size));
+            sink.push(types::progress_event(
+                mod_id,
+                rel_path,
+                written,
+                manifest.size,
+            ));
         }
     }
 
@@ -321,7 +316,10 @@ async fn apply_patch(
 
         let mut remaining = part.len;
         while remaining > 0 {
-            let chunk = rs.next_chunk().await?.ok_or_else(|| anyhow::anyhow!("unexpected EOF from remote range stream"))?;
+            let chunk = rs
+                .next_chunk()
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unexpected EOF from remote range stream"))?;
             if chunk.is_empty() {
                 continue;
             }
@@ -331,7 +329,12 @@ async fn apply_patch(
             remaining -= take as u64;
 
             if tuning.emit_progress {
-                sink.push(types::progress_event(mod_id, rel_path, patched_bytes, manifest.size));
+                sink.push(types::progress_event(
+                    mod_id,
+                    rel_path,
+                    patched_bytes,
+                    manifest.size,
+                ));
             }
         }
     }

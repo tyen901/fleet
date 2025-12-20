@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use relative_path::RelativePath;
-use tokio::sync::OnceCell;
 use remote_core::{RemoteRepo as _, RemoteSession as _};
+use tokio::sync::OnceCell;
 
 pub struct HttpRemoteAdapter {
     inner: remote_http::HttpRemoteRepo,
@@ -170,8 +170,8 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
         use md5::Digest;
         use std::io::Read;
 
-        let mut f = std::fs::File::open(path)
-            .with_context(|| format!("open {}", path.display()))?;
+        let mut f =
+            std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
         let mut buf = vec![0u8; 1024 * 1024];
         let mut ctx = md5::Md5::new();
         loop {
@@ -188,8 +188,8 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
         use md5::Digest;
         use std::io::{Read, Seek};
 
-        let mut f = std::fs::File::open(path)
-            .with_context(|| format!("open {}", path.display()))?;
+        let mut f =
+            std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
         f.seek(std::io::SeekFrom::Start(offset))
             .with_context(|| format!("seek {} to {offset}", path.display()))?;
 
@@ -198,9 +198,9 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
         let mut remaining = len;
         while remaining > 0 {
             let want = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..want]).with_context(|| {
-                format!("read {} @{}+{}", path.display(), offset, len)
-            })?;
+            let n = f
+                .read(&mut buf[..want])
+                .with_context(|| format!("read {} @{}+{}", path.display(), offset, len))?;
             if n == 0 {
                 anyhow::bail!("short read {} @{}+{}", path.display(), offset, len);
             }
