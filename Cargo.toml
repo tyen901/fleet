@@ -11,6 +11,7 @@ members = [
   "crates/sync_plan",
   "crates/sync_apply",
   "crates/coordinator",
+  "crates/fleet-ui",
   "apps/fleet",
 ]
 

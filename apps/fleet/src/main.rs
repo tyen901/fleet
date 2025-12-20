@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand};
 
-mod gui;
-
 #[derive(Parser, Debug)]
 #[command(name = "fleet", version, about = "Fleet CLI/GUI")]
 struct Args {
@@ -110,11 +108,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     if args.cmd.is_none() {
-        return gui::run_gui();
+        return run_gui();
     }
 
     if matches!(args.cmd, Some(Cmd::Gui)) {
-        return gui::run_gui();
+        return run_gui();
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -130,7 +128,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     match args.cmd.unwrap() {
         Cmd::Gui => {
-            gui::run_gui()?;
+            run_gui()?;
         }
         Cmd::RegistryPath => {
             println!("{}", app.registry_path());
@@ -268,6 +266,10 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
+    fleet_ui::run().map_err(Box::<dyn std::error::Error>::from)
 }
 
 #[cfg(test)]

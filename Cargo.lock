@@ -1468,10 +1468,9 @@ dependencies = [
  "camino",
  "clap",
  "coordinator",
- "eframe",
+ "fleet-ui",
  "fleet_app",
  "reqwest",
- "rfd",
  "serde",
  "serde_json",
  "sha2",
@@ -1479,6 +1478,18 @@ dependencies = [
  "tokio",
  "urlencoding",
  "walkdir",
+]
+
+[[package]]
+name = "fleet-ui"
+version = "0.1.0"
+dependencies = [
+ "coordinator",
+ "eframe",
+ "egui",
+ "fleet_app",
+ "rfd",
+ "tokio",
 ]
 
 [[package]]
@@ -3514,9 +3525,9 @@ dependencies = [
 
 [[package]]
 name = "rfd"
-version = "0.16.0"
+version = "0.15.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
+checksum = "ef2bee61e6cffa4635c72d7d81a84294e28f0930db0ddcb0f66d10244674ebed"
 dependencies = [
  "ashpd",
  "block2 0.6.2",
@@ -3533,7 +3544,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
