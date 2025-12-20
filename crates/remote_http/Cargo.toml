@@ -12,6 +12,7 @@ remote_core = { path = "../remote_core" }
 relative-path = "1.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde_json = "1.0"
+hex = "0.4"
 url = "2"
 
 [dev-dependencies]

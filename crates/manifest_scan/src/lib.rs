@@ -123,7 +123,6 @@ fn scan_regular_file(path: &Path, base_dir: &Path) -> Result<FileManifest, ScanE
             file_len,
             offset: 0,
             reason: match e {
-                manifest_types::PartValidationError::ZeroLength => "zero-length part",
                 manifest_types::PartValidationError::NotContiguous => "parts are not contiguous",
                 manifest_types::PartValidationError::LengthMismatch => {
                     "parts do not cover file length"
@@ -238,7 +237,6 @@ fn build_pbo_parts(
             file_len,
             offset,
             reason: match e {
-                manifest_types::PartValidationError::ZeroLength => "zero-length part",
                 manifest_types::PartValidationError::NotContiguous => "parts are not contiguous",
                 manifest_types::PartValidationError::LengthMismatch => {
                     "parts do not cover file length"

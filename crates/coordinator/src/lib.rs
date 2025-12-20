@@ -186,7 +186,11 @@ fn build_delete_ops_for_mod(
         let rel_os = abs.strip_prefix(mod_root.as_std_path()).unwrap();
         let rel = rel_os.to_string_lossy().replace('\\', "/");
 
-        if rel.starts_with(".fleet/") || rel.starts_with(".fleet_tmp_") {
+        let file_name = entry.file_name().to_string_lossy();
+        if rel.starts_with(".fleet/")
+            || file_name.starts_with(".fleet_tmp_")
+            || file_name.starts_with(".fleet_stage_")
+        {
             continue;
         }
 

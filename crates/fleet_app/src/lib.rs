@@ -5,8 +5,8 @@ use std::fmt;
 use std::path::PathBuf;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use tokio::sync::{mpsc, oneshot};
 use serde::Serialize;
+use tokio::sync::{mpsc, oneshot};
 
 pub use arma3::{build_arma3_steam_url, launch_arma3_via_steam, LaunchError};
 pub use registry::{normalize_repo_url, registry_path, Arma3Config, Profile, Registry};

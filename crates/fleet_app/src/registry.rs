@@ -124,8 +124,7 @@ pub fn save_registry_atomic(path: &Utf8Path, reg: &Registry) -> Result<(), std::
 
     let tmp = path.with_extension("json.tmp");
 
-    let bytes =
-        serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
 
     {
         let mut f = std::fs::File::create(tmp.as_std_path())?;

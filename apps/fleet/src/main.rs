@@ -23,8 +23,15 @@ enum Cmd {
 
 #[derive(Subcommand, Debug)]
 enum ProfileCmd {
-    List { #[arg(long)] json: bool },
-    Show { id: Option<String>, #[arg(long)] json: bool },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        id: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     Add {
         #[arg(long)]
         name: String,
@@ -46,8 +53,14 @@ enum ProfileCmd {
         #[arg(long)]
         select: bool,
     },
-    Remove { id: String, #[arg(long)] yes: bool },
-    Select { id: String },
+    Remove {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    Select {
+        id: String,
+    },
     Init,
     Path,
 }
@@ -203,9 +216,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 use_index: sa.use_index,
             };
 
-            let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<coordinator::events::Event>(
-                2048,
-            );
+            let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel::<coordinator::events::Event>(2048);
 
             if sa.repo_url.is_some() ^ sa.path.is_some() {
                 return Err("--repo-url and --path must be provided together".into());

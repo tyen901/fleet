@@ -1,6 +1,6 @@
-use std::collections::VecDeque;
 use coordinator::events::Event;
 use eframe::egui;
+use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
 
 use fleet_app::{AppError, FleetApp, ProfileUpdate, SyncJob, SyncTuning};
@@ -168,10 +168,7 @@ impl FleetGuiApp {
             return;
         }
 
-        if let Err(e) = self
-            .app
-            .add_profile(name, repo_url, folder, true)
-        {
+        if let Err(e) = self.app.add_profile(name, repo_url, folder, true) {
             self.error_banner = Some(e.to_string());
             return;
         }

@@ -64,6 +64,44 @@ where
     Ok(RelativePathBuf::from(normalized))
 }
 
+pub fn deserialize_u16_string_or_number<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct V;
+
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = u16;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "u16 or string containing a u16")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u16, E> {
+            u16::try_from(v).map_err(|_| E::custom(format!("port out of range for u16: {v}")))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u16, E> {
+            if v < 0 {
+                return Err(E::custom(format!("port out of range for u16: {v}")));
+            }
+            u16::try_from(v as u64)
+                .map_err(|_| E::custom(format!("port out of range for u16: {v}")))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u16, E> {
+            v.parse::<u16>()
+                .map_err(|e| E::custom(format!("invalid port string {v:?}: {e}")))
+        }
+
+        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<u16, E> {
+            self.visit_str(&v)
+        }
+    }
+
+    deserializer.deserialize_any(V)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoSpec {
@@ -103,6 +141,7 @@ pub struct RepoBasicAuth {
 pub struct RepoServer {
     pub name: String,
     pub address: String,
+    #[serde(deserialize_with = "deserialize_u16_string_or_number")]
     pub port: u16,
     pub password: String,
     pub battle_eye: bool,
@@ -111,26 +150,35 @@ pub struct RepoServer {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModManifest {
+    #[serde(alias = "Name")]
     pub name: String,
+    #[serde(alias = "Checksum")]
     pub checksum: Md5Digest,
+    #[serde(alias = "Files")]
     pub files: Vec<FileManifest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileManifest {
-    #[serde(deserialize_with = "deserialize_relpath")]
+    #[serde(deserialize_with = "deserialize_relpath", alias = "Path")]
     pub path: RelativePathBuf,
+    #[serde(alias = "Length")]
     pub length: u64,
+    #[serde(alias = "Checksum")]
     pub checksum: Md5Digest,
+    #[serde(alias = "Parts")]
     pub parts: Vec<PartManifest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartManifest {
+    #[serde(alias = "Start")]
     pub start: u64,
+    #[serde(alias = "Length")]
     pub length: u64,
+    #[serde(alias = "Checksum")]
     pub checksum: Md5Digest,
 }
 
@@ -157,8 +205,6 @@ pub fn mod_checksum_from_files(files: &[FileManifest]) -> Md5Digest {
 
 #[derive(thiserror::Error, Debug)]
 pub enum PartValidationError {
-    #[error("zero-length part")]
-    ZeroLength,
     #[error("parts are not contiguous")]
     NotContiguous,
     #[error("parts do not cover expected length")]
@@ -177,9 +223,6 @@ pub fn validate_parts(
 
     let mut pos = 0u64;
     for part in &v {
-        if part.length == 0 {
-            return Err(PartValidationError::ZeroLength);
-        }
         if part.start != pos {
             return Err(PartValidationError::NotContiguous);
         }

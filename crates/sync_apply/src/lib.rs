@@ -199,7 +199,6 @@ async fn ensure_file<S: RemoteSession>(
         ApplyError::InvalidPartsLayout {
             path: final_path.to_string(),
             reason: match e {
-                manifest_types::PartValidationError::ZeroLength => "zero-length part",
                 manifest_types::PartValidationError::NotContiguous => "parts are not contiguous",
                 manifest_types::PartValidationError::LengthMismatch => {
                     "parts do not cover expected length"
@@ -355,6 +354,9 @@ async fn detect_mismatched_parts(
     let mut buf = vec![0u8; buf_size.max(64 * 1024)];
 
     for part in parts_sorted {
+        if part.length == 0 {
+            continue;
+        }
         let end = part.start.saturating_add(part.length);
         if end > local_len {
             mismatched_bytes += part.length;
@@ -423,6 +425,9 @@ async fn patch_ranges_to_atomic<S: RemoteSession>(
         FuturesUnordered::new();
 
     for part in mismatched_parts {
+        if part.length == 0 {
+            continue;
+        }
         let range_sem = range_sem.clone();
         let tmp_path = tmp_path.clone();
         let mod_name = mod_name.to_string();
@@ -508,7 +513,6 @@ async fn download_full_to_atomic<S: RemoteSession>(
         ApplyError::InvalidPartsLayout {
             path: final_path.to_string(),
             reason: match e {
-                manifest_types::PartValidationError::ZeroLength => "zero-length part",
                 manifest_types::PartValidationError::NotContiguous => "parts are not contiguous",
                 manifest_types::PartValidationError::LengthMismatch => {
                     "parts do not cover expected length"
@@ -537,7 +541,10 @@ async fn download_full_to_atomic<S: RemoteSession>(
 
     if current_len < expected_len && current_len > 0 {
         let mut resume_failed = false;
-        for part in parts_sorted.iter().filter(|p| p.start >= current_len) {
+        for part in parts_sorted
+            .iter()
+            .filter(|p| p.start >= current_len && p.length > 0)
+        {
             let r = download_part_to_file(
                 session,
                 mod_name,
@@ -619,6 +626,19 @@ async fn download_part_to_file<S: RemoteSession>(
     expected_len: u64,
     observer: Option<&dyn ApplyObserver>,
 ) -> Result<(), ApplyError> {
+    if part.length == 0 {
+        let empty =
+            Md5Digest::parse_hex("D41D8CD98F00B204E9800998ECF8427E").expect("valid md5 hex");
+        if part.checksum != empty {
+            return Err(ApplyError::ChecksumMismatch {
+                path: tmp_path.to_string(),
+                start: part.start,
+                end: part.start,
+            });
+        }
+        return Ok(());
+    }
+
     let mut tmp = tokio::fs::OpenOptions::new()
         .write(true)
         .open(tmp_path)
