@@ -307,7 +307,11 @@ pub fn scan_mod(
         let path = entry.path();
         let rel = rel_path_from_base(path, mod_root.as_std_path())?;
         let rel_str = rel.as_str();
-        if rel_str.starts_with(".fleet/") || rel_str.starts_with(".fleet_tmp_") {
+        let file_name = entry.file_name().to_string_lossy();
+        if rel_str.starts_with(".fleet/")
+            || file_name.starts_with(".fleet_tmp_")
+            || file_name.starts_with(".fleet_stage_")
+        {
             continue;
         }
 
