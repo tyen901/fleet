@@ -78,6 +78,7 @@ pub enum LocalPathState {
     Ok,
     Missing,
     NotDir,
+    NoAccess,
     NonUtf,
 }
 
