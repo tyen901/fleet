@@ -1,4 +1,4 @@
-use crate::apply::{apply_ops, quarantine_unexpected, ApplyOptions, IndexUpdate, QuarantineStats};
+use crate::apply::{apply_ops, AbortReason, ApplyOptions, FileFailure, IndexUpdate, QuarantineStats};
 use crate::events::{EventSink, SyncEvent};
 use crate::fetch::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
@@ -160,6 +160,8 @@ pub async fn repair(
         idx.expected_replace_all(&desired.state_id, baseline)?;
 
         let mut report = RepairReport::default();
+        let mut failures: Vec<FileFailure> = Vec::new();
+        let mut aborted: Option<AbortReason> = None;
 
         for manifest in &fetch.manifests {
             sink.push(SyncEvent::ModStarted {
@@ -246,11 +248,11 @@ pub async fn repair(
             apply_index_updates(idx, &desired.state_id, apply_outcome.index_updates)?;
             apply_cache_hints(idx, &desired.state_id, cache_hints)?;
 
-            if let Some(failure) = apply_outcome.failures.into_iter().next() {
-                sink.push(SyncEvent::Error {
-                    message: failure.error.to_string(),
-                });
-                return Err(failure.error);
+            failures.extend(apply_outcome.failures);
+
+            if let Some(reason) = apply_outcome.aborted {
+                aborted = Some(reason);
+                break;
             }
 
             sink.push(SyncEvent::ModFinished {
@@ -258,7 +260,7 @@ pub async fn repair(
             });
         }
 
-        if req.tuning.quarantine {
+        if aborted.is_none() && req.tuning.quarantine {
             let mut expected_by_mod: HashMap<String, HashSet<String>> = HashMap::new();
             for manifest in &fetch.manifests {
                 let mut set = HashSet::new();
@@ -282,6 +284,22 @@ pub async fn repair(
         }
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
+
+        if let Some(reason) = aborted {
+            sink.push(SyncEvent::Error {
+                message: format!("repair aborted: {:?}", reason),
+            });
+            return Err(anyhow::anyhow!("repair aborted"));
+        }
+
+        if !failures.is_empty() {
+            let first = &failures[0];
+            sink.push(SyncEvent::Error {
+                message: first.message.clone(),
+            });
+            return Err(anyhow::anyhow!("repair encountered failures"));
+        }
+
         idx.verified_set(&desired.state_id, now_ns())?;
         sink.push(SyncEvent::RepairFinished {
             ok: true,

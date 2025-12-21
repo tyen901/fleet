@@ -669,6 +669,152 @@ async fn patch_falls_back_to_full_when_remote_lacks_range_support() {
     assert_eq!(std::fs::read(mod_root.join("file.bin")).unwrap(), data);
 }
 
+#[tokio::test]
+async fn apply_continues_on_non_safety_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let ok_data = b"12345678".to_vec();
+    let bad_expected = b"abcdefgh".to_vec();
+
+    let ok_parts = build_parts(&ok_data, ok_data.len());
+    let bad_parts = build_parts(&bad_expected, bad_expected.len());
+
+    let mut files = HashMap::new();
+    files.insert(("@mod".to_string(), "ok.bin".to_string()), ok_data.clone());
+    files.insert(("@mod".to_string(), "bad.bin".to_string()), b"abcd".to_vec());
+
+    let remote = FakeRemote {
+        supports_ranges: true,
+        manifests: HashMap::new(),
+        files,
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let ok_target = FileTarget {
+        size: ok_data.len() as u64,
+        file_checksum: blake3::hash(&ok_data).as_bytes().to_vec(),
+        parts: ok_parts.clone(),
+        strategy: RepairStrategy::Full,
+        parts_to_fetch: ok_parts.clone(),
+    };
+    let bad_target = FileTarget {
+        size: bad_expected.len() as u64,
+        file_checksum: blake3::hash(&bad_expected).as_bytes().to_vec(),
+        parts: bad_parts.clone(),
+        strategy: RepairStrategy::Full,
+        parts_to_fetch: bad_parts.clone(),
+    };
+
+    let ops = vec![
+        PlannedOp {
+            mod_id: "@mod".to_string(),
+            rel_path: "ok.bin".to_string(),
+            abs_path: mod_root.join("ok.bin"),
+            target: ok_target,
+            estimated_bytes: ok_data.len() as u64,
+        },
+        PlannedOp {
+            mod_id: "@mod".to_string(),
+            rel_path: "bad.bin".to_string(),
+            abs_path: mod_root.join("bad.bin"),
+            target: bad_target,
+            estimated_bytes: bad_expected.len() as u64,
+        },
+    ];
+
+    let req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods: vec!["@mod".to_string()],
+        remote: Arc::new(remote),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: RepairTuning::default(),
+    };
+    let sink = Arc::new(TestSink::default());
+
+    let outcome = apply_ops(
+        ops,
+        &req,
+        sink.clone(),
+        ApplyOptions {
+            supports_ranges: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.failures.len(), 1);
+    assert!(outcome.aborted.is_none());
+    assert_eq!(std::fs::read(mod_root.join("ok.bin")).unwrap(), ok_data);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn apply_aborts_on_unsafe_on_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, mod_root.join("addons")).unwrap();
+
+    let data = b"data".to_vec();
+    let parts = build_parts(&data, data.len());
+
+    let op = PlannedOp {
+        mod_id: "@mod".to_string(),
+        rel_path: "addons/bad.bin".to_string(),
+        abs_path: mod_root.join("addons").join("bad.bin"),
+        target: FileTarget {
+            size: data.len() as u64,
+            file_checksum: blake3::hash(&data).as_bytes().to_vec(),
+            parts: parts.clone(),
+            strategy: RepairStrategy::Full,
+            parts_to_fetch: parts.clone(),
+        },
+        estimated_bytes: data.len() as u64,
+    };
+
+    let req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods: vec!["@mod".to_string()],
+        remote: Arc::new(FakeRemote {
+            supports_ranges: true,
+            manifests: HashMap::new(),
+            files: HashMap::new(),
+            fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+            fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+            fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+        }),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: RepairTuning::default(),
+    };
+    let sink = Arc::new(TestSink::default());
+
+    let outcome = apply_ops(
+        vec![op],
+        &req,
+        sink.clone(),
+        ApplyOptions {
+            supports_ranges: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.aborted.is_some());
+    assert_eq!(outcome.failures.len(), 1);
+    assert!(outcome.failures[0].aborting);
+}
+
 #[test]
 fn fetch_rejects_manifest_mod_id_mismatch() {
     let mut files = HashMap::new();
