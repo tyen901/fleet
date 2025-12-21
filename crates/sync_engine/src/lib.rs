@@ -6,6 +6,7 @@ pub mod fetch;
 pub mod flows;
 pub mod manifest;
 pub mod plan;
+pub mod quarantine;
 pub mod remote;
 pub mod safe_fs;
 pub mod safe_path;

@@ -1,8 +1,9 @@
-use crate::apply::{apply_ops, AbortReason, ApplyOptions, FileFailure, IndexUpdate, QuarantineStats};
+use crate::apply::{apply_ops, AbortReason, ApplyOptions, FileFailure, IndexUpdate};
 use crate::events::{EventSink, SyncEvent};
 use crate::fetch::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::plan::{plan_mod, CacheHint, PlanError, PlannedOp, RepairStrategy};
+use crate::quarantine::{quarantine_unexpected, QuarantineStats};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
 use crate::types::{

@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use sync_engine::apply::{apply_ops, quarantine_unexpected, ApplyOptions};
+use sync_engine::apply::{apply_ops, ApplyOptions};
+use sync_engine::quarantine::quarantine_unexpected;
 use sync_engine::events::{EventSink, SyncEvent};
 use sync_engine::fetch::fetch_all;
 use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
@@ -507,6 +508,58 @@ async fn quarantine_ignores_symlinks_and_quarantines_unexpected() {
         let md = std::fs::symlink_metadata(mod_root.join("link.txt")).unwrap();
         assert!(md.file_type().is_symlink());
     }
+}
+
+#[tokio::test]
+async fn quarantine_respects_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let big_path = mod_root.join("big.bin");
+    std::fs::write(&big_path, vec![0u8; 32]).unwrap();
+
+    let expected = HashSet::new();
+    let tuning = RepairTuning {
+        max_quarantine_bytes: Some(16),
+        ..Default::default()
+    };
+
+    let sink = Arc::new(TestSink::default());
+    let stats = quarantine_unexpected(root, "@mod", &expected, &tuning, sink.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(stats.files, 0);
+    assert!(big_path.exists());
+}
+
+#[tokio::test]
+async fn quarantine_deletes_empty_expected_prefix_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let expected_dir = mod_root.join("expected");
+    std::fs::create_dir_all(&expected_dir).unwrap();
+
+    let mut expected = HashSet::new();
+    expected.insert("expected/file.bin".to_string());
+
+    let tuning = RepairTuning {
+        delete_empty_dirs: true,
+        ..Default::default()
+    };
+
+    let sink = Arc::new(TestSink::default());
+    let stats = quarantine_unexpected(root, "@mod", &expected, &tuning, sink.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(stats.empty_dirs_deleted, 1);
+    assert!(!expected_dir.exists());
 }
 
 #[tokio::test]
