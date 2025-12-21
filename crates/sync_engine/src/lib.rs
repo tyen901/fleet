@@ -9,6 +9,7 @@ pub mod plan;
 pub mod remote;
 pub mod safe_fs;
 pub mod safe_path;
+pub mod staging;
 pub mod types;
 pub mod verify_parts;
 

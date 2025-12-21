@@ -1,11 +1,12 @@
 use crate::events::{EventSink, SyncEvent};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::safe_fs::{ensure_no_symlink_ancestors, is_symlink_or_reparse};
+use crate::staging::StagedFile;
 use crate::types::{Durability, RepairReport, RepairRequest};
 use crate::verify_parts::verify_all_parts;
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -175,24 +176,6 @@ async fn apply_one(
         }
     }
 
-    let stage = stage_path_for(
-        &req.checkout_root,
-        &op.mod_id,
-        &op.rel_path,
-        &op.target.file_checksum,
-    );
-    if let Some(parent) = stage.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
-            return Err(ApplyFailure {
-                mod_id: op.mod_id.clone(),
-                rel_path: op.rel_path.clone(),
-                kind: ApplyFailureKind::Other,
-                error: err.into(),
-                index_updates: Vec::new(),
-            });
-        }
-    }
-
     let mut effective_strategy = op.target.strategy;
     if matches!(effective_strategy, RepairStrategy::Patch) && !opts.supports_ranges {
         sink.push(SyncEvent::Warning {
@@ -205,9 +188,9 @@ async fn apply_one(
     }
 
     if matches!(effective_strategy, RepairStrategy::Patch) {
-        match prepare_patch_stage(&op, &stage).await {
-            Ok(PatchStagePrep::Ready) => {}
-            Ok(PatchStagePrep::NeedFull) => {
+        match patch_baseline_ok(&op.abs_path, op.target.size).await {
+            Ok(true) => {}
+            Ok(false) => {
                 sink.push(SyncEvent::Warning {
                     message: format!(
                         "patch baseline missing for {}; falling back to full",
@@ -216,9 +199,26 @@ async fn apply_one(
                 });
                 effective_strategy = RepairStrategy::Full;
             }
-            Err(err) => {
-                return Err(classify_apply_error(&op, err));
-            }
+            Err(err) => return Err(classify_apply_error(&op, err)),
+        }
+    }
+
+    let staged = match StagedFile::create_next_to(&op.abs_path).await {
+        Ok(s) => s,
+        Err(err) => {
+            return Err(ApplyFailure {
+                mod_id: op.mod_id.clone(),
+                rel_path: op.rel_path.clone(),
+                kind: ApplyFailureKind::Other,
+                error: err,
+                index_updates: Vec::new(),
+            });
+        }
+    };
+
+    if matches!(effective_strategy, RepairStrategy::Patch) {
+        if let Err(err) = copy_baseline(&op.abs_path, &staged.tmp_path, op.target.size).await {
+            return Err(classify_apply_error(&op, err));
         }
     }
 
@@ -238,13 +238,13 @@ async fn apply_one(
 
     let report = match effective_strategy {
         RepairStrategy::Full => {
-            match apply_full(req, &sink, range_sem, &op, &stage, &mod_root).await {
+            match apply_full(req, &sink, range_sem, &op, staged).await {
                 Ok(r) => r,
                 Err(err) => return Err(classify_apply_error(&op, err)),
             }
         }
         RepairStrategy::Patch => {
-            match apply_patch(req, &sink, range_sem, &op, &stage, &mod_root).await {
+            match apply_patch(req, &sink, range_sem, &op, staged).await {
                 Ok(r) => r,
                 Err(err) => return Err(classify_apply_error(&op, err)),
             }
@@ -276,14 +276,21 @@ async fn apply_full(
     sink: &Arc<dyn EventSink>,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
-    stage: &Path,
-    mod_root: &Path,
+    staged: StagedFile,
 ) -> Result<RepairReport> {
     use tokio::io::AsyncWriteExt;
 
     let mut report = RepairReport::default();
 
-    let mut f = create_stage_file(stage, op.target.size).await?;
+    let mut f = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .read(true)
+        .open(&staged.tmp_path)
+        .await
+        .with_context(|| format!("open stage file {}", staged.tmp_path.display()))?;
+    f.set_len(op.target.size).await?;
 
     let _permit = range_sem.clone().acquire_owned().await?;
     let mut stream = req
@@ -310,10 +317,12 @@ async fn apply_full(
     maybe_fsync(&mut f, req.tuning.durability).await?;
     drop(f);
 
-    verify_all_parts(stage, &op.target.parts, req.checksummer.as_ref())
+    verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
         .context("verify downloaded file")?;
 
-    atomic_replace(stage, &op.abs_path, req.tuning.durability, mod_root).await?;
+    staged
+        .commit(&op.abs_path, req.tuning.durability)
+        .await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),
@@ -324,34 +333,23 @@ async fn apply_full(
     Ok(report)
 }
 
-enum PatchStagePrep {
-    Ready,
-    NeedFull,
-}
-
-async fn prepare_patch_stage(op: &PlannedOp, stage: &Path) -> Result<PatchStagePrep> {
-    let needs_rebuild = match tokio::fs::metadata(stage).await {
-        Ok(md) => md.len() != op.target.size,
-        Err(_) => true,
-    };
-    if !needs_rebuild {
-        return Ok(PatchStagePrep::Ready);
-    }
-
-    let _ = tokio::fs::remove_file(stage).await;
-
-    let md = match tokio::fs::symlink_metadata(&op.abs_path).await {
+async fn patch_baseline_ok(path: &Path, expected_size: u64) -> Result<bool> {
+    let md = match tokio::fs::symlink_metadata(path).await {
         Ok(md) => md,
-        Err(_) => return Ok(PatchStagePrep::NeedFull),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
     };
 
     let ft = md.file_type();
     if ft.is_symlink() || !ft.is_file() {
-        return Ok(PatchStagePrep::NeedFull);
+        return Ok(false);
     }
 
-    copy_baseline(&op.abs_path, stage, op.target.size).await?;
-    Ok(PatchStagePrep::Ready)
+    if md.len() != expected_size {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 async fn apply_patch(
@@ -359,8 +357,7 @@ async fn apply_patch(
     sink: &Arc<dyn EventSink>,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
-    stage: &Path,
-    mod_root: &Path,
+    staged: StagedFile,
 ) -> Result<RepairReport> {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -376,7 +373,7 @@ async fn apply_patch(
     for part in op.target.parts_to_fetch.clone() {
         let permit = range_sem.clone().acquire_owned().await?;
         let remote = req.remote.clone();
-        let stage_path = stage.to_path_buf();
+        let stage_path = staged.tmp_path.clone();
         let sink = sink.clone();
         let tuning = req.tuning.clone();
         let done = done.clone();
@@ -434,14 +431,19 @@ async fn apply_patch(
     }
 
     if matches!(req.tuning.durability, Durability::Strict) {
-        let mut f = tokio::fs::OpenOptions::new().read(true).open(stage).await?;
+        let mut f = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&staged.tmp_path)
+            .await?;
         maybe_fsync(&mut f, req.tuning.durability).await?;
     }
 
-    verify_all_parts(stage, &op.target.parts, req.checksummer.as_ref())
+    verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
         .context("verify patched file")?;
 
-    atomic_replace(stage, &op.abs_path, req.tuning.durability, mod_root).await?;
+    staged
+        .commit(&op.abs_path, req.tuning.durability)
+        .await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),
@@ -453,35 +455,6 @@ async fn apply_patch(
     Ok(report)
 }
 
-fn stage_key(rel_path: &str, checksum: &[u8]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(rel_path.as_bytes());
-    hasher.update(checksum);
-    hasher.finalize().to_hex().to_string()
-}
-
-fn stage_path_for(checkout_root: &Path, mod_id: &str, rel_path: &str, checksum: &[u8]) -> PathBuf {
-    let key = stage_key(rel_path, checksum);
-    checkout_root
-        .join(".fleet")
-        .join("stage")
-        .join(mod_id)
-        .join(format!("{key}.stage"))
-}
-
-async fn create_stage_file(stage: &Path, size: u64) -> Result<tokio::fs::File> {
-    let f = tokio::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .read(true)
-        .open(stage)
-        .await
-        .with_context(|| format!("open stage file {}", stage.display()))?;
-    f.set_len(size).await?;
-    Ok(f)
-}
-
 async fn copy_baseline(src: &Path, dst: &Path, expected_size: u64) -> Result<()> {
     tokio::fs::copy(src, dst).await?;
     let md = tokio::fs::metadata(dst).await?;
@@ -489,47 +462,6 @@ async fn copy_baseline(src: &Path, dst: &Path, expected_size: u64) -> Result<()>
         anyhow::bail!("stage baseline size mismatch after copy");
     }
     Ok(())
-}
-
-async fn atomic_replace(
-    stage: &Path,
-    final_path: &Path,
-    durability: Durability,
-    mod_root: &Path,
-) -> Result<()> {
-    if let Some(parent) = final_path.parent() {
-        ensure_no_symlink_ancestors(mod_root, parent).map_err(anyhow::Error::new)?;
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    if let Ok(md) = tokio::fs::symlink_metadata(final_path).await {
-        let ft = md.file_type();
-        if ft.is_dir() {
-            tokio::fs::remove_dir_all(final_path).await?;
-        } else {
-            tokio::fs::remove_file(final_path).await?;
-        }
-    }
-
-    if let Some(parent) = final_path.parent() {
-        ensure_no_symlink_ancestors(mod_root, parent).map_err(anyhow::Error::new)?;
-    }
-
-    tokio::fs::rename(stage, final_path).await?;
-
-    if matches!(durability, Durability::Strict) {
-        if let Some(parent) = final_path.parent() {
-            fsync_dir(parent);
-        }
-    }
-
-    Ok(())
-}
-
-fn fsync_dir(path: &Path) {
-    if let Ok(dir) = std::fs::File::open(path) {
-        let _ = dir.sync_data();
-    }
 }
 
 async fn maybe_fsync(f: &mut tokio::fs::File, durability: Durability) -> Result<()> {
