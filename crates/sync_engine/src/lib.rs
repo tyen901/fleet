@@ -11,6 +11,9 @@ pub mod safe_path;
 pub mod types;
 pub mod verify_parts;
 
+#[cfg(test)]
+pub mod test_support;
+
 pub use events::*;
 pub use flows::*;
 pub use types::*;
