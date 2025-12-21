@@ -229,10 +229,13 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
 
     let out = run_sync_assert_success(checkout);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("RepoStarted"), "stdout missing RepoStarted");
     assert!(
-        stdout.contains("RepoReady") || stdout.contains("RemoteCapabilities"),
-        "stdout missing RepoReady/RemoteCapabilities"
+        stdout.contains("RepairStarted"),
+        "stdout missing RepairStarted"
+    );
+    assert!(
+        stdout.contains("RemoteCapabilities"),
+        "stdout missing RemoteCapabilities"
     );
 
     for m in spec.required_mods.iter().filter(|m| m.enabled) {

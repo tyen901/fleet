@@ -1,30 +1,36 @@
-#[derive(Debug, Clone)]
+pub trait EventSink: Send + Sync {
+    fn push(&self, ev: SyncEvent);
+}
+
+pub struct NoopSink;
+
+impl EventSink for NoopSink {
+    fn push(&self, _: SyncEvent) {}
+}
+
+#[derive(Clone, Debug)]
 pub enum SyncEvent {
-    RepoStarted {
+    VerifyStarted {
         repo: String,
     },
+    VerifyFinished {
+        ok: bool,
+    },
+
+    RepairStarted {
+        repo: String,
+    },
+    RepairSkipEvaluated {
+        skippable: bool,
+        reason: Option<String>,
+    },
+    RepairFinished {
+        ok: bool,
+        skipped: bool,
+    },
+
     RemoteCapabilities {
         supports_ranges: bool,
-    },
-    RepoReady {
-        mods_available: usize,
-        mods_enabled: usize,
-    },
-
-    PlanningStarted {
-        mods_enabled: usize,
-    },
-    PlanningFinished {
-        ops: usize,
-        total_bytes: u64,
-    },
-
-    TransferPlanned {
-        total_bytes: u64,
-    },
-    TransferProgress {
-        transferred_bytes: u64,
-        total_bytes: u64,
     },
 
     ModStarted {
@@ -34,10 +40,15 @@ pub enum SyncEvent {
         mod_id: String,
     },
 
-    PathDeleted {
+    FileUpToDate {
+        mod_id: String,
         path: String,
     },
-
+    FileNeedsRepair {
+        mod_id: String,
+        path: String,
+        strategy: String,
+    },
     FileStarted {
         mod_id: String,
         path: String,
@@ -49,13 +60,16 @@ pub enum SyncEvent {
         bytes_done: u64,
         bytes_total: u64,
     },
-    /// File is already correct locally; no transfer needed.
-    FileUpToDate {
+    FileVerified {
         mod_id: String,
         path: String,
     },
-    FileVerified {
-        mod_id: String,
+
+    PathQuarantined {
+        path: String,
+        dest: String,
+    },
+    EmptyDirDeleted {
         path: String,
     },
 
@@ -65,13 +79,4 @@ pub enum SyncEvent {
     Error {
         message: String,
     },
-}
-
-pub trait EventSink: Send + Sync {
-    fn push(&self, ev: SyncEvent);
-}
-
-pub struct NoopSink;
-impl EventSink for NoopSink {
-    fn push(&self, _ev: SyncEvent) {}
 }

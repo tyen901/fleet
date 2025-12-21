@@ -5,19 +5,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchMode {
     /// Default OS handler (Windows ShellExecute / Linux xdg-open)
+    #[default]
     SystemDefault,
     /// When running inside Flatpak, open via host: `flatpak-spawn --host xdg-open ...`
     LinuxFlatpakHost,
-}
-
-impl Default for LaunchMode {
-    fn default() -> Self {
-        LaunchMode::SystemDefault
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

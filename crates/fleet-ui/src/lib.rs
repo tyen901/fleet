@@ -19,7 +19,7 @@ const WINDOW_H: f32 = 720.0;
 
 enum UiMsg {
     SyncFinished(Result<(), String>),
-    UpdateChecked(Result<velopack::UpdateCheck, String>),
+    UpdateChecked(Box<Result<velopack::UpdateCheck, String>>),
     UpdateProgress(f32),
     UpdateApplyError(String),
 }
@@ -110,7 +110,7 @@ impl FleetUiApp {
             reduce(
                 &mut self.state,
                 Action::UpdateCheckFinished {
-                    result: Err("Update feed not configured (FLEET_UPDATE_URL)".into()),
+                    result: Box::new(Err("Update feed not configured (FLEET_UPDATE_URL)".into())),
                 },
             );
             return;
@@ -129,7 +129,7 @@ impl FleetUiApp {
                 um.check_for_updates().map_err(|e| e.to_string())
             })();
 
-            let _ = ui_tx.blocking_send(UiMsg::UpdateChecked(res));
+            let _ = ui_tx.blocking_send(UiMsg::UpdateChecked(Box::new(res)));
         });
     }
 

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use fleet_index::{DesiredState, FleetIndex};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
@@ -380,32 +381,54 @@ impl FleetApp {
                     .map(|m| m.mod_name.clone())
                     .collect();
 
-                let engine_tuning = sync_engine::types::SyncTuning {
+                let engine_tuning = sync_engine::types::RepairTuning {
                     file_concurrency: tuning
                         .max_concurrent_files
-                        .unwrap_or(sync_engine::types::SyncTuning::default().file_concurrency),
+                        .unwrap_or(sync_engine::types::RepairTuning::default().file_concurrency),
                     range_concurrency: tuning
                         .max_concurrent_range_requests
-                        .unwrap_or(sync_engine::types::SyncTuning::default().range_concurrency),
-                    scan_concurrency: sync_engine::types::SyncTuning::default().scan_concurrency,
-                    delete_extraneous: true,
-                    emit_progress: true,
-                    durability: sync_engine::types::Durability::BestEffort,
+                        .unwrap_or(sync_engine::types::RepairTuning::default().range_concurrency),
+                    scan_concurrency: sync_engine::types::RepairTuning::default().scan_concurrency,
                     patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
+                    patch_max_bad_parts: Some(tuning.full_download_part_threshold),
+                    durability: sync_engine::types::Durability::BestEffort,
+                    quarantine: true,
+                    delete_empty_dirs: true,
+                    max_quarantine_bytes: None,
+                    use_index: tuning.use_index,
+                    emit_progress: true,
                 };
 
                 let sink = SyncEventSink { tx: ev_tx.clone() };
 
-                let request = sync_engine::types::SyncRequest {
+                let repo_id = fleet_index::normalize_repo_id(&raw_spec.checksum);
+                let mut enabled_sorted = enabled_mods.clone();
+                enabled_sorted.sort();
+                let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
+                let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+
+                let mut idx = FleetIndex::open_or_recover(checkout_root_buf.as_std_path())
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let desired = DesiredState {
+                    repo_url: repo_url.clone(),
+                    repo_id,
+                    enabled_mods_hash: enabled_hash,
+                    state_id,
+                    updated_at_unix_s: registry::unix_now(),
+                };
+                idx.set_desired_state(desired)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let request = sync_engine::types::RepairRequest {
                     repo_name,
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
                     remote: Arc::new(remote),
                     checksummer: Arc::new(remote_adapter::Md5Checksummer),
-                    tuning: Some(engine_tuning),
+                    tuning: engine_tuning,
                 };
 
-                let _report = sync_engine::sync(request, Arc::new(sink))
+                let _report = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 Ok(())

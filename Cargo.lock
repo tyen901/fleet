@@ -1457,6 +1457,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "directories",
+ "fleet_index",
  "open",
  "percent-encoding",
  "remote_adapter",
@@ -1465,6 +1466,16 @@ dependencies = [
  "sync_engine",
  "tokio",
  "walkdir",
+]
+
+[[package]]
+name = "fleet_index"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "rusqlite",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3942,9 +3953,10 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "fleet_index",
  "futures",
- "rusqlite",
- "serde",
+ "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "walkdir",
 ]

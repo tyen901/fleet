@@ -169,10 +169,10 @@ fn open_target(mode: LaunchMode, target: &str) -> Result<(), LaunchError> {
                     if st.success() {
                         Ok(())
                     } else {
-                    Err(LaunchError::Other(format!(
-                        "flatpak-spawn failed (exit={:?})",
-                        st.code()
-                    )))
+                        Err(LaunchError::Other(format!(
+                            "flatpak-spawn failed (exit={:?})",
+                            st.code()
+                        )))
                     }
                 }
             }

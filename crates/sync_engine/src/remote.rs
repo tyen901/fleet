@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::types::{ModManifest, RepoSpec};
+use crate::fetch::ModManifest;
 
 #[derive(Clone, Debug, Default)]
 pub struct RemoteCapabilities {
@@ -14,7 +14,6 @@ pub trait RemoteRepo: Send + Sync {
         Ok(RemoteCapabilities::default())
     }
 
-    async fn fetch_repo_spec(&self) -> Result<RepoSpec>;
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest>;
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> Result<RemoteStream>;
@@ -27,7 +26,6 @@ pub trait RemoteRepo: Send + Sync {
     ) -> Result<RemoteStream>;
 }
 
-/// Remote stream interface intentionally avoids tying you to reqwest/hyper.
 pub struct RemoteStream {
     inner: Box<dyn RemoteStreamImpl>,
 }

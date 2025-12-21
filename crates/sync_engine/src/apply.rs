@@ -1,0 +1,815 @@
+use crate::events::{EventSink, SyncEvent};
+use crate::plan::{PlannedOp, RepairStrategy};
+use crate::safe_fs::{ensure_no_symlink_ancestors, is_symlink_or_reparse};
+use crate::types::{Durability, RepairReport, RepairRequest};
+use crate::verify_parts::verify_all_parts;
+use anyhow::{Context, Result};
+use futures::StreamExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+#[derive(Clone, Debug)]
+pub enum IndexUpdate {
+    UpsertFileState {
+        mod_id: String,
+        rel_path: String,
+        size: u64,
+        mtime_ns: i64,
+        checksum: Vec<u8>,
+    },
+    DeleteFileState {
+        mod_id: String,
+        rel_path: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ApplyOptions {
+    pub supports_ranges: bool,
+}
+
+pub struct ApplyOutcome {
+    pub report: RepairReport,
+    pub index_updates: Vec<IndexUpdate>,
+    pub failures: Vec<ApplyFailure>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyFailureKind {
+    UnsafeOnDisk,
+    Other,
+}
+
+#[derive(Debug)]
+pub struct ApplyFailure {
+    pub mod_id: String,
+    pub rel_path: String,
+    pub kind: ApplyFailureKind,
+    pub error: anyhow::Error,
+    pub index_updates: Vec<IndexUpdate>,
+}
+
+pub async fn apply_ops(
+    ops: Vec<PlannedOp>,
+    req: &RepairRequest,
+    sink: Arc<dyn EventSink>,
+    opts: ApplyOptions,
+) -> Result<ApplyOutcome> {
+    let file_workers = req.tuning.file_concurrency.max(1);
+    let range_workers = req.tuning.range_concurrency.max(1);
+
+    let file_sem = Arc::new(Semaphore::new(file_workers));
+    let range_sem = Arc::new(Semaphore::new(range_workers));
+
+    let mut in_flight = futures::stream::FuturesUnordered::new();
+    let mut report = RepairReport::default();
+    let mut index_updates: Vec<IndexUpdate> = Vec::new();
+    let mut failures: Vec<ApplyFailure> = Vec::new();
+
+    for op in ops.into_iter() {
+        if matches!(op.target.strategy, RepairStrategy::Skip) {
+            continue;
+        }
+        let permit = file_sem.clone().acquire_owned().await?;
+        let req = req.clone();
+        let sink = sink.clone();
+        let range_sem = range_sem.clone();
+
+        in_flight.push(tokio::spawn(async move {
+            let _permit = permit;
+            apply_one(op, &req, sink, &range_sem, opts).await
+        }));
+
+        if in_flight.len() >= file_workers {
+            if let Some(res) = in_flight.next().await {
+                match res? {
+                    Ok(success) => {
+                        merge_report(&mut report, &success.report);
+                        index_updates.extend(success.index_updates);
+                    }
+                    Err(failure) => {
+                        index_updates.extend(failure.index_updates.iter().cloned());
+                        failures.push(failure);
+                    }
+                }
+            }
+        }
+    }
+
+    while let Some(res) = in_flight.next().await {
+        match res? {
+            Ok(success) => {
+                merge_report(&mut report, &success.report);
+                index_updates.extend(success.index_updates);
+            }
+            Err(failure) => {
+                index_updates.extend(failure.index_updates.iter().cloned());
+                failures.push(failure);
+            }
+        }
+    }
+
+    Ok(ApplyOutcome {
+        report,
+        index_updates,
+        failures,
+    })
+}
+
+struct ApplyOneSuccess {
+    report: RepairReport,
+    index_updates: Vec<IndexUpdate>,
+}
+
+fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> ApplyFailure {
+    let kind = if error.is::<crate::safe_fs::UnsafeOnDiskError>() {
+        ApplyFailureKind::UnsafeOnDisk
+    } else {
+        ApplyFailureKind::Other
+    };
+
+    let index_updates = if matches!(kind, ApplyFailureKind::UnsafeOnDisk) {
+        vec![IndexUpdate::DeleteFileState {
+            mod_id: op.mod_id.clone(),
+            rel_path: op.rel_path.clone(),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    ApplyFailure {
+        mod_id: op.mod_id.clone(),
+        rel_path: op.rel_path.clone(),
+        kind,
+        error,
+        index_updates,
+    }
+}
+
+async fn apply_one(
+    op: PlannedOp,
+    req: &RepairRequest,
+    sink: Arc<dyn EventSink>,
+    range_sem: &Arc<Semaphore>,
+    opts: ApplyOptions,
+) -> std::result::Result<ApplyOneSuccess, ApplyFailure> {
+    let mod_root = req.checkout_root.join(&op.mod_id);
+
+    if let Some(parent) = op.abs_path.parent() {
+        if let Err(err) = ensure_no_symlink_ancestors(&mod_root, parent) {
+            let error = anyhow::Error::new(err);
+            sink.push(SyncEvent::Error {
+                message: error.to_string(),
+            });
+            return Err(ApplyFailure {
+                mod_id: op.mod_id.clone(),
+                rel_path: op.rel_path.clone(),
+                kind: ApplyFailureKind::UnsafeOnDisk,
+                error,
+                index_updates: vec![IndexUpdate::DeleteFileState {
+                    mod_id: op.mod_id.clone(),
+                    rel_path: op.rel_path.clone(),
+                }],
+            });
+        }
+    }
+
+    let stage = stage_path_for(
+        &req.checkout_root,
+        &op.mod_id,
+        &op.rel_path,
+        &op.target.file_checksum,
+    );
+    if let Some(parent) = stage.parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            return Err(ApplyFailure {
+                mod_id: op.mod_id.clone(),
+                rel_path: op.rel_path.clone(),
+                kind: ApplyFailureKind::Other,
+                error: err.into(),
+                index_updates: Vec::new(),
+            });
+        }
+    }
+
+    let mut effective_strategy = op.target.strategy;
+    if matches!(effective_strategy, RepairStrategy::Patch) && !opts.supports_ranges {
+        sink.push(SyncEvent::Warning {
+            message: format!(
+                "remote lacks range support; falling back to full for {}",
+                op.rel_path
+            ),
+        });
+        effective_strategy = RepairStrategy::Full;
+    }
+
+    if matches!(effective_strategy, RepairStrategy::Patch) {
+        match prepare_patch_stage(&op, &stage).await {
+            Ok(PatchStagePrep::Ready) => {}
+            Ok(PatchStagePrep::NeedFull) => {
+                sink.push(SyncEvent::Warning {
+                    message: format!(
+                        "patch baseline missing for {}; falling back to full",
+                        op.rel_path
+                    ),
+                });
+                effective_strategy = RepairStrategy::Full;
+            }
+            Err(err) => {
+                return Err(classify_apply_error(&op, err));
+            }
+        }
+    }
+
+    let bytes_total = if matches!(effective_strategy, RepairStrategy::Patch) {
+        op.target
+            .parts_to_fetch
+            .iter()
+            .fold(0u64, |acc, p| acc.saturating_add(p.len))
+    } else {
+        op.target.size
+    };
+    sink.push(SyncEvent::FileStarted {
+        mod_id: op.mod_id.clone(),
+        path: op.rel_path.clone(),
+        bytes_total,
+    });
+
+    let report = match effective_strategy {
+        RepairStrategy::Full => {
+            match apply_full(req, &sink, range_sem, &op, &stage, &mod_root).await {
+                Ok(r) => r,
+                Err(err) => return Err(classify_apply_error(&op, err)),
+            }
+        }
+        RepairStrategy::Patch => {
+            match apply_patch(req, &sink, range_sem, &op, &stage, &mod_root).await {
+                Ok(r) => r,
+                Err(err) => return Err(classify_apply_error(&op, err)),
+            }
+        }
+        RepairStrategy::Skip => RepairReport::default(),
+    };
+
+    let md = match tokio::fs::metadata(&op.abs_path).await {
+        Ok(md) => md,
+        Err(err) => return Err(classify_apply_error(&op, err.into())),
+    };
+    let mtime_ns = file_mtime_ns(&md).unwrap_or(0);
+    let index_updates = vec![IndexUpdate::UpsertFileState {
+        mod_id: op.mod_id.clone(),
+        rel_path: op.rel_path.clone(),
+        size: op.target.size,
+        mtime_ns,
+        checksum: op.target.file_checksum.clone(),
+    }];
+
+    Ok(ApplyOneSuccess {
+        report,
+        index_updates,
+    })
+}
+
+async fn apply_full(
+    req: &RepairRequest,
+    sink: &Arc<dyn EventSink>,
+    range_sem: &Arc<Semaphore>,
+    op: &PlannedOp,
+    stage: &Path,
+    mod_root: &Path,
+) -> Result<RepairReport> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut report = RepairReport::default();
+
+    let mut f = create_stage_file(stage, op.target.size).await?;
+
+    let _permit = range_sem.clone().acquire_owned().await?;
+    let mut stream = req
+        .remote
+        .fetch_file(&op.mod_id, &op.rel_path)
+        .await
+        .context("fetch file")?;
+
+    let mut written: u64 = 0;
+    while let Some(chunk) = stream.next_chunk().await? {
+        f.write_all(&chunk).await?;
+        written = written.saturating_add(chunk.len() as u64);
+        if req.tuning.emit_progress {
+            sink.push(SyncEvent::FileProgress {
+                mod_id: op.mod_id.clone(),
+                path: op.rel_path.clone(),
+                bytes_done: written,
+                bytes_total: op.target.size,
+            });
+        }
+    }
+
+    f.flush().await?;
+    maybe_fsync(&mut f, req.tuning.durability).await?;
+    drop(f);
+
+    verify_all_parts(stage, &op.target.parts, req.checksummer.as_ref())
+        .context("verify downloaded file")?;
+
+    atomic_replace(stage, &op.abs_path, req.tuning.durability, mod_root).await?;
+    sink.push(SyncEvent::FileVerified {
+        mod_id: op.mod_id.clone(),
+        path: op.rel_path.clone(),
+    });
+
+    report.files_downloaded += 1;
+    report.bytes_downloaded = report.bytes_downloaded.saturating_add(op.target.size);
+    Ok(report)
+}
+
+enum PatchStagePrep {
+    Ready,
+    NeedFull,
+}
+
+async fn prepare_patch_stage(op: &PlannedOp, stage: &Path) -> Result<PatchStagePrep> {
+    let needs_rebuild = match tokio::fs::metadata(stage).await {
+        Ok(md) => md.len() != op.target.size,
+        Err(_) => true,
+    };
+    if !needs_rebuild {
+        return Ok(PatchStagePrep::Ready);
+    }
+
+    let _ = tokio::fs::remove_file(stage).await;
+
+    let md = match tokio::fs::symlink_metadata(&op.abs_path).await {
+        Ok(md) => md,
+        Err(_) => return Ok(PatchStagePrep::NeedFull),
+    };
+
+    let ft = md.file_type();
+    if ft.is_symlink() || !ft.is_file() {
+        return Ok(PatchStagePrep::NeedFull);
+    }
+
+    copy_baseline(&op.abs_path, stage, op.target.size).await?;
+    Ok(PatchStagePrep::Ready)
+}
+
+async fn apply_patch(
+    req: &RepairRequest,
+    sink: &Arc<dyn EventSink>,
+    range_sem: &Arc<Semaphore>,
+    op: &PlannedOp,
+    stage: &Path,
+    mod_root: &Path,
+) -> Result<RepairReport> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+    let total_bytes = op
+        .target
+        .parts_to_fetch
+        .iter()
+        .fold(0u64, |acc, p| acc.saturating_add(p.len));
+    let done = Arc::new(AtomicU64::new(0));
+
+    let mut tasks = futures::stream::FuturesUnordered::new();
+    for part in op.target.parts_to_fetch.clone() {
+        let permit = range_sem.clone().acquire_owned().await?;
+        let remote = req.remote.clone();
+        let stage_path = stage.to_path_buf();
+        let sink = sink.clone();
+        let tuning = req.tuning.clone();
+        let done = done.clone();
+        let mod_id = op.mod_id.clone();
+        let rel_path = op.rel_path.clone();
+
+        tasks.push(tokio::spawn(async move {
+            let _permit = permit;
+            let mut stream = remote
+                .fetch_range(&mod_id, &rel_path, part.offset, part.len)
+                .await
+                .context("fetch range")?;
+
+            let mut stage_file = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&stage_path)
+                .await?;
+
+            stage_file
+                .seek(std::io::SeekFrom::Start(part.offset))
+                .await?;
+
+            let mut remaining = part.len;
+            while remaining > 0 {
+                let chunk = stream
+                    .next_chunk()
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("unexpected EOF from range stream"))?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                let take = std::cmp::min(chunk.len() as u64, remaining) as usize;
+                stage_file.write_all(&chunk[..take]).await?;
+
+                remaining -= take as u64;
+                let next = done.fetch_add(take as u64, Ordering::Relaxed) + take as u64;
+                if tuning.emit_progress {
+                    sink.push(SyncEvent::FileProgress {
+                        mod_id: mod_id.clone(),
+                        path: rel_path.clone(),
+                        bytes_done: next,
+                        bytes_total: total_bytes,
+                    });
+                }
+            }
+
+            stage_file.flush().await?;
+            Ok::<(), anyhow::Error>(())
+        }));
+    }
+
+    while let Some(res) = tasks.next().await {
+        res??;
+    }
+
+    if matches!(req.tuning.durability, Durability::Strict) {
+        let mut f = tokio::fs::OpenOptions::new().read(true).open(stage).await?;
+        maybe_fsync(&mut f, req.tuning.durability).await?;
+    }
+
+    verify_all_parts(stage, &op.target.parts, req.checksummer.as_ref())
+        .context("verify patched file")?;
+
+    atomic_replace(stage, &op.abs_path, req.tuning.durability, mod_root).await?;
+    sink.push(SyncEvent::FileVerified {
+        mod_id: op.mod_id.clone(),
+        path: op.rel_path.clone(),
+    });
+
+    let mut report = RepairReport::default();
+    report.files_patched += 1;
+    report.bytes_patched = report.bytes_patched.saturating_add(total_bytes);
+    Ok(report)
+}
+
+fn stage_key(rel_path: &str, checksum: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(rel_path.as_bytes());
+    hasher.update(checksum);
+    hasher.finalize().to_hex().to_string()
+}
+
+fn stage_path_for(checkout_root: &Path, mod_id: &str, rel_path: &str, checksum: &[u8]) -> PathBuf {
+    let key = stage_key(rel_path, checksum);
+    checkout_root
+        .join(".fleet")
+        .join("stage")
+        .join(mod_id)
+        .join(format!("{key}.stage"))
+}
+
+async fn create_stage_file(stage: &Path, size: u64) -> Result<tokio::fs::File> {
+    let f = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .read(true)
+        .open(stage)
+        .await
+        .with_context(|| format!("open stage file {}", stage.display()))?;
+    f.set_len(size).await?;
+    Ok(f)
+}
+
+async fn copy_baseline(src: &Path, dst: &Path, expected_size: u64) -> Result<()> {
+    tokio::fs::copy(src, dst).await?;
+    let md = tokio::fs::metadata(dst).await?;
+    if md.len() != expected_size {
+        anyhow::bail!("stage baseline size mismatch after copy");
+    }
+    Ok(())
+}
+
+async fn atomic_replace(
+    stage: &Path,
+    final_path: &Path,
+    durability: Durability,
+    mod_root: &Path,
+) -> Result<()> {
+    if let Some(parent) = final_path.parent() {
+        ensure_no_symlink_ancestors(mod_root, parent).map_err(anyhow::Error::new)?;
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    if let Ok(md) = tokio::fs::symlink_metadata(final_path).await {
+        let ft = md.file_type();
+        if ft.is_dir() {
+            tokio::fs::remove_dir_all(final_path).await?;
+        } else {
+            tokio::fs::remove_file(final_path).await?;
+        }
+    }
+
+    if let Some(parent) = final_path.parent() {
+        ensure_no_symlink_ancestors(mod_root, parent).map_err(anyhow::Error::new)?;
+    }
+
+    tokio::fs::rename(stage, final_path).await?;
+
+    if matches!(durability, Durability::Strict) {
+        if let Some(parent) = final_path.parent() {
+            fsync_dir(parent);
+        }
+    }
+
+    Ok(())
+}
+
+fn fsync_dir(path: &Path) {
+    if let Ok(dir) = std::fs::File::open(path) {
+        let _ = dir.sync_data();
+    }
+}
+
+async fn maybe_fsync(f: &mut tokio::fs::File, durability: Durability) -> Result<()> {
+    if matches!(durability, Durability::Strict) {
+        f.sync_data().await?;
+    }
+    Ok(())
+}
+
+fn merge_report(dst: &mut RepairReport, src: &RepairReport) {
+    dst.files_downloaded = dst.files_downloaded.saturating_add(src.files_downloaded);
+    dst.files_patched = dst.files_patched.saturating_add(src.files_patched);
+    dst.bytes_downloaded = dst.bytes_downloaded.saturating_add(src.bytes_downloaded);
+    dst.bytes_patched = dst.bytes_patched.saturating_add(src.bytes_patched);
+    dst.quarantine_files = dst.quarantine_files.saturating_add(src.quarantine_files);
+    dst.quarantine_dirs = dst.quarantine_dirs.saturating_add(src.quarantine_dirs);
+    dst.quarantine_bytes = dst.quarantine_bytes.saturating_add(src.quarantine_bytes);
+    dst.empty_dirs_deleted = dst
+        .empty_dirs_deleted
+        .saturating_add(src.empty_dirs_deleted);
+}
+
+fn file_mtime_ns(md: &std::fs::Metadata) -> Option<i64> {
+    let nanos = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    i64::try_from(nanos).ok()
+}
+
+pub struct QuarantineStats {
+    pub files: u64,
+    pub dirs: u64,
+    pub bytes: u64,
+    pub empty_dirs_deleted: u64,
+}
+
+pub async fn quarantine_unexpected(
+    checkout_root: &Path,
+    mod_id: &str,
+    expected_paths: &std::collections::HashSet<String>,
+    tuning: &crate::types::RepairTuning,
+    sink: Arc<dyn EventSink>,
+) -> Result<QuarantineStats> {
+    let mod_root = checkout_root.join(mod_id);
+    if !mod_root.exists() {
+        return Ok(QuarantineStats {
+            files: 0,
+            dirs: 0,
+            bytes: 0,
+            empty_dirs_deleted: 0,
+        });
+    }
+
+    let mut expected_prefixes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in expected_paths {
+        let mut cur = PathBuf::new();
+        for comp in path.split('/') {
+            if comp.is_empty() {
+                continue;
+            }
+            cur.push(comp);
+            if let Some(s) = cur.to_str() {
+                expected_prefixes.insert(s.replace('\\', "/"));
+            }
+        }
+    }
+
+    let mut stats = QuarantineStats {
+        files: 0,
+        dirs: 0,
+        bytes: 0,
+        empty_dirs_deleted: 0,
+    };
+
+    let quarantine_root = checkout_root
+        .join(".fleet")
+        .join("quarantine")
+        .join(format!("{}", current_unix_s()));
+
+    let mut cap_reached = false;
+    let cap = tuning.max_quarantine_bytes;
+
+    for entry in walkdir::WalkDir::new(&mod_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if cap_reached {
+            break;
+        }
+        if let Ok(md) = std::fs::symlink_metadata(entry.path()) {
+            if is_symlink_or_reparse(&md) {
+                continue;
+            }
+        }
+        let ft = entry.file_type();
+        let path = entry.path();
+        if path == mod_root {
+            continue;
+        }
+        if ft.is_dir() {
+            continue;
+        }
+
+        let rel = path
+            .strip_prefix(&mod_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        if expected_paths.contains(&rel) {
+            continue;
+        }
+
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if let Some(max) = cap {
+            if stats.bytes.saturating_add(size) > max {
+                sink.push(SyncEvent::Warning {
+                    message: "quarantine cap reached; leaving remaining paths untouched"
+                        .to_string(),
+                });
+                cap_reached = true;
+                break;
+            }
+        }
+
+        let dest = quarantine_root.join(mod_id).join(&rel);
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::rename(path, &dest).await?;
+        sink.push(SyncEvent::PathQuarantined {
+            path: path.display().to_string(),
+            dest: dest.display().to_string(),
+        });
+
+        stats.files += 1;
+        stats.bytes = stats.bytes.saturating_add(size);
+    }
+
+    for entry in walkdir::WalkDir::new(&mod_root)
+        .follow_links(false)
+        .contents_first(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if cap_reached {
+            break;
+        }
+        if let Ok(md) = std::fs::symlink_metadata(entry.path()) {
+            if is_symlink_or_reparse(&md) {
+                continue;
+            }
+        }
+        let ft = entry.file_type();
+        if !ft.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if path == mod_root {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&mod_root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if expected_prefixes.contains(&rel) {
+            continue;
+        }
+
+        let size = dir_size(path).unwrap_or(0);
+        if let Some(max) = cap {
+            if stats.bytes.saturating_add(size) > max {
+                sink.push(SyncEvent::Warning {
+                    message: "quarantine cap reached; leaving remaining paths untouched"
+                        .to_string(),
+                });
+                cap_reached = true;
+                break;
+            }
+        }
+
+        let dest = quarantine_root.join(mod_id).join(&rel);
+        if dest.exists() && is_dir_empty(path) {
+            tokio::fs::remove_dir(path).await?;
+            sink.push(SyncEvent::PathQuarantined {
+                path: path.display().to_string(),
+                dest: dest.display().to_string(),
+            });
+            stats.dirs += 1;
+            stats.bytes = stats.bytes.saturating_add(size);
+            continue;
+        }
+
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::rename(path, &dest).await?;
+        sink.push(SyncEvent::PathQuarantined {
+            path: path.display().to_string(),
+            dest: dest.display().to_string(),
+        });
+
+        stats.dirs += 1;
+        stats.bytes = stats.bytes.saturating_add(size);
+    }
+
+    if cap_reached {
+        return Ok(stats);
+    }
+
+    if tuning.delete_empty_dirs {
+        for entry in walkdir::WalkDir::new(&mod_root)
+            .follow_links(false)
+            .contents_first(true)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if let Ok(md) = std::fs::symlink_metadata(entry.path()) {
+                if is_symlink_or_reparse(&md) {
+                    continue;
+                }
+            }
+            let ft = entry.file_type();
+            if !ft.is_dir() {
+                continue;
+            }
+            let path = entry.path();
+            if path == mod_root {
+                continue;
+            }
+            if is_dir_empty(path) {
+                match tokio::fs::remove_dir(path).await {
+                    Ok(_) => {
+                        sink.push(SyncEvent::EmptyDirDeleted {
+                            path: path.display().to_string(),
+                        });
+                        stats.empty_dirs_deleted += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+fn dir_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            if let Ok(md) = entry.metadata() {
+                total = total.saturating_add(md.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn is_dir_empty(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut it) => it.next().is_none(),
+        Err(_) => false,
+    }
+}
+
+fn current_unix_s() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => 0,
+    }
+}

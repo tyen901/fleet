@@ -47,24 +47,7 @@ impl sync_engine::remote::RemoteRepo for HttpRemoteAdapter {
         })
     }
 
-    async fn fetch_repo_spec(&self) -> Result<sync_engine::types::RepoSpec> {
-        let session = self.session().await?;
-        let spec = session.repo_spec();
-
-        let mods = spec
-            .required_mods
-            .iter()
-            .chain(spec.optional_mods.iter())
-            .map(|m| sync_engine::types::ModSpec {
-                mod_id: m.mod_name.clone(),
-                version: m.checksum.to_hex_upper(),
-            })
-            .collect();
-
-        Ok(sync_engine::types::RepoSpec { mods })
-    }
-
-    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<sync_engine::types::ModManifest> {
+    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<sync_engine::fetch::ModManifest> {
         let session = self.session().await?;
         let manifest = session
             .fetch_mod_manifest(mod_id)
@@ -74,29 +57,24 @@ impl sync_engine::remote::RemoteRepo for HttpRemoteAdapter {
         let files = manifest
             .files
             .into_iter()
-            .map(|f| sync_engine::types::FileEntry {
+            .map(|f| sync_engine::fetch::FileEntry {
                 rel_path: f.path.as_str().replace('\\', "/"),
                 size: f.length,
-                file_checksum: sync_engine::types::Checksum {
-                    bytes: f.checksum.as_bytes().to_vec(),
-                },
+                file_checksum: f.checksum.as_bytes().to_vec(),
                 parts: f
                     .parts
                     .into_iter()
-                    .map(|p| sync_engine::types::FilePart {
+                    .map(|p| sync_engine::fetch::FilePart {
                         offset: p.start,
                         len: p.length,
-                        checksum: sync_engine::types::Checksum {
-                            bytes: p.checksum.as_bytes().to_vec(),
-                        },
+                        checksum: p.checksum.as_bytes().to_vec(),
                     })
                     .collect(),
             })
             .collect();
 
-        Ok(sync_engine::types::ModManifest {
+        Ok(sync_engine::fetch::ModManifest {
             mod_id: manifest.name,
-            version: manifest.checksum.to_hex_upper(),
             files,
         })
     }
@@ -157,13 +135,6 @@ pub struct Md5Checksummer;
 impl sync_engine::types::Checksummer for Md5Checksummer {
     fn algorithm_name(&self) -> &str {
         "md5"
-    }
-
-    fn hash_bytes(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use md5::Digest;
-        let mut ctx = md5::Md5::new();
-        ctx.update(data);
-        Ok(ctx.finalize().to_vec())
     }
 
     fn hash_file(&self, path: &std::path::Path) -> Result<Vec<u8>> {

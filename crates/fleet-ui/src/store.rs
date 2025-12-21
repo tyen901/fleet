@@ -231,7 +231,7 @@ pub enum Action {
 
     UpdateCheckStarted,
     UpdateCheckFinished {
-        result: Result<UpdateCheck, String>,
+        result: Box<Result<UpdateCheck, String>>,
     },
     UpdateApplyStarted,
     UpdateProgress(f32),
@@ -344,50 +344,39 @@ pub fn reduce(state: &mut AppState, action: Action) {
 
             // Update task display fields (simple, utilitarian).
             match ev {
-                SyncEvent::RepoStarted { repo } => {
-                    set_task(state, &format!("Repo: {repo}"), None, true, None)
+                SyncEvent::VerifyStarted { repo } => {
+                    set_task(state, &format!("Verify {repo}"), None, true, None)
                 }
-                SyncEvent::RepoReady {
-                    mods_available,
-                    mods_enabled,
-                } => set_task(
+                SyncEvent::VerifyFinished { ok } => set_task(
                     state,
-                    &format!("Repo ready ({mods_enabled}/{mods_available} mods enabled)"),
+                    if ok {
+                        "Verify finished"
+                    } else {
+                        "Verify failed"
+                    },
                     None,
-                    true,
+                    false,
                     None,
                 ),
-
-                SyncEvent::PlanningStarted { mods_enabled } => set_task(
-                    state,
-                    &format!("Planning ({mods_enabled} mods)"),
-                    None,
-                    true,
-                    None,
-                ),
-                SyncEvent::PlanningFinished { ops, total_bytes } => set_task(
-                    state,
-                    &format!("Plan ready ({ops} ops, {total_bytes} bytes)"),
-                    None,
-                    true,
-                    None,
-                ),
-
-                SyncEvent::TransferPlanned { total_bytes } => {
-                    state.download_summary.total_bytes = total_bytes;
-                    state.download_summary.downloaded_bytes = 0;
-                    state.download_summary.speed_bps = 0.0;
-                    state.download_summary.eta_s = None;
-                    state.last_speed_sample_ts_s = Some(ts_s);
-                    state.last_speed_sample_bytes = 0;
+                SyncEvent::RepairStarted { repo } => {
+                    set_task(state, &format!("Repair {repo}"), None, true, None)
                 }
-                SyncEvent::TransferProgress {
-                    transferred_bytes,
-                    total_bytes,
-                } => {
-                    state.download_summary.total_bytes = total_bytes;
-                    state.download_summary.downloaded_bytes = transferred_bytes.min(total_bytes);
-                    recompute_speed_and_eta(state, ts_s);
+                SyncEvent::RepairSkipEvaluated { skippable, reason } => {
+                    if skippable {
+                        set_task(state, "Repair skipped (cache valid)", None, true, None);
+                    } else if let Some(r) = reason {
+                        set_task(state, &format!("Repair required ({r})"), None, true, None);
+                    }
+                }
+                SyncEvent::RepairFinished { ok, skipped } => {
+                    let label = if skipped {
+                        "Repair skipped"
+                    } else if ok {
+                        "Repair finished"
+                    } else {
+                        "Repair failed"
+                    };
+                    set_task(state, label, None, false, None);
                 }
 
                 SyncEvent::ModStarted { mod_id } => {
@@ -414,6 +403,17 @@ pub fn reduce(state: &mut AppState, action: Action) {
                 SyncEvent::FileUpToDate { mod_id, path } => set_task(
                     state,
                     &format!("Up-to-date {mod_id}/{path}"),
+                    None,
+                    true,
+                    None,
+                ),
+                SyncEvent::FileNeedsRepair {
+                    mod_id,
+                    path,
+                    strategy,
+                } => set_task(
+                    state,
+                    &format!("Repair {mod_id}/{path} ({strategy})"),
                     None,
                     true,
                     None,
@@ -446,6 +446,12 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     true,
                     None,
                 ),
+                SyncEvent::PathQuarantined { path, .. } => {
+                    set_task(state, &format!("Quarantined {path}"), None, true, None)
+                }
+                SyncEvent::EmptyDirDeleted { path } => {
+                    set_task(state, &format!("Removed {path}"), None, true, None)
+                }
 
                 SyncEvent::Warning { message } => {
                     let t = state.task.get_or_insert_with(TaskState::default);
@@ -481,7 +487,7 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.update.busy = false;
             state.update.progress = None;
 
-            match result {
+            match *result {
                 Err(e) => {
                     state.update.last_error = Some(e);
                     state.update.available = None;
@@ -537,39 +543,6 @@ pub fn reduce(state: &mut AppState, action: Action) {
     }
 }
 
-fn recompute_speed_and_eta(state: &mut AppState, ts_s: f64) {
-    let total = state.download_summary.total_bytes;
-    let downloaded = state.download_summary.downloaded_bytes;
-
-    let prev_ts = state.last_speed_sample_ts_s;
-    if let Some(prev_ts) = prev_ts {
-        let dt = (ts_s - prev_ts).max(0.0);
-        if dt > 0.15 {
-            let delta = downloaded.saturating_sub(state.last_speed_sample_bytes);
-            let inst = (delta as f64) / dt;
-            let alpha = 0.25;
-            state.download_summary.speed_bps = if state.download_summary.speed_bps <= 0.0 {
-                inst
-            } else {
-                alpha * inst + (1.0 - alpha) * state.download_summary.speed_bps
-            };
-            state.last_speed_sample_ts_s = Some(ts_s);
-            state.last_speed_sample_bytes = downloaded;
-        }
-    } else {
-        state.last_speed_sample_ts_s = Some(ts_s);
-        state.last_speed_sample_bytes = downloaded;
-        state.download_summary.speed_bps = 0.0;
-    }
-
-    if total > 0 && state.download_summary.speed_bps > 1.0 {
-        let remaining = total.saturating_sub(downloaded) as f64;
-        state.download_summary.eta_s = Some(remaining / state.download_summary.speed_bps);
-    } else {
-        state.download_summary.eta_s = None;
-    }
-}
-
 fn set_task(
     state: &mut AppState,
     phase: &str,
@@ -593,30 +566,26 @@ fn push_log(state: &mut AppState, ts_s: f64, text: String) {
 
 fn format_sync_event(ev: &SyncEvent) -> String {
     match ev {
-        SyncEvent::RepoStarted { repo } => format!("RepoStarted {repo}"),
+        SyncEvent::VerifyStarted { repo } => format!("VerifyStarted {repo}"),
+        SyncEvent::VerifyFinished { ok } => format!("VerifyFinished ok={ok}"),
+        SyncEvent::RepairStarted { repo } => format!("RepairStarted {repo}"),
+        SyncEvent::RepairSkipEvaluated { skippable, reason } => {
+            format!("RepairSkipEvaluated skippable={skippable} reason={reason:?}")
+        }
+        SyncEvent::RepairFinished { ok, skipped } => {
+            format!("RepairFinished ok={ok} skipped={skipped}")
+        }
         SyncEvent::RemoteCapabilities { supports_ranges } => {
             format!("RemoteCapabilities supports_ranges={supports_ranges}")
         }
-        SyncEvent::RepoReady {
-            mods_available,
-            mods_enabled,
-        } => format!("RepoReady enabled={mods_enabled} available={mods_available}"),
-        SyncEvent::PlanningStarted { mods_enabled } => {
-            format!("PlanningStarted mods_enabled={mods_enabled}")
-        }
-        SyncEvent::PlanningFinished { ops, total_bytes } => {
-            format!("PlanningFinished ops={ops} total_bytes={total_bytes}")
-        }
-        SyncEvent::TransferPlanned { total_bytes } => {
-            format!("TransferPlanned total_bytes={total_bytes}")
-        }
-        SyncEvent::TransferProgress {
-            transferred_bytes,
-            total_bytes,
-        } => format!("TransferProgress {transferred_bytes}/{total_bytes}"),
         SyncEvent::ModStarted { mod_id } => format!("ModStarted {mod_id}"),
         SyncEvent::ModFinished { mod_id } => format!("ModFinished {mod_id}"),
-        SyncEvent::PathDeleted { path } => format!("PathDeleted {path}"),
+        SyncEvent::FileUpToDate { mod_id, path } => format!("FileUpToDate {mod_id}/{path}"),
+        SyncEvent::FileNeedsRepair {
+            mod_id,
+            path,
+            strategy,
+        } => format!("FileNeedsRepair {mod_id}/{path} {strategy}"),
         SyncEvent::FileStarted {
             mod_id,
             path,
@@ -628,8 +597,9 @@ fn format_sync_event(ev: &SyncEvent) -> String {
             bytes_done,
             bytes_total,
         } => format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}"),
-        SyncEvent::FileUpToDate { mod_id, path } => format!("FileUpToDate {mod_id}/{path}"),
         SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
+        SyncEvent::PathQuarantined { path, dest } => format!("PathQuarantined {path} -> {dest}"),
+        SyncEvent::EmptyDirDeleted { path } => format!("EmptyDirDeleted {path}"),
         SyncEvent::Warning { message } => format!("Warning {message}"),
         SyncEvent::Error { message } => format!("Error {message}"),
     }

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/fleet_app",
+  "crates/fleet_index",
   "crates/manifest_types",
   "crates/remote_core",
   "crates/remote_http",

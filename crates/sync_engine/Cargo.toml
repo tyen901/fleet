@@ -5,11 +5,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
 bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "time"] }
 futures = "0.3"
 walkdir = "2"
-rusqlite = { version = "0.30", features = ["bundled"] }
 blake3 = "1"
 async-trait = "0.1"
+thiserror = "1"
+fleet_index = { path = "../fleet_index" }
+
+[dev-dependencies]
+tempfile = "3"
