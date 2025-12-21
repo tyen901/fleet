@@ -971,10 +971,10 @@ async fn verify_then_repair_skips_without_remote_fetch() {
         checksummer: Arc::new(TestChecksummer),
         tuning: RepairTuning::default(),
     };
-    let report = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+    let outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
         .await
         .unwrap();
-    assert!(report.skipped);
+    assert!(outcome.report.skipped);
     assert_eq!(
         remote.fetch_manifest_calls.load(Ordering::Relaxed),
         remote_calls_before
@@ -1125,8 +1125,10 @@ async fn unsafe_on_disk_verify_reports_and_repair_aborts_even_if_cached() {
         checksummer: Arc::new(TestChecksummer),
         tuning: RepairTuning::default(),
     };
-    let res = sync_engine::flows::repair(repair_req, &mut idx, sink.clone()).await;
-    assert!(res.is_err());
+    let outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+    assert!(outcome.aborted.is_some());
     assert!(unsafe_target.exists());
     assert!(idx.verified_get().unwrap().is_none());
     assert!(idx
@@ -1206,10 +1208,10 @@ async fn verify_then_repair_repairs_corruption_and_verify_becomes_ok() {
         checksummer: Arc::new(TestChecksummer),
         tuning: RepairTuning::default(),
     };
-    let repair_report = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+    let repair_outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
         .await
         .unwrap();
-    assert!(!repair_report.skipped);
+    assert!(!repair_outcome.report.skipped);
     assert_eq!(std::fs::read(mod_root.join("file.bin")).unwrap(), data);
 
     // Post-repair verify: should become ok.

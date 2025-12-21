@@ -428,9 +428,23 @@ impl FleetApp {
                     tuning: engine_tuning,
                 };
 
-                let _report = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
+                let outcome = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                if let Some(aborted) = outcome.aborted {
+                    return Err(AppError::SyncEngine(format!(
+                        "repair aborted: {:?}",
+                        aborted
+                    )));
+                }
+                if !outcome.failures.is_empty() {
+                    let first = &outcome.failures[0];
+                    return Err(AppError::SyncEngine(format!(
+                        "repair failed ({} files): {}",
+                        outcome.failures.len(),
+                        first.message
+                    )));
+                }
                 Ok(())
             }
             .await;

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::ops::AddAssign;
 
 use crate::remote::RemoteRepo;
 
@@ -128,6 +129,45 @@ pub struct RepairReport {
     pub empty_dirs_deleted: u64,
 
     pub elapsed_ms: u64,
+}
+
+impl AddAssign<&RepairReport> for RepairReport {
+    fn add_assign(&mut self, src: &RepairReport) {
+        self.files_downloaded = self.files_downloaded.saturating_add(src.files_downloaded);
+        self.files_patched = self.files_patched.saturating_add(src.files_patched);
+        self.bytes_downloaded = self.bytes_downloaded.saturating_add(src.bytes_downloaded);
+        self.bytes_patched = self.bytes_patched.saturating_add(src.bytes_patched);
+        self.quarantine_files = self.quarantine_files.saturating_add(src.quarantine_files);
+        self.quarantine_dirs = self.quarantine_dirs.saturating_add(src.quarantine_dirs);
+        self.quarantine_bytes = self.quarantine_bytes.saturating_add(src.quarantine_bytes);
+        self.empty_dirs_deleted = self.empty_dirs_deleted.saturating_add(src.empty_dirs_deleted);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AbortReason {
+    UnsafeOnDisk { message: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct FileFailure {
+    pub mod_id: String,
+    pub rel_path: String,
+    pub message: String,
+    pub aborting: bool,
+}
+
+#[derive(Debug)]
+pub struct RepairOutcome {
+    pub report: RepairReport,
+    pub failures: Vec<FileFailure>,
+    pub aborted: Option<AbortReason>,
+}
+
+impl RepairOutcome {
+    pub fn ok(&self) -> bool {
+        self.aborted.is_none() && self.failures.is_empty()
+    }
 }
 
 pub trait Checksummer: Send + Sync {

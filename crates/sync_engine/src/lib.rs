@@ -11,6 +11,7 @@ pub mod remote;
 pub mod safe_fs;
 pub mod safe_path;
 pub mod staging;
+pub mod time_util;
 pub mod types;
 pub mod verify_parts;
 

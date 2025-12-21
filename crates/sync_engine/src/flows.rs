@@ -1,4 +1,4 @@
-use crate::apply::{apply_ops, AbortReason, ApplyOptions, FileFailure, IndexUpdate};
+use crate::apply::{apply_ops, ApplyOptions, IndexUpdate};
 use crate::events::{EventSink, SyncEvent};
 use crate::fetch::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
@@ -6,8 +6,10 @@ use crate::plan::{plan_mod, CacheHint, PlanError, PlannedOp, RepairStrategy};
 use crate::quarantine::{quarantine_unexpected, QuarantineStats};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
+use crate::time_util::now_ns;
 use crate::types::{
-    RepairReport, RepairRequest, VerifyIssue, VerifyIssueKind, VerifyReport, VerifyRequest,
+    AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, VerifyIssue,
+    VerifyIssueKind, VerifyReport, VerifyRequest,
 };
 use crate::verify_parts::first_part_mismatch;
 use anyhow::Result;
@@ -107,7 +109,7 @@ pub async fn repair(
     req: RepairRequest,
     idx: &mut FleetIndex,
     sink: Arc<dyn EventSink>,
-) -> Result<RepairReport> {
+) -> Result<RepairOutcome> {
     let start = Instant::now();
     sink.push(SyncEvent::RepairStarted {
         repo: req.repo_name.clone(),
@@ -133,11 +135,16 @@ pub async fn repair(
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     ..Default::default()
                 };
+                let outcome = RepairOutcome {
+                    report,
+                    failures: Vec::new(),
+                    aborted: None,
+                };
                 sink.push(SyncEvent::RepairFinished {
                     ok: true,
                     skipped: true,
                 });
-                return Ok(report);
+                return Ok(outcome);
             }
             fleet_index::SkipRepairDecision::NotSkippable { reason, .. } => {
                 sink.push(SyncEvent::RepairSkipEvaluated {
@@ -244,7 +251,7 @@ pub async fn repair(
                 },
             )
             .await?;
-            merge_repair_report(&mut report, &apply_outcome.report);
+            report += &apply_outcome.report;
 
             apply_index_updates(idx, &desired.state_id, apply_outcome.index_updates)?;
             apply_cache_hints(idx, &desired.state_id, cache_hints)?;
@@ -286,27 +293,23 @@ pub async fn repair(
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
 
-        if let Some(reason) = aborted {
-            sink.push(SyncEvent::Error {
-                message: format!("repair aborted: {:?}", reason),
-            });
-            return Err(anyhow::anyhow!("repair aborted"));
+        let outcome = RepairOutcome {
+            report,
+            failures,
+            aborted,
+        };
+
+        if outcome.ok() {
+            idx.verified_set(&desired.state_id, now_ns())?;
+        } else if !outcome.report.skipped {
+            let _ = idx.verified_clear();
         }
 
-        if !failures.is_empty() {
-            let first = &failures[0];
-            sink.push(SyncEvent::Error {
-                message: first.message.clone(),
-            });
-            return Err(anyhow::anyhow!("repair encountered failures"));
-        }
-
-        idx.verified_set(&desired.state_id, now_ns())?;
         sink.push(SyncEvent::RepairFinished {
-            ok: true,
-            skipped: false,
+            ok: outcome.ok(),
+            skipped: outcome.report.skipped,
         });
-        Ok(report)
+        Ok(outcome)
     }
     .await;
 
@@ -665,19 +668,6 @@ fn split_ops(ops: Vec<PlannedOp>) -> (Vec<PlannedOp>, Vec<PlannedOp>) {
     (to_apply, skipped)
 }
 
-fn merge_repair_report(dst: &mut RepairReport, src: &RepairReport) {
-    dst.files_downloaded = dst.files_downloaded.saturating_add(src.files_downloaded);
-    dst.files_patched = dst.files_patched.saturating_add(src.files_patched);
-    dst.bytes_downloaded = dst.bytes_downloaded.saturating_add(src.bytes_downloaded);
-    dst.bytes_patched = dst.bytes_patched.saturating_add(src.bytes_patched);
-    dst.quarantine_files = dst.quarantine_files.saturating_add(src.quarantine_files);
-    dst.quarantine_dirs = dst.quarantine_dirs.saturating_add(src.quarantine_dirs);
-    dst.quarantine_bytes = dst.quarantine_bytes.saturating_add(src.quarantine_bytes);
-    dst.empty_dirs_deleted = dst
-        .empty_dirs_deleted
-        .saturating_add(src.empty_dirs_deleted);
-}
-
 fn merge_quarantine(dst: &mut RepairReport, stats: QuarantineStats) {
     dst.quarantine_files = dst.quarantine_files.saturating_add(stats.files);
     dst.quarantine_dirs = dst.quarantine_dirs.saturating_add(stats.dirs);
@@ -685,11 +675,4 @@ fn merge_quarantine(dst: &mut RepairReport, stats: QuarantineStats) {
     dst.empty_dirs_deleted = dst
         .empty_dirs_deleted
         .saturating_add(stats.empty_dirs_deleted);
-}
-
-fn now_ns() -> i64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => d.as_nanos() as i64,
-        Err(_) => 0,
-    }
 }

@@ -2,7 +2,8 @@ use crate::events::{EventSink, SyncEvent};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::staging::StagedFile;
-use crate::types::{Durability, RepairReport, RepairRequest};
+use crate::time_util::file_mtime_ns;
+use crate::types::{AbortReason, Durability, FileFailure, RepairReport, RepairRequest};
 use crate::verify_parts::verify_all_parts;
 use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
@@ -29,19 +30,6 @@ pub enum IndexUpdate {
 #[derive(Clone, Copy, Debug)]
 pub struct ApplyOptions {
     pub supports_ranges: bool,
-}
-
-#[derive(Debug)]
-pub enum AbortReason {
-    UnsafeOnDisk { message: String },
-}
-
-#[derive(Debug)]
-pub struct FileFailure {
-    pub mod_id: String,
-    pub rel_path: String,
-    pub message: String,
-    pub aborting: bool,
 }
 
 pub struct ApplyBatchOutcome {
@@ -88,7 +76,7 @@ pub async fn apply_ops(
     while let Some(res) = stream.next().await {
         match res {
             Ok(Ok(success)) => {
-                merge_report(&mut report, &success.report);
+                report += &success.report;
                 index_updates.extend(success.index_updates);
             }
             Ok(Err(failure)) => {
@@ -451,27 +439,4 @@ async fn maybe_fsync(f: &mut tokio::fs::File, durability: Durability) -> Result<
         f.sync_data().await?;
     }
     Ok(())
-}
-
-fn merge_report(dst: &mut RepairReport, src: &RepairReport) {
-    dst.files_downloaded = dst.files_downloaded.saturating_add(src.files_downloaded);
-    dst.files_patched = dst.files_patched.saturating_add(src.files_patched);
-    dst.bytes_downloaded = dst.bytes_downloaded.saturating_add(src.bytes_downloaded);
-    dst.bytes_patched = dst.bytes_patched.saturating_add(src.bytes_patched);
-    dst.quarantine_files = dst.quarantine_files.saturating_add(src.quarantine_files);
-    dst.quarantine_dirs = dst.quarantine_dirs.saturating_add(src.quarantine_dirs);
-    dst.quarantine_bytes = dst.quarantine_bytes.saturating_add(src.quarantine_bytes);
-    dst.empty_dirs_deleted = dst
-        .empty_dirs_deleted
-        .saturating_add(src.empty_dirs_deleted);
-}
-
-fn file_mtime_ns(md: &std::fs::Metadata) -> Option<i64> {
-    let nanos = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    i64::try_from(nanos).ok()
 }
