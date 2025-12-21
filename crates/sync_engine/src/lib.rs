@@ -4,6 +4,7 @@ pub mod apply;
 pub mod events;
 pub mod fetch;
 pub mod flows;
+pub mod manifest;
 pub mod plan;
 pub mod remote;
 pub mod safe_fs;

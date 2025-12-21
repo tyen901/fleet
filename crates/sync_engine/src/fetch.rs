@@ -1,5 +1,6 @@
+use crate::manifest::{validate_and_normalize_manifest, ValidatedModManifest};
 use crate::remote::{RemoteCapabilities, RemoteRepo};
-use crate::safe_path::{validate_mod_id, validate_rel_path};
+use crate::safe_path::validate_mod_id;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ pub struct FilePart {
 
 pub struct FetchResult {
     pub capabilities: RemoteCapabilities,
-    pub manifests: Vec<ModManifest>,
+    pub manifests: Vec<ValidatedModManifest>,
 }
 
 pub async fn fetch_all(
@@ -62,9 +63,8 @@ pub async fn fetch_all(
                     manifest.mod_id
                 );
             }
-            normalize_manifest(&mut manifest);
-            validate_manifest(&manifest)?;
-            Ok::<ModManifest, anyhow::Error>(manifest)
+            let validated = validate_and_normalize_manifest(manifest)?;
+            Ok::<ValidatedModManifest, anyhow::Error>(validated)
         }));
     }
 
@@ -79,19 +79,4 @@ pub async fn fetch_all(
         capabilities: caps,
         manifests,
     })
-}
-
-fn validate_manifest(manifest: &ModManifest) -> Result<()> {
-    validate_mod_id(&manifest.mod_id)?;
-    for file in &manifest.files {
-        validate_rel_path(&file.rel_path)
-            .with_context(|| format!("invalid rel_path {}", file.rel_path))?;
-    }
-    Ok(())
-}
-
-fn normalize_manifest(manifest: &mut ModManifest) {
-    for file in &mut manifest.files {
-        file.rel_path = file.rel_path.replace('\\', "/");
-    }
 }

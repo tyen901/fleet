@@ -1,9 +1,10 @@
 use crate::apply::{apply_ops, quarantine_unexpected, ApplyOptions, IndexUpdate, QuarantineStats};
 use crate::events::{EventSink, SyncEvent};
-use crate::fetch::{fetch_all, FileEntry, ModManifest};
+use crate::fetch::fetch_all;
+use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::plan::{plan_mod, CacheHint, PlanError, PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
-use crate::safe_path::{safe_join_mod_file, validate_mod_id, validate_rel_path};
+use crate::safe_path::{safe_join_mod_file, validate_mod_id};
 use crate::types::{
     RepairReport, RepairRequest, VerifyIssue, VerifyIssueKind, VerifyReport, VerifyRequest,
 };
@@ -262,7 +263,7 @@ pub async fn repair(
             for manifest in &fetch.manifests {
                 let mut set = HashSet::new();
                 for file in &manifest.files {
-                    set.insert(file.rel_path.replace('\\', "/"));
+                    set.insert(file.rel_path.clone());
                 }
                 expected_by_mod.insert(manifest.mod_id.clone(), set);
             }
@@ -305,7 +306,7 @@ async fn verify_mod(
     req: &VerifyRequest,
     idx: &mut FleetIndex,
     state_id: &str,
-    manifest: &ModManifest,
+    manifest: &ValidatedModManifest,
     cache: &HashMap<String, fleet_index::FileState>,
     report: &mut VerifyReport,
     sink: Arc<dyn EventSink>,
@@ -318,7 +319,7 @@ async fn verify_mod(
     for file in &manifest.files {
         report.expected_files += 1;
         let mod_id = manifest.mod_id.clone();
-        let rel_path = file.rel_path.replace('\\', "/");
+        let rel_path = file.rel_path.clone();
         let permit = sem.clone().acquire_owned().await?;
         let checksummer = req.checksummer.clone();
         let file = file.clone();
@@ -361,23 +362,10 @@ fn verify_one_file(
     checkout_root: &std::path::Path,
     mod_id: &str,
     rel_path: &str,
-    file: &FileEntry,
+    file: &ValidatedFileEntry,
     cached: Option<fleet_index::FileState>,
     checksummer: &dyn crate::types::Checksummer,
 ) -> Result<VerifyOutcome> {
-    if validate_mod_id(mod_id).is_err() || validate_rel_path(rel_path).is_err() {
-        return Ok(VerifyOutcome {
-            mod_id: mod_id.to_string(),
-            rel_path: rel_path.to_string(),
-            ok: false,
-            size: file.size,
-            mtime_ns: 0,
-            checksum: file.file_checksum.clone(),
-            issue: Some(VerifyIssueKind::UnsafePath),
-            unsafe_message: None,
-        });
-    }
-
     let abs_path = match safe_join_mod_file(checkout_root, mod_id, rel_path) {
         Ok(p) => p,
         Err(_) => {
@@ -565,13 +553,13 @@ fn apply_verify_outcome(
     Ok(())
 }
 
-fn build_baseline(manifests: &[ModManifest]) -> Vec<ExpectedFile> {
+fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<ExpectedFile> {
     let mut rows = Vec::new();
     for manifest in manifests {
         for file in &manifest.files {
             rows.push(ExpectedFile {
                 mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.replace('\\', "/"),
+                rel_path: file.rel_path.clone(),
                 size: file.size,
             });
         }
@@ -582,11 +570,11 @@ fn build_baseline(manifests: &[ModManifest]) -> Vec<ExpectedFile> {
 fn build_cache_snapshot(
     idx: &FleetIndex,
     state_id: &str,
-    manifest: &ModManifest,
+    manifest: &ValidatedModManifest,
 ) -> Result<HashMap<String, fleet_index::FileState>> {
     let mut map = HashMap::new();
     for file in &manifest.files {
-        let rel = file.rel_path.replace('\\', "/");
+        let rel = file.rel_path.clone();
         if let Some(state) = idx.file_state_get(state_id, &manifest.mod_id, &rel)? {
             map.insert(rel, state);
         }

@@ -1,4 +1,5 @@
-use crate::fetch::{FileEntry, ModManifest};
+use crate::fetch::FilePart;
+use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
 use crate::types::{Checksummer, RepairTuning};
@@ -29,8 +30,6 @@ pub struct FileTarget {
     pub strategy: RepairStrategy,
     pub parts_to_fetch: Vec<FilePart>,
 }
-
-pub type FilePart = crate::fetch::FilePart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepairStrategy {
@@ -86,7 +85,7 @@ struct PlanContext<'a> {
 
 pub fn plan_mod(
     checkout_root: &Path,
-    manifest: &ModManifest,
+    manifest: &ValidatedModManifest,
     cache_snapshot: &HashMap<String, FileState>,
     supports_ranges: bool,
     tuning: &RepairTuning,
@@ -157,7 +156,7 @@ struct CacheMeta {
 fn plan_one_file(
     ctx: &PlanContext<'_>,
     abs_path: &Path,
-    file: &FileEntry,
+    file: &ValidatedFileEntry,
 ) -> PlanResult<(RepairStrategy, Vec<FilePart>, u64, Option<CacheMeta>)> {
     let metadata = match std::fs::symlink_metadata(abs_path) {
         Ok(md) => {

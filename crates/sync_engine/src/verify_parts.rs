@@ -12,8 +12,15 @@ pub fn first_part_mismatch(
     }
     let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
     let hashes = checksummer.hash_ranges(path, &ranges)?;
-    for (idx, part) in parts.iter().enumerate() {
-        if hashes[idx] != part.checksum {
+    if hashes.len() != parts.len() {
+        anyhow::bail!(
+            "checksummer returned {} hashes for {} parts",
+            hashes.len(),
+            parts.len()
+        );
+    }
+    for (got, part) in hashes.iter().zip(parts.iter()) {
+        if *got != part.checksum {
             return Ok(Some((part.offset, part.len)));
         }
     }

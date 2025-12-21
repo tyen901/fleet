@@ -7,6 +7,7 @@ use sync_engine::apply::{apply_ops, quarantine_unexpected, ApplyOptions};
 use sync_engine::events::{EventSink, SyncEvent};
 use sync_engine::fetch::fetch_all;
 use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
+use sync_engine::manifest::{validate_and_normalize_manifest, ValidatedModManifest};
 use sync_engine::plan::{plan_mod, FileTarget, PlannedOp, RepairStrategy};
 use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
 use sync_engine::types::VerifyIssueKind;
@@ -151,6 +152,15 @@ fn build_manifest(mod_id: &str, rel_path: &str, data: &[u8], part_size: usize) -
     }
 }
 
+fn build_validated_manifest(
+    mod_id: &str,
+    rel_path: &str,
+    data: &[u8],
+    part_size: usize,
+) -> ValidatedModManifest {
+    validate_and_normalize_manifest(build_manifest(mod_id, rel_path, data, part_size)).unwrap()
+}
+
 fn mtime_ns(path: &std::path::Path) -> i64 {
     let md = std::fs::metadata(path).unwrap();
     md.modified()
@@ -171,7 +181,7 @@ fn planner_cache_hit_yields_skip() {
     let file_path = mod_root.join("file.bin");
     std::fs::write(&file_path, &data).unwrap();
 
-    let manifest = build_manifest("@mod", "file.bin", &data, 4);
+    let manifest = build_validated_manifest("@mod", "file.bin", &data, 4);
     let checksum = manifest.files[0].file_checksum.clone();
     let cache_state = fleet_index::FileState {
         size: data.len() as u64,
@@ -203,7 +213,7 @@ fn planner_symlink_triggers_full() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&real, mod_root.join("file.bin")).unwrap();
 
-    let manifest = build_manifest("@mod", "file.bin", b"data", 4);
+    let manifest = build_validated_manifest("@mod", "file.bin", b"data", 4);
     let checksummer = TestChecksummer;
     let (plan, _hints) = plan_mod(
         root,
@@ -273,7 +283,7 @@ fn planner_strategy_selection_respects_ratio_and_part_caps() {
     let cache = HashMap::new();
 
     for case in cases {
-        let manifest = build_manifest("@mod", "file.bin", &data, case.part_size);
+        let manifest = build_validated_manifest("@mod", "file.bin", &data, case.part_size);
 
         let mut corrupted = data.clone();
         for b in corrupted.iter_mut().take(case.corrupt_prefix_bytes) {
@@ -299,7 +309,7 @@ async fn applier_atomic_replace_handles_existing_targets() {
     std::fs::create_dir_all(&mod_root).unwrap();
 
     let data = b"content".to_vec();
-    let manifest = build_manifest("@mod", "file.bin", &data, 4);
+    let manifest = build_validated_manifest("@mod", "file.bin", &data, 4);
     let entry = &manifest.files[0];
 
     let mut files = HashMap::new();
@@ -509,6 +519,7 @@ async fn patch_event_totals_are_consistent() {
     // Use the real planner so `parts_to_fetch` reflects *only* the bad parts.
     let data = vec![b'A'; 100];
     let manifest = build_manifest("@mod", "file.bin", &data, 10);
+    let validated = validate_and_normalize_manifest(manifest.clone()).unwrap();
 
     let mut corrupted = data.clone();
     corrupted[0] = b'X'; // corrupt exactly one part (offset 0..10)
@@ -520,7 +531,7 @@ async fn patch_event_totals_are_consistent() {
     };
     let checksummer = TestChecksummer;
     let cache = HashMap::new();
-    let (plan, _hints) = plan_mod(root, &manifest, &cache, true, &tuning, &checksummer).unwrap();
+    let (plan, _hints) = plan_mod(root, &validated, &cache, true, &tuning, &checksummer).unwrap();
     assert_eq!(plan.ops.len(), 1);
     assert_eq!(plan.ops[0].target.strategy, RepairStrategy::Patch);
     assert_eq!(
@@ -612,7 +623,7 @@ async fn patch_falls_back_to_full_when_remote_lacks_range_support() {
     };
     let checksummer = TestChecksummer;
     let cache = HashMap::new();
-    let (plan, _hints) = plan_mod(root, &manifest, &cache, true, &tuning, &checksummer).unwrap();
+    let (plan, _hints) = plan_mod(root, &validated, &cache, true, &tuning, &checksummer).unwrap();
     assert_eq!(plan.ops.len(), 1);
     assert_eq!(plan.ops[0].target.strategy, RepairStrategy::Patch);
 
