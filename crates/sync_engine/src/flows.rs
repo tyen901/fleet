@@ -171,7 +171,7 @@ pub async fn repair(
         let mut failures: Vec<FileFailure> = Vec::new();
         let mut aborted: Option<AbortReason> = None;
 
-        for manifest in &fetch.manifests {
+        'mods: for manifest in &fetch.manifests {
             sink.push(SyncEvent::ModStarted {
                 mod_id: manifest.mod_id.clone(),
             });
@@ -204,21 +204,37 @@ pub async fn repair(
 
             let (plan, cache_hints) = match plan_res {
                 Ok(v) => v,
-                Err(err) => {
-                    if let PlanError::UnsafeOnDisk {
+                Err(err) => match err {
+                    PlanError::UnsafeOnDisk {
                         mod_id,
                         rel_path,
                         source,
-                    } = &err
-                    {
+                    } => {
                         sink.push(SyncEvent::Error {
                             message: source.to_string(),
                         });
-                        idx.file_state_delete(&desired.state_id, mod_id, rel_path)?;
+                        idx.file_state_delete(&desired.state_id, &mod_id, &rel_path)?;
+
+                        failures.push(FileFailure {
+                            mod_id: mod_id.clone(),
+                            rel_path: rel_path.clone(),
+                            message: source.to_string(),
+                            aborting: true,
+                        });
+
+                        aborted = Some(AbortReason::UnsafeOnDisk {
+                            message: source.to_string(),
+                        });
+
+                        break 'mods;
                     }
-                    return Err(err.into());
-                }
+                    other => return Err(other.into()),
+                },
             };
+
+            if aborted.is_some() {
+                break;
+            }
 
             let (to_apply, skipped) = split_ops(plan.ops);
 

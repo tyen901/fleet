@@ -52,7 +52,7 @@ pub async fn fetch_all(
         let mod_id = mod_id.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
-            let mut manifest = remote
+            let manifest = remote
                 .fetch_mod_manifest(&mod_id)
                 .await
                 .with_context(|| format!("fetch manifest for {mod_id}"))?;

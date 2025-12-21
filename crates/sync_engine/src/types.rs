@@ -1,6 +1,6 @@
+use std::ops::AddAssign;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::ops::AddAssign;
 
 use crate::remote::RemoteRepo;
 
@@ -140,7 +140,9 @@ impl AddAssign<&RepairReport> for RepairReport {
         self.quarantine_files = self.quarantine_files.saturating_add(src.quarantine_files);
         self.quarantine_dirs = self.quarantine_dirs.saturating_add(src.quarantine_dirs);
         self.quarantine_bytes = self.quarantine_bytes.saturating_add(src.quarantine_bytes);
-        self.empty_dirs_deleted = self.empty_dirs_deleted.saturating_add(src.empty_dirs_deleted);
+        self.empty_dirs_deleted = self
+            .empty_dirs_deleted
+            .saturating_add(src.empty_dirs_deleted);
     }
 }
 

@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use sync_engine::apply::{apply_ops, ApplyOptions};
-use sync_engine::quarantine::quarantine_unexpected;
 use sync_engine::events::{EventSink, SyncEvent};
 use sync_engine::fetch::fetch_all;
 use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
 use sync_engine::manifest::{validate_and_normalize_manifest, ValidatedModManifest};
 use sync_engine::plan::{plan_mod, FileTarget, PlannedOp, RepairStrategy};
+use sync_engine::quarantine::quarantine_unexpected;
 use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
 use sync_engine::types::VerifyIssueKind;
 use sync_engine::types::{Checksummer, RepairRequest, RepairTuning, VerifyRequest, VerifyTuning};
@@ -310,7 +310,7 @@ async fn applier_atomic_replace_handles_existing_targets() {
     std::fs::create_dir_all(&mod_root).unwrap();
 
     let data = b"content".to_vec();
-    let manifest = build_validated_manifest("@mod", "file.bin", &data, 4);
+    let manifest = build_manifest("@mod", "file.bin", &data, 4);
     let entry = &manifest.files[0];
 
     let mut files = HashMap::new();
@@ -665,6 +665,7 @@ async fn patch_falls_back_to_full_when_remote_lacks_range_support() {
     // Plan for Patch, but apply against a remote that does not support ranges.
     let data = vec![b'Z'; 100];
     let manifest = build_manifest("@mod", "file.bin", &data, 10);
+    let validated = validate_and_normalize_manifest(manifest.clone()).unwrap();
 
     let mut corrupted = data.clone();
     corrupted[0] = b'Y';
@@ -737,7 +738,10 @@ async fn apply_continues_on_non_safety_failure() {
 
     let mut files = HashMap::new();
     files.insert(("@mod".to_string(), "ok.bin".to_string()), ok_data.clone());
-    files.insert(("@mod".to_string(), "bad.bin".to_string()), b"abcd".to_vec());
+    files.insert(
+        ("@mod".to_string(), "bad.bin".to_string()),
+        b"abcd".to_vec(),
+    );
 
     let remote = FakeRemote {
         supports_ranges: true,

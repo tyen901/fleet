@@ -6,7 +6,10 @@ async fn staging_creates_temp_next_to_destination() {
     let tmp = tempfile::tempdir().unwrap();
     let final_path = tmp.path().join("dir").join("file.bin");
     let staged = StagedFile::create_next_to(&final_path).await.unwrap();
-    assert_eq!(staged.tmp_path.parent().unwrap(), final_path.parent().unwrap());
+    assert_eq!(
+        staged.tmp_path.parent().unwrap(),
+        final_path.parent().unwrap()
+    );
 }
 
 #[tokio::test]

@@ -8,8 +8,8 @@ use crate::verify_parts::verify_all_parts;
 use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug)]
@@ -56,7 +56,9 @@ pub async fn apply_ops(
     let mut aborted: Option<AbortReason> = None;
     let stop_scheduling = Arc::new(AtomicBool::new(false));
 
-    let it = ops.into_iter().filter(|op| !matches!(op.target.strategy, RepairStrategy::Skip));
+    let it = ops
+        .into_iter()
+        .filter(|op| !matches!(op.target.strategy, RepairStrategy::Skip));
 
     let mut stream = stream::iter(it)
         .take_while({
@@ -67,19 +69,17 @@ pub async fn apply_ops(
             let sink = sink.clone();
             let req = req.clone();
             let range_sem = range_sem.clone();
-            async move {
-                apply_one(op, &req, sink, &range_sem, opts).await
-            }
+            async move { apply_one(op, &req, sink, &range_sem, opts).await }
         })
         .buffer_unordered(file_workers);
 
     while let Some(res) = stream.next().await {
         match res {
-            Ok(Ok(success)) => {
+            Ok(success) => {
                 report += &success.report;
                 index_updates.extend(success.index_updates);
             }
-            Ok(Err(failure)) => {
+            Err(failure) => {
                 if failure.aborting {
                     if aborted.is_none() {
                         aborted = Some(AbortReason::UnsafeOnDisk {
@@ -93,14 +93,6 @@ pub async fn apply_ops(
                     });
                 }
                 failures.push(failure);
-            }
-            Err(err) => {
-                failures.push(FileFailure {
-                    mod_id: "unknown".to_string(),
-                    rel_path: "unknown".to_string(),
-                    message: err.to_string(),
-                    aborting: false,
-                });
             }
         }
     }
@@ -205,18 +197,14 @@ async fn apply_one(
     });
 
     let report = match effective_strategy {
-        RepairStrategy::Full => {
-            match apply_full(req, &sink, range_sem, &op, staged).await {
-                Ok(r) => r,
-                Err(err) => return Err(classify_apply_error(&op, err)),
-            }
-        }
-        RepairStrategy::Patch => {
-            match apply_patch(req, &sink, range_sem, &op, staged).await {
-                Ok(r) => r,
-                Err(err) => return Err(classify_apply_error(&op, err)),
-            }
-        }
+        RepairStrategy::Full => match apply_full(req, &sink, range_sem, &op, staged).await {
+            Ok(r) => r,
+            Err(err) => return Err(classify_apply_error(&op, err)),
+        },
+        RepairStrategy::Patch => match apply_patch(req, &sink, range_sem, &op, staged).await {
+            Ok(r) => r,
+            Err(err) => return Err(classify_apply_error(&op, err)),
+        },
         RepairStrategy::Skip => RepairReport::default(),
     };
 
@@ -288,9 +276,7 @@ async fn apply_full(
     verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
         .context("verify downloaded file")?;
 
-    staged
-        .commit(&op.abs_path, req.tuning.durability)
-        .await?;
+    staged.commit(&op.abs_path, req.tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),
@@ -339,10 +325,11 @@ async fn apply_patch(
 
     let range_workers = req.tuning.range_concurrency.max(1);
     let parts = op.target.parts_to_fetch.clone();
+    let tmp_path = staged.tmp_path.clone();
     let mut tasks = stream::iter(parts)
         .map(|part| {
             let remote = req.remote.clone();
-            let stage_path = staged.tmp_path.clone();
+            let stage_path = tmp_path.clone();
             let sink = sink.clone();
             let tuning = req.tuning.clone();
             let done = done.clone();
@@ -411,9 +398,7 @@ async fn apply_patch(
     verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
         .context("verify patched file")?;
 
-    staged
-        .commit(&op.abs_path, req.tuning.durability)
-        .await?;
+    staged.commit(&op.abs_path, req.tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),

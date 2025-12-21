@@ -22,7 +22,8 @@ pub fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<ValidatedMo
     let mut files = Vec::with_capacity(m.files.len());
     for mut f in m.files.drain(..) {
         f.rel_path = f.rel_path.replace('\\', "/");
-        validate_rel_path(&f.rel_path).with_context(|| format!("invalid rel_path {}", f.rel_path))?;
+        validate_rel_path(&f.rel_path)
+            .with_context(|| format!("invalid rel_path {}", f.rel_path))?;
         validate_parts(&f)?;
         files.push(ValidatedFileEntry {
             rel_path: f.rel_path,

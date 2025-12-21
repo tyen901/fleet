@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub struct TestSink {
     events: Mutex<Vec<SyncEvent>>,
@@ -54,7 +54,7 @@ impl MockRemoteRepo {
         }
     }
 
-    pub fn with_manifest(mut self, manifest: ModManifest) -> Self {
+    pub fn with_manifest(self, manifest: ModManifest) -> Self {
         self.manifests
             .lock()
             .unwrap()
@@ -62,17 +62,18 @@ impl MockRemoteRepo {
         self
     }
 
-    pub fn with_file(mut self, mod_id: &str, rel_path: &str, bytes: Bytes) -> Self {
-        self.files.lock().unwrap().insert(
-            (mod_id.to_string(), rel_path.to_string()),
-            bytes,
-        );
+    pub fn with_file(self, mod_id: &str, rel_path: &str, bytes: Bytes) -> Self {
+        self.files
+            .lock()
+            .unwrap()
+            .insert((mod_id.to_string(), rel_path.to_string()), bytes);
         self
     }
 
-    pub fn with_caps(mut self, caps: RemoteCapabilities) -> Self {
-        self.caps = caps;
-        self
+    pub fn with_caps(self, caps: RemoteCapabilities) -> Self {
+        let mut next = self;
+        next.caps = caps;
+        next
     }
 }
 
@@ -102,13 +103,7 @@ impl RemoteRepo for MockRemoteRepo {
     }
 
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest> {
-        Ok(self
-            .manifests
-            .lock()
-            .unwrap()
-            .get(mod_id)
-            .cloned()
-            .unwrap())
+        Ok(self.manifests.lock().unwrap().get(mod_id).cloned().unwrap())
     }
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> Result<RemoteStream> {
