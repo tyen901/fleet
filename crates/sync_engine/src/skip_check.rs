@@ -220,7 +220,7 @@ pub fn evaluate_skip(
                 continue;
             }
 
-            let Some(actual_mtime_ns) = file_mtime_ns(&md) else {
+            let Some(actual_mtime_ns) = file_mtime_ns(&md).map(|t| t.0) else {
                 evidence.mtime_mismatch += 1;
                 continue;
             };

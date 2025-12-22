@@ -149,17 +149,35 @@ async fn apply_one(
     let mod_root = checkout_root.join(&op.mod_id);
 
     if let Some(parent) = op.abs_path.parent() {
-        if let Err(err) = ensure_no_symlink_ancestors(&mod_root, parent) {
-            let error = anyhow::Error::new(err);
-            sink.push(SyncEvent::Error {
-                message: error.to_string(),
-            });
-            return Err(FileFailure {
-                mod_id: op.mod_id.clone(),
-                rel_path: op.rel_path.clone(),
-                message: error.to_string(),
-                aborting: true,
-            });
+        let mod_root2 = mod_root.clone();
+        let parent2 = parent.to_path_buf();
+        let res = tokio::task::spawn_blocking(move || ensure_no_symlink_ancestors(&mod_root2, &parent2)).await;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let error = anyhow::Error::new(err);
+                sink.push(SyncEvent::Error {
+                    message: error.to_string(),
+                });
+                return Err(FileFailure {
+                    mod_id: op.mod_id.clone(),
+                    rel_path: op.rel_path.clone(),
+                    message: error.to_string(),
+                    aborting: true,
+                });
+            }
+            Err(e) => {
+                let error = anyhow::anyhow!(e.to_string());
+                sink.push(SyncEvent::Error {
+                    message: error.to_string(),
+                });
+                return Err(FileFailure {
+                    mod_id: op.mod_id.clone(),
+                    rel_path: op.rel_path.clone(),
+                    message: error.to_string(),
+                    aborting: true,
+                });
+            }
         }
     }
 
@@ -253,7 +271,7 @@ async fn apply_one(
         Ok(md) => md,
         Err(err) => return Err(classify_apply_error(&op, err.into())),
     };
-    let mtime_ns = file_mtime_ns(&md).unwrap_or(0);
+    let mtime_ns = file_mtime_ns(&md).map(|t| t.0).unwrap_or(0);
     let index_updates = vec![IndexUpdate::UpsertFileState {
         mod_id: op.mod_id.clone(),
         rel_path: op.rel_path.clone(),

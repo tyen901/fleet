@@ -12,7 +12,6 @@ use crate::model::{
     SyncFreshRequest, TimestampNs, UnknownPathPolicy,
 };
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
-use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
 use crate::time_util::now_ns;
 
@@ -78,7 +77,7 @@ pub(crate) async fn run(
                 let abs = safe_join_mod_file(&req.checkout_root, mod_id, rel_path)?;
                 if let Some(parent) = abs.parent() {
                     let mod_root = req.checkout_root.join(mod_id);
-                    ensure_no_symlink_ancestors(&mod_root, parent)?;
+                    crate::fs::ensure_no_symlink_ancestors(mod_root, parent.to_path_buf()).await?;
                 }
 
                 match tokio::fs::symlink_metadata(&abs).await {

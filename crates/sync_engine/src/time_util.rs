@@ -5,12 +5,12 @@ pub fn now_ns() -> i64 {
     }
 }
 
-pub fn file_mtime_ns(md: &std::fs::Metadata) -> Option<i64> {
+pub fn file_mtime_ns(md: &std::fs::Metadata) -> Option<crate::model::TimestampNs> {
     let nanos = md
         .modified()
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    i64::try_from(nanos).ok()
+    i64::try_from(nanos).ok().map(crate::model::TimestampNs)
 }

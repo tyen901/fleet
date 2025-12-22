@@ -267,7 +267,7 @@ fn verify_one_file(
         });
     }
 
-    let Some(mtime_ns) = file_mtime_ns(&md) else {
+    let Some(mtime_ns) = file_mtime_ns(&md).map(|t| t.0) else {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
