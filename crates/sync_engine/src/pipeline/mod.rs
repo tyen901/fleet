@@ -41,7 +41,7 @@ pub(crate) fn baseline_digest_hex(rows: &[crate::model::ExpectedFile]) -> String
 
 pub(crate) fn validate_enabled_mods(expected_hash: &str, enabled_mods: &[String]) -> anyhow::Result<()> {
     for mod_id in enabled_mods {
-        crate::safe_path::validate_mod_id(mod_id)?;
+        crate::fs::validate_mod_id(mod_id)?;
     }
     let mut mods_sorted = enabled_mods.to_vec();
     mods_sorted.sort();

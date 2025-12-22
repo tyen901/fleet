@@ -12,7 +12,7 @@ use crate::model::{
     SyncFreshRequest, TimestampNs, UnknownPathPolicy,
 };
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
-use crate::safe_path::safe_join_mod_file;
+use crate::fs::safe_join_mod_file;
 use crate::util::now_ns;
 use tokio_util::sync::CancellationToken;
 

@@ -10,8 +10,7 @@ use crate::model::{
     TimestampNs,
 };
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
-use crate::safe_fs::ensure_no_symlink_ancestors;
-use crate::safe_path::safe_join_mod_file;
+use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::util::{file_mtime_ns, now_ns};
 use futures::StreamExt;
 
@@ -204,7 +203,7 @@ fn verify_one_file(
 
     if let Some(parent) = abs_path.parent() {
         let mod_root = checkout_root.join(mod_id);
-        if let Err(err) = ensure_no_symlink_ancestors(&mod_root, parent) {
+        if let Err(err) = ensure_no_symlink_ancestors_blocking(&mod_root, parent) {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),

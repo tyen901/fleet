@@ -1,7 +1,7 @@
 use crate::events::{EventSink, SyncEvent};
 use crate::model::{Checksummer, RepairTuning};
 use crate::plan::{PlannedOp, RepairStrategy};
-use crate::safe_fs::ensure_no_symlink_ancestors;
+use crate::fs::ensure_no_symlink_ancestors_blocking;
 use crate::fs::StagedFile;
 use crate::util::file_mtime_ns;
 use crate::model::{AbortReason, Durability, FileFailure, RepairReport};
@@ -137,7 +137,7 @@ struct ApplyOneSuccess {
 }
 
 fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> FileFailure {
-    let aborting = error.is::<crate::safe_fs::UnsafeOnDiskError>();
+    let aborting = error.is::<crate::fs::UnsafeOnDiskError>();
     FileFailure {
         mod_id: op.mod_id.clone(),
         rel_path: op.rel_path.clone(),
@@ -170,7 +170,10 @@ async fn apply_one(
     if let Some(parent) = op.abs_path.parent() {
         let mod_root2 = mod_root.clone();
         let parent2 = parent.to_path_buf();
-        let res = tokio::task::spawn_blocking(move || ensure_no_symlink_ancestors(&mod_root2, &parent2)).await;
+        let res = tokio::task::spawn_blocking(move || {
+            ensure_no_symlink_ancestors_blocking(&mod_root2, &parent2)
+        })
+        .await;
         match res {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {

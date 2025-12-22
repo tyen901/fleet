@@ -1,5 +1,5 @@
 use crate::events::{EventSink, SyncEvent};
-use crate::safe_fs::is_symlink_or_reparse;
+use crate::fs::is_symlink_or_reparse;
 use crate::model::{RepairTuning, UnexpectedPathPolicy};
 use anyhow::Result;
 use std::collections::HashSet;

@@ -1,7 +1,6 @@
 use crate::manifest::ValidatedModManifest;
 use crate::ports::StateStore;
-use crate::safe_fs::ensure_no_symlink_ancestors;
-use crate::safe_path::safe_join_mod_file;
+use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::util::file_mtime_ns;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -154,7 +153,7 @@ pub fn evaluate_skip(
 
             if let Some(parent) = abs_path.parent() {
                 let mod_root = checkout_root.join(&manifest.mod_id);
-                if ensure_no_symlink_ancestors(&mod_root, parent).is_err() {
+                if ensure_no_symlink_ancestors_blocking(&mod_root, parent).is_err() {
                     evidence.local_unsafe_path += 1;
                     push_issue(
                         &mut evidence.issues,

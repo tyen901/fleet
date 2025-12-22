@@ -1,5 +1,5 @@
 use crate::fetch::{FileEntry, FilePart, ModManifest};
-use crate::safe_path::{validate_mod_id, validate_rel_path};
+use crate::fs::{validate_mod_id, validate_rel_path};
 use anyhow::{bail, Context, Result};
 
 #[derive(Clone, Debug)]

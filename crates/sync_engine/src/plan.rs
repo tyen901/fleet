@@ -1,7 +1,6 @@
 use crate::fetch::FilePart;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
-use crate::safe_fs::ensure_no_symlink_ancestors;
-use crate::safe_path::safe_join_mod_file;
+use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::model::{Checksummer, RepairTuning};
 use fleet_index::FileState;
 use std::collections::HashMap;
@@ -61,7 +60,7 @@ pub enum PlanError {
         mod_id: String,
         rel_path: String,
         #[source]
-        source: crate::safe_fs::UnsafeOnDiskError,
+        source: crate::fs::UnsafeOnDiskError,
     },
     #[error("planning failed for {mod_id}/{rel_path}: {source}")]
     Other {
@@ -179,7 +178,7 @@ fn plan_one_file(
     };
 
     if let Some(parent) = abs_path.parent() {
-        ensure_no_symlink_ancestors(ctx.mod_root, parent).map_err(|e| PlanError::UnsafeOnDisk {
+        ensure_no_symlink_ancestors_blocking(ctx.mod_root, parent).map_err(|e| PlanError::UnsafeOnDisk {
             mod_id: ctx.mod_id.to_string(),
             rel_path: file.rel_path.clone(),
             source: e,

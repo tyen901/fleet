@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::safe_fs::UnsafeOnDiskError;
+pub(crate) type UnsafeOnDiskError = crate::safe_fs::UnsafeOnDiskError;
 use crate::model::Durability;
 
 pub(crate) fn validate_mod_id(mod_id: &str) -> anyhow::Result<()> {
@@ -24,6 +24,10 @@ pub(crate) fn ensure_no_symlink_ancestors_blocking(
     candidate: &Path,
 ) -> Result<(), UnsafeOnDiskError> {
     crate::safe_fs::ensure_no_symlink_ancestors(mod_root, candidate)
+}
+
+pub(crate) fn is_symlink_or_reparse(md: &std::fs::Metadata) -> bool {
+    crate::safe_fs::is_symlink_or_reparse(md)
 }
 
 pub(crate) async fn ensure_no_symlink_ancestors(

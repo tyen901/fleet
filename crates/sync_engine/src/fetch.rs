@@ -1,6 +1,6 @@
 use crate::manifest::{validate_and_normalize_manifest, ValidatedModManifest};
 use crate::remote::{RemoteCapabilities, RemoteRepo};
-use crate::safe_path::validate_mod_id;
+use crate::fs::validate_mod_id;
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
