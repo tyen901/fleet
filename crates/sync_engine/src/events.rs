@@ -65,9 +65,26 @@ pub enum SyncEvent {
         path: String,
     },
 
-    PathQuarantined {
+    UnexpectedPathsFound {
+        mod_id: String,
+        files: u64,
+        dirs: u64,
+        bytes: u64,
+        sample: Vec<String>,
+    },
+    UnexpectedPathDeleted {
+        mod_id: String,
         path: String,
-        dest: String,
+        bytes: u64,
+        is_dir: bool,
+    },
+    UnexpectedPathsActionRequired {
+        mod_id: String,
+        message: String,
+    },
+    UnexpectedPathsCapReached {
+        mod_id: String,
+        message: String,
     },
     EmptyDirDeleted {
         path: String,

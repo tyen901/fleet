@@ -3,7 +3,6 @@ use crate::events::{EventSink, SyncEvent};
 use crate::fetch::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::plan::{plan_mod, PlanError, PlannedOp, RepairStrategy};
-use crate::quarantine::{quarantine_unexpected, QuarantineStats};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
 use crate::time_util::now_ns;
@@ -11,6 +10,7 @@ use crate::types::{
     AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, VerifyIssue,
     VerifyIssueKind, VerifyReport, VerifyRequest,
 };
+use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::verify_parts::first_part_mismatch;
 use anyhow::Result;
 use fleet_index::{ExpectedFile, FleetIndex, SkipRepairPolicy};
@@ -337,7 +337,7 @@ pub async fn repair(
             });
         }
 
-        if aborted.is_none() && req.tuning.quarantine {
+        if aborted.is_none() {
             let mut expected_by_mod: HashMap<String, HashSet<String>> = HashMap::new();
             for manifest in &fetch.manifests {
                 let mut set = HashSet::new();
@@ -348,7 +348,7 @@ pub async fn repair(
             }
 
             for (mod_id, expected) in expected_by_mod {
-                let stats = quarantine_unexpected(
+                let stats = handle_unexpected_paths(
                     &req.checkout_root,
                     &mod_id,
                     &expected,
@@ -356,7 +356,21 @@ pub async fn repair(
                     sink.clone(),
                 )
                 .await?;
-                merge_quarantine(&mut report, stats);
+                merge_unexpected(&mut report, stats.clone());
+                if matches!(
+                    req.tuning.unexpected_paths,
+                    crate::types::UnexpectedPathPolicy::Prompt
+                ) && (stats.found_files + stats.found_dirs) > 0
+                {
+                    aborted = Some(AbortReason::UnexpectedPaths {
+                        message: "unexpected files/directories found".to_string(),
+                        mod_id,
+                        files: stats.found_files,
+                        dirs: stats.found_dirs,
+                        bytes: stats.found_bytes,
+                    });
+                    break;
+                }
             }
         }
 
@@ -765,10 +779,19 @@ fn split_ops(ops: Vec<PlannedOp>) -> (Vec<PlannedOp>, Vec<PlannedOp>) {
     (to_apply, skipped)
 }
 
-fn merge_quarantine(dst: &mut RepairReport, stats: QuarantineStats) {
-    dst.quarantine_files = dst.quarantine_files.saturating_add(stats.files);
-    dst.quarantine_dirs = dst.quarantine_dirs.saturating_add(stats.dirs);
-    dst.quarantine_bytes = dst.quarantine_bytes.saturating_add(stats.bytes);
+fn merge_unexpected(dst: &mut RepairReport, stats: UnexpectedStats) {
+    dst.unexpected_found_files = dst.unexpected_found_files.saturating_add(stats.found_files);
+    dst.unexpected_found_dirs = dst.unexpected_found_dirs.saturating_add(stats.found_dirs);
+    dst.unexpected_found_bytes = dst.unexpected_found_bytes.saturating_add(stats.found_bytes);
+    dst.unexpected_deleted_files = dst
+        .unexpected_deleted_files
+        .saturating_add(stats.deleted_files);
+    dst.unexpected_deleted_dirs = dst
+        .unexpected_deleted_dirs
+        .saturating_add(stats.deleted_dirs);
+    dst.unexpected_deleted_bytes = dst
+        .unexpected_deleted_bytes
+        .saturating_add(stats.deleted_bytes);
     dst.empty_dirs_deleted = dst
         .empty_dirs_deleted
         .saturating_add(stats.empty_dirs_deleted);

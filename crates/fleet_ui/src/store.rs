@@ -426,8 +426,27 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     true,
                     None,
                 ),
-                SyncEvent::PathQuarantined { path, .. } => {
-                    set_task(state, &format!("Quarantined {path}"), None, true, None)
+                SyncEvent::UnexpectedPathsFound { mod_id, .. } => set_task(
+                    state,
+                    &format!("Unexpected paths in {mod_id}"),
+                    None,
+                    true,
+                    None,
+                ),
+                SyncEvent::UnexpectedPathDeleted { mod_id, path, .. } => set_task(
+                    state,
+                    &format!("Deleted unexpected {mod_id}/{path}"),
+                    None,
+                    true,
+                    None,
+                ),
+                SyncEvent::UnexpectedPathsActionRequired { message, .. } => {
+                    let t = state.task.get_or_insert_with(TaskState::default);
+                    t.last_error = Some(message);
+                }
+                SyncEvent::UnexpectedPathsCapReached { message, .. } => {
+                    let t = state.task.get_or_insert_with(TaskState::default);
+                    t.last_error = Some(message);
                 }
                 SyncEvent::EmptyDirDeleted { path } => {
                     set_task(state, &format!("Removed {path}"), None, true, None)
@@ -582,7 +601,28 @@ fn format_sync_event(ev: &SyncEvent) -> String {
             format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}")
         }
         SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
-        SyncEvent::PathQuarantined { path, dest } => format!("PathQuarantined {path} -> {dest}"),
+        SyncEvent::UnexpectedPathsFound {
+            mod_id,
+            files,
+            dirs,
+            bytes,
+            sample,
+        } => format!(
+            "UnexpectedPathsFound {mod_id} files={files} dirs={dirs} bytes={bytes} sample={}",
+            sample.join(",")
+        ),
+        SyncEvent::UnexpectedPathDeleted {
+            mod_id,
+            path,
+            bytes,
+            is_dir,
+        } => format!("UnexpectedPathDeleted {mod_id}/{path} bytes={bytes} is_dir={is_dir}"),
+        SyncEvent::UnexpectedPathsActionRequired { mod_id, message } => {
+            format!("UnexpectedPathsActionRequired {mod_id} {message}")
+        }
+        SyncEvent::UnexpectedPathsCapReached { mod_id, message } => {
+            format!("UnexpectedPathsCapReached {mod_id} {message}")
+        }
         SyncEvent::EmptyDirDeleted { path } => format!("EmptyDirDeleted {path}"),
         SyncEvent::Warning { message } => format!("Warning {message}"),
         SyncEvent::Error { message } => format!("Error {message}"),

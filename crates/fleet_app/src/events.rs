@@ -57,9 +57,26 @@ pub enum SyncEvent {
         path: String,
     },
 
-    PathQuarantined {
+    UnexpectedPathsFound {
+        mod_id: String,
+        files: u64,
+        dirs: u64,
+        bytes: u64,
+        sample: Vec<String>,
+    },
+    UnexpectedPathDeleted {
+        mod_id: String,
         path: String,
-        dest: String,
+        bytes: u64,
+        is_dir: bool,
+    },
+    UnexpectedPathsActionRequired {
+        mod_id: String,
+        message: String,
+    },
+    UnexpectedPathsCapReached {
+        mod_id: String,
+        message: String,
     },
     EmptyDirDeleted {
         path: String,
@@ -129,7 +146,36 @@ impl From<sync_engine::events::SyncEvent> for SyncEvent {
             },
             E::FileVerified { mod_id, path } => SyncEvent::FileVerified { mod_id, path },
 
-            E::PathQuarantined { path, dest } => SyncEvent::PathQuarantined { path, dest },
+            E::UnexpectedPathsFound {
+                mod_id,
+                files,
+                dirs,
+                bytes,
+                sample,
+            } => SyncEvent::UnexpectedPathsFound {
+                mod_id,
+                files,
+                dirs,
+                bytes,
+                sample,
+            },
+            E::UnexpectedPathDeleted {
+                mod_id,
+                path,
+                bytes,
+                is_dir,
+            } => SyncEvent::UnexpectedPathDeleted {
+                mod_id,
+                path,
+                bytes,
+                is_dir,
+            },
+            E::UnexpectedPathsActionRequired { mod_id, message } => {
+                SyncEvent::UnexpectedPathsActionRequired { mod_id, message }
+            }
+            E::UnexpectedPathsCapReached { mod_id, message } => {
+                SyncEvent::UnexpectedPathsCapReached { mod_id, message }
+            }
             E::EmptyDirDeleted { path } => SyncEvent::EmptyDirDeleted { path },
 
             E::Warning { message } => SyncEvent::Warning { message },

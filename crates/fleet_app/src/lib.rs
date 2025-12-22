@@ -423,9 +423,10 @@ impl FleetApp {
                     patch_max_range_requests: sync_engine::types::RepairTuning::default()
                         .patch_max_range_requests,
                     durability: sync_engine::types::Durability::BestEffort,
-                    quarantine: true,
+                    unexpected_paths: sync_engine::types::UnexpectedPathPolicy::Prompt,
+                    max_unexpected_delete_bytes: sync_engine::types::RepairTuning::default()
+                        .max_unexpected_delete_bytes,
                     delete_empty_dirs: true,
-                    max_quarantine_bytes: None,
                     use_index: tuning.use_index,
                     emit_progress: true,
                     auto_fix_case: sync_engine::types::RepairTuning::default().auto_fix_case,

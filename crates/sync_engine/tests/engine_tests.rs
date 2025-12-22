@@ -9,10 +9,12 @@ use sync_engine::fetch::fetch_all;
 use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
 use sync_engine::manifest::{validate_and_normalize_manifest, ValidatedModManifest};
 use sync_engine::plan::{plan_mod, FileTarget, PlannedOp, RepairStrategy};
-use sync_engine::quarantine::quarantine_unexpected;
 use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
 use sync_engine::types::VerifyIssueKind;
-use sync_engine::types::{Checksummer, RepairRequest, RepairTuning, VerifyRequest, VerifyTuning};
+use sync_engine::types::{
+    Checksummer, RepairRequest, RepairTuning, UnexpectedPathPolicy, VerifyRequest, VerifyTuning,
+};
+use sync_engine::unexpected::handle_unexpected_paths;
 
 use fleet_index::{DesiredState, FleetIndex};
 
@@ -476,7 +478,7 @@ async fn patch_falls_back_to_full_when_baseline_missing() {
 }
 
 #[tokio::test]
-async fn quarantine_ignores_symlinks_and_quarantines_unexpected() {
+async fn unexpected_ignores_symlinks_and_deletes_unexpected() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let mod_root = root.join("@mod");
@@ -496,16 +498,17 @@ async fn quarantine_ignores_symlinks_and_quarantines_unexpected() {
     expected.insert("expected.txt".to_string());
 
     let tuning = RepairTuning {
+        unexpected_paths: UnexpectedPathPolicy::AutoDelete,
         delete_empty_dirs: true,
         ..Default::default()
     };
 
     let sink = Arc::new(TestSink::default());
-    let stats = quarantine_unexpected(root, "@mod", &expected, &tuning, sink.clone())
+    let stats = handle_unexpected_paths(root, "@mod", &expected, &tuning, sink.clone())
         .await
         .unwrap();
 
-    assert!(stats.files >= 1);
+    assert!(stats.deleted_files >= 1);
     assert!(!mod_root.join("extra.txt").exists());
     assert!(!mod_root.join("extra_dir").exists());
 
@@ -517,7 +520,7 @@ async fn quarantine_ignores_symlinks_and_quarantines_unexpected() {
 }
 
 #[tokio::test]
-async fn quarantine_respects_cap() {
+async fn unexpected_respects_cap() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let mod_root = root.join("@mod");
@@ -528,21 +531,23 @@ async fn quarantine_respects_cap() {
 
     let expected = HashSet::new();
     let tuning = RepairTuning {
-        max_quarantine_bytes: Some(16),
+        unexpected_paths: UnexpectedPathPolicy::AutoDelete,
+        max_unexpected_delete_bytes: Some(16),
         ..Default::default()
     };
 
     let sink = Arc::new(TestSink::default());
-    let stats = quarantine_unexpected(root, "@mod", &expected, &tuning, sink.clone())
+    let stats = handle_unexpected_paths(root, "@mod", &expected, &tuning, sink.clone())
         .await
         .unwrap();
 
-    assert_eq!(stats.files, 0);
+    assert_eq!(stats.deleted_files, 0);
+    assert!(stats.cap_reached);
     assert!(big_path.exists());
 }
 
 #[tokio::test]
-async fn quarantine_deletes_empty_expected_prefix_dirs() {
+async fn unexpected_deletes_empty_expected_prefix_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let mod_root = root.join("@mod");
@@ -555,17 +560,49 @@ async fn quarantine_deletes_empty_expected_prefix_dirs() {
     expected.insert("expected/file.bin".to_string());
 
     let tuning = RepairTuning {
+        unexpected_paths: UnexpectedPathPolicy::AutoDelete,
         delete_empty_dirs: true,
         ..Default::default()
     };
 
     let sink = Arc::new(TestSink::default());
-    let stats = quarantine_unexpected(root, "@mod", &expected, &tuning, sink.clone())
+    let stats = handle_unexpected_paths(root, "@mod", &expected, &tuning, sink.clone())
         .await
         .unwrap();
 
     assert_eq!(stats.empty_dirs_deleted, 1);
     assert!(!expected_dir.exists());
+}
+
+#[tokio::test]
+async fn unexpected_prompt_does_not_delete() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let extra_path = mod_root.join("extra.txt");
+    std::fs::write(&extra_path, b"bad").unwrap();
+
+    let expected = HashSet::new();
+    let tuning = RepairTuning {
+        unexpected_paths: UnexpectedPathPolicy::Prompt,
+        ..Default::default()
+    };
+
+    let sink = Arc::new(TestSink::default());
+    let stats = handle_unexpected_paths(root, "@mod", &expected, &tuning, sink.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(stats.found_files, 1);
+    assert!(extra_path.exists());
+    assert!(sink
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|e| matches!(e, SyncEvent::UnexpectedPathsActionRequired { .. })));
 }
 
 #[tokio::test]

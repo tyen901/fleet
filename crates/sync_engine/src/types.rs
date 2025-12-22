@@ -64,13 +64,19 @@ pub struct RepairTuning {
     pub patch_max_range_requests: Option<usize>,
     pub durability: Durability,
 
-    pub quarantine: bool,
+    pub unexpected_paths: UnexpectedPathPolicy,
+    pub max_unexpected_delete_bytes: Option<u64>,
     pub delete_empty_dirs: bool,
-    pub max_quarantine_bytes: Option<u64>,
 
     pub use_index: bool,
     pub emit_progress: bool,
     pub auto_fix_case: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum UnexpectedPathPolicy {
+    Prompt,
+    AutoDelete,
 }
 
 impl Default for RepairTuning {
@@ -86,9 +92,9 @@ impl Default for RepairTuning {
             patch_max_fetch_ratio: 0.60,
             patch_max_range_requests: Some(64),
             durability: Durability::BestEffort,
-            quarantine: true,
+            unexpected_paths: UnexpectedPathPolicy::Prompt,
+            max_unexpected_delete_bytes: Some(512 * 1024 * 1024),
             delete_empty_dirs: true,
-            max_quarantine_bytes: None,
             use_index: true,
             emit_progress: true,
             auto_fix_case: true,
@@ -142,9 +148,12 @@ pub struct RepairReport {
     pub bytes_downloaded: u64,
     pub bytes_patched: u64,
 
-    pub quarantine_files: u64,
-    pub quarantine_dirs: u64,
-    pub quarantine_bytes: u64,
+    pub unexpected_found_files: u64,
+    pub unexpected_found_dirs: u64,
+    pub unexpected_found_bytes: u64,
+    pub unexpected_deleted_files: u64,
+    pub unexpected_deleted_dirs: u64,
+    pub unexpected_deleted_bytes: u64,
     pub empty_dirs_deleted: u64,
 
     pub elapsed_ms: u64,
@@ -156,9 +165,24 @@ impl AddAssign<&RepairReport> for RepairReport {
         self.files_patched = self.files_patched.saturating_add(src.files_patched);
         self.bytes_downloaded = self.bytes_downloaded.saturating_add(src.bytes_downloaded);
         self.bytes_patched = self.bytes_patched.saturating_add(src.bytes_patched);
-        self.quarantine_files = self.quarantine_files.saturating_add(src.quarantine_files);
-        self.quarantine_dirs = self.quarantine_dirs.saturating_add(src.quarantine_dirs);
-        self.quarantine_bytes = self.quarantine_bytes.saturating_add(src.quarantine_bytes);
+        self.unexpected_found_files = self
+            .unexpected_found_files
+            .saturating_add(src.unexpected_found_files);
+        self.unexpected_found_dirs = self
+            .unexpected_found_dirs
+            .saturating_add(src.unexpected_found_dirs);
+        self.unexpected_found_bytes = self
+            .unexpected_found_bytes
+            .saturating_add(src.unexpected_found_bytes);
+        self.unexpected_deleted_files = self
+            .unexpected_deleted_files
+            .saturating_add(src.unexpected_deleted_files);
+        self.unexpected_deleted_dirs = self
+            .unexpected_deleted_dirs
+            .saturating_add(src.unexpected_deleted_dirs);
+        self.unexpected_deleted_bytes = self
+            .unexpected_deleted_bytes
+            .saturating_add(src.unexpected_deleted_bytes);
         self.empty_dirs_deleted = self
             .empty_dirs_deleted
             .saturating_add(src.empty_dirs_deleted);
@@ -167,7 +191,16 @@ impl AddAssign<&RepairReport> for RepairReport {
 
 #[derive(Debug, Clone)]
 pub enum AbortReason {
-    UnsafeOnDisk { message: String },
+    UnsafeOnDisk {
+        message: String,
+    },
+    UnexpectedPaths {
+        message: String,
+        mod_id: String,
+        files: u64,
+        dirs: u64,
+        bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
