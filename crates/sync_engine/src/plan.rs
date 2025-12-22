@@ -318,12 +318,14 @@ fn coalesce_patch_fetch_ranges(
 
     // Map bad parts to indices in the full contiguous part list, so we can expand/merge on
     // part boundaries (important for PBO layout correctness).
+    let mut index_by_range = HashMap::with_capacity(all_parts.len());
+    for (idx, part) in all_parts.iter().enumerate() {
+        index_by_range.insert((part.offset, part.len), idx);
+    }
+
     let mut is_bad = vec![false; all_parts.len()];
     for bad in bad_parts {
-        if let Some(idx) = all_parts
-            .iter()
-            .position(|p| p.offset == bad.offset && p.len == bad.len)
-        {
+        if let Some(&idx) = index_by_range.get(&(bad.offset, bad.len)) {
             is_bad[idx] = true;
         }
     }
