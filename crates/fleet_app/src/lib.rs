@@ -434,16 +434,18 @@ impl FleetApp {
                 let sink = SyncEventSink { tx: ev_tx.clone() };
 
                 let repo_id = fleet_index::normalize_repo_id(&raw_spec.checksum);
+                let repo_revision = format!("{}|{}", raw_spec.version, raw_spec.checksum);
                 let mut enabled_sorted = enabled_mods.clone();
                 enabled_sorted.sort();
                 let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-                let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+                let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
                 let mut idx = FleetIndex::open_or_recover(checkout_root_buf.as_std_path())
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let desired = DesiredState {
                     repo_url: repo_url.clone(),
                     repo_id,
+                    repo_revision,
                     enabled_mods_hash: enabled_hash,
                     state_id,
                     updated_at_unix_s: registry::unix_now(),

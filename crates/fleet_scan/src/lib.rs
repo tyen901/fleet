@@ -107,6 +107,11 @@ fn scan_pbo_file(
     if meta.header_len > file_len {
         return Err(ScanError::InvalidPbo("header_len exceeds file length"));
     }
+    if meta.entries.first().is_some_and(|e| e.data_size != 0) {
+        return Err(ScanError::InvalidPbo(
+            "pbo first entry must have data_size == 0",
+        ));
+    }
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 

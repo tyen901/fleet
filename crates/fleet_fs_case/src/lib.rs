@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+type HashFileFn = dyn Fn(&Path) -> io::Result<Vec<u8>>;
+
 #[derive(Clone, Debug, Default)]
 pub struct CaseIndex {
     pub files: HashMap<String, Vec<String>>,
@@ -172,7 +174,7 @@ fn rename_via_temp(from: &Path, to: &Path) -> io::Result<()> {
     }
     let parent = from
         .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "rename_via_temp: no parent"))?;
+        .ok_or_else(|| io::Error::other("rename_via_temp: no parent"))?;
     let tmp = unique_temp_path_in_dir(parent);
     std::fs::rename(from, &tmp)?;
     std::fs::rename(&tmp, to)?;
@@ -319,12 +321,19 @@ fn remove_any(path: &Path) -> io::Result<()> {
 }
 
 fn trash_path(checkout_root: &Path, tuning: &CaseFixTuning, label: &str) -> io::Result<PathBuf> {
-    let root = checkout_root.join(&tuning.trash_rel).join(format!("{}", now_unix_s()));
+    let root = checkout_root
+        .join(&tuning.trash_rel)
+        .join(format!("{}", now_unix_s()));
     std::fs::create_dir_all(&root)?;
     Ok(root.join(format!("{label}_{}", rand_suffix())))
 }
 
-fn remove_or_trash(checkout_root: &Path, path: &Path, tuning: &CaseFixTuning, label: &str) -> io::Result<()> {
+fn remove_or_trash(
+    checkout_root: &Path,
+    path: &Path,
+    tuning: &CaseFixTuning,
+    label: &str,
+) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -368,7 +377,7 @@ pub fn case_sweep_and_fix(
     mod_id: &str,
     expected: &[(String, u64, Option<Vec<u8>>)],
     tuning: &CaseFixTuning,
-    hash_file: Option<&dyn Fn(&Path) -> io::Result<Vec<u8>>>,
+    hash_file: Option<&HashFileFn>,
 ) -> io::Result<CaseFixStats> {
     let mut stats = CaseFixStats::default();
 
@@ -404,7 +413,9 @@ pub fn case_sweep_and_fix(
         let mut cands: Vec<Candidate> = Vec::new();
 
         for (root_display, root_real, idx) in &indices {
-            let Some(list) = idx.files.get(&key) else { continue };
+            let Some(list) = idx.files.get(&key) else {
+                continue;
+            };
             for on_disk_rel in list {
                 let abs = join_under(root_display, on_disk_rel);
                 let md = match std::fs::symlink_metadata(&abs) {
@@ -431,7 +442,7 @@ pub fn case_sweep_and_fix(
         }
 
         let dst_parent = ensure_path_dirs_cased(checkout_root, &canonical_root, &rel_norm, tuning)?;
-        let file_name = rel_norm.split('/').last().unwrap_or(&rel_norm);
+        let file_name = rel_norm.split('/').next_back().unwrap_or(&rel_norm);
         let dst = dst_parent.join(file_name);
 
         let mut best_idx = 0usize;
@@ -501,7 +512,7 @@ fn better_candidate(
     b: &Candidate,
     expected_size: &u64,
     expected_hash: Option<&[u8]>,
-    hash_file: Option<&dyn Fn(&Path) -> io::Result<Vec<u8>>>,
+    hash_file: Option<&HashFileFn>,
 ) -> io::Result<bool> {
     // Score: canonical path > size match > hash match, then mtime, then lexicographic.
     let a_canon = a.is_canonical_path;

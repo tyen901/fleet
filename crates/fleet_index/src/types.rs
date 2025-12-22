@@ -4,6 +4,7 @@ use thiserror::Error;
 pub struct DesiredState {
     pub repo_url: String,
     pub repo_id: String,
+    pub repo_revision: String,
     pub enabled_mods_hash: String,
     pub state_id: String,
     pub updated_at_unix_s: i64,

@@ -8,6 +8,8 @@ use rusqlite::params;
 use std::collections::HashMap;
 use std::path::Path;
 
+type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
+
 #[derive(Clone, Debug)]
 pub struct SkipRepairPolicy {
     pub max_issues: usize,
@@ -164,13 +166,13 @@ impl FleetIndex {
         }
 
         // Auto-fix casing silently as a pre-step (per mod) so skip evidence isn't polluted by casing artifacts.
-        let mut expected_by_mod: HashMap<String, Vec<(String, u64, Option<Vec<u8>>)>> =
-            HashMap::new();
+        let mut expected_by_mod: HashMap<String, Vec<ExpectedTriplet>> = HashMap::new();
         for r in &all {
-            expected_by_mod
-                .entry(r.mod_id.clone())
-                .or_default()
-                .push((r.rel_norm.clone(), r.expected_size, None));
+            expected_by_mod.entry(r.mod_id.clone()).or_default().push((
+                r.rel_norm.clone(),
+                r.expected_size,
+                None,
+            ));
         }
         let sweep_tuning = fleet_fs_case::CaseFixTuning::default();
         for (mod_id, expected) in &expected_by_mod {
@@ -301,4 +303,3 @@ fn push_issue(issues: &mut Vec<LocalIssue>, max: usize, issue: LocalIssue) {
         issues.push(issue);
     }
 }
-

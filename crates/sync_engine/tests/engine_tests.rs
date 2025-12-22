@@ -945,11 +945,13 @@ async fn verify_then_repair_skips_without_remote_fetch() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id: state_id.clone(),
         updated_at_unix_s: 1,
@@ -1024,11 +1026,13 @@ async fn repair_fixes_mod_dir_case_without_downloading() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id,
         updated_at_unix_s: 1,
@@ -1071,9 +1075,12 @@ async fn verify_auto_fixes_file_path_case_mismatch_and_does_not_download() {
         manifests: vec![("@mod".to_string(), manifest.clone())]
             .into_iter()
             .collect(),
-        files: vec![(("@mod".to_string(), "Addons/A.pbo".to_string()), data.clone())]
-            .into_iter()
-            .collect(),
+        files: vec![(
+            ("@mod".to_string(), "Addons/A.pbo".to_string()),
+            data.clone(),
+        )]
+        .into_iter()
+        .collect(),
         fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
         fetch_file_calls: Arc::new(AtomicUsize::new(0)),
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
@@ -1084,11 +1091,13 @@ async fn verify_auto_fixes_file_path_case_mismatch_and_does_not_download() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id: state_id.clone(),
         updated_at_unix_s: 1,
@@ -1177,11 +1186,13 @@ async fn verify_auto_resolves_collision_and_does_not_download() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id,
         updated_at_unix_s: 1,
@@ -1294,13 +1305,15 @@ async fn unsafe_on_disk_verify_reports_and_repair_aborts_even_if_cached() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
     let mut idx = FleetIndex::open_in_memory().unwrap();
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id: state_id.clone(),
         updated_at_unix_s: 1,
@@ -1412,13 +1425,15 @@ async fn verify_then_repair_repairs_corruption_and_verify_becomes_ok() {
     let mut enabled_sorted = enabled_mods.clone();
     enabled_sorted.sort();
     let repo_id = fleet_index::normalize_repo_id("abcd");
+    let repo_revision = "rev1".to_string();
     let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
-    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
     let mut idx = FleetIndex::open_in_memory().unwrap();
     idx.set_desired_state(DesiredState {
         repo_url: "http://example".to_string(),
         repo_id,
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id: state_id.clone(),
         updated_at_unix_s: 1,

@@ -12,6 +12,7 @@ pub fn init(conn: &Connection) -> Result<(), rusqlite::Error> {
           key TEXT PRIMARY KEY,
           repo_url TEXT NOT NULL,
           repo_id TEXT NOT NULL,
+          repo_revision TEXT NOT NULL DEFAULT '',
           enabled_mods_hash TEXT NOT NULL,
           state_id TEXT NOT NULL,
           updated_at_unix_s INTEGER NOT NULL
@@ -48,5 +49,13 @@ pub fn init(conn: &Connection) -> Result<(), rusqlite::Error> {
         ON file_state(state_id);
         "#,
     )?;
+
+    // Lightweight schema migration(s): add columns if missing.
+    // This project doesn't maintain a full migration history, so we keep these idempotent.
+    let _ = conn.execute(
+        "ALTER TABLE desired_state ADD COLUMN repo_revision TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
     Ok(())
 }

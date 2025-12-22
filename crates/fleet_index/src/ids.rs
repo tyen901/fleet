@@ -7,7 +7,7 @@ pub fn enabled_mods_hash(enabled_mods_sorted: &[String]) -> String {
     blake3::hash(joined.as_bytes()).to_hex().to_string()
 }
 
-pub fn state_id(repo_id: &str, enabled_mods_hash: &str) -> String {
-    let key = format!("{}|{}", repo_id, enabled_mods_hash);
+pub fn state_id(repo_id: &str, enabled_mods_hash: &str, repo_revision: &str) -> String {
+    let key = format!("{}|{}|{}", repo_id, enabled_mods_hash, repo_revision);
     blake3::hash(key.as_bytes()).to_hex().to_string()
 }

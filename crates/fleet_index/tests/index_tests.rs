@@ -10,10 +10,12 @@ fn make_desired(repo_id: &str, mods: &[&str]) -> DesiredState {
     let mut mods_sorted: Vec<String> = mods.iter().map(|s| s.to_string()).collect();
     mods_sorted.sort();
     let enabled_hash = enabled_mods_hash(&mods_sorted);
-    let state = state_id(repo_id, &enabled_hash);
+    let repo_revision = "rev1".to_string();
+    let state = state_id(repo_id, &enabled_hash, &repo_revision);
     DesiredState {
         repo_url: "https://example.invalid/repo".to_string(),
         repo_id: normalize_repo_id(repo_id),
+        repo_revision,
         enabled_mods_hash: enabled_hash,
         state_id: state,
         updated_at_unix_s: 123,

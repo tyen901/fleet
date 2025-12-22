@@ -2,7 +2,7 @@ use crate::apply::{apply_ops, ApplyOptions, IndexUpdate};
 use crate::events::{EventSink, SyncEvent};
 use crate::fetch::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
-use crate::plan::{plan_mod, CacheHint, PlanError, PlannedOp, RepairStrategy};
+use crate::plan::{plan_mod, PlanError, PlannedOp, RepairStrategy};
 use crate::quarantine::{quarantine_unexpected, QuarantineStats};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
@@ -48,7 +48,8 @@ pub async fn verify(
         });
 
         let baseline = build_baseline(&fetch.manifests);
-        idx.expected_replace_all(&desired.state_id, baseline)?;
+        let baseline_digest = baseline_digest_hex(&baseline);
+        idx.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
 
         let mut report = VerifyReport::default();
 
@@ -165,7 +166,8 @@ pub async fn repair(
         });
 
         let baseline = build_baseline(&fetch.manifests);
-        idx.expected_replace_all(&desired.state_id, baseline)?;
+        let baseline_digest = baseline_digest_hex(&baseline);
+        idx.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
 
         let mut report = RepairReport::default();
         let mut failures: Vec<FileFailure> = Vec::new();
@@ -187,16 +189,17 @@ pub async fn repair(
                 let checksummer = req.checksummer.clone();
                 let tuning = fleet_fs_case::CaseFixTuning::default();
                 let _ = tokio::task::spawn_blocking(move || {
+                    let hash_file = move |p: &std::path::Path| {
+                        checksummer
+                            .hash_file(p)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    };
                     fleet_fs_case::case_sweep_and_fix(
                         &checkout_root,
                         &mod_id,
                         &expected,
                         &tuning,
-                        Some(&|p| {
-                            checksummer
-                                .hash_file(p)
-                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                        }),
+                        Some(&hash_file),
                     )
                 })
                 .await??;
@@ -295,8 +298,32 @@ pub async fn repair(
             .await?;
             report += &apply_outcome.report;
 
-            apply_index_updates(idx, &desired.state_id, apply_outcome.index_updates)?;
-            apply_cache_hints(idx, &desired.state_id, cache_hints)?;
+            let mut upserts: Vec<(String, String, u64, i64, Vec<u8>)> = Vec::new();
+            let mut deletes: Vec<(String, String)> = Vec::new();
+            for update in apply_outcome.index_updates {
+                match update {
+                    IndexUpdate::UpsertFileState {
+                        mod_id,
+                        rel_path,
+                        size,
+                        mtime_ns,
+                        checksum,
+                    } => upserts.push((mod_id, rel_path, size, mtime_ns, checksum)),
+                    IndexUpdate::DeleteFileState { mod_id, rel_path } => {
+                        deletes.push((mod_id, rel_path))
+                    }
+                }
+            }
+            for hint in cache_hints {
+                upserts.push((
+                    hint.mod_id,
+                    hint.rel_path,
+                    hint.size,
+                    hint.mtime_ns,
+                    hint.checksum,
+                ));
+            }
+            idx.file_state_apply_batch(&desired.state_id, upserts, deletes)?;
 
             failures.extend(apply_outcome.failures);
 
@@ -386,57 +413,63 @@ async fn verify_mod(
         let checksummer = req.checksummer.clone();
         let tuning = fleet_fs_case::CaseFixTuning::default();
         let _ = tokio::task::spawn_blocking(move || {
+            let hash_file = move |p: &std::path::Path| {
+                checksummer
+                    .hash_file(p)
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            };
             fleet_fs_case::case_sweep_and_fix(
                 &checkout_root,
                 &mod_id,
                 &expected,
                 &tuning,
-                Some(&|p| {
-                    checksummer
-                        .hash_file(p)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                }),
+                Some(&hash_file),
             )
         })
         .await??;
     }
 
-    let sem = Arc::new(tokio::sync::Semaphore::new(
-        req.tuning.scan_concurrency.max(1),
-    ));
-    let mut tasks = futures::stream::FuturesUnordered::new();
-
     report.expected_files = report
         .expected_files
         .saturating_add(manifest.files.len() as u64);
 
-    for file in &manifest.files {
-        let mod_id = manifest.mod_id.clone();
-        let rel_path = file.rel_path.clone();
-        let permit = sem.clone().acquire_owned().await?;
-        let checksummer = req.checksummer.clone();
-        let file = file.clone();
-        let cached = cache.get(&rel_path).cloned();
-        let checkout_root = req.checkout_root.clone();
+    let scan_concurrency = req.tuning.scan_concurrency.max(1);
+    let mut outcomes = futures::stream::iter(manifest.files.clone())
+        .map(|file| {
+            let checkout_root = req.checkout_root.clone();
+            let mod_id = manifest.mod_id.clone();
+            let rel_path = file.rel_path.clone();
+            let cached = cache.get(&rel_path).cloned();
+            let checksummer = req.checksummer.clone();
+            tokio::task::spawn_blocking(move || {
+                verify_one_file(
+                    &checkout_root,
+                    &mod_id,
+                    &rel_path,
+                    &file,
+                    cached,
+                    checksummer.as_ref(),
+                )
+            })
+        })
+        .buffer_unordered(scan_concurrency);
 
-        tasks.push(tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            verify_one_file(
-                &checkout_root,
-                &mod_id,
-                &rel_path,
-                &file,
-                cached,
-                checksummer.as_ref(),
-            )
-        }));
-    }
+    let mut upserts: Vec<(String, String, u64, i64, Vec<u8>)> = Vec::new();
+    let mut deletes: Vec<(String, String)> = Vec::new();
 
-    while let Some(res) = tasks.next().await {
+    while let Some(res) = outcomes.next().await {
         let outcome = res??;
-        apply_verify_outcome(req, idx, state_id, report, outcome, sink.clone())?;
+        apply_verify_outcome(
+            req,
+            report,
+            outcome,
+            sink.clone(),
+            &mut upserts,
+            &mut deletes,
+        )?;
     }
 
+    idx.file_state_apply_batch(state_id, upserts, deletes)?;
     Ok(())
 }
 
@@ -548,7 +581,9 @@ fn verify_one_file(
         .unwrap_or(0);
 
     if let Some(cached) = cached {
-        if cached.size == file.size && cached.mtime_ns == mtime_ns && cached.checksum == file.file_checksum
+        if cached.size == file.size
+            && cached.mtime_ns == mtime_ns
+            && cached.checksum == file.file_checksum
         {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
@@ -580,9 +615,7 @@ fn verify_one_file(
                 unsafe_message: None,
             });
         }
-    } else if let Some((offset, len)) =
-        first_part_mismatch(&abs_path, &file.parts, checksummer)?
-    {
+    } else if let Some((offset, len)) = first_part_mismatch(&abs_path, &file.parts, checksummer)? {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
@@ -609,22 +642,21 @@ fn verify_one_file(
 
 fn apply_verify_outcome(
     req: &VerifyRequest,
-    idx: &mut FleetIndex,
-    state_id: &str,
     report: &mut VerifyReport,
     outcome: VerifyOutcome,
     sink: Arc<dyn EventSink>,
+    upserts: &mut Vec<(String, String, u64, i64, Vec<u8>)>,
+    deletes: &mut Vec<(String, String)>,
 ) -> Result<()> {
     if outcome.ok {
         report.verified_ok += 1;
-        idx.file_state_upsert(
-            state_id,
-            &outcome.mod_id,
-            &outcome.rel_path,
+        upserts.push((
+            outcome.mod_id.clone(),
+            outcome.rel_path.clone(),
             outcome.size,
             outcome.mtime_ns,
-            &outcome.checksum,
-        )?;
+            outcome.checksum.clone(),
+        ));
         sink.push(SyncEvent::FileVerified {
             mod_id: outcome.mod_id,
             path: outcome.rel_path,
@@ -659,7 +691,7 @@ fn apply_verify_outcome(
         });
     }
 
-    idx.file_state_delete(state_id, &outcome.mod_id, &outcome.rel_path)?;
+    deletes.push((outcome.mod_id, outcome.rel_path));
     Ok(())
 }
 
@@ -682,14 +714,29 @@ fn build_cache_snapshot(
     state_id: &str,
     manifest: &ValidatedModManifest,
 ) -> Result<HashMap<String, fleet_index::FileState>> {
+    let all = idx.file_state_get_all_for_mod(state_id, &manifest.mod_id)?;
     let mut map = HashMap::new();
     for file in &manifest.files {
-        let rel = file.rel_path.clone();
-        if let Some(state) = idx.file_state_get(state_id, &manifest.mod_id, &rel)? {
-            map.insert(rel, state);
+        if let Some(state) = all.get(&file.rel_path) {
+            map.insert(file.rel_path.clone(), state.clone());
         }
     }
     Ok(map)
+}
+
+fn baseline_digest_hex(rows: &[ExpectedFile]) -> String {
+    let mut rows = rows.to_vec();
+    rows.sort_by(|a, b| (&a.mod_id, &a.rel_path, a.size).cmp(&(&b.mod_id, &b.rel_path, b.size)));
+    let mut hasher = blake3::Hasher::new();
+    for r in rows {
+        hasher.update(r.mod_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(r.rel_path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&r.size.to_le_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn validate_enabled_mods(expected_hash: &str, enabled_mods: &[String]) -> Result<()> {
@@ -701,44 +748,6 @@ fn validate_enabled_mods(expected_hash: &str, enabled_mods: &[String]) -> Result
     let got = fleet_index::enabled_mods_hash(&mods_sorted);
     if got != expected_hash {
         anyhow::bail!("enabled mods hash mismatch");
-    }
-    Ok(())
-}
-
-fn apply_index_updates(
-    idx: &mut FleetIndex,
-    state_id: &str,
-    updates: Vec<IndexUpdate>,
-) -> Result<()> {
-    for update in updates {
-        match update {
-            IndexUpdate::UpsertFileState {
-                mod_id,
-                rel_path,
-                size,
-                mtime_ns,
-                checksum,
-            } => {
-                idx.file_state_upsert(state_id, &mod_id, &rel_path, size, mtime_ns, &checksum)?;
-            }
-            IndexUpdate::DeleteFileState { mod_id, rel_path } => {
-                idx.file_state_delete(state_id, &mod_id, &rel_path)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn apply_cache_hints(idx: &mut FleetIndex, state_id: &str, hints: Vec<CacheHint>) -> Result<()> {
-    for hint in hints {
-        idx.file_state_upsert(
-            state_id,
-            &hint.mod_id,
-            &hint.rel_path,
-            hint.size,
-            hint.mtime_ns,
-            &hint.checksum,
-        )?;
     }
     Ok(())
 }

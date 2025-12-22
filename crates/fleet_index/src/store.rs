@@ -2,11 +2,13 @@ use crate::path_safety::{normalize_rel_path, validate_mod_id, validate_rel_path}
 use crate::schema;
 use crate::types::{DesiredState, ExpectedFile, FileState, IndexError, VerifiedState};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const DESIRED_KEY: &str = "current";
 const VERIFIED_KEY: &str = "current";
 const META_BASELINE_STATE_KEY: &str = "baseline_state_id";
+const META_BASELINE_DIGEST_PREFIX: &str = "baseline_digest:";
 
 pub struct FleetIndex {
     pub(crate) conn: Connection,
@@ -54,16 +56,17 @@ impl FleetIndex {
         let row = self
             .conn
             .query_row(
-                "SELECT repo_url, repo_id, enabled_mods_hash, state_id, updated_at_unix_s \
+                "SELECT repo_url, repo_id, repo_revision, enabled_mods_hash, state_id, updated_at_unix_s \
                  FROM desired_state WHERE key = ?1",
                 params![DESIRED_KEY],
                 |r| {
                     Ok(DesiredState {
                         repo_url: r.get(0)?,
                         repo_id: r.get(1)?,
-                        enabled_mods_hash: r.get(2)?,
-                        state_id: r.get(3)?,
-                        updated_at_unix_s: r.get(4)?,
+                        repo_revision: r.get(2)?,
+                        enabled_mods_hash: r.get(3)?,
+                        state_id: r.get(4)?,
+                        updated_at_unix_s: r.get(5)?,
                     })
                 },
             )
@@ -85,11 +88,12 @@ impl FleetIndex {
             .optional()?;
 
         tx.execute(
-            "INSERT INTO desired_state(key, repo_url, repo_id, enabled_mods_hash, state_id, updated_at_unix_s)\
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)\
+            "INSERT INTO desired_state(key, repo_url, repo_id, repo_revision, enabled_mods_hash, state_id, updated_at_unix_s)\
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)\
              ON CONFLICT(key) DO UPDATE SET \
               repo_url=excluded.repo_url,\
               repo_id=excluded.repo_id,\
+              repo_revision=excluded.repo_revision,\
               enabled_mods_hash=excluded.enabled_mods_hash,\
               state_id=excluded.state_id,\
               updated_at_unix_s=excluded.updated_at_unix_s",
@@ -97,6 +101,7 @@ impl FleetIndex {
                 DESIRED_KEY,
                 next.repo_url,
                 next.repo_id,
+                next.repo_revision,
                 next.enabled_mods_hash,
                 next.state_id,
                 next.updated_at_unix_s
@@ -161,6 +166,31 @@ impl FleetIndex {
         state_id: &str,
         rows: impl IntoIterator<Item = ExpectedFile>,
     ) -> Result<(), IndexError> {
+        self.expected_replace_all_with_digest(state_id, rows, None)?;
+        Ok(())
+    }
+
+    pub fn expected_replace_all_if_digest_changed(
+        &mut self,
+        state_id: &str,
+        rows: impl IntoIterator<Item = ExpectedFile>,
+        digest_hex: &str,
+    ) -> Result<bool, IndexError> {
+        let key = format!("{}{}", META_BASELINE_DIGEST_PREFIX, state_id);
+        let current = self.meta_get(&key)?;
+        if current.as_deref() == Some(digest_hex) {
+            return Ok(false);
+        }
+        self.expected_replace_all_with_digest(state_id, rows, Some(digest_hex))?;
+        Ok(true)
+    }
+
+    fn expected_replace_all_with_digest(
+        &mut self,
+        state_id: &str,
+        rows: impl IntoIterator<Item = ExpectedFile>,
+        digest_hex: Option<&str>,
+    ) -> Result<(), IndexError> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM expected_file WHERE state_id = ?1",
@@ -188,6 +218,15 @@ impl FleetIndex {
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![META_BASELINE_STATE_KEY, state_id],
         )?;
+
+        if let Some(digest_hex) = digest_hex {
+            let key = format!("{}{}", META_BASELINE_DIGEST_PREFIX, state_id);
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)\
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, digest_hex],
+            )?;
+        }
 
         tx.commit()?;
         Ok(())
@@ -245,6 +284,34 @@ impl FleetIndex {
         Ok(row)
     }
 
+    pub fn file_state_get_all_for_mod(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<HashMap<String, FileState>, IndexError> {
+        validate_mod_id(mod_id)?;
+        let mut out = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT rel_path, size, mtime_ns, checksum \
+             FROM file_state WHERE state_id = ?1 AND mod_id = ?2",
+        )?;
+        let mut rows = stmt.query(params![state_id, mod_id])?;
+        while let Some(r) = rows.next()? {
+            let rel: String = r.get(0)?;
+            let size_i64: i64 = r.get(1)?;
+            out.insert(
+                rel,
+                FileState {
+                    size: u64::try_from(size_i64)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, size_i64))?,
+                    mtime_ns: r.get(2)?,
+                    checksum: r.get(3)?,
+                },
+            );
+        }
+        Ok(out)
+    }
+
     pub fn file_state_upsert(
         &mut self,
         state_id: &str,
@@ -275,6 +342,51 @@ impl FleetIndex {
                 checksum.to_vec()
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn file_state_apply_batch(
+        &mut self,
+        state_id: &str,
+        upserts: impl IntoIterator<Item = (String, String, u64, i64, Vec<u8>)>,
+        deletes: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+
+        {
+            let mut up = tx.prepare(
+                "INSERT INTO file_state(state_id, mod_id, rel_path, size, mtime_ns, checksum)\
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)\
+                 ON CONFLICT(state_id, mod_id, rel_path) DO UPDATE SET \
+                  size=excluded.size,\
+                  mtime_ns=excluded.mtime_ns,\
+                  checksum=excluded.checksum",
+            )?;
+            for (mod_id, rel_path, size, mtime_ns, checksum) in upserts {
+                validate_mod_id(&mod_id)?;
+                let rel_norm = normalize_rel_path(&rel_path);
+                validate_rel_path(&rel_norm)?;
+                let size_i64 = i64::try_from(size)
+                    .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+                up.execute(params![
+                    state_id, mod_id, rel_norm, size_i64, mtime_ns, checksum
+                ])?;
+            }
+        }
+
+        {
+            let mut del = tx.prepare(
+                "DELETE FROM file_state WHERE state_id = ?1 AND mod_id = ?2 AND rel_path = ?3",
+            )?;
+            for (mod_id, rel_path) in deletes {
+                validate_mod_id(&mod_id)?;
+                let rel_norm = normalize_rel_path(&rel_path);
+                validate_rel_path(&rel_norm)?;
+                del.execute(params![state_id, mod_id, rel_norm])?;
+            }
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -326,6 +438,15 @@ impl FleetIndex {
             )
             .optional()?;
         Ok(marker.as_deref() == Some(state_id))
+    }
+
+    fn meta_get(&self, key: &str) -> Result<Option<String>, IndexError> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
     }
 
     fn open_at_path(path: &Path) -> Result<Self, IndexError> {
