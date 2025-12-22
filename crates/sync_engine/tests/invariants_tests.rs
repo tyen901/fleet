@@ -5,10 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
-use sync_engine::events::SyncEvent;
-use sync_engine::fetch::{FileEntry, ModManifest};
-use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
-use sync_engine::types::{RepairRequest, RepairTuning, VerifyRequest, VerifyTuning};
+use sync_engine::ports::SyncEvent;
+use sync_engine::ports::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore};
+use sync_engine::ports::{FileEntry, ModManifest};
+use sync_engine::model::{
+    CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
+    StoreError, TimestampNs,
+};
+use sync_engine::SyncEngine;
 
 struct VecStream {
     data: Vec<u8>,
@@ -89,7 +93,7 @@ struct TestSink {
     events: Mutex<Vec<SyncEvent>>,
 }
 
-impl sync_engine::events::EventSink for TestSink {
+impl sync_engine::EventSink for TestSink {
     fn push(&self, ev: SyncEvent) {
         self.events.lock().unwrap().push(ev);
     }
@@ -98,7 +102,7 @@ impl sync_engine::events::EventSink for TestSink {
 #[derive(Clone)]
 struct TestChecksummer;
 
-impl sync_engine::types::Checksummer for TestChecksummer {
+impl sync_engine::Checksummer for TestChecksummer {
     fn algorithm_name(&self) -> &str {
         "blake3"
     }
@@ -135,6 +139,122 @@ fn setup_index(enabled_mods: &[String]) -> FleetIndex {
     })
     .unwrap();
     idx
+}
+
+struct IndexStore {
+    inner: Mutex<FleetIndex>,
+}
+
+impl IndexStore {
+    fn new(idx: FleetIndex) -> Self {
+        Self {
+            inner: Mutex::new(idx),
+        }
+    }
+}
+
+impl StateStore for IndexStore {
+    fn desired_state_get(&self) -> Result<Option<sync_engine::model::DesiredState>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_desired_state()
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_replace_all_if_digest_changed(
+        &self,
+        state_id: &str,
+        rows: Vec<sync_engine::model::ExpectedFile>,
+        digest_hex: &str,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_replace_all_if_digest_changed(state_id, rows, digest_hex)
+            .map(|_| ())
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn baseline_exists(&self, state_id: &str) -> Result<bool, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .baseline_exists(state_id)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_get_all_for_mod(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<std::collections::HashMap<String, sync_engine::model::FileState>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_get_all_for_mod(state_id, mod_id)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_apply_batch(
+        &self,
+        state_id: &str,
+        upserts: Vec<FileStateUpsert>,
+        deletes: Vec<FileStateDelete>,
+    ) -> Result<(), StoreError> {
+        let up = upserts.into_iter().map(|u| {
+            (
+                u.mod_id,
+                u.rel_path,
+                u.size,
+                u.mtime_ns.0,
+                u.checksum,
+            )
+        });
+        let del = deletes.into_iter().map(|d| (d.mod_id, d.rel_path));
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_apply_batch(state_id, up, del)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_delete(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_delete(state_id, mod_id, rel_path)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn verified_get(&self) -> Result<Option<sync_engine::model::VerifiedState>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_get()
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn verified_set(&self, state_id: &str, verified_at: TimestampNs) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_set(state_id, verified_at.0)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn verified_clear(&self) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_clear()
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
 }
 
 fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8]) -> ModManifest {
@@ -178,19 +298,23 @@ async fn safety_abort_does_not_fetch_remote_file_bytes() {
     };
 
     let enabled_mods = vec!["@mod".to_string()];
-    let mut idx = setup_index(&enabled_mods);
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+    let engine = SyncEngine::new(
+        Arc::new(remote.clone()),
+        store,
+        Arc::new(TestChecksummer),
+    );
     let sink = Arc::new(TestSink::default());
 
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
         enabled_mods,
-        remote: Arc::new(remote.clone()),
-        checksummer: Arc::new(TestChecksummer),
         tuning: RepairTuning::default(),
     };
 
-    let outcome = sync_engine::flows::repair(req, &mut idx, sink).await.unwrap();
+    let outcome = engine.repair(req, sink.as_ref()).await.unwrap();
     assert!(outcome.aborted.is_some());
     assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
     assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);
@@ -220,32 +344,32 @@ async fn skip_logic_does_not_fetch_remote_file_bytes() {
     };
 
     let enabled_mods = vec!["@mod".to_string()];
-    let mut idx = setup_index(&enabled_mods);
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+    let engine = SyncEngine::new(
+        Arc::new(remote.clone()),
+        store,
+        Arc::new(TestChecksummer),
+    );
     let sink = Arc::new(TestSink::default());
 
-    let verify_req = VerifyRequest {
+    let check_req = CheckRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
         enabled_mods: enabled_mods.clone(),
-        remote: Arc::new(remote.clone()),
-        checksummer: Arc::new(TestChecksummer),
-        tuning: VerifyTuning::default(),
+        tuning: CheckTuning::default(),
     };
-    let report = sync_engine::flows::verify(verify_req, &mut idx, sink.clone())
-        .await
-        .unwrap();
+    let report = engine.check(check_req, sink.as_ref()).await.unwrap();
     assert!(report.ok);
 
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
         enabled_mods,
-        remote: Arc::new(remote.clone()),
-        checksummer: Arc::new(TestChecksummer),
         tuning: RepairTuning::default(),
     };
 
-    let outcome = sync_engine::flows::repair(req, &mut idx, sink).await.unwrap();
+    let outcome = engine.repair(req, sink.as_ref()).await.unwrap();
     assert!(outcome.report.skipped);
     assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
     assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);

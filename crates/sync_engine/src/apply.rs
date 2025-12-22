@@ -1,9 +1,11 @@
 use crate::events::{EventSink, SyncEvent};
+use crate::model::{Checksummer, RepairTuning};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::staging::StagedFile;
 use crate::time_util::file_mtime_ns;
-use crate::types::{AbortReason, Durability, FileFailure, RepairReport, RepairRequest};
+use crate::model::{AbortReason, Durability, FileFailure, RepairReport};
+use crate::ports::RemoteRepo;
 use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
 use std::path::Path;
@@ -40,12 +42,15 @@ pub struct ApplyBatchOutcome {
 
 pub async fn apply_ops(
     ops: Vec<PlannedOp>,
-    req: &RepairRequest,
-    sink: Arc<dyn EventSink>,
+    checkout_root: &Path,
+    remote: Arc<dyn RemoteRepo>,
+    checksummer: Arc<dyn Checksummer>,
+    tuning: &RepairTuning,
+    sink: &dyn EventSink,
     opts: ApplyOptions,
 ) -> Result<ApplyBatchOutcome> {
-    let file_workers = req.tuning.file_concurrency.max(1);
-    let range_workers = req.tuning.range_concurrency.max(1);
+    let file_workers = tuning.file_concurrency.max(1);
+    let range_workers = tuning.range_concurrency.max(1);
 
     let range_sem = Arc::new(Semaphore::new(range_workers));
 
@@ -65,10 +70,22 @@ pub async fn apply_ops(
             move |_| futures::future::ready(!stop_scheduling.load(Ordering::Relaxed))
         })
         .map(|op| {
-            let sink = sink.clone();
-            let req = req.clone();
+            let remote = remote.clone();
+            let checksummer = checksummer.clone();
             let range_sem = range_sem.clone();
-            async move { apply_one(op, &req, sink, &range_sem, opts).await }
+            async move {
+                apply_one(
+                    op,
+                    checkout_root,
+                    remote,
+                    checksummer,
+                    tuning,
+                    sink,
+                    &range_sem,
+                    opts,
+                )
+                .await
+            }
         })
         .buffer_unordered(file_workers);
 
@@ -121,12 +138,15 @@ fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> FileFailure {
 
 async fn apply_one(
     op: PlannedOp,
-    req: &RepairRequest,
-    sink: Arc<dyn EventSink>,
+    checkout_root: &Path,
+    remote: Arc<dyn RemoteRepo>,
+    checksummer: Arc<dyn Checksummer>,
+    tuning: &RepairTuning,
+    sink: &dyn EventSink,
     range_sem: &Arc<Semaphore>,
     opts: ApplyOptions,
 ) -> std::result::Result<ApplyOneSuccess, FileFailure> {
-    let mod_root = req.checkout_root.join(&op.mod_id);
+    let mod_root = checkout_root.join(&op.mod_id);
 
     if let Some(parent) = op.abs_path.parent() {
         if let Err(err) = ensure_no_symlink_ancestors(&mod_root, parent) {
@@ -196,11 +216,33 @@ async fn apply_one(
     });
 
     let report = match effective_strategy {
-        RepairStrategy::Full => match apply_full(req, &sink, range_sem, &op, staged).await {
+        RepairStrategy::Full => match apply_full(
+            checkout_root,
+            remote,
+            checksummer.clone(),
+            tuning,
+            sink,
+            range_sem,
+            &op,
+            staged,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(err) => return Err(classify_apply_error(&op, err)),
         },
-        RepairStrategy::Patch => match apply_patch(req, &sink, range_sem, &op, staged).await {
+        RepairStrategy::Patch => match apply_patch(
+            checkout_root,
+            remote,
+            checksummer.clone(),
+            tuning,
+            sink,
+            range_sem,
+            &op,
+            staged,
+        )
+        .await
+        {
             Ok(r) => r,
             Err(err) => return Err(classify_apply_error(&op, err)),
         },
@@ -227,8 +269,11 @@ async fn apply_one(
 }
 
 async fn apply_full(
-    req: &RepairRequest,
-    sink: &Arc<dyn EventSink>,
+    _checkout_root: &Path,
+    remote: Arc<dyn RemoteRepo>,
+    checksummer: Arc<dyn Checksummer>,
+    tuning: &RepairTuning,
+    sink: &dyn EventSink,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
     staged: StagedFile,
@@ -248,8 +293,7 @@ async fn apply_full(
     f.set_len(op.target.size).await?;
 
     let _permit = range_sem.clone().acquire_owned().await?;
-    let mut stream = req
-        .remote
+    let mut stream = remote
         .fetch_file(&op.mod_id, &op.rel_path)
         .await
         .context("fetch file")?;
@@ -258,7 +302,7 @@ async fn apply_full(
     while let Some(chunk) = stream.next_chunk().await? {
         f.write_all(&chunk).await?;
         written = written.saturating_add(chunk.len() as u64);
-        if req.tuning.emit_progress {
+        if tuning.emit_progress {
             sink.push(SyncEvent::FileProgress {
                 mod_id: op.mod_id.clone(),
                 path: op.rel_path.clone(),
@@ -269,13 +313,13 @@ async fn apply_full(
     }
 
     f.flush().await?;
-    maybe_fsync(&mut f, req.tuning.durability).await?;
+    maybe_fsync(&mut f, tuning.durability).await?;
     drop(f);
 
-    verify_target(&staged.tmp_path, &op.target, req.checksummer.as_ref())
+    verify_target(&staged.tmp_path, &op.target, checksummer.as_ref())
         .context("verify downloaded file")?;
 
-    staged.commit(&op.abs_path, req.tuning.durability).await?;
+    staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),
@@ -306,8 +350,11 @@ async fn patch_baseline_ok(path: &Path, expected_size: u64) -> Result<bool> {
 }
 
 async fn apply_patch(
-    req: &RepairRequest,
-    sink: &Arc<dyn EventSink>,
+    _checkout_root: &Path,
+    remote: Arc<dyn RemoteRepo>,
+    checksummer: Arc<dyn Checksummer>,
+    tuning: &RepairTuning,
+    sink: &dyn EventSink,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
     staged: StagedFile,
@@ -322,15 +369,14 @@ async fn apply_patch(
         .fold(0u64, |acc, p| acc.saturating_add(p.len));
     let done = Arc::new(AtomicU64::new(0));
 
-    let range_workers = req.tuning.range_concurrency.max(1);
+    let range_workers = tuning.range_concurrency.max(1);
     let parts = op.target.parts_to_fetch.clone();
     let tmp_path = staged.tmp_path.clone();
     let mut tasks = stream::iter(parts)
         .map(|part| {
-            let remote = req.remote.clone();
+            let remote = remote.clone();
             let stage_path = tmp_path.clone();
-            let sink = sink.clone();
-            let tuning = req.tuning.clone();
+            let tuning = tuning.clone();
             let done = done.clone();
             let mod_id = op.mod_id.clone();
             let rel_path = op.rel_path.clone();
@@ -386,18 +432,18 @@ async fn apply_patch(
         res?;
     }
 
-    if matches!(req.tuning.durability, Durability::Strict) {
+    if matches!(tuning.durability, Durability::Strict) {
         let mut f = tokio::fs::OpenOptions::new()
             .read(true)
             .open(&staged.tmp_path)
             .await?;
-        maybe_fsync(&mut f, req.tuning.durability).await?;
+        maybe_fsync(&mut f, tuning.durability).await?;
     }
 
-    verify_target(&staged.tmp_path, &op.target, req.checksummer.as_ref())
+    verify_target(&staged.tmp_path, &op.target, checksummer.as_ref())
         .context("verify patched file")?;
 
-    staged.commit(&op.abs_path, req.tuning.durability).await?;
+    staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
         path: op.rel_path.clone(),
@@ -428,7 +474,7 @@ async fn maybe_fsync(f: &mut tokio::fs::File, durability: Durability) -> Result<
 fn verify_target(
     path: &std::path::Path,
     target: &crate::plan::FileTarget,
-    checksummer: &dyn crate::types::Checksummer,
+    checksummer: &dyn crate::model::Checksummer,
 ) -> anyhow::Result<()> {
     if target.parts.is_empty() {
         let got = checksummer.hash_file(path)?;

@@ -1,5 +1,5 @@
 use crate::fetch::FilePart;
-use crate::types::Checksummer;
+use crate::model::Checksummer;
 use anyhow::Result;
 
 pub fn first_part_mismatch(

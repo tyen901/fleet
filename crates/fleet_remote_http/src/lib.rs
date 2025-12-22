@@ -4,8 +4,10 @@ use bytes::Bytes;
 use manifest_types::{ModManifest as MtModManifest, RepoSpec};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
-use sync_engine::fetch::{FileEntry, FilePart, ModManifest as FetchModManifest};
-use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
+use sync_engine::ports::{
+    FileEntry, FilePart, ModManifest as FetchModManifest, RemoteCapabilities, RemoteRepo,
+    RemoteStream, RemoteStreamImpl,
+};
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 

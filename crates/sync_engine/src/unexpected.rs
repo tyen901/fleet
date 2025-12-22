@@ -1,10 +1,9 @@
 use crate::events::{EventSink, SyncEvent};
 use crate::safe_fs::is_symlink_or_reparse;
-use crate::types::{RepairTuning, UnexpectedPathPolicy};
+use crate::model::{RepairTuning, UnexpectedPathPolicy};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 #[derive(Default, Clone, Debug)]
 pub struct UnexpectedStats {
@@ -48,7 +47,7 @@ pub async fn handle_unexpected_paths(
     mod_id: &str,
     expected_paths: &HashSet<String>,
     tuning: &RepairTuning,
-    sink: Arc<dyn EventSink>,
+    sink: &dyn EventSink,
 ) -> Result<UnexpectedStats> {
     let mod_root = checkout_root.join(mod_id);
     if tokio::fs::metadata(&mod_root).await.is_err() {

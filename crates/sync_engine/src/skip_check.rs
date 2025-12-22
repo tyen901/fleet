@@ -1,10 +1,9 @@
 use crate::manifest::ValidatedModManifest;
+use crate::ports::StateStore;
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
 use crate::time_util::file_mtime_ns;
 use anyhow::Result;
-use fleet_index::FleetIndex;
-use fleet_index::IndexError;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -82,12 +81,12 @@ fn push_issue(issues: &mut Vec<SkipCheckIssue>, max: usize, issue: SkipCheckIssu
 }
 
 pub fn evaluate_skip(
-    idx: &FleetIndex,
+    store: &dyn StateStore,
     checkout_root: &Path,
     manifests: &[ValidatedModManifest],
     policy: SkipCheckPolicy,
 ) -> Result<SkipCheckDecision> {
-    let desired = match idx.get_desired_state()? {
+    let desired = match store.desired_state_get()? {
         Some(s) => s,
         None => {
             return Ok(SkipCheckDecision::NotSkippable {
@@ -97,7 +96,7 @@ pub fn evaluate_skip(
         }
     };
 
-    let verified = idx.verified_get()?;
+    let verified = store.verified_get()?;
     let mut evidence = SkipCheckEvidence {
         state_id: Some(desired.state_id.clone()),
         verified_state_id: verified.as_ref().map(|v| v.state_id.clone()),
@@ -119,17 +118,17 @@ pub fn evaluate_skip(
         });
     }
 
-    if !idx.baseline_exists(&desired.state_id)? {
+    if !store.baseline_exists(&desired.state_id)? {
         return Ok(SkipCheckDecision::NotSkippable {
             reason: SkipCheckReason::NoBaseline,
             evidence,
         });
     }
 
-    let mut cache_by_mod: HashMap<String, HashMap<String, fleet_index::FileState>> = HashMap::new();
+    let mut cache_by_mod: HashMap<String, HashMap<String, crate::model::FileState>> = HashMap::new();
 
     for manifest in manifests {
-        let cache_snapshot = idx.get_metadata_map(&desired.state_id, &manifest.mod_id)?;
+        let cache_snapshot = store.file_state_get_all_for_mod(&desired.state_id, &manifest.mod_id)?;
         cache_by_mod.insert(manifest.mod_id.clone(), cache_snapshot);
 
         for file in &manifest.files {
@@ -185,7 +184,7 @@ pub fn evaluate_skip(
                     );
                     continue;
                 }
-                Err(e) => return Err(IndexError::Io(e).into()),
+                Err(e) => return Err(e.into()),
             };
 
             let ft = md.file_type();

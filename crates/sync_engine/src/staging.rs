@@ -1,4 +1,4 @@
-use crate::types::Durability;
+use crate::model::Durability;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 

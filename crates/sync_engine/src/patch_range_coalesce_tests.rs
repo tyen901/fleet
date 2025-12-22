@@ -6,7 +6,7 @@ mod tests {
     use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
     use crate::plan::RepairStrategy;
     use crate::test_support::{MockRemoteRepo, TestSink};
-    use crate::types::{Checksummer, Durability, RepairRequest, RepairTuning};
+    use crate::model::{Checksummer, Durability, RepairRequest, RepairTuning};
     use bytes::Bytes;
     use std::collections::HashMap;
     use std::fs;
@@ -138,16 +138,17 @@ mod tests {
             repo_name: "r".to_string(),
             checkout_root: tmp.path().to_path_buf(),
             enabled_mods: vec!["m".to_string()],
-            remote: remote.clone(),
-            checksummer: checksummer.clone(),
             tuning,
         };
 
         let sink: Arc<dyn EventSink> = Arc::new(TestSink::new());
         apply_ops(
             vec![op],
-            &req,
-            sink,
+            &req.checkout_root,
+            remote.clone(),
+            checksummer.clone(),
+            &req.tuning,
+            sink.as_ref(),
             ApplyOptions {
                 supports_ranges: true,
             },
@@ -214,16 +215,17 @@ mod tests {
             repo_name: "r".to_string(),
             checkout_root: tmp.path().to_path_buf(),
             enabled_mods: vec!["m".to_string()],
-            remote: remote.clone(),
-            checksummer: checksummer.clone(),
             tuning,
         };
 
         let sink: Arc<dyn EventSink> = Arc::new(TestSink::new());
         apply_ops(
             vec![op],
-            &req,
-            sink,
+            &req.checkout_root,
+            remote.clone(),
+            checksummer.clone(),
+            &req.tuning,
+            sink.as_ref(),
             ApplyOptions {
                 supports_ranges: true,
             },

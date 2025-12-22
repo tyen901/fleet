@@ -1,17 +1,59 @@
 use std::ops::AddAssign;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use crate::remote::RemoteRepo;
+pub use fleet_index::types::{DesiredState, ExpectedFile, FileState, VerifiedState};
+
+#[derive(Clone, Debug)]
+pub struct FileStateUpsert {
+    pub mod_id: String,
+    pub rel_path: String,
+    pub size: u64,
+    pub mtime_ns: TimestampNs,
+    pub checksum: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileStateDelete {
+    pub mod_id: String,
+    pub rel_path: String,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum StoreError {
+    #[error("store error: {0}")]
+    Other(String),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum EngineError {
+    #[error("invalid request: {0}")]
+    InvalidInput(String),
+
+    #[error("remote error: {0}")]
+    Remote(anyhow::Error),
+
+    #[error("store error: {0}")]
+    Store(#[from] StoreError),
+
+    #[error("filesystem safety abort: {0:?}")]
+    Abort(AbortReason),
+
+    #[error("operation cancelled")]
+    Cancelled,
+
+    #[error("internal error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TimestampNs(pub i64);
 
 #[derive(Clone)]
-pub struct VerifyRequest {
+pub struct CheckRequest {
     pub repo_name: String,
     pub checkout_root: PathBuf,
     pub enabled_mods: Vec<String>,
-    pub remote: Arc<dyn RemoteRepo>,
-    pub checksummer: Arc<dyn Checksummer>,
-    pub tuning: VerifyTuning,
+    pub tuning: CheckTuning,
 }
 
 #[derive(Clone)]
@@ -19,20 +61,18 @@ pub struct RepairRequest {
     pub repo_name: String,
     pub checkout_root: PathBuf,
     pub enabled_mods: Vec<String>,
-    pub remote: Arc<dyn RemoteRepo>,
-    pub checksummer: Arc<dyn Checksummer>,
     pub tuning: RepairTuning,
 }
 
 #[derive(Clone, Debug)]
-pub struct VerifyTuning {
+pub struct CheckTuning {
     pub scan_concurrency: usize,
     pub max_issues: usize,
     pub use_index: bool,
     pub auto_fix_case: bool,
 }
 
-impl Default for VerifyTuning {
+impl Default for CheckTuning {
     fn default() -> Self {
         Self {
             scan_concurrency: 6,
@@ -110,7 +150,7 @@ pub enum Durability {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct VerifyReport {
+pub struct CheckReport {
     pub ok: bool,
     pub expected_files: u64,
     pub verified_ok: u64,
@@ -119,12 +159,12 @@ pub struct VerifyReport {
     pub not_a_file: u64,
     pub checksum_mismatch: u64,
     pub unsafe_path: u64,
-    pub issues: Vec<VerifyIssue>,
+    pub issues: Vec<CheckIssue>,
     pub elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug)]
-pub enum VerifyIssueKind {
+pub enum CheckIssueKind {
     Missing,
     WrongSize { expected: u64, got: u64 },
     NotAFile,
@@ -134,10 +174,10 @@ pub enum VerifyIssueKind {
 }
 
 #[derive(Clone, Debug)]
-pub struct VerifyIssue {
+pub struct CheckIssue {
     pub mod_id: String,
     pub rel_path: String,
-    pub kind: VerifyIssueKind,
+    pub kind: CheckIssueKind,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -219,6 +259,61 @@ pub struct RepairOutcome {
 }
 
 impl RepairOutcome {
+    pub fn ok(&self) -> bool {
+        self.aborted.is_none() && self.failures.is_empty()
+    }
+}
+
+#[derive(Clone)]
+pub struct SyncFreshRequest {
+    pub repo_name: String,
+    pub checkout_root: PathBuf,
+    pub enabled_mods: Vec<String>,
+    pub tuning: SyncFreshTuning,
+}
+
+#[derive(Clone, Debug)]
+pub struct SyncFreshTuning {
+    pub concurrency: RepairTuning,
+    pub safe_wipe: SafeWipePolicy,
+    pub unknown_paths: UnknownPathPolicy,
+}
+
+impl Default for SyncFreshTuning {
+    fn default() -> Self {
+        Self {
+            concurrency: RepairTuning::default(),
+            safe_wipe: SafeWipePolicy::ExpectedUnion,
+            unknown_paths: UnknownPathPolicy::Quarantine,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum SafeWipePolicy {
+    None,
+    ExpectedFromStoreBaseline,
+    ExpectedFromRemoteManifest,
+    #[default]
+    ExpectedUnion,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub enum UnknownPathPolicy {
+    Keep,
+    #[default]
+    Quarantine,
+    Delete,
+}
+
+#[derive(Debug)]
+pub struct SyncFreshOutcome {
+    pub report: RepairReport,
+    pub failures: Vec<FileFailure>,
+    pub aborted: Option<AbortReason>,
+}
+
+impl SyncFreshOutcome {
     pub fn ok(&self) -> bool {
         self.aborted.is_none() && self.failures.is_empty()
     }

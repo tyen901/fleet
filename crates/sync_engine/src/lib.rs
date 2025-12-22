@@ -1,25 +1,30 @@
-pub mod apply;
-pub mod events;
-pub mod fetch;
-pub mod flows;
-pub mod manifest;
-pub mod plan;
-pub mod remote;
-pub mod safe_fs;
-pub mod safe_path;
-pub mod skip_check;
-pub mod staging;
-pub mod time_util;
-pub mod types;
-pub mod unexpected;
-pub mod verify_parts;
+pub mod engine;
+pub mod model;
+pub mod ports;
+
+pub(crate) mod apply;
+pub(crate) mod events;
+pub(crate) mod fetch;
+pub(crate) mod flows;
+pub(crate) mod manifest;
+pub(crate) mod plan;
+pub(crate) mod remote;
+pub(crate) mod safe_fs;
+pub(crate) mod safe_path;
+pub(crate) mod skip_check;
+pub(crate) mod staging;
+pub(crate) mod time_util;
+pub(crate) mod unexpected;
+pub(crate) mod verify_parts;
+
+pub(crate) mod pipeline;
 
 #[cfg(test)]
-pub mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod patch_range_coalesce_tests;
 
-pub use events::*;
-pub use flows::*;
-pub use types::*;
+pub use crate::engine::SyncEngine;
+pub use crate::model::*;
+pub use crate::ports::*;

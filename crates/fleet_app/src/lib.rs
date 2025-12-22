@@ -404,32 +404,32 @@ impl FleetApp {
                     .map(|m| m.mod_name.clone())
                     .collect();
 
-                let engine_tuning = sync_engine::types::RepairTuning {
+                let engine_tuning = sync_engine::RepairTuning {
                     file_concurrency: tuning
                         .max_concurrent_files
-                        .unwrap_or(sync_engine::types::RepairTuning::default().file_concurrency),
+                        .unwrap_or(sync_engine::RepairTuning::default().file_concurrency),
                     range_concurrency: tuning
                         .max_concurrent_range_requests
-                        .unwrap_or(sync_engine::types::RepairTuning::default().range_concurrency),
-                    scan_concurrency: sync_engine::types::RepairTuning::default().scan_concurrency,
+                        .unwrap_or(sync_engine::RepairTuning::default().range_concurrency),
+                    scan_concurrency: sync_engine::RepairTuning::default().scan_concurrency,
                     patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
                     patch_max_bad_parts: Some(tuning.full_download_part_threshold),
-                    patch_merge_gap_bytes: sync_engine::types::RepairTuning::default()
+                    patch_merge_gap_bytes: sync_engine::RepairTuning::default()
                         .patch_merge_gap_bytes,
-                    patch_min_range_bytes: sync_engine::types::RepairTuning::default()
+                    patch_min_range_bytes: sync_engine::RepairTuning::default()
                         .patch_min_range_bytes,
-                    patch_max_fetch_ratio: sync_engine::types::RepairTuning::default()
+                    patch_max_fetch_ratio: sync_engine::RepairTuning::default()
                         .patch_max_fetch_ratio,
-                    patch_max_range_requests: sync_engine::types::RepairTuning::default()
+                    patch_max_range_requests: sync_engine::RepairTuning::default()
                         .patch_max_range_requests,
-                    durability: sync_engine::types::Durability::BestEffort,
-                    unexpected_paths: sync_engine::types::UnexpectedPathPolicy::Prompt,
-                    max_unexpected_delete_bytes: sync_engine::types::RepairTuning::default()
+                    durability: sync_engine::Durability::BestEffort,
+                    unexpected_paths: sync_engine::UnexpectedPathPolicy::Prompt,
+                    max_unexpected_delete_bytes: sync_engine::RepairTuning::default()
                         .max_unexpected_delete_bytes,
                     delete_empty_dirs: true,
                     use_index: tuning.use_index,
                     emit_progress: true,
-                    auto_fix_case: sync_engine::types::RepairTuning::default().auto_fix_case,
+                    auto_fix_case: sync_engine::RepairTuning::default().auto_fix_case,
                 };
 
                 let sink = SyncEventSink { tx: ev_tx.clone() };
@@ -458,16 +458,21 @@ impl FleetApp {
                 idx.set_desired_state(desired)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
-                let request = sync_engine::types::RepairRequest {
+                let request = sync_engine::RepairRequest {
                     repo_name,
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
-                    remote: remote as Arc<dyn sync_engine::remote::RemoteRepo>,
-                    checksummer: Arc::new(Md5Checksummer),
                     tuning: engine_tuning,
                 };
 
-                let _report = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
+                let store = Arc::new(FleetIndexStore::new(idx));
+                let engine = sync_engine::SyncEngine::new(
+                    remote as Arc<dyn sync_engine::RemoteRepo>,
+                    store,
+                    Arc::new(Md5Checksummer),
+                );
+                let _outcome = engine
+                    .repair(request, &sink)
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 Ok(())
@@ -532,8 +537,129 @@ struct SyncEventSink {
     tx: mpsc::Sender<events::SyncEvent>,
 }
 
-impl sync_engine::events::EventSink for SyncEventSink {
-    fn push(&self, ev: sync_engine::events::SyncEvent) {
+struct FleetIndexStore {
+    inner: std::sync::Mutex<FleetIndex>,
+}
+
+impl FleetIndexStore {
+    fn new(idx: FleetIndex) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(idx),
+        }
+    }
+}
+
+impl sync_engine::StateStore for FleetIndexStore {
+    fn desired_state_get(&self) -> Result<Option<sync_engine::DesiredState>, sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_desired_state()
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_replace_all_if_digest_changed(
+        &self,
+        state_id: &str,
+        rows: Vec<sync_engine::ExpectedFile>,
+        digest_hex: &str,
+    ) -> Result<(), sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_replace_all_if_digest_changed(state_id, rows, digest_hex)
+            .map(|_| ())
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn baseline_exists(&self, state_id: &str) -> Result<bool, sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .baseline_exists(state_id)
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_get_all_for_mod(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<std::collections::HashMap<String, sync_engine::FileState>, sync_engine::StoreError>
+    {
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_get_all_for_mod(state_id, mod_id)
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_apply_batch(
+        &self,
+        state_id: &str,
+        upserts: Vec<sync_engine::FileStateUpsert>,
+        deletes: Vec<sync_engine::FileStateDelete>,
+    ) -> Result<(), sync_engine::StoreError> {
+        let up = upserts.into_iter().map(|u| {
+            (
+                u.mod_id,
+                u.rel_path,
+                u.size,
+                u.mtime_ns.0,
+                u.checksum,
+            )
+        });
+        let del = deletes.into_iter().map(|d| (d.mod_id, d.rel_path));
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_apply_batch(state_id, up, del)
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn file_state_delete(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<(), sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .file_state_delete(state_id, mod_id, rel_path)
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn verified_get(&self) -> Result<Option<sync_engine::VerifiedState>, sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_get()
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn verified_set(
+        &self,
+        state_id: &str,
+        verified_at: sync_engine::TimestampNs,
+    ) -> Result<(), sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_set(state_id, verified_at.0)
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+
+    fn verified_clear(&self) -> Result<(), sync_engine::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .verified_clear()
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+    }
+}
+
+impl sync_engine::EventSink for SyncEventSink {
+    fn push(&self, ev: sync_engine::SyncEvent) {
         let app_ev: events::SyncEvent = ev.into();
 
         // High-frequency progress can be lossy; state transitions should be reliable.
@@ -551,7 +677,7 @@ impl sync_engine::events::EventSink for SyncEventSink {
 #[derive(Clone, Copy)]
 struct Md5Checksummer;
 
-impl sync_engine::types::Checksummer for Md5Checksummer {
+impl sync_engine::Checksummer for Md5Checksummer {
     fn algorithm_name(&self) -> &str {
         "md5"
     }

@@ -7,39 +7,42 @@ use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
 use crate::skip_check;
 use crate::time_util::now_ns;
-use crate::types::{
-    AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, VerifyIssue,
-    VerifyIssueKind, VerifyReport, VerifyRequest,
+use crate::model::{
+    AbortReason, CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileFailure, RepairOutcome,
+    RepairReport, RepairRequest, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
 };
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::verify_parts::first_part_mismatch;
 use anyhow::Result;
-use fleet_index::{ExpectedFile, FleetIndex};
+use crate::ports::{Checksummer, RemoteRepo, StateStore};
+use fleet_index::ExpectedFile;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-pub async fn verify(
-    req: VerifyRequest,
-    idx: &mut FleetIndex,
-    sink: Arc<dyn EventSink>,
-) -> Result<VerifyReport> {
+pub(crate) async fn check(
+    req: CheckRequest,
+    remote: Arc<dyn RemoteRepo>,
+    store: Arc<dyn StateStore>,
+    checksummer: Arc<dyn Checksummer>,
+    sink: &dyn EventSink,
+) -> Result<CheckReport, crate::model::EngineError> {
     let start = Instant::now();
     sink.push(SyncEvent::VerifyStarted {
         repo: req.repo_name.clone(),
     });
 
-    let result = async {
+    let result: Result<CheckReport> = async {
         tokio::fs::create_dir_all(req.checkout_root.join(".fleet")).await?;
 
-        let desired = idx
-            .get_desired_state()?
+        let desired = store
+            .desired_state_get()?
             .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
         validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
 
         let fetch = fetch_all(
-            req.remote.clone(),
+            remote.clone(),
             &req.enabled_mods,
             req.tuning.scan_concurrency,
         )
@@ -50,9 +53,9 @@ pub async fn verify(
 
         let baseline = build_baseline(&fetch.manifests);
         let baseline_digest = baseline_digest_hex(&baseline);
-        idx.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
+        store.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
 
-        let mut report = VerifyReport::default();
+        let mut report = CheckReport::default();
 
         for manifest in &fetch.manifests {
             sink.push(SyncEvent::ModStarted {
@@ -60,19 +63,20 @@ pub async fn verify(
             });
 
             let cache = if req.tuning.use_index {
-                build_cache_snapshot(idx, &desired.state_id, manifest)?
+                build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)?
             } else {
                 HashMap::new()
             };
 
             verify_mod(
                 &req,
-                idx,
+                store.as_ref(),
                 &desired.state_id,
                 manifest,
                 &cache,
                 &mut report,
-                sink.clone(),
+                sink,
+                checksummer.clone(),
             )
             .await?;
 
@@ -88,9 +92,9 @@ pub async fn verify(
             && report.unsafe_path == 0;
 
         if report.ok {
-            idx.verified_set(&desired.state_id, now_ns())?;
+            store.verified_set(&desired.state_id, TimestampNs(now_ns()))?;
         } else {
-            idx.verified_clear()?;
+            store.verified_clear()?;
         }
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -100,33 +104,35 @@ pub async fn verify(
     .await;
 
     if result.is_err() {
-        let _ = idx.verified_clear();
+        let _ = store.verified_clear();
         sink.push(SyncEvent::VerifyFinished { ok: false });
     }
 
-    result
+    result.map_err(crate::model::EngineError::Internal)
 }
 
-pub async fn repair(
+pub(crate) async fn repair(
     req: RepairRequest,
-    idx: &mut FleetIndex,
-    sink: Arc<dyn EventSink>,
-) -> Result<RepairOutcome> {
+    remote: Arc<dyn RemoteRepo>,
+    store: Arc<dyn StateStore>,
+    checksummer: Arc<dyn Checksummer>,
+    sink: &dyn EventSink,
+) -> Result<RepairOutcome, crate::model::EngineError> {
     let start = Instant::now();
     sink.push(SyncEvent::RepairStarted {
         repo: req.repo_name.clone(),
     });
 
-    let result = async {
+    let result: Result<RepairOutcome> = async {
         tokio::fs::create_dir_all(req.checkout_root.join(".fleet")).await?;
 
-        let desired = idx
-            .get_desired_state()?
+        let desired = store
+            .desired_state_get()?
             .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
         validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
 
         let fetch = fetch_all(
-            req.remote.clone(),
+            remote.clone(),
             &req.enabled_mods,
             req.tuning.scan_concurrency,
         )
@@ -137,7 +143,7 @@ pub async fn repair(
 
         let baseline = build_baseline(&fetch.manifests);
         let baseline_digest = baseline_digest_hex(&baseline);
-        idx.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
+        store.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
 
         type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
 
@@ -150,7 +156,7 @@ pub async fn repair(
                     .iter()
                     .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
                     .collect();
-                let checksummer = req.checksummer.clone();
+                let checksummer = checksummer.clone();
                 let tuning = fleet_fs_case::CaseFixTuning::default();
                 let _ = tokio::task::spawn_blocking(move || {
                     let hash_file = move |p: &std::path::Path| {
@@ -171,7 +177,7 @@ pub async fn repair(
         }
 
         let skip = skip_check::evaluate_skip(
-            idx,
+            store.as_ref(),
             &req.checkout_root,
             &fetch.manifests,
             skip_check::SkipCheckPolicy::default(),
@@ -216,7 +222,7 @@ pub async fn repair(
             });
 
             let cache = if req.tuning.use_index {
-                build_cache_snapshot(idx, &desired.state_id, manifest)?
+                build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)?
             } else {
                 HashMap::new()
             };
@@ -226,7 +232,7 @@ pub async fn repair(
                 let manifest = manifest.clone();
                 let cache = cache.clone();
                 let tuning = req.tuning.clone();
-                let checksummer = req.checksummer.clone();
+                let checksummer = checksummer.clone();
                 let supports_ranges = fetch.capabilities.supports_ranges;
                 move || {
                     plan_mod(
@@ -252,7 +258,7 @@ pub async fn repair(
                         sink.push(SyncEvent::Error {
                             message: source.to_string(),
                         });
-                        idx.file_state_delete(&desired.state_id, &mod_id, &rel_path)?;
+                        store.file_state_delete(&desired.state_id, &mod_id, &rel_path)?;
 
                         failures.push(FileFailure {
                             mod_id: mod_id.clone(),
@@ -299,8 +305,11 @@ pub async fn repair(
 
             let apply_outcome = apply_ops(
                 to_apply,
-                &req,
-                sink.clone(),
+                &req.checkout_root,
+                remote.clone(),
+                checksummer.clone(),
+                &req.tuning,
+                sink,
                 ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
                 },
@@ -333,7 +342,21 @@ pub async fn repair(
                     hint.checksum,
                 ));
             }
-            idx.file_state_apply_batch(&desired.state_id, upserts, deletes)?;
+            let upserts = upserts
+                .into_iter()
+                .map(|(mod_id, rel_path, size, mtime_ns, checksum)| crate::model::FileStateUpsert {
+                    mod_id,
+                    rel_path,
+                    size,
+                    mtime_ns: TimestampNs(mtime_ns),
+                    checksum,
+                })
+                .collect();
+            let deletes = deletes
+                .into_iter()
+                .map(|(mod_id, rel_path)| crate::model::FileStateDelete { mod_id, rel_path })
+                .collect();
+            store.file_state_apply_batch(&desired.state_id, upserts, deletes)?;
 
             failures.extend(apply_outcome.failures);
 
@@ -363,13 +386,13 @@ pub async fn repair(
                     &mod_id,
                     &expected,
                     &req.tuning,
-                    sink.clone(),
+                    sink,
                 )
                 .await?;
                 merge_unexpected(&mut report, stats.clone());
                 if matches!(
                     req.tuning.unexpected_paths,
-                    crate::types::UnexpectedPathPolicy::Prompt
+                    crate::model::UnexpectedPathPolicy::Prompt
                 ) && (stats.found_files + stats.found_dirs) > 0
                 {
                     aborted = Some(AbortReason::UnexpectedPaths {
@@ -393,9 +416,9 @@ pub async fn repair(
         };
 
         if outcome.ok() {
-            idx.verified_set(&desired.state_id, now_ns())?;
+            store.verified_set(&desired.state_id, TimestampNs(now_ns()))?;
         } else if !outcome.report.skipped {
-            let _ = idx.verified_clear();
+            let _ = store.verified_clear();
         }
 
         sink.push(SyncEvent::RepairFinished {
@@ -407,24 +430,25 @@ pub async fn repair(
     .await;
 
     if result.is_err() {
-        let _ = idx.verified_clear();
+        let _ = store.verified_clear();
         sink.push(SyncEvent::RepairFinished {
             ok: false,
             skipped: false,
         });
     }
 
-    result
+    result.map_err(crate::model::EngineError::Internal)
 }
 
 async fn verify_mod(
-    req: &VerifyRequest,
-    idx: &mut FleetIndex,
+    req: &CheckRequest,
+    store: &dyn StateStore,
     state_id: &str,
     manifest: &ValidatedModManifest,
     cache: &HashMap<String, fleet_index::FileState>,
-    report: &mut VerifyReport,
-    sink: Arc<dyn EventSink>,
+    report: &mut CheckReport,
+    sink: &dyn EventSink,
+    checksummer: Arc<dyn Checksummer>,
 ) -> Result<()> {
     if req.tuning.auto_fix_case {
         let checkout_root = req.checkout_root.clone();
@@ -434,7 +458,7 @@ async fn verify_mod(
             .iter()
             .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
             .collect();
-        let checksummer = req.checksummer.clone();
+        let checksummer = checksummer.clone();
         let tuning = fleet_fs_case::CaseFixTuning::default();
         let _ = tokio::task::spawn_blocking(move || {
             let hash_file = move |p: &std::path::Path| {
@@ -464,7 +488,7 @@ async fn verify_mod(
             let mod_id = manifest.mod_id.clone();
             let rel_path = file.rel_path.clone();
             let cached = cache.get(&rel_path).cloned();
-            let checksummer = req.checksummer.clone();
+            let checksummer = checksummer.clone();
             tokio::task::spawn_blocking(move || {
                 verify_one_file(
                     &checkout_root,
@@ -487,13 +511,27 @@ async fn verify_mod(
             req,
             report,
             outcome,
-            sink.clone(),
+            sink,
             &mut upserts,
             &mut deletes,
         )?;
     }
 
-    idx.file_state_apply_batch(state_id, upserts, deletes)?;
+    let upserts = upserts
+        .into_iter()
+        .map(|(mod_id, rel_path, size, mtime_ns, checksum)| crate::model::FileStateUpsert {
+            mod_id,
+            rel_path,
+            size,
+            mtime_ns: TimestampNs(mtime_ns),
+            checksum,
+        })
+        .collect();
+    let deletes = deletes
+        .into_iter()
+        .map(|(mod_id, rel_path)| crate::model::FileStateDelete { mod_id, rel_path })
+        .collect();
+    store.file_state_apply_batch(state_id, upserts, deletes)?;
     Ok(())
 }
 
@@ -504,7 +542,7 @@ struct VerifyOutcome {
     size: u64,
     mtime_ns: i64,
     checksum: Vec<u8>,
-    issue: Option<VerifyIssueKind>,
+    issue: Option<CheckIssueKind>,
     unsafe_message: Option<String>,
 }
 
@@ -514,7 +552,7 @@ fn verify_one_file(
     rel_path: &str,
     file: &ValidatedFileEntry,
     cached: Option<fleet_index::FileState>,
-    checksummer: &dyn crate::types::Checksummer,
+    checksummer: &dyn Checksummer,
 ) -> Result<VerifyOutcome> {
     let abs_path = match safe_join_mod_file(checkout_root, mod_id, rel_path) {
         Ok(p) => p,
@@ -526,7 +564,7 @@ fn verify_one_file(
                 size: file.size,
                 mtime_ns: 0,
                 checksum: file.file_checksum.clone(),
-                issue: Some(VerifyIssueKind::UnsafePath),
+                issue: Some(CheckIssueKind::UnsafePath),
                 unsafe_message: None,
             })
         }
@@ -542,7 +580,7 @@ fn verify_one_file(
                 size: file.size,
                 mtime_ns: 0,
                 checksum: file.file_checksum.clone(),
-                issue: Some(VerifyIssueKind::UnsafeOnDisk),
+                issue: Some(CheckIssueKind::UnsafeOnDisk),
                 unsafe_message: Some(err.to_string()),
             });
         }
@@ -559,7 +597,7 @@ fn verify_one_file(
                     size: file.size,
                     mtime_ns: 0,
                     checksum: file.file_checksum.clone(),
-                    issue: Some(VerifyIssueKind::NotAFile),
+                    issue: Some(CheckIssueKind::NotAFile),
                     unsafe_message: None,
                 });
             }
@@ -573,7 +611,7 @@ fn verify_one_file(
                 size: file.size,
                 mtime_ns: 0,
                 checksum: file.file_checksum.clone(),
-                issue: Some(VerifyIssueKind::Missing),
+                issue: Some(CheckIssueKind::Missing),
                 unsafe_message: None,
             });
         }
@@ -588,7 +626,7 @@ fn verify_one_file(
             size: file.size,
             mtime_ns: 0,
             checksum: file.file_checksum.clone(),
-            issue: Some(VerifyIssueKind::WrongSize {
+            issue: Some(CheckIssueKind::WrongSize {
                 expected: file.size,
                 got: metadata.len(),
             }),
@@ -632,7 +670,7 @@ fn verify_one_file(
                 size: file.size,
                 mtime_ns,
                 checksum: file.file_checksum.clone(),
-                issue: Some(VerifyIssueKind::PartMismatch {
+                issue: Some(CheckIssueKind::PartMismatch {
                     offset: 0,
                     len: file.size,
                 }),
@@ -647,7 +685,7 @@ fn verify_one_file(
             size: file.size,
             mtime_ns,
             checksum: file.file_checksum.clone(),
-            issue: Some(VerifyIssueKind::PartMismatch { offset, len }),
+            issue: Some(CheckIssueKind::PartMismatch { offset, len }),
             unsafe_message: None,
         });
     }
@@ -665,10 +703,10 @@ fn verify_one_file(
 }
 
 fn apply_verify_outcome(
-    req: &VerifyRequest,
-    report: &mut VerifyReport,
+    req: &CheckRequest,
+    report: &mut CheckReport,
     outcome: VerifyOutcome,
-    sink: Arc<dyn EventSink>,
+    sink: &dyn EventSink,
     upserts: &mut Vec<(String, String, u64, i64, Vec<u8>)>,
     deletes: &mut Vec<(String, String)>,
 ) -> Result<()> {
@@ -690,16 +728,16 @@ fn apply_verify_outcome(
 
     if let Some(kind) = &outcome.issue {
         match kind {
-            VerifyIssueKind::Missing => report.missing += 1,
-            VerifyIssueKind::WrongSize { .. } => report.wrong_size += 1,
-            VerifyIssueKind::NotAFile => report.not_a_file += 1,
-            VerifyIssueKind::UnsafePath => report.unsafe_path += 1,
-            VerifyIssueKind::UnsafeOnDisk => report.unsafe_path += 1,
-            VerifyIssueKind::PartMismatch { .. } => report.checksum_mismatch += 1,
+            CheckIssueKind::Missing => report.missing += 1,
+            CheckIssueKind::WrongSize { .. } => report.wrong_size += 1,
+            CheckIssueKind::NotAFile => report.not_a_file += 1,
+            CheckIssueKind::UnsafePath => report.unsafe_path += 1,
+            CheckIssueKind::UnsafeOnDisk => report.unsafe_path += 1,
+            CheckIssueKind::PartMismatch { .. } => report.checksum_mismatch += 1,
         }
 
         if report.issues.len() < req.tuning.max_issues {
-            report.issues.push(VerifyIssue {
+            report.issues.push(CheckIssue {
                 mod_id: outcome.mod_id.clone(),
                 rel_path: outcome.rel_path.clone(),
                 kind: kind.clone(),
@@ -707,7 +745,7 @@ fn apply_verify_outcome(
         }
     }
 
-    if matches!(outcome.issue, Some(VerifyIssueKind::UnsafeOnDisk)) {
+    if matches!(outcome.issue, Some(CheckIssueKind::UnsafeOnDisk)) {
         sink.push(SyncEvent::Error {
             message: outcome
                 .unsafe_message
@@ -734,11 +772,11 @@ fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<ExpectedFile> {
 }
 
 fn build_cache_snapshot(
-    idx: &FleetIndex,
+    store: &dyn StateStore,
     state_id: &str,
     manifest: &ValidatedModManifest,
 ) -> Result<HashMap<String, fleet_index::FileState>> {
-    let all = idx.file_state_get_all_for_mod(state_id, &manifest.mod_id)?;
+    let all = store.file_state_get_all_for_mod(state_id, &manifest.mod_id)?;
     let mut map = HashMap::new();
     for file in &manifest.files {
         if let Some(state) = all.get(&file.rel_path) {
@@ -805,4 +843,16 @@ fn merge_unexpected(dst: &mut RepairReport, stats: UnexpectedStats) {
     dst.empty_dirs_deleted = dst
         .empty_dirs_deleted
         .saturating_add(stats.empty_dirs_deleted);
+}
+
+pub(crate) async fn sync_fresh(
+    _req: SyncFreshRequest,
+    _remote: Arc<dyn RemoteRepo>,
+    _store: Arc<dyn StateStore>,
+    _checksummer: Arc<dyn Checksummer>,
+    _sink: &dyn EventSink,
+) -> Result<SyncFreshOutcome, crate::model::EngineError> {
+    Err(crate::model::EngineError::InvalidInput(
+        "sync_fresh not implemented".to_string(),
+    ))
 }

@@ -96,9 +96,9 @@ impl SyncEvent {
     }
 }
 
-impl From<sync_engine::events::SyncEvent> for SyncEvent {
-    fn from(ev: sync_engine::events::SyncEvent) -> Self {
-        use sync_engine::events::SyncEvent as E;
+impl From<sync_engine::SyncEvent> for SyncEvent {
+    fn from(ev: sync_engine::SyncEvent) -> Self {
+        use sync_engine::SyncEvent as E;
         match ev {
             E::VerifyStarted { repo } => SyncEvent::VerifyStarted { repo },
             E::VerifyFinished { ok } => SyncEvent::VerifyFinished { ok },

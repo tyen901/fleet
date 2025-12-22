@@ -2,7 +2,7 @@ use crate::fetch::FilePart;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
-use crate::types::{Checksummer, RepairTuning};
+use crate::model::{Checksummer, RepairTuning};
 use fleet_index::FileState;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
