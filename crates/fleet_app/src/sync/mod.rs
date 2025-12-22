@@ -1,3 +1,5 @@
+pub mod adapters;
+
 use async_trait::async_trait;
 use fleet_sync::ports::{ModManifest, RemoteCapabilities, RemoteRepo, RemoteStream};
 use fleet_sync::{

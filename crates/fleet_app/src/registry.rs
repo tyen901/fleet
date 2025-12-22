@@ -1,39 +1,14 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LaunchMode {
-    /// Default OS handler (Windows ShellExecute / Linux xdg-open)
-    #[default]
-    SystemDefault,
-    /// When running inside Flatpak, open via host: `flatpak-spawn --host xdg-open ...`
-    LinuxFlatpakHost,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LaunchSettings {
-    #[serde(default)]
-    pub mode: LaunchMode,
-}
-
-impl Default for LaunchSettings {
-    fn default() -> Self {
-        Self {
-            mode: LaunchMode::SystemDefault,
-        }
-    }
-}
+use crate::settings::{Arma3Config, LaunchSettings};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Registry {
     pub schema_version: u32,
     pub selected_profile: Option<String>,
     pub profiles: Vec<Profile>,
-
-    /// Global app settings (launch behavior, etc.)
     #[serde(default)]
     pub launch: LaunchSettings,
 }
@@ -50,27 +25,6 @@ pub struct Profile {
     pub arma3: Arma3Config,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Arma3Config {
-    #[serde(default)]
-    pub extra_args: String,
-    #[serde(default)]
-    pub enabled_mods: Vec<String>,
-}
-
-impl Arma3Config {
-    pub const DEFAULT_EXTRA_ARGS: &'static str = "-noPause -noSplash -skipIntro -noLauncher";
-}
-
-impl Default for Arma3Config {
-    fn default() -> Self {
-        Self {
-            extra_args: Self::DEFAULT_EXTRA_ARGS.to_string(),
-            enabled_mods: Vec::new(),
-        }
-    }
-}
-
 impl Default for Registry {
     fn default() -> Self {
         Self {
@@ -83,112 +37,72 @@ impl Default for Registry {
 }
 
 impl Registry {
+    pub fn selected(&self) -> Option<&Profile> {
+        self.selected_profile
+            .as_ref()
+            .and_then(|id| self.profiles.iter().find(|p| &p.id == id))
+    }
+
     pub fn add_profile(&mut self, mut p: Profile) {
-        let base = slugify(&p.name);
-        let id = unique_slug(&base, self.profiles.iter().map(|x| x.id.clone()));
-        p.id = id.clone();
-        self.selected_profile = Some(id.clone());
+        if p.id.is_empty() {
+            p.id = uuid::Uuid::new_v4().to_string();
+        }
         self.profiles.push(p);
     }
 
     pub fn remove_profile(&mut self, id: &str) -> bool {
-        let before = self.profiles.len();
+        let len_before = self.profiles.len();
         self.profiles.retain(|p| p.id != id);
-        let removed = self.profiles.len() != before;
-
-        if removed && self.selected_profile.as_deref() == Some(id) {
-            self.selected_profile = self.profiles.first().map(|p| p.id.clone());
+        if self.selected_profile.as_deref() == Some(id) {
+            self.selected_profile = None;
         }
-
-        removed
-    }
-
-    pub fn selected(&self) -> Option<&Profile> {
-        let id = self.selected_profile.as_deref()?;
-        self.profiles.iter().find(|p| p.id == id)
+        self.profiles.len() < len_before
     }
 }
 
 pub fn registry_path() -> Result<Utf8PathBuf, std::io::Error> {
-    let proj = ProjectDirs::from("com", "rts", "fleet")
-        .ok_or_else(|| std::io::Error::other("no project dirs"))?;
-
-    let p = proj.data_local_dir().join("registry.json");
-
-    Utf8PathBuf::from_path_buf(p).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "registry path not valid UTF-8",
-        )
-    })
-}
-
-pub fn setup_checkout_root(path: &Utf8Path) -> Result<(), std::io::Error> {
-    std::fs::create_dir_all(path.as_std_path())?;
-    std::fs::create_dir_all(path.join(".fleet").as_std_path())?;
-    Ok(())
-}
-
-pub fn normalize_repo_url(s: &str) -> String {
-    let t = s.trim();
-    if t.ends_with('/') {
-        t.to_string()
-    } else {
-        format!("{t}/")
+    // 1. FLEET_REGISTRY env var
+    if let Ok(p) = std::env::var("FLEET_REGISTRY") {
+        return Ok(Utf8PathBuf::from(p));
     }
-}
 
-pub fn slugify(input: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-
-    for ch in input.trim().to_lowercase().chars() {
-        let ok = ch.is_ascii_alphanumeric();
-        if ok {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
+    // 2. Standard locations
+    if let Some(dirs) = ProjectDirs::from("io", "fleet-app", "fleet") {
+        let config_dir = dirs.config_dir();
+        if !config_dir.exists() {
+            std::fs::create_dir_all(config_dir)?;
         }
+        let p = config_dir.join("registry.json");
+        // Convert to Utf8PathBuf (handle invalid UTF-8 gracefully-ish?)
+        return Utf8PathBuf::from_path_buf(p).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Config path contains invalid UTF-8: {:?}", e),
+            )
+        });
     }
 
-    while out.starts_with('-') {
-        out.remove(0);
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-
-    if out.is_empty() {
-        "profile".to_string()
-    } else {
-        out
-    }
+    Ok(Utf8PathBuf::from("registry.json"))
 }
 
-pub fn unique_slug(base: &str, existing: impl Iterator<Item = String>) -> String {
-    let set: HashSet<String> = existing.collect();
-
-    if !set.contains(base) {
-        return base.to_string();
+pub fn normalize_repo_url(url: &str) -> String {
+    let mut s = url.trim().to_string();
+    if s.ends_with('/') {
+        s.pop();
     }
-
-    for i in 2..=10_000u32 {
-        let cand = format!("{base}-{i}");
-        if !set.contains(&cand) {
-            return cand;
-        }
-    }
-
-    format!("{base}-{}", unix_now())
+    s
 }
 
 pub fn unix_now() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+pub fn setup_checkout_root(path: &Utf8Path) -> Result<(), std::io::Error> {
+    if !path.exists() {
+        std::fs::create_dir_all(path)?;
+    }
+    Ok(())
 }

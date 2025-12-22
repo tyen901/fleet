@@ -16,7 +16,7 @@ fleet_sync = { path = "../fleet_sync" }
 fleet_index = { path = "../fleet_index" }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
 tokio-util = "0.7"
-walkdir = "2.5"
+
 md5 = "0.7"
 
 # New: error ergonomics + safe registry writes + file locking
@@ -24,3 +24,4 @@ thiserror = "2"
 atomicwrites = "0.4"
 fs2 = "0.4"
 async-trait = "0.1.89"
+uuid = { version = "1.19.0", features = ["v4"] }
