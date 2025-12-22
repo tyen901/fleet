@@ -8,6 +8,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+#[derive(thiserror::Error, Debug)]
+#[error("cancelled")]
+pub(crate) struct Cancelled;
+
 #[derive(Default, Clone, Debug)]
 pub struct UnexpectedStats {
     pub found_files: u64,
@@ -54,7 +58,7 @@ pub async fn handle_unexpected_paths(
     cancel: &CancellationToken,
 ) -> Result<UnexpectedStats> {
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     let mod_root = checkout_root.join(mod_id);
     if tokio::fs::metadata(&mod_root).await.is_err() {
@@ -104,7 +108,7 @@ pub async fn handle_unexpected_paths(
         UnexpectedPathPolicy::AutoDelete => {
             for action in plan.actions {
                 if cancel.is_cancelled() {
-                    anyhow::bail!("cancelled");
+                    return Err(Cancelled.into());
                 }
                 match action {
                     UnexpectedAction::File { abs, rel, size } => {

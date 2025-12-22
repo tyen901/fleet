@@ -8,7 +8,6 @@ use crate::model::{
     CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileStateDelete, FileStateUpsert,
     TimestampNs,
 };
-use crate::pipeline::fetch_all;
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::{file_mtime_ns, now_ns};
@@ -24,43 +23,23 @@ pub(crate) async fn run(
     cancel: &CancellationToken,
 ) -> Result<CheckReport, crate::model::EngineError> {
     let start = Instant::now();
-    if cancel.is_cancelled() {
-        return Err(crate::model::EngineError::Cancelled);
-    }
     sink.push(SyncEvent::CheckStarted {
         repo: req.repo_name.clone(),
     });
 
     let result: Result<CheckReport, crate::model::EngineError> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
-            .await
-            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
-
-        let desired = store
-            .desired_state_get()
-            .map_err(crate::model::EngineError::Store)?
-            .ok_or_else(|| {
-                crate::model::EngineError::InvalidInput("desired_state missing".to_string())
-            })?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
-            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
-
-        let fetch = fetch_all(
-            remote.clone(),
+        let prelude = super::prelude::run_prelude(
+            &req.checkout_root,
             &req.enabled_mods,
             req.tuning.scan_concurrency,
+            remote.clone(),
+            store.clone(),
+            sink,
             cancel,
         )
         .await?;
-        sink.push(SyncEvent::RemoteCapabilities {
-            supports_ranges: fetch.capabilities.supports_ranges,
-        });
-
-        let baseline = build_baseline(&fetch.manifests);
-        let baseline_digest = super::baseline_digest_hex(&baseline);
-        store
-            .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
-            .map_err(crate::model::EngineError::Store)?;
+        let desired = prelude.desired;
+        let fetch = prelude.fetch;
 
         let mut report = CheckReport::default();
 
@@ -425,18 +404,4 @@ fn apply_verify_outcome(
         rel_path: outcome.rel_path,
     });
     Ok(())
-}
-
-fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
-    let mut rows = Vec::new();
-    for manifest in manifests {
-        for file in &manifest.files {
-            rows.push(crate::model::ExpectedFile {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
-                size: file.size,
-            });
-        }
-    }
-    rows
 }

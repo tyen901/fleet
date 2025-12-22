@@ -6,17 +6,14 @@ use std::time::Instant;
 use crate::fs::safe_join_mod_file;
 use crate::manifest::ValidatedModManifest;
 use crate::model::{
-    AbortReason, FileStateDelete, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome,
-    SyncFreshRequest, TimestampNs, UnknownPathPolicy,
+    AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
+    UnknownPathPolicy,
 };
-use crate::pipeline::fetch_all;
+use crate::pipeline::repair::{apply_full_download_ops, FullDownloadOp};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::now_ns;
 use tokio_util::sync::CancellationToken;
-
-use crate::pipeline::repair::applier::{apply_ops, ApplyOptions, IndexUpdate};
-use crate::pipeline::repair::planner::{FileTarget, PlannedOp, RepairStrategy};
 
 pub(crate) async fn run(
     req: SyncFreshRequest,
@@ -27,51 +24,27 @@ pub(crate) async fn run(
     cancel: &CancellationToken,
 ) -> Result<SyncFreshOutcome, crate::model::EngineError> {
     let start = Instant::now();
-    if cancel.is_cancelled() {
-        return Err(crate::model::EngineError::Cancelled);
-    }
     sink.push(SyncEvent::SyncFreshStarted {
         repo: req.repo_name.clone(),
     });
 
     let result: Result<SyncFreshOutcome, crate::model::EngineError> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
-            .await
-            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
-
-        let desired = store
-            .desired_state_get()
-            .map_err(crate::model::EngineError::Store)?
-            .ok_or_else(|| {
-                crate::model::EngineError::InvalidInput("desired_state missing".to_string())
-            })?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
-            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
-
-        let quarantine_id = format!("{}-{}", desired.state_id, crate::util::now_ns());
-
         let tuning = &req.tuning;
 
-        let fetch = fetch_all(
-            remote.clone(),
+        let prelude = super::prelude::run_prelude(
+            &req.checkout_root,
             &req.enabled_mods,
             tuning.concurrency.scan_concurrency,
+            remote.clone(),
+            store.clone(),
+            sink,
             cancel,
         )
         .await?;
-        sink.push(SyncEvent::RemoteCapabilities {
-            supports_ranges: fetch.capabilities.supports_ranges,
-        });
+        let desired = prelude.desired;
+        let fetch = prelude.fetch;
 
-        let baseline_rows = build_baseline(&fetch.manifests);
-        let baseline_digest = super::baseline_digest_hex(&baseline_rows);
-        store
-            .expected_replace_all_if_digest_changed(
-                &desired.state_id,
-                baseline_rows,
-                &baseline_digest,
-            )
-            .map_err(crate::model::EngineError::Store)?;
+        let quarantine_id = format!("{}-{}", desired.state_id, crate::util::now_ns());
 
         let expected_from_manifest = expected_sets_from_manifests(&fetch.manifests);
         let expected_from_store = if matches!(
@@ -122,7 +95,33 @@ pub(crate) async fn run(
                 match tokio::fs::symlink_metadata(&abs).await {
                     Ok(md) => {
                         if md.is_dir() {
-                            let _ = tokio::fs::remove_dir_all(&abs).await;
+                            let rel = Path::new(rel_path);
+                            if crate::fs::quarantine_move_path(
+                                &req.checkout_root,
+                                &quarantine_id,
+                                mod_id,
+                                rel,
+                                &abs,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                cancel.cancel();
+                                let report = crate::model::RepairReport {
+                                    elapsed_ms: start.elapsed().as_millis() as u64,
+                                    ..Default::default()
+                                };
+                                return Ok(SyncFreshOutcome {
+                                    report,
+                                    failures: Vec::new(),
+                                    aborted: Some(AbortReason::UnsafeOnDisk {
+                                        message: format!(
+                                            "failed to quarantine directory at expected file path: {}",
+                                            abs.display()
+                                        ),
+                                    }),
+                                });
+                            }
                         } else {
                             let _ = tokio::fs::remove_file(&abs).await;
                         }
@@ -134,28 +133,23 @@ pub(crate) async fn run(
         }
 
         // Force full download of all expected files.
-        let mut ops: Vec<PlannedOp> = Vec::new();
+        let mut ops: Vec<FullDownloadOp> = Vec::new();
         for manifest in &fetch.manifests {
             for file in &manifest.files {
                 let abs_path =
                     safe_join_mod_file(&req.checkout_root, &manifest.mod_id, &file.rel_path)?;
-                ops.push(PlannedOp {
+                ops.push(FullDownloadOp {
                     mod_id: manifest.mod_id.clone(),
                     rel_path: file.rel_path.clone(),
                     abs_path,
-                    target: FileTarget {
-                        size: file.size,
-                        file_checksum: file.file_checksum.clone(),
-                        parts: file.parts.clone(),
-                        strategy: RepairStrategy::Full,
-                        parts_to_fetch: Vec::new(),
-                    },
-                    estimated_bytes: file.size,
+                    size: file.size,
+                    file_checksum: file.file_checksum.clone(),
+                    parts: file.parts.clone(),
                 });
             }
         }
 
-        let apply_outcome = apply_ops(
+        let apply_outcome = apply_full_download_ops(
             ops,
             &req.checkout_root,
             remote.clone(),
@@ -163,9 +157,8 @@ pub(crate) async fn run(
             &tuning.concurrency,
             sink,
             cancel,
-            ApplyOptions {
-                supports_ranges: fetch.capabilities.supports_ranges,
-            },
+            fetch.capabilities.supports_ranges,
+            quarantine_id.clone(),
         )
         .await?;
 
@@ -174,29 +167,17 @@ pub(crate) async fn run(
         let mut aborted = apply_outcome.aborted;
 
         let mut upserts: Vec<FileStateUpsert> = Vec::new();
-        let mut deletes: Vec<FileStateDelete> = Vec::new();
-        for update in apply_outcome.index_updates {
-            match update {
-                IndexUpdate::UpsertFileState {
-                    mod_id,
-                    rel_path,
-                    size,
-                    mtime_ns,
-                    checksum,
-                } => upserts.push(FileStateUpsert {
-                    mod_id,
-                    rel_path,
-                    size,
-                    mtime_ns,
-                    checksum,
-                }),
-                IndexUpdate::DeleteFileState { mod_id, rel_path } => {
-                    deletes.push(FileStateDelete { mod_id, rel_path })
-                }
-            }
+        for (mod_id, rel_path, size, mtime_ns, checksum) in apply_outcome.index_updates {
+            upserts.push(FileStateUpsert {
+                mod_id,
+                rel_path,
+                size,
+                mtime_ns,
+                checksum,
+            });
         }
         store
-            .file_state_apply_batch(&desired.state_id, upserts, deletes)
+            .file_state_apply_batch(&desired.state_id, upserts, Vec::new())
             .map_err(crate::model::EngineError::Store)?;
 
         if aborted.is_none() {
@@ -218,7 +199,7 @@ pub(crate) async fn run(
                 )
                 .await
                 .map_err(|e| {
-                    if cancel.is_cancelled() || e.to_string().contains("cancelled") {
+                    if cancel.is_cancelled() || e.is::<Cancelled>() {
                         crate::model::EngineError::Cancelled
                     } else {
                         crate::model::EngineError::Internal(e)
@@ -262,20 +243,6 @@ pub(crate) async fn run(
     }
 
     result
-}
-
-fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
-    let mut rows = Vec::new();
-    for manifest in manifests {
-        for file in &manifest.files {
-            rows.push(crate::model::ExpectedFile {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
-                size: file.size,
-            });
-        }
-    }
-    rows
 }
 
 fn expected_sets_from_manifests(
@@ -323,6 +290,10 @@ struct UnknownStats {
     cap_reached: bool,
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("cancelled")]
+struct Cancelled;
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_unknown_paths(
     checkout_root: &Path,
@@ -335,7 +306,7 @@ async fn handle_unknown_paths(
     cancel: &CancellationToken,
 ) -> anyhow::Result<UnknownStats> {
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     let mod_root = checkout_root.join(mod_id);
     if tokio::fs::metadata(&mod_root).await.is_err() {
@@ -378,7 +349,7 @@ async fn handle_unknown_paths(
     let mut bytes_processed: u64 = 0;
     for action in plan.actions {
         if cancel.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(Cancelled.into());
         }
         if let Some(cap) = cap_bytes {
             if bytes_processed >= cap {

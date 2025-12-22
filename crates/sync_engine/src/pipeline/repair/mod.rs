@@ -2,12 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::manifest::ValidatedModManifest;
 use crate::model::{
     AbortReason, FileFailure, FileStateDelete, FileStateUpsert, RepairOutcome, RepairReport,
     RepairRequest, TimestampNs,
 };
-use crate::pipeline::fetch_all;
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
@@ -15,8 +13,90 @@ use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::util::now_ns;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) mod applier;
-pub(crate) mod planner;
+mod applier;
+mod planner;
+
+pub(crate) struct FullDownloadOp {
+    pub(crate) mod_id: String,
+    pub(crate) rel_path: String,
+    pub(crate) abs_path: std::path::PathBuf,
+    pub(crate) size: u64,
+    pub(crate) file_checksum: Vec<u8>,
+    pub(crate) parts: Vec<crate::ports::FilePart>,
+}
+
+pub(crate) struct FullDownloadOutcome {
+    pub(crate) report: crate::model::RepairReport,
+    pub(crate) failures: Vec<crate::model::FileFailure>,
+    pub(crate) aborted: Option<crate::model::AbortReason>,
+    pub(crate) index_updates: Vec<(String, String, u64, crate::model::TimestampNs, Vec<u8>)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_full_download_ops(
+    ops: Vec<FullDownloadOp>,
+    checkout_root: &std::path::Path,
+    remote: Arc<dyn RemoteRepo>,
+    checksummer: Arc<dyn Checksummer>,
+    tuning: &crate::model::RepairTuning,
+    sink: &dyn EventSink,
+    cancel: &CancellationToken,
+    supports_ranges: bool,
+    quarantine_id: String,
+) -> Result<FullDownloadOutcome, crate::model::EngineError> {
+    let planned: Vec<planner::PlannedOp> = ops
+        .into_iter()
+        .map(|op| planner::PlannedOp {
+            mod_id: op.mod_id,
+            rel_path: op.rel_path,
+            abs_path: op.abs_path,
+            target: planner::FileTarget {
+                size: op.size,
+                file_checksum: op.file_checksum,
+                parts: op.parts,
+                strategy: planner::RepairStrategy::Full,
+                parts_to_fetch: Vec::new(),
+            },
+            estimated_bytes: op.size,
+        })
+        .collect();
+
+    let outcome = applier::apply_ops(
+        planned,
+        checkout_root,
+        remote,
+        checksummer,
+        tuning,
+        sink,
+        cancel,
+        applier::ApplyOptions {
+            supports_ranges,
+            quarantine_id,
+        },
+    )
+    .await?;
+
+    let mut index_updates = Vec::new();
+    for update in outcome.index_updates {
+        match update {
+            applier::IndexUpdate::UpsertFileState {
+                mod_id,
+                rel_path,
+                size,
+                mtime_ns,
+                checksum,
+            } => index_updates.push((mod_id, rel_path, size, mtime_ns, checksum)),
+            applier::IndexUpdate::DeleteFileState { .. } => {}
+        }
+    }
+
+    Ok(FullDownloadOutcome {
+        report: outcome.report,
+        failures: outcome.failures,
+        aborted: outcome.aborted,
+        index_updates,
+    })
+}
 
 pub(crate) async fn run(
     req: RepairRequest,
@@ -32,35 +112,19 @@ pub(crate) async fn run(
     });
 
     let result: Result<RepairOutcome, crate::model::EngineError> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
-            .await
-            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
-
-        let desired = store
-            .desired_state_get()
-            .map_err(crate::model::EngineError::Store)?
-            .ok_or_else(|| {
-                crate::model::EngineError::InvalidInput("desired_state missing".to_string())
-            })?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
-            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
-
-        let fetch = fetch_all(
-            remote.clone(),
+        let prelude = super::prelude::run_prelude(
+            &req.checkout_root,
             &req.enabled_mods,
             req.tuning.scan_concurrency,
+            remote.clone(),
+            store.clone(),
+            sink,
             cancel,
         )
         .await?;
-        sink.push(SyncEvent::RemoteCapabilities {
-            supports_ranges: fetch.capabilities.supports_ranges,
-        });
-
-        let baseline = build_baseline(&fetch.manifests);
-        let baseline_digest = super::baseline_digest_hex(&baseline);
-        store
-            .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
-            .map_err(crate::model::EngineError::Store)?;
+        let desired = prelude.desired;
+        let fetch = prelude.fetch;
+        let quarantine_id = format!("{}-{}", desired.state_id, now_ns());
 
         type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
 
@@ -235,6 +299,7 @@ pub(crate) async fn run(
                 cancel,
                 applier::ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
+                    quarantine_id: quarantine_id.clone(),
                 },
             )
             .await?;
@@ -311,7 +376,7 @@ pub(crate) async fn run(
                 {
                     Ok(s) => s,
                     Err(e) => {
-                        if cancel.is_cancelled() || e.to_string().contains("cancelled") {
+                        if cancel.is_cancelled() || e.is::<crate::unexpected::Cancelled>() {
                             return Err(crate::model::EngineError::Cancelled);
                         }
                         return Err(crate::model::EngineError::Internal(e));
@@ -366,20 +431,6 @@ pub(crate) async fn run(
     }
 
     result
-}
-
-fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
-    let mut rows = Vec::new();
-    for manifest in manifests {
-        for file in &manifest.files {
-            rows.push(crate::model::ExpectedFile {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
-                size: file.size,
-            });
-        }
-    }
-    rows
 }
 
 fn split_ops(ops: Vec<planner::PlannedOp>) -> (Vec<planner::PlannedOp>, Vec<planner::PlannedOp>) {
@@ -694,6 +745,7 @@ mod tests {
             &tokio_util::sync::CancellationToken::new(),
             applier::ApplyOptions {
                 supports_ranges: true,
+                quarantine_id: "test".to_string(),
             },
         )
         .await
@@ -772,6 +824,7 @@ mod tests {
             &tokio_util::sync::CancellationToken::new(),
             applier::ApplyOptions {
                 supports_ranges: true,
+                quarantine_id: "test".to_string(),
             },
         )
         .await

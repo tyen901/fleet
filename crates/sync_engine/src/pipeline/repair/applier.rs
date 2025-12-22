@@ -14,6 +14,10 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
+#[derive(thiserror::Error, Debug)]
+#[error("cancelled")]
+struct Cancelled;
+
 #[derive(Clone, Debug)]
 pub(crate) enum IndexUpdate {
     UpsertFileState {
@@ -29,9 +33,10 @@ pub(crate) enum IndexUpdate {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ApplyOptions {
     pub supports_ranges: bool,
+    pub quarantine_id: String,
 }
 
 pub(crate) struct ApplyBatchOutcome {
@@ -80,6 +85,7 @@ pub(crate) async fn apply_ops(
             let checksummer = checksummer.clone();
             let range_sem = range_sem.clone();
             let cancel = cancel.clone();
+            let opts = opts.clone();
             async move {
                 apply_one(
                     op,
@@ -139,7 +145,7 @@ pub(crate) async fn apply_ops(
 }
 
 fn is_cancel_failure(f: &FileFailure) -> bool {
-    !f.aborting && f.message.contains("cancelled")
+    !f.aborting && f.message == "cancelled"
 }
 
 struct ApplyOneSuccess {
@@ -213,6 +219,25 @@ async fn apply_one(
                 });
             }
         }
+    }
+
+    match tokio::fs::symlink_metadata(&op.abs_path).await {
+        Ok(md) if md.is_dir() => {
+            if let Err(err) = crate::fs::quarantine_move_path(
+                checkout_root,
+                &opts.quarantine_id,
+                &op.mod_id,
+                Path::new(&op.rel_path),
+                &op.abs_path,
+            )
+            .await
+            {
+                return Err(classify_apply_error(&op, err));
+            }
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(classify_apply_error(&op, e.into())),
     }
 
     let mut effective_strategy = op.target.strategy;
@@ -350,7 +375,7 @@ async fn apply_full(
 
     let _permit = range_sem.clone().acquire_owned().await?;
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     let mut stream = remote
         .fetch_file(&op.mod_id, &op.rel_path)
@@ -360,7 +385,7 @@ async fn apply_full(
     let mut written: u64 = 0;
     while let Some(chunk) = stream.next_chunk().await? {
         if cancel.is_cancelled() {
-            anyhow::bail!("cancelled");
+            return Err(Cancelled.into());
         }
         let expected = op.target.size;
         let next = written.saturating_add(chunk.len() as u64);
@@ -392,7 +417,7 @@ async fn apply_full(
     drop(f);
 
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     {
         let tmp_path = staged.tmp_path.clone();
@@ -408,7 +433,7 @@ async fn apply_full(
     }
 
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
@@ -477,11 +502,11 @@ async fn apply_patch(
             let cancel = cancel.clone();
             async move {
                 if cancel.is_cancelled() {
-                    anyhow::bail!("cancelled");
+                    return Err(Cancelled.into());
                 }
                 let _permit = range_sem.acquire_owned().await?;
                 if cancel.is_cancelled() {
-                    anyhow::bail!("cancelled");
+                    return Err(Cancelled.into());
                 }
                 let mut stream = remote
                     .fetch_range(&mod_id, &rel_path, part.offset, part.len)
@@ -501,7 +526,7 @@ async fn apply_patch(
                 let mut remaining = part.len;
                 while remaining > 0 {
                     if cancel.is_cancelled() {
-                        anyhow::bail!("cancelled");
+                        return Err(Cancelled.into());
                     }
                     let chunk = stream
                         .next_chunk()
@@ -536,7 +561,7 @@ async fn apply_patch(
     }
 
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
 
     if matches!(tuning.durability, Durability::Strict) {
@@ -548,7 +573,7 @@ async fn apply_patch(
     }
 
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     {
         let tmp_path = staged.tmp_path.clone();
@@ -564,7 +589,7 @@ async fn apply_patch(
     }
 
     if cancel.is_cancelled() {
-        anyhow::bail!("cancelled");
+        return Err(Cancelled.into());
     }
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {

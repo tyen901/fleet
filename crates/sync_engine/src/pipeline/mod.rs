@@ -11,6 +11,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) mod check;
+pub(crate) mod prelude;
 pub(crate) mod repair;
 pub(crate) mod sync_fresh;
 
@@ -48,24 +49,25 @@ pub(crate) async fn fetch_all(
             let cancel = cancel.clone();
             async move {
                 let permit = tokio::select! {
-                    _ = cancel.cancelled() => anyhow::bail!("cancelled"),
-                    permit = sem.acquire_owned() => permit.map_err(|e| anyhow::anyhow!(e))?,
+                    _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
+                    permit = sem.acquire_owned() => permit.map_err(|e| crate::model::EngineError::Internal(anyhow::anyhow!(e)))?,
                 };
                 let _permit = permit;
 
                 let manifest = tokio::select! {
-                    _ = cancel.cancelled() => anyhow::bail!("cancelled"),
-                    m = remote.fetch_mod_manifest(&mod_id) => m.with_context(|| format!("fetch manifest for {mod_id}"))?,
+                    _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
+                    m = remote.fetch_mod_manifest(&mod_id) => m.map_err(crate::model::EngineError::Remote).with_context(|| format!("fetch manifest for {mod_id}"))?,
                 };
                 if manifest.mod_id != mod_id {
-                    anyhow::bail!(
+                    return Err(crate::model::EngineError::Internal(anyhow::anyhow!(
                         "manifest mod_id mismatch (requested {}, got {})",
                         mod_id,
                         manifest.mod_id
-                    );
+                    )));
                 }
-                let validated = crate::manifest::validate_and_normalize_manifest(manifest)?;
-                Ok::<ValidatedModManifest, anyhow::Error>(validated)
+                let validated = crate::manifest::validate_and_normalize_manifest(manifest)
+                    .map_err(crate::model::EngineError::Internal)?;
+                Ok::<ValidatedModManifest, crate::model::EngineError>(validated)
             }
         })
         .buffer_unordered(max_concurrency.max(1));
@@ -73,10 +75,10 @@ pub(crate) async fn fetch_all(
     while let Some(next) = stream.next().await {
         match next {
             Ok(v) => manifests.push(v),
-            Err(e) if e.to_string().contains("cancelled") || cancel.is_cancelled() => {
-                return Err(crate::model::EngineError::Cancelled);
+            Err(crate::model::EngineError::Cancelled) => {
+                return Err(crate::model::EngineError::Cancelled)
             }
-            Err(e) => return Err(crate::model::EngineError::Internal(e)),
+            Err(e) => return Err(e),
         }
     }
 

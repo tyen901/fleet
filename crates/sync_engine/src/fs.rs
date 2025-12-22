@@ -283,7 +283,10 @@ impl StagedFile {
     ) -> anyhow::Result<()> {
         if let Ok(md) = tokio::fs::symlink_metadata(final_path).await {
             if md.is_dir() {
-                tokio::fs::remove_dir_all(final_path).await?;
+                anyhow::bail!(
+                    "refusing to replace directory with file: {}",
+                    final_path.display()
+                );
             } else {
                 tokio::fs::remove_file(final_path).await?;
             }
