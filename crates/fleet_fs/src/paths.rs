@@ -1,4 +1,13 @@
-use crate::types::PathError;
+use std::path::{Component, Path};
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PathError {
+    #[error("invalid mod_id: {0}")]
+    InvalidModId(String),
+    #[error("invalid rel_path: {0}")]
+    InvalidRelPath(String),
+}
 
 pub fn normalize_rel_path(s: &str) -> String {
     s.replace('\\', "/")
@@ -22,7 +31,17 @@ pub fn validate_rel_path(rel: &str) -> Result<(), PathError> {
         return Err(PathError::InvalidRelPath(rel.to_string()));
     }
 
+    if rel.is_empty() || rel == "." {
+        return Err(PathError::InvalidRelPath(rel.to_string()));
+    }
+
     if rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(PathError::InvalidRelPath(rel.to_string()));
+    }
+
+    // Require callers to normalize to `/` separators (use `normalize_rel_path`).
+    // Without this, Windows-style traversal like `..\\foo` could bypass component checks on Unix.
+    if rel.contains('\\') {
         return Err(PathError::InvalidRelPath(rel.to_string()));
     }
 
@@ -30,9 +49,9 @@ pub fn validate_rel_path(rel: &str) -> Result<(), PathError> {
         return Err(PathError::InvalidRelPath(rel.to_string()));
     }
 
-    for comp in std::path::Path::new(rel).components() {
+    for comp in Path::new(rel).components() {
         match comp {
-            std::path::Component::ParentDir | std::path::Component::RootDir => {
+            Component::ParentDir | Component::RootDir | Component::CurDir => {
                 return Err(PathError::InvalidRelPath(rel.to_string()));
             }
             _ => {}

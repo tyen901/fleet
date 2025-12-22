@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::model::Durability;
+pub(crate) use fleet_fs::normalize_rel_path;
+pub(crate) use fleet_fs::validate_mod_id;
+pub(crate) use fleet_fs::validate_rel_path;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum UnsafeOnDiskError {
@@ -15,39 +18,7 @@ pub(crate) enum UnsafeOnDiskError {
     Io(#[from] std::io::Error),
 }
 
-pub(crate) fn validate_mod_id(mod_id: &str) -> anyhow::Result<()> {
-    if mod_id.is_empty() || mod_id == "." || mod_id == ".." {
-        anyhow::bail!("invalid mod_id: {mod_id}");
-    }
-    if mod_id.contains('/') || mod_id.contains('\\') || mod_id.contains('\0') {
-        anyhow::bail!("invalid mod_id: {mod_id}");
-    }
-    if is_windows_prefix(mod_id) {
-        anyhow::bail!("invalid mod_id: {mod_id}");
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_rel_path(rel_path: &str) -> anyhow::Result<()> {
-    if rel_path.contains('\0') {
-        anyhow::bail!("invalid rel_path: {rel_path}");
-    }
-    if rel_path.starts_with('/') || rel_path.starts_with('\\') {
-        anyhow::bail!("invalid rel_path: {rel_path}");
-    }
-    if is_windows_prefix(rel_path) {
-        anyhow::bail!("invalid rel_path: {rel_path}");
-    }
-    for comp in std::path::Path::new(rel_path).components() {
-        match comp {
-            std::path::Component::ParentDir | std::path::Component::RootDir => {
-                anyhow::bail!("invalid rel_path: {rel_path}");
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
+// Validation functions are provided by the `fleet_fs` crate.
 
 pub(crate) fn safe_join_mod_file(
     checkout_root: &Path,
@@ -55,7 +26,7 @@ pub(crate) fn safe_join_mod_file(
     rel_path: &str,
 ) -> anyhow::Result<PathBuf> {
     validate_mod_id(mod_id)?;
-    let rel_norm = rel_path.replace('\\', "/");
+    let rel_norm = normalize_rel_path(rel_path);
     validate_rel_path(&rel_norm)?;
     Ok(checkout_root.join(mod_id).join(rel_norm))
 }
@@ -126,17 +97,6 @@ fn is_reparse_point(md: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     (md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-}
-
-fn is_windows_prefix(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        return true;
-    }
-    if s.starts_with("\\\\") {
-        return true;
-    }
-    false
 }
 
 pub(crate) fn quarantine_root(checkout_root: &Path, quarantine_id: &str) -> PathBuf {

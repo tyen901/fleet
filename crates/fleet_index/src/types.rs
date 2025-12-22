@@ -37,15 +37,8 @@ pub enum IndexError {
     #[error("sqlite error: {0}")]
     Sql(#[from] rusqlite::Error),
     #[error("path error: {0}")]
-    Path(#[from] PathError),
+    Path(#[from] fleet_fs::PathError),
     #[error("corrupt index: {0}")]
     Corrupt(String),
 }
 
-#[derive(Error, Debug)]
-pub enum PathError {
-    #[error("invalid mod_id: {0}")]
-    InvalidModId(String),
-    #[error("invalid rel_path: {0}")]
-    InvalidRelPath(String),
-}

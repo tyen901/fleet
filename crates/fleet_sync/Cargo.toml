@@ -13,7 +13,7 @@ walkdir = "2"
 blake3 = "1"
 async-trait = "0.1"
 thiserror = "1"
-fleet_fs_case = { path = "../fleet_fs_case" }
+fleet_fs = { path = "../fleet_fs" }
 
 [dev-dependencies]
 tempfile = "3"

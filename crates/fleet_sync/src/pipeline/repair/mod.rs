@@ -138,14 +138,14 @@ pub(crate) async fn run(
                     .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
                     .collect();
                 let checksummer = checksummer.clone();
-                let tuning = fleet_fs_case::CaseFixTuning::default();
+                let tuning = fleet_fs::CaseFixTuning::default();
                 let _ = tokio::task::spawn_blocking(move || {
                     let hash_file = move |p: &std::path::Path| {
                         checksummer
                             .hash_file(p)
                             .map_err(|e| std::io::Error::other(e.to_string()))
                     };
-                    fleet_fs_case::case_sweep_and_fix(
+                    fleet_fs::case_sweep_and_fix(
                         &checkout_root,
                         &mod_id,
                         &expected,

@@ -1,4 +1,4 @@
-use crate::fs::{validate_mod_id, validate_rel_path};
+use crate::fs::{normalize_rel_path, validate_mod_id, validate_rel_path};
 use crate::ports::{FileEntry, FilePart, ModManifest};
 use anyhow::{bail, Context, Result};
 
@@ -21,7 +21,7 @@ pub(crate) fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<Vali
 
     let mut files = Vec::with_capacity(m.files.len());
     for mut f in m.files.drain(..) {
-        f.rel_path = f.rel_path.replace('\\', "/");
+        f.rel_path = normalize_rel_path(&f.rel_path);
         validate_rel_path(&f.rel_path)
             .with_context(|| format!("invalid rel_path {}", f.rel_path))?;
         validate_parts(&f)?;

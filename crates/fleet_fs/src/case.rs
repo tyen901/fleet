@@ -110,21 +110,24 @@ pub fn resolve_mod_dir(checkout_root: &Path, mod_id: &str) -> io::Result<ModDirR
     let want = case_key(mod_id);
 
     let mut matches = Vec::new();
-    for entry in std::fs::read_dir(checkout_root)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let md = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !md.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if case_key(&name) == want {
-            matches.push(name);
+    // read_dir can fail if checkout_root doesn't exist, handle gracefully or prop
+    if let Ok(rd) = std::fs::read_dir(checkout_root) {
+        for entry in rd {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let ft = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if case_key(&name) == want {
+                matches.push(name);
+            }
         }
     }
     matches.sort();
@@ -367,11 +370,6 @@ fn file_mtime_ns(md: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
-/// Sweep a mod directory tree so the on-disk casing matches `expected_rel_paths` exactly.
-/// Collisions are resolved silently and deterministically; losers are deleted or moved to trash.
-///
-/// `expected` is a list of `(rel_path, expected_size, expected_hash)` where `expected_hash` may be `None`.
-/// If `hash_file` is provided, it is used only when needed to disambiguate candidates.
 pub fn case_sweep_and_fix(
     checkout_root: &Path,
     mod_id: &str,
@@ -391,8 +389,6 @@ pub fn case_sweep_and_fix(
         .chain(std::iter::once(canonical_root.clone()))
         .collect();
 
-    // Deduplicate roots by canonicalized (real) path, so case-insensitive FS doesn't double-count
-    // and we never "remove" the canonical directory via an alternate casing path.
     let mut roots_by_real: HashMap<PathBuf, PathBuf> = HashMap::new();
     for r in roots_raw {
         if std::fs::metadata(&r).is_err() {
@@ -402,7 +398,7 @@ pub fn case_sweep_and_fix(
         roots_by_real.entry(real).or_insert(r);
     }
 
-    let mut indices: Vec<(PathBuf, PathBuf, CaseIndex)> = Vec::new(); // (root_display, root_real, index)
+    let mut indices: Vec<(PathBuf, PathBuf, CaseIndex)> = Vec::new();
     for (real, display) in &roots_by_real {
         indices.push((display.clone(), real.clone(), build_case_index(display)?));
     }
@@ -458,7 +454,6 @@ pub fn case_sweep_and_fix(
             }
         }
 
-        // Ensure destination doesn't contain a different candidate.
         if dst.exists()
             && cands[best_idx].full != dst
             && !same_fs_entry(&cands[best_idx].full, &dst)
@@ -474,7 +469,6 @@ pub fn case_sweep_and_fix(
                 stats.files_renamed_or_moved += 1;
             }
         } else if cands[best_idx].full != dst && same_fs_entry(&cands[best_idx].full, &dst) {
-            // Same inode but different casing/path spelling: enforce desired filename casing.
             if let Ok(mut matches) = file_entries_case_insensitive(&dst_parent, file_name) {
                 if let Some(from) = matches.pop() {
                     if from != dst {
@@ -493,7 +487,6 @@ pub fn case_sweep_and_fix(
         }
     }
 
-    // Remove/trash non-canonical roots (treated as merge sources).
     for (real, display) in roots_by_real {
         if real == canonical_real {
             continue;
@@ -514,7 +507,6 @@ fn better_candidate(
     expected_hash: Option<&[u8]>,
     hash_file: Option<&HashFileFn>,
 ) -> io::Result<bool> {
-    // Score: canonical path > size match > hash match, then mtime, then lexicographic.
     let a_canon = a.is_canonical_path;
     let b_canon = b.is_canonical_path;
     if a_canon != b_canon {
@@ -527,7 +519,6 @@ fn better_candidate(
         return Ok(a_size);
     }
 
-    // Hash only when needed: if expected_hash and hash_file exist and still tied.
     if let (Some(exp), Some(hasher)) = (expected_hash, hash_file) {
         let ah = if a_size { Some(hasher(&a.full)?) } else { None };
         let bh = if b_size { Some(hasher(&b.full)?) } else { None };

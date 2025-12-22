@@ -1,4 +1,4 @@
-use crate::path_safety::{normalize_rel_path, validate_mod_id, validate_rel_path};
+use fleet_fs::{normalize_rel_path, validate_mod_id, validate_rel_path};
 use crate::schema;
 use crate::types::{DesiredState, ExpectedFile, FileState, IndexError, VerifiedState};
 use rusqlite::{params, Connection, OptionalExtension};
