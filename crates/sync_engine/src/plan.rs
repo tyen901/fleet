@@ -4,7 +4,6 @@ use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
 use crate::types::{Checksummer, RepairTuning};
 use fleet_index::FileState;
-use std::cmp::max;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -283,7 +282,7 @@ fn plan_one_file(
         .map(|max| bad_parts.len() <= max)
         .unwrap_or(true);
 
-    let coalesced = coalesce_patch_fetch_ranges(&bad_parts, file.size, ctx.tuning);
+    let coalesced = coalesce_patch_fetch_ranges(&file.parts, &bad_parts, ctx.tuning);
     let fetch_bytes: u64 = coalesced.iter().map(|p| p.len).sum();
     let fetch_ratio = if file.size == 0 {
         1.0
@@ -308,100 +307,95 @@ fn plan_one_file(
     Ok((RepairStrategy::Full, file.parts.clone(), file.size, None))
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ByteRange {
-    start: u64, // inclusive
-    end: u64,   // exclusive
-}
-
 fn coalesce_patch_fetch_ranges(
+    all_parts: &[FilePart],
     bad_parts: &[FilePart],
-    file_size: u64,
     tuning: &RepairTuning,
 ) -> Vec<FilePart> {
-    if bad_parts.is_empty() || file_size == 0 {
+    if bad_parts.is_empty() || all_parts.is_empty() {
         return Vec::new();
     }
 
-    let mut ranges: Vec<ByteRange> = bad_parts
-        .iter()
-        .filter_map(|p| {
-            let start = p.offset;
-            let end = p.offset.saturating_add(p.len).min(file_size);
-            if end > start {
-                Some(ByteRange { start, end })
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    ranges = merge_ranges(ranges, tuning.patch_merge_gap_bytes);
-
-    let min_len = tuning.patch_min_range_bytes.min(file_size);
-    if min_len > 0 {
-        for range in &mut ranges {
-            let cur_len = range.end.saturating_sub(range.start);
-            if cur_len >= min_len {
-                continue;
-            }
-
-            let need = min_len - cur_len;
-            let left = need / 2;
-            let right = need - left;
-
-            let mut start = range.start.saturating_sub(left);
-            let mut end = range.end.saturating_add(right).min(file_size);
-
-            if end.saturating_sub(start) < min_len {
-                if start == 0 {
-                    end = min_len.min(file_size);
-                } else if end == file_size {
-                    start = file_size.saturating_sub(min_len);
-                }
-            }
-
-            range.start = start;
-            range.end = end;
+    // Map bad parts to indices in the full contiguous part list, so we can expand/merge on
+    // part boundaries (important for PBO layout correctness).
+    let mut is_bad = vec![false; all_parts.len()];
+    for bad in bad_parts {
+        if let Some(idx) = all_parts
+            .iter()
+            .position(|p| p.offset == bad.offset && p.len == bad.len)
+        {
+            is_bad[idx] = true;
         }
-
-        ranges = merge_ranges(ranges, tuning.patch_merge_gap_bytes);
     }
 
-    ranges
-        .into_iter()
-        .filter_map(|r| {
-            let len = r.end.saturating_sub(r.start);
-            if len == 0 {
-                None
-            } else {
-                Some(FilePart {
-                    offset: r.start,
-                    len,
-                    checksum: Vec::new(),
-                })
-            }
-        })
-        .collect()
-}
-
-fn merge_ranges(mut ranges: Vec<ByteRange>, gap: u64) -> Vec<ByteRange> {
-    if ranges.is_empty() {
-        return ranges;
+    let mut prefix = vec![0u64; all_parts.len() + 1];
+    for i in 0..all_parts.len() {
+        prefix[i + 1] = prefix[i].saturating_add(all_parts[i].len);
     }
-    ranges.sort_by_key(|r| r.start);
+    let sum_len = |lo: usize, hi: usize| -> u64 { prefix[hi].saturating_sub(prefix[lo]) };
 
     let mut out = Vec::new();
-    let mut cur = ranges[0];
-    for r in ranges.into_iter().skip(1) {
-        let merge_limit = cur.end.saturating_add(gap);
-        if r.start <= merge_limit {
-            cur.end = max(cur.end, r.end);
-        } else {
-            out.push(cur);
-            cur = r;
+    let mut i = 0usize;
+    while i < all_parts.len() {
+        while i < all_parts.len() && !is_bad[i] {
+            i += 1;
         }
+        if i >= all_parts.len() {
+            break;
+        }
+
+        let mut start = i;
+        let mut end = i; // inclusive index
+
+        // Merge forward across "small gaps" (gap bytes are just intervening parts).
+        loop {
+            let mut j = end + 1;
+            while j < all_parts.len() && !is_bad[j] {
+                j += 1;
+            }
+            if j >= all_parts.len() {
+                break;
+            }
+            let gap_bytes = sum_len(end + 1, j);
+            if gap_bytes <= tuning.patch_merge_gap_bytes {
+                end = j;
+                continue;
+            }
+            break;
+        }
+
+        // Expand to meet minimum request size by including neighboring parts.
+        let min_len = tuning.patch_min_range_bytes;
+        let mut bytes = sum_len(start, end + 1);
+        while bytes < min_len && (start > 0 || end + 1 < all_parts.len()) {
+            if start > 0 {
+                start -= 1;
+                bytes = bytes.saturating_add(all_parts[start].len);
+                if bytes >= min_len {
+                    break;
+                }
+            }
+            if end + 1 < all_parts.len() {
+                end += 1;
+                bytes = bytes.saturating_add(all_parts[end].len);
+            }
+        }
+
+        let start_off = all_parts[start].offset;
+        let end_off = all_parts[end].offset.saturating_add(all_parts[end].len);
+        let len = end_off.saturating_sub(start_off);
+
+        if len > 0 {
+            out.push(FilePart {
+                offset: start_off,
+                len,
+                checksum: Vec::new(),
+            });
+        }
+
+        i = end + 1;
     }
-    out.push(cur);
+
+    // Output is naturally sorted and non-overlapping by construction.
     out
 }

@@ -202,7 +202,7 @@ mod tests {
         assert!(matches!(op.target.strategy, RepairStrategy::Patch));
         assert_eq!(op.target.parts_to_fetch.len(), 1);
 
-        assert_eq!(op.target.parts_to_fetch[0].offset, 3328);
+        assert_eq!(op.target.parts_to_fetch[0].offset, 3072);
         assert_eq!(op.target.parts_to_fetch[0].len, 2048);
 
         let remote = Arc::new(MockRemoteRepo::new(1024).with_file(
@@ -234,7 +234,7 @@ mod tests {
         let calls = remote.range_calls();
         assert_eq!(calls.len(), 1);
         let (_m, _p, off, len) = &calls[0];
-        assert_eq!(*off, 3328);
+        assert_eq!(*off, 3072);
         assert_eq!(*len, 2048);
 
         let final_bytes = fs::read(tmp.path().join("m").join("b.bin")).unwrap();
