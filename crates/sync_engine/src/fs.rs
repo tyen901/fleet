@@ -1,14 +1,52 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) type UnsafeOnDiskError = crate::safe_fs::UnsafeOnDiskError;
 use crate::model::Durability;
 
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum UnsafeOnDiskError {
+    #[error("unsafe path (outside mod_root): {0}")]
+    OutsideModRoot(String),
+    #[error("unsafe path (symlink ancestor): {0}")]
+    SymlinkAncestor(String),
+    #[cfg(windows)]
+    #[error("unsafe path (reparse point ancestor): {0}")]
+    ReparsePointAncestor(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 pub(crate) fn validate_mod_id(mod_id: &str) -> anyhow::Result<()> {
-    crate::safe_path::validate_mod_id(mod_id)
+    if mod_id.is_empty() || mod_id == "." || mod_id == ".." {
+        anyhow::bail!("invalid mod_id: {mod_id}");
+    }
+    if mod_id.contains('/') || mod_id.contains('\\') || mod_id.contains('\0') {
+        anyhow::bail!("invalid mod_id: {mod_id}");
+    }
+    if is_windows_prefix(mod_id) {
+        anyhow::bail!("invalid mod_id: {mod_id}");
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_rel_path(rel_path: &str) -> anyhow::Result<()> {
-    crate::safe_path::validate_rel_path(rel_path)
+    if rel_path.contains('\0') {
+        anyhow::bail!("invalid rel_path: {rel_path}");
+    }
+    if rel_path.starts_with('/') || rel_path.starts_with('\\') {
+        anyhow::bail!("invalid rel_path: {rel_path}");
+    }
+    if is_windows_prefix(rel_path) {
+        anyhow::bail!("invalid rel_path: {rel_path}");
+    }
+    for comp in std::path::Path::new(rel_path).components() {
+        match comp {
+            std::path::Component::ParentDir | std::path::Component::RootDir => {
+                anyhow::bail!("invalid rel_path: {rel_path}");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn safe_join_mod_file(
@@ -16,29 +54,89 @@ pub(crate) fn safe_join_mod_file(
     mod_id: &str,
     rel_path: &str,
 ) -> anyhow::Result<PathBuf> {
-    crate::safe_path::safe_join_mod_file(checkout_root, mod_id, rel_path)
+    validate_mod_id(mod_id)?;
+    let rel_norm = rel_path.replace('\\', "/");
+    validate_rel_path(&rel_norm)?;
+    Ok(checkout_root.join(mod_id).join(rel_norm))
 }
 
 pub(crate) fn ensure_no_symlink_ancestors_blocking(
     mod_root: &Path,
     candidate: &Path,
 ) -> Result<(), UnsafeOnDiskError> {
-    crate::safe_fs::ensure_no_symlink_ancestors(mod_root, candidate)
+    let rel = candidate
+        .strip_prefix(mod_root)
+        .map_err(|_| UnsafeOnDiskError::OutsideModRoot(candidate.display().to_string()))?;
+
+    let mut current = PathBuf::from(mod_root);
+    check_component(&current)?;
+
+    for comp in rel.components() {
+        current.push(comp);
+        check_component(&current)?;
+    }
+
+    Ok(())
 }
 
 pub(crate) fn is_symlink_or_reparse(md: &std::fs::Metadata) -> bool {
-    crate::safe_fs::is_symlink_or_reparse(md)
+    if md.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if is_reparse_point(md) {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) async fn ensure_no_symlink_ancestors(
     mod_root: PathBuf,
     candidate: PathBuf,
 ) -> Result<(), UnsafeOnDiskError> {
-    tokio::task::spawn_blocking(move || {
-        crate::safe_fs::ensure_no_symlink_ancestors(&mod_root, &candidate)
-    })
-    .await
-    .map_err(|e| UnsafeOnDiskError::Io(std::io::Error::other(e.to_string())))?
+    tokio::task::spawn_blocking(move || ensure_no_symlink_ancestors_blocking(&mod_root, &candidate))
+        .await
+        .map_err(|e| UnsafeOnDiskError::Io(std::io::Error::other(e.to_string())))?
+}
+
+fn check_component(path: &Path) -> Result<(), UnsafeOnDiskError> {
+    let md = match std::fs::symlink_metadata(path) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(UnsafeOnDiskError::Io(e)),
+    };
+    if md.file_type().is_symlink() {
+        return Err(UnsafeOnDiskError::SymlinkAncestor(
+            path.display().to_string(),
+        ));
+    }
+    #[cfg(windows)]
+    if is_reparse_point(&md) {
+        return Err(UnsafeOnDiskError::ReparsePointAncestor(
+            path.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(md: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    (md.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+fn is_windows_prefix(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return true;
+    }
+    if s.starts_with("\\\\") {
+        return true;
+    }
+    false
 }
 
 pub(crate) fn quarantine_root(checkout_root: &Path, quarantine_id: &str) -> PathBuf {

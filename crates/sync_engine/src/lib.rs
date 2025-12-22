@@ -10,8 +10,6 @@ pub(crate) mod fs;
 pub(crate) mod manifest;
 pub(crate) mod plan;
 pub(crate) mod remote;
-pub(crate) mod safe_fs;
-pub(crate) mod safe_path;
 pub(crate) mod skip_check;
 pub(crate) mod util;
 pub(crate) mod unexpected;
