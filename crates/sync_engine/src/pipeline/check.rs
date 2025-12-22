@@ -27,22 +27,30 @@ pub(crate) async fn run(
         repo: req.repo_name.clone(),
     });
 
-    let result: anyhow::Result<CheckReport> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet")).await?;
+    let result: Result<CheckReport, crate::model::EngineError> = async {
+        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
+            .await
+            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
 
         let desired = store
-            .desired_state_get()?
-            .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
+            .desired_state_get()
+            .map_err(crate::model::EngineError::Store)?
+            .ok_or_else(|| crate::model::EngineError::InvalidInput("desired_state missing".to_string()))?;
+        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
+            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
-        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency).await?;
+        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency)
+            .await
+            .map_err(crate::model::EngineError::Remote)?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });
 
         let baseline = build_baseline(&fetch.manifests);
         let baseline_digest = super::baseline_digest_hex(&baseline);
-        store.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
+        store
+            .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
+            .map_err(crate::model::EngineError::Store)?;
 
         let mut report = CheckReport::default();
 
@@ -52,7 +60,8 @@ pub(crate) async fn run(
             });
 
             let cache = if req.tuning.use_index {
-                super::build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)?
+                super::build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)
+                    .map_err(crate::model::EngineError::Store)?
             } else {
                 HashMap::new()
             };
@@ -67,7 +76,8 @@ pub(crate) async fn run(
                 sink,
                 checksummer.clone(),
             )
-            .await?;
+            .await
+            .map_err(crate::model::EngineError::Internal)?;
 
             sink.push(SyncEvent::ModFinished {
                 mod_id: manifest.mod_id.clone(),
@@ -81,9 +91,13 @@ pub(crate) async fn run(
             && report.unsafe_path == 0;
 
         if report.ok {
-            store.verified_set(&desired.state_id, TimestampNs(now_ns()))?;
+            store
+                .verified_set(&desired.state_id, TimestampNs(now_ns()))
+                .map_err(crate::model::EngineError::Store)?;
         } else {
-            store.verified_clear()?;
+            store
+                .verified_clear()
+                .map_err(crate::model::EngineError::Store)?;
         }
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -97,7 +111,7 @@ pub(crate) async fn run(
         sink.push(SyncEvent::VerifyFinished { ok: false });
     }
 
-    result.map_err(crate::model::EngineError::Internal)
+    result
 }
 
 async fn verify_mod(
@@ -111,24 +125,9 @@ async fn verify_mod(
     checksummer: Arc<dyn Checksummer>,
 ) -> anyhow::Result<()> {
     if req.tuning.auto_fix_case {
-        let checkout_root = req.checkout_root.clone();
-        let mod_id = manifest.mod_id.clone();
-        let expected: Vec<(String, u64, Option<Vec<u8>>)> = manifest
-            .files
-            .iter()
-            .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
-            .collect();
-        let checksummer = checksummer.clone();
-        let tuning = fleet_fs_case::CaseFixTuning::default();
-        let _ = tokio::task::spawn_blocking(move || {
-            let hash_file = move |p: &std::path::Path| {
-                checksummer
-                    .hash_file(p)
-                    .map_err(|e| std::io::Error::other(e.to_string()))
-            };
-            fleet_fs_case::case_sweep_and_fix(&checkout_root, &mod_id, &expected, &tuning, Some(&hash_file))
-        })
-        .await??;
+        sink.push(SyncEvent::Warning {
+            message: "check is read-only; auto_fix_case is ignored (use repair)".to_string(),
+        });
     }
 
     report.expected_files = report

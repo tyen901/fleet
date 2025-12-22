@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::manifest::ValidatedModManifest;
 use crate::model::FileState;
+use crate::model::StoreError;
 use crate::ports::StateStore;
 
 pub(crate) mod check;
@@ -12,7 +13,7 @@ pub(crate) fn build_cache_snapshot(
     store: &dyn StateStore,
     state_id: &str,
     manifest: &ValidatedModManifest,
-) -> anyhow::Result<HashMap<String, FileState>> {
+) -> Result<HashMap<String, FileState>, StoreError> {
     let all = store.file_state_get_all_for_mod(state_id, &manifest.mod_id)?;
     let mut map = HashMap::new();
     for file in &manifest.files {

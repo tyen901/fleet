@@ -149,6 +149,7 @@ mod tests {
             checksummer.clone(),
             &req.tuning,
             sink.as_ref(),
+            &tokio_util::sync::CancellationToken::new(),
             ApplyOptions {
                 supports_ranges: true,
             },
@@ -226,6 +227,7 @@ mod tests {
             checksummer.clone(),
             &req.tuning,
             sink.as_ref(),
+            &tokio_util::sync::CancellationToken::new(),
             ApplyOptions {
                 supports_ranges: true,
             },

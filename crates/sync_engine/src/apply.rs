@@ -12,6 +12,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub enum IndexUpdate {
@@ -47,6 +48,7 @@ pub async fn apply_ops(
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
     opts: ApplyOptions,
 ) -> Result<ApplyBatchOutcome> {
     let file_workers = tuning.file_concurrency.max(1);
@@ -67,12 +69,18 @@ pub async fn apply_ops(
     let mut stream = stream::iter(it)
         .take_while({
             let stop_scheduling = stop_scheduling.clone();
-            move |_| futures::future::ready(!stop_scheduling.load(Ordering::Relaxed))
+            let cancel = cancel.clone();
+            move |_| {
+                futures::future::ready(
+                    !stop_scheduling.load(Ordering::Relaxed) && !cancel.is_cancelled(),
+                )
+            }
         })
         .map(|op| {
             let remote = remote.clone();
             let checksummer = checksummer.clone();
             let range_sem = range_sem.clone();
+            let cancel = cancel.clone();
             async move {
                 apply_one(
                     op,
@@ -81,6 +89,7 @@ pub async fn apply_ops(
                     checksummer,
                     tuning,
                     sink,
+                    &cancel,
                     &range_sem,
                     opts,
                 )
@@ -103,6 +112,7 @@ pub async fn apply_ops(
                         });
                     }
                     stop_scheduling.store(true, Ordering::Relaxed);
+                    cancel.cancel();
                     index_updates.push(IndexUpdate::DeleteFileState {
                         mod_id: failure.mod_id.clone(),
                         rel_path: failure.rel_path.clone(),
@@ -143,9 +153,18 @@ async fn apply_one(
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
     range_sem: &Arc<Semaphore>,
     opts: ApplyOptions,
 ) -> std::result::Result<ApplyOneSuccess, FileFailure> {
+    if cancel.is_cancelled() {
+        return Err(FileFailure {
+            mod_id: op.mod_id.clone(),
+            rel_path: op.rel_path.clone(),
+            message: "cancelled".to_string(),
+            aborting: true,
+        });
+    }
     let mod_root = checkout_root.join(&op.mod_id);
 
     if let Some(parent) = op.abs_path.parent() {
@@ -240,6 +259,7 @@ async fn apply_one(
             checksummer.clone(),
             tuning,
             sink,
+            cancel,
             range_sem,
             &op,
             staged,
@@ -255,6 +275,7 @@ async fn apply_one(
             checksummer.clone(),
             tuning,
             sink,
+            cancel,
             range_sem,
             &op,
             staged,
@@ -292,6 +313,7 @@ async fn apply_full(
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
     staged: StagedFile,
@@ -311,6 +333,9 @@ async fn apply_full(
     f.set_len(op.target.size).await?;
 
     let _permit = range_sem.clone().acquire_owned().await?;
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     let mut stream = remote
         .fetch_file(&op.mod_id, &op.rel_path)
         .await
@@ -318,6 +343,9 @@ async fn apply_full(
 
     let mut written: u64 = 0;
     while let Some(chunk) = stream.next_chunk().await? {
+        if cancel.is_cancelled() {
+            anyhow::bail!("cancelled");
+        }
         f.write_all(&chunk).await?;
         written = written.saturating_add(chunk.len() as u64);
         if tuning.emit_progress {
@@ -373,6 +401,7 @@ async fn apply_patch(
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
     range_sem: &Arc<Semaphore>,
     op: &PlannedOp,
     staged: StagedFile,
@@ -399,8 +428,15 @@ async fn apply_patch(
             let mod_id = op.mod_id.clone();
             let rel_path = op.rel_path.clone();
             let range_sem = range_sem.clone();
+            let cancel = cancel.clone();
             async move {
+                if cancel.is_cancelled() {
+                    return Ok::<(), anyhow::Error>(());
+                }
                 let _permit = range_sem.acquire_owned().await?;
+                if cancel.is_cancelled() {
+                    return Ok::<(), anyhow::Error>(());
+                }
                 let mut stream = remote
                     .fetch_range(&mod_id, &rel_path, part.offset, part.len)
                     .await
@@ -418,6 +454,9 @@ async fn apply_patch(
 
                 let mut remaining = part.len;
                 while remaining > 0 {
+                    if cancel.is_cancelled() {
+                        return Ok::<(), anyhow::Error>(());
+                    }
                     let chunk = stream
                         .next_chunk()
                         .await?

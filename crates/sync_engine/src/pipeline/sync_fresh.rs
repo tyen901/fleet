@@ -14,6 +14,7 @@ use crate::model::{
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::safe_path::safe_join_mod_file;
 use crate::time_util::now_ns;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(
     req: SyncFreshRequest,
@@ -27,22 +28,28 @@ pub(crate) async fn run(
         repo: req.repo_name.clone(),
     });
 
-    let result: anyhow::Result<SyncFreshOutcome> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet")).await?;
+    let result: Result<SyncFreshOutcome, crate::model::EngineError> = async {
+        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
+            .await
+            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
 
         let desired = store
-            .desired_state_get()?
-            .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
+            .desired_state_get()
+            .map_err(crate::model::EngineError::Store)?
+            .ok_or_else(|| crate::model::EngineError::InvalidInput("desired_state missing".to_string()))?;
+        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
+            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
         let tuning = &req.tuning;
+        let cancel = CancellationToken::new();
 
         let fetch = fetch_all(
             remote.clone(),
             &req.enabled_mods,
             tuning.concurrency.scan_concurrency,
         )
-        .await?;
+        .await
+        .map_err(crate::model::EngineError::Remote)?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });
@@ -53,14 +60,16 @@ pub(crate) async fn run(
             &desired.state_id,
             baseline_rows,
             &baseline_digest,
-        )?;
+        )
+        .map_err(crate::model::EngineError::Store)?;
 
         let expected_from_manifest = expected_sets_from_manifests(&fetch.manifests);
         let expected_from_store = if matches!(
             tuning.safe_wipe,
             SafeWipePolicy::ExpectedFromStoreBaseline | SafeWipePolicy::ExpectedUnion
         ) {
-            expected_sets_from_store(store.as_ref(), &desired.state_id)?
+            expected_sets_from_store(store.as_ref(), &desired.state_id)
+                .map_err(crate::model::EngineError::Store)?
         } else {
             HashMap::new()
         };
@@ -77,7 +86,20 @@ pub(crate) async fn run(
                 let abs = safe_join_mod_file(&req.checkout_root, mod_id, rel_path)?;
                 if let Some(parent) = abs.parent() {
                     let mod_root = req.checkout_root.join(mod_id);
-                    crate::fs::ensure_no_symlink_ancestors(mod_root, parent.to_path_buf()).await?;
+                    if let Err(e) = crate::fs::ensure_no_symlink_ancestors(mod_root, parent.to_path_buf()).await {
+                        cancel.cancel();
+                        let report = crate::model::RepairReport {
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                            ..Default::default()
+                        };
+                        return Ok(SyncFreshOutcome {
+                            report,
+                            failures: Vec::new(),
+                            aborted: Some(AbortReason::UnsafeOnDisk {
+                                message: e.to_string(),
+                            }),
+                        });
+                    }
                 }
 
                 match tokio::fs::symlink_metadata(&abs).await {
@@ -89,7 +111,7 @@ pub(crate) async fn run(
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(crate::model::EngineError::Internal(e.into())),
                 }
             }
         }
@@ -122,11 +144,13 @@ pub(crate) async fn run(
             checksummer.clone(),
             &tuning.concurrency,
             sink,
+            &cancel,
             ApplyOptions {
                 supports_ranges: fetch.capabilities.supports_ranges,
             },
         )
-        .await?;
+        .await
+        .map_err(crate::model::EngineError::Internal)?;
 
         let mut report = apply_outcome.report;
         let failures = apply_outcome.failures;
@@ -154,11 +178,14 @@ pub(crate) async fn run(
                 }
             }
         }
-        store.file_state_apply_batch(&desired.state_id, upserts, deletes)?;
+        store
+            .file_state_apply_batch(&desired.state_id, upserts, deletes)
+            .map_err(crate::model::EngineError::Store)?;
 
         if aborted.is_none() {
             let expected_union = union_expected_sets(
-                &expected_sets_from_store(store.as_ref(), &desired.state_id)?,
+                &expected_sets_from_store(store.as_ref(), &desired.state_id)
+                    .map_err(crate::model::EngineError::Store)?,
                 &expected_from_manifest,
             );
             for (mod_id, expected) in expected_union {
@@ -171,7 +198,8 @@ pub(crate) async fn run(
                     tuning.concurrency.max_unexpected_delete_bytes,
                     sink,
                 )
-                .await?;
+                .await
+                .map_err(crate::model::EngineError::Internal)?;
 
                 if matches!(tuning.unknown_paths, UnknownPathPolicy::Delete)
                     && stats.cap_reached
@@ -196,9 +224,13 @@ pub(crate) async fn run(
         };
 
         if outcome.ok() {
-            store.verified_set(&desired.state_id, TimestampNs(now_ns()))?;
+            store
+                .verified_set(&desired.state_id, TimestampNs(now_ns()))
+                .map_err(crate::model::EngineError::Store)?;
         } else {
-            store.verified_clear()?;
+            store
+                .verified_clear()
+                .map_err(crate::model::EngineError::Store)?;
         }
 
         sink.push(SyncEvent::RepairFinished {
@@ -217,7 +249,7 @@ pub(crate) async fn run(
         });
     }
 
-    result.map_err(crate::model::EngineError::Internal)
+    result
 }
 
 fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
@@ -245,7 +277,10 @@ fn expected_sets_from_manifests(manifests: &[ValidatedModManifest]) -> HashMap<S
     map
 }
 
-fn expected_sets_from_store(store: &dyn StateStore, state_id: &str) -> anyhow::Result<HashMap<String, HashSet<String>>> {
+fn expected_sets_from_store(
+    store: &dyn StateStore,
+    state_id: &str,
+) -> Result<HashMap<String, HashSet<String>>, crate::model::StoreError> {
     let mut map: HashMap<String, HashSet<String>> = HashMap::new();
     for row in store.expected_get_all(state_id)? {
         map.entry(row.mod_id).or_default().insert(row.rel_path);

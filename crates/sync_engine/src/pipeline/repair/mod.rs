@@ -13,6 +13,7 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
 use crate::time_util::now_ns;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
+use tokio_util::sync::CancellationToken;
 
 mod applier;
 mod planner;
@@ -29,22 +30,30 @@ pub(crate) async fn run(
         repo: req.repo_name.clone(),
     });
 
-    let result: anyhow::Result<RepairOutcome> = async {
-        tokio::fs::create_dir_all(req.checkout_root.join(".fleet")).await?;
+    let result: Result<RepairOutcome, crate::model::EngineError> = async {
+        tokio::fs::create_dir_all(req.checkout_root.join(".fleet"))
+            .await
+            .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
 
         let desired = store
-            .desired_state_get()?
-            .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
-        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
+            .desired_state_get()
+            .map_err(crate::model::EngineError::Store)?
+            .ok_or_else(|| crate::model::EngineError::InvalidInput("desired_state missing".to_string()))?;
+        super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
+            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
-        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency).await?;
+        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency)
+            .await
+            .map_err(crate::model::EngineError::Remote)?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });
 
         let baseline = build_baseline(&fetch.manifests);
         let baseline_digest = super::baseline_digest_hex(&baseline);
-        store.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
+        store
+            .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
+            .map_err(crate::model::EngineError::Store)?;
 
         type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
 
@@ -73,7 +82,9 @@ pub(crate) async fn run(
                         Some(&hash_file),
                     )
                 })
-                .await??;
+                .await
+                .map_err(|e| crate::model::EngineError::Internal(anyhow::anyhow!(e.to_string())))?
+                .map_err(|e| crate::model::EngineError::Internal(anyhow::anyhow!(e.to_string())))?;
             }
         }
 
@@ -84,7 +95,9 @@ pub(crate) async fn run(
             let store = store.clone();
             move || skip_check::evaluate_skip(store.as_ref(), &checkout_root, &manifests, policy)
         })
-        .await??;
+        .await
+        .map_err(|e| crate::model::EngineError::Internal(anyhow::anyhow!(e.to_string())))?
+        .map_err(crate::model::EngineError::Internal)?;
 
         match &skip {
             skip_check::SkipCheckDecision::Skippable(_) => {
@@ -119,6 +132,7 @@ pub(crate) async fn run(
         let mut report = RepairReport::default();
         let mut failures: Vec<FileFailure> = Vec::new();
         let mut aborted: Option<AbortReason> = None;
+        let cancel = CancellationToken::new();
 
         'mods: for manifest in &fetch.manifests {
             sink.push(SyncEvent::ModStarted {
@@ -126,7 +140,8 @@ pub(crate) async fn run(
             });
 
             let cache = if req.tuning.use_index {
-                super::build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)?
+                super::build_cache_snapshot(store.as_ref(), &desired.state_id, manifest)
+                    .map_err(crate::model::EngineError::Store)?
             } else {
                 HashMap::new()
             };
@@ -149,7 +164,9 @@ pub(crate) async fn run(
                     message,
                 }) => {
                     sink.push(SyncEvent::Error { message: message.clone() });
-                    store.file_state_delete(&desired.state_id, &mod_id, &rel_path)?;
+                    store
+                        .file_state_delete(&desired.state_id, &mod_id, &rel_path)
+                        .map_err(crate::model::EngineError::Store)?;
                     failures.push(FileFailure {
                         mod_id: mod_id.clone(),
                         rel_path: rel_path.clone(),
@@ -161,7 +178,9 @@ pub(crate) async fn run(
                     });
                     break 'mods;
                 }
-                Err(planner::PlannerError::Other(e)) => return Err(e),
+                Err(planner::PlannerError::Other(e)) => {
+                    return Err(crate::model::EngineError::Internal(e))
+                }
             };
 
             if aborted.is_some() {
@@ -197,11 +216,13 @@ pub(crate) async fn run(
                 checksummer.clone(),
                 &req.tuning,
                 sink,
+                &cancel,
                 crate::apply::ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
                 },
             )
-            .await?;
+            .await
+            .map_err(crate::model::EngineError::Internal)?;
 
             report += &apply_outcome.report;
 
@@ -236,7 +257,9 @@ pub(crate) async fn run(
                     checksum: hint.checksum,
                 });
             }
-            store.file_state_apply_batch(&desired.state_id, upserts, deletes)?;
+            store
+                .file_state_apply_batch(&desired.state_id, upserts, deletes)
+                .map_err(crate::model::EngineError::Store)?;
 
             failures.extend(apply_outcome.failures);
 
@@ -287,7 +310,9 @@ pub(crate) async fn run(
         };
 
         if outcome.ok() {
-            store.verified_set(&desired.state_id, TimestampNs(now_ns()))?;
+            store
+                .verified_set(&desired.state_id, TimestampNs(now_ns()))
+                .map_err(crate::model::EngineError::Store)?;
         } else if !outcome.report.skipped {
             let _ = store.verified_clear();
         }
@@ -308,7 +333,7 @@ pub(crate) async fn run(
         });
     }
 
-    result.map_err(crate::model::EngineError::Internal)
+    result
 }
 
 fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
@@ -361,4 +386,3 @@ fn merge_unexpected(dst: &mut RepairReport, stats: UnexpectedStats) {
         .empty_dirs_deleted
         .saturating_add(stats.empty_dirs_deleted);
 }
-
