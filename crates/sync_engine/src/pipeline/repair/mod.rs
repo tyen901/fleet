@@ -11,7 +11,7 @@ use crate::model::{
 };
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
-use crate::time_util::now_ns;
+use crate::util::now_ns;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use tokio_util::sync::CancellationToken;
 

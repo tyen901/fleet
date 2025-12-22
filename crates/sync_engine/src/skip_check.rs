@@ -2,7 +2,7 @@ use crate::manifest::ValidatedModManifest;
 use crate::ports::StateStore;
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
-use crate::time_util::file_mtime_ns;
+use crate::util::file_mtime_ns;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;

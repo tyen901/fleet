@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::safe_path::safe_join_mod_file;
-use crate::time_util::now_ns;
+use crate::util::now_ns;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(

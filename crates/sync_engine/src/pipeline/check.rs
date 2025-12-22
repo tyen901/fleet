@@ -12,7 +12,7 @@ use crate::model::{
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
-use crate::time_util::{file_mtime_ns, now_ns};
+use crate::util::{file_mtime_ns, now_ns};
 use futures::StreamExt;
 
 pub(crate) async fn run(

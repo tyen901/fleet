@@ -3,7 +3,7 @@ use crate::model::{Checksummer, RepairTuning};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::staging::StagedFile;
-use crate::time_util::file_mtime_ns;
+use crate::util::file_mtime_ns;
 use crate::model::{AbortReason, Durability, FileFailure, RepairReport};
 use crate::ports::RemoteRepo;
 use anyhow::{Context, Result};
