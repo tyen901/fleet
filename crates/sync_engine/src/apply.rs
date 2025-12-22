@@ -1,4 +1,4 @@
-use crate::events::{EventSink, SyncEvent};
+use crate::ports::{EventSink, SyncEvent};
 use crate::model::{Checksummer, RepairTuning};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::fs::ensure_no_symlink_ancestors_blocking;

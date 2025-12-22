@@ -1,4 +1,4 @@
-use crate::fetch::FilePart;
+use crate::ports::FilePart;
 use crate::model::Checksummer;
 use anyhow::Result;
 

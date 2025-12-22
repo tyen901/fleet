@@ -3,13 +3,10 @@ pub mod model;
 pub mod ports;
 
 pub(crate) mod apply;
-pub(crate) mod events;
-pub(crate) mod fetch;
 pub(crate) mod flows;
 pub(crate) mod fs;
 pub(crate) mod manifest;
 pub(crate) mod plan;
-pub(crate) mod remote;
 pub(crate) mod skip_check;
 pub(crate) mod util;
 pub(crate) mod unexpected;

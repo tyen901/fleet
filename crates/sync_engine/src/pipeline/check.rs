@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::events::SyncEvent;
-use crate::fetch::fetch_all;
+use crate::ports::SyncEvent;
+use crate::pipeline::fetch_all;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::model::{
     CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileStateDelete, FileStateUpsert,
@@ -38,9 +38,7 @@ pub(crate) async fn run(
         super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
             .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
-        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency)
-            .await
-            .map_err(crate::model::EngineError::Remote)?;
+        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency).await?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });

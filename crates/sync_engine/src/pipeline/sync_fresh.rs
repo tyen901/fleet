@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::apply::{apply_ops, ApplyOptions};
-use crate::events::SyncEvent;
-use crate::fetch::fetch_all;
+use crate::ports::SyncEvent;
+use crate::pipeline::fetch_all;
 use crate::manifest::ValidatedModManifest;
 use crate::model::{
     AbortReason, FileStateDelete, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome,
@@ -48,8 +48,7 @@ pub(crate) async fn run(
             &req.enabled_mods,
             tuning.concurrency.scan_concurrency,
         )
-        .await
-        .map_err(crate::model::EngineError::Remote)?;
+        .await?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });

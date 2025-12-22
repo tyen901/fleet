@@ -1,4 +1,4 @@
-use crate::fetch::FilePart;
+use crate::ports::FilePart;
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::model::{Checksummer, RepairTuning};

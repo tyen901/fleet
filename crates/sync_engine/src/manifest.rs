@@ -1,4 +1,4 @@
-use crate::fetch::{FileEntry, FilePart, ModManifest};
+use crate::ports::{FileEntry, FilePart, ModManifest};
 use crate::fs::{validate_mod_id, validate_rel_path};
 use anyhow::{bail, Context, Result};
 

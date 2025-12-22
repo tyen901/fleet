@@ -1,6 +1,4 @@
-use crate::events::{EventSink, SyncEvent};
-use crate::fetch::ModManifest;
-use crate::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
+use crate::ports::{EventSink, ModManifest, RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, SyncEvent};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;

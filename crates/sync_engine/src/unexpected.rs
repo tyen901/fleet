@@ -1,4 +1,4 @@
-use crate::events::{EventSink, SyncEvent};
+use crate::ports::{EventSink, SyncEvent};
 use crate::fs::is_symlink_or_reparse;
 use crate::model::{RepairTuning, UnexpectedPathPolicy};
 use anyhow::Result;

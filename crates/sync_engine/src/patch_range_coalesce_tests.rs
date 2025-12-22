@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::apply::{apply_ops, ApplyOptions};
-    use crate::events::EventSink;
-    use crate::fetch::FilePart;
+    use crate::ports::EventSink;
+    use crate::ports::FilePart;
     use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
     use crate::plan::RepairStrategy;
     use crate::test_support::{MockRemoteRepo, TestSink};

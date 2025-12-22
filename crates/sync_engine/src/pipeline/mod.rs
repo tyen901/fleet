@@ -3,11 +3,70 @@ use std::collections::HashMap;
 use crate::manifest::ValidatedModManifest;
 use crate::model::FileState;
 use crate::model::StoreError;
-use crate::ports::StateStore;
+use crate::ports::{RemoteCapabilities, RemoteRepo, StateStore};
+use anyhow::Context;
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 pub(crate) mod check;
 pub(crate) mod repair;
 pub(crate) mod sync_fresh;
+
+pub(crate) struct FetchResult {
+    pub(crate) capabilities: RemoteCapabilities,
+    pub(crate) manifests: Vec<ValidatedModManifest>,
+}
+
+pub(crate) async fn fetch_all(
+    remote: Arc<dyn RemoteRepo>,
+    enabled_mods: &[String],
+    max_concurrency: usize,
+) -> Result<FetchResult, crate::model::EngineError> {
+    for mod_id in enabled_mods {
+        crate::fs::validate_mod_id(mod_id)
+            .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
+    }
+
+    let caps = remote.capabilities().await.map_err(crate::model::EngineError::Remote)?;
+
+    let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
+    let mut tasks = FuturesUnordered::new();
+
+    for mod_id in enabled_mods {
+        let remote = remote.clone();
+        let permit = sem.clone().acquire_owned().await.map_err(|e| crate::model::EngineError::Internal(e.into()))?;
+        let mod_id = mod_id.clone();
+        tasks.push(tokio::spawn(async move {
+            let _permit = permit;
+            let manifest = remote
+                .fetch_mod_manifest(&mod_id)
+                .await
+                .with_context(|| format!("fetch manifest for {mod_id}"))?;
+            if manifest.mod_id != mod_id {
+                anyhow::bail!(
+                    "manifest mod_id mismatch (requested {}, got {})",
+                    mod_id,
+                    manifest.mod_id
+                );
+            }
+            let validated = crate::manifest::validate_and_normalize_manifest(manifest)?;
+            Ok::<ValidatedModManifest, anyhow::Error>(validated)
+        }));
+    }
+
+    let mut manifests = Vec::new();
+    while let Some(res) = tasks.next().await {
+        manifests.push(res.map_err(|e| crate::model::EngineError::Internal(e.into()))??);
+    }
+
+    manifests.sort_by(|a, b| a.mod_id.cmp(&b.mod_id));
+
+    Ok(FetchResult {
+        capabilities: caps,
+        manifests,
+    })
+}
 
 pub(crate) fn build_cache_snapshot(
     store: &dyn StateStore,

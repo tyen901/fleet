@@ -5,10 +5,106 @@ use crate::model::{
     TimestampNs, VerifiedState,
 };
 
-pub use crate::events::{EventSink, SyncEvent};
 pub use crate::model::Checksummer;
-pub use crate::fetch::{FileEntry, FilePart, ModManifest};
-pub use crate::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
+
+#[derive(Clone, Debug)]
+pub struct FilePart {
+    pub offset: u64,
+    pub len: u64,
+    pub checksum: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileEntry {
+    pub rel_path: String,
+    pub size: u64,
+    pub file_checksum: Vec<u8>,
+    pub parts: Vec<FilePart>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ModManifest {
+    pub mod_id: String,
+    pub files: Vec<FileEntry>,
+}
+
+pub trait EventSink: Send + Sync {
+    fn push(&self, ev: SyncEvent);
+}
+
+pub struct NoopSink;
+
+impl EventSink for NoopSink {
+    fn push(&self, _: SyncEvent) {}
+}
+
+#[derive(Clone, Debug)]
+pub enum SyncEvent {
+    VerifyStarted { repo: String },
+    VerifyFinished { ok: bool },
+
+    RepairStarted { repo: String },
+    RepairSkipEvaluated { skippable: bool, reason: Option<String> },
+    RepairFinished { ok: bool, skipped: bool },
+
+    RemoteCapabilities { supports_ranges: bool },
+
+    ModStarted { mod_id: String },
+    ModFinished { mod_id: String },
+
+    FileUpToDate { mod_id: String, path: String },
+    FileNeedsRepair { mod_id: String, path: String, strategy: String },
+    FileStarted { mod_id: String, path: String, bytes_total: u64 },
+    FileProgress { mod_id: String, path: String, bytes_done: u64, bytes_total: u64 },
+    FileVerified { mod_id: String, path: String },
+
+    UnexpectedPathsFound { mod_id: String, files: u64, dirs: u64, bytes: u64, sample: Vec<String> },
+    UnexpectedPathDeleted { mod_id: String, path: String, bytes: u64, is_dir: bool },
+    UnexpectedPathsActionRequired { mod_id: String, message: String },
+    UnexpectedPathsCapReached { mod_id: String, message: String },
+    EmptyDirDeleted { path: String },
+
+    Warning { message: String },
+    Error { message: String },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RemoteCapabilities {
+    pub supports_ranges: bool,
+}
+
+#[async_trait::async_trait]
+pub trait RemoteRepo: Send + Sync {
+    async fn capabilities(&self) -> anyhow::Result<RemoteCapabilities> {
+        Ok(RemoteCapabilities::default())
+    }
+    async fn fetch_mod_manifest(&self, mod_id: &str) -> anyhow::Result<ModManifest>;
+    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream>;
+    async fn fetch_range(
+        &self,
+        mod_id: &str,
+        rel_path: &str,
+        offset: u64,
+        len: u64,
+    ) -> anyhow::Result<RemoteStream>;
+}
+
+pub struct RemoteStream {
+    inner: Box<dyn RemoteStreamImpl>,
+}
+impl RemoteStream {
+    pub fn new(inner: Box<dyn RemoteStreamImpl>) -> Self {
+        Self { inner }
+    }
+    pub async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>> {
+        self.inner.next_chunk().await
+    }
+}
+
+#[async_trait::async_trait]
+pub trait RemoteStreamImpl: Send {
+    async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>>;
+}
 
 pub trait StateStore: Send + Sync {
     fn desired_state_get(&self) -> Result<Option<DesiredState>, StoreError>;
