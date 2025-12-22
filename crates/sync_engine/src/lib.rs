@@ -16,6 +16,9 @@ pub mod verify_parts;
 #[cfg(test)]
 pub mod test_support;
 
+#[cfg(test)]
+mod patch_range_coalesce_tests;
+
 pub use events::*;
 pub use flows::*;
 pub use types::*;

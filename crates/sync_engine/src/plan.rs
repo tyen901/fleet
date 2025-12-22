@@ -4,6 +4,7 @@ use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::safe_join_mod_file;
 use crate::types::{Checksummer, RepairTuning};
 use fleet_index::FileState;
+use std::cmp::max;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -282,9 +283,125 @@ fn plan_one_file(
         .map(|max| bad_parts.len() <= max)
         .unwrap_or(true);
 
-    if ctx.supports_ranges && ratio <= ctx.tuning.patch_max_bad_ratio && parts_ok {
-        return Ok((RepairStrategy::Patch, bad_parts.clone(), bad_bytes, None));
+    let coalesced = coalesce_patch_fetch_ranges(&bad_parts, file.size, ctx.tuning);
+    let fetch_bytes: u64 = coalesced.iter().map(|p| p.len).sum();
+    let fetch_ratio = if file.size == 0 {
+        1.0
+    } else {
+        fetch_bytes as f32 / file.size as f32
+    };
+    let reqs_ok = ctx
+        .tuning
+        .patch_max_range_requests
+        .map(|max| coalesced.len() <= max)
+        .unwrap_or(true);
+
+    if ctx.supports_ranges
+        && ratio <= ctx.tuning.patch_max_bad_ratio
+        && parts_ok
+        && reqs_ok
+        && fetch_ratio <= ctx.tuning.patch_max_fetch_ratio
+    {
+        return Ok((RepairStrategy::Patch, coalesced, fetch_bytes, None));
     }
 
     Ok((RepairStrategy::Full, file.parts.clone(), file.size, None))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ByteRange {
+    start: u64, // inclusive
+    end: u64,   // exclusive
+}
+
+fn coalesce_patch_fetch_ranges(
+    bad_parts: &[FilePart],
+    file_size: u64,
+    tuning: &RepairTuning,
+) -> Vec<FilePart> {
+    if bad_parts.is_empty() || file_size == 0 {
+        return Vec::new();
+    }
+
+    let mut ranges: Vec<ByteRange> = bad_parts
+        .iter()
+        .filter_map(|p| {
+            let start = p.offset;
+            let end = p.offset.saturating_add(p.len).min(file_size);
+            if end > start {
+                Some(ByteRange { start, end })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    ranges = merge_ranges(ranges, tuning.patch_merge_gap_bytes);
+
+    let min_len = tuning.patch_min_range_bytes.min(file_size);
+    if min_len > 0 {
+        for range in &mut ranges {
+            let cur_len = range.end.saturating_sub(range.start);
+            if cur_len >= min_len {
+                continue;
+            }
+
+            let need = min_len - cur_len;
+            let left = need / 2;
+            let right = need - left;
+
+            let mut start = range.start.saturating_sub(left);
+            let mut end = range.end.saturating_add(right).min(file_size);
+
+            if end.saturating_sub(start) < min_len {
+                if start == 0 {
+                    end = min_len.min(file_size);
+                } else if end == file_size {
+                    start = file_size.saturating_sub(min_len);
+                }
+            }
+
+            range.start = start;
+            range.end = end;
+        }
+
+        ranges = merge_ranges(ranges, tuning.patch_merge_gap_bytes);
+    }
+
+    ranges
+        .into_iter()
+        .filter_map(|r| {
+            let len = r.end.saturating_sub(r.start);
+            if len == 0 {
+                None
+            } else {
+                Some(FilePart {
+                    offset: r.start,
+                    len,
+                    checksum: Vec::new(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn merge_ranges(mut ranges: Vec<ByteRange>, gap: u64) -> Vec<ByteRange> {
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort_by_key(|r| r.start);
+
+    let mut out = Vec::new();
+    let mut cur = ranges[0];
+    for r in ranges.into_iter().skip(1) {
+        let merge_limit = cur.end.saturating_add(gap);
+        if r.start <= merge_limit {
+            cur.end = max(cur.end, r.end);
+        } else {
+            out.push(cur);
+            cur = r;
+        }
+    }
+    out.push(cur);
+    out
 }
