@@ -134,6 +134,9 @@ impl FleetApp {
     }
 
     pub fn set_launch_settings(&mut self, settings: LaunchSettings) -> Result<(), AppError> {
+        // REQUIRED: reject invalid Linux templates at the settings boundary
+        crate::launch::arma3::validate_linux_template_strict(&settings.arma3.linux.template)?;
+
         let store = self.store.clone();
         store.update(|reg| {
             reg.launch = settings;
@@ -144,7 +147,7 @@ impl FleetApp {
     }
 
     pub fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
-        crate::platform::runner::open_path(self.registry.launch.open_mode.clone(), path)?;
+        crate::platform::open_path(self.registry.launch.open_mode.clone(), path)?;
         Ok(())
     }
 
@@ -172,6 +175,32 @@ impl FleetApp {
         )?;
 
         Ok(plan.preview)
+    }
+
+    pub fn arma3_linux_template_validation_for_profile(
+        &self,
+        id: &str,
+        extra_args_override: Option<String>,
+    ) -> Result<crate::launch::arma3::LinuxTemplateValidation, AppError> {
+        let profile = self
+            .registry
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("profile not found: {id}")))?;
+
+        let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
+        let base_path = std::path::PathBuf::from(profile.checkout_root);
+
+        let report = crate::launch::arma3::linux_template_preview(
+            &base_path,
+            &profile.arma3.enabled_mods,
+            &extra,
+            &self.registry.launch,
+        )?;
+
+        Ok(report)
     }
 
     pub fn list_profiles(&self) -> Vec<ProfileSpec> {

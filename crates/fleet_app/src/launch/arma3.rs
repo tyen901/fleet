@@ -1,20 +1,14 @@
-use std::path::Path;
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+use serde::Serialize;
 use std::collections::HashMap;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 
-use crate::platform::LaunchAction;
-use crate::settings::LaunchSettings;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::constants::ARMA3_DEFAULT_EXTRA_ARGS;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::settings::LinuxModPathStyle;
+use crate::platform::LaunchAction;
 #[cfg(target_os = "windows")]
 use crate::settings::WindowsLaunchMethod;
+use crate::settings::{LaunchSettings, LinuxModPathStyle};
 
 #[derive(Debug, Clone)]
 pub struct Arma3LaunchPlan {
@@ -35,18 +29,28 @@ pub enum LaunchError {
     #[error("missing configuration: {0}")]
     MissingConfig(String),
 
+    #[error("invalid linux template: {0}")]
+    InvalidTemplate(String),
+
     #[error("{0}")]
     Other(String),
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Debug, Clone, Serialize)]
+pub struct LinuxTemplateValidation {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub normalized_template: String,
+    pub preview: String,
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedMod {
-    name: String,
+    _name: String,
     path: PathBuf,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Debug, Clone)]
 struct ArgsPlan {
     base_args: Vec<String>,
@@ -78,7 +82,6 @@ pub fn plan_launch(
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn build_args_plan(
     base: &Path,
     enabled_mods: &[String],
@@ -92,7 +95,6 @@ fn build_args_plan(
     Ok(ArgsPlan { base_args, mods })
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn parse_extra_args(extra_args: &str) -> Result<Vec<String>, LaunchError> {
     let s = extra_args.trim();
     let effective = if s.is_empty() {
@@ -104,7 +106,6 @@ fn parse_extra_args(extra_args: &str) -> Result<Vec<String>, LaunchError> {
     shell_words::split(effective).map_err(|e| LaunchError::InvalidArgs(e.to_string()))
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn resolve_enabled_mods(
     base: &Path,
     enabled_mods: &[String],
@@ -144,7 +145,6 @@ fn resolve_enabled_mods(
     Ok(out)
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn normalize_mod_name(s: &str) -> String {
     let t = s.trim();
     if t.is_empty() {
@@ -157,7 +157,6 @@ fn normalize_mod_name(s: &str) -> String {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn build_mod_arg(mods: &[ResolvedMod], style: LinuxModPathStyle) -> Option<String> {
     if mods.is_empty() {
         return None;
@@ -176,10 +175,113 @@ fn build_mod_arg(mods: &[ResolvedMod], style: LinuxModPathStyle) -> Option<Strin
     Some(format!("-mod={}", paths.join(";")))
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn host_path_to_proton_z(path: &str) -> String {
     let windows_style = path.replace('/', "\\");
     format!("Z:{}", windows_style)
+}
+
+pub fn validate_linux_template(template: &str) -> LinuxTemplateValidation {
+    let normalized_template = normalize_template_ws(template);
+
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if normalized_template.trim().is_empty() {
+        errors.push("template is empty".to_string());
+    }
+
+    if normalized_template.contains('\0') {
+        errors.push("template contains NUL byte".to_string());
+    }
+
+    if normalized_template.contains('\n') || normalized_template.contains('\r') {
+        errors.push("template contains newline; must be a single command".to_string());
+    }
+
+    let args_count = count_substring(&normalized_template, "$ARGS");
+    let mods_count = count_substring(&normalized_template, "$MODS");
+
+    if args_count == 0 && mods_count == 0 {
+        errors.push("template must include $ARGS and/or $MODS".to_string());
+    }
+
+    if args_count == 0 {
+        warnings.push("template does not include $ARGS; extra args will not be passed".to_string());
+    }
+    if mods_count == 0 {
+        warnings
+            .push("template does not include $MODS; enabled mods will not be passed".to_string());
+    }
+
+    if args_count > 1 {
+        warnings.push("template includes $ARGS more than once".to_string());
+    }
+    if mods_count > 1 {
+        warnings.push("template includes $MODS more than once".to_string());
+    }
+
+    LinuxTemplateValidation {
+        ok: errors.is_empty(),
+        errors,
+        warnings,
+        normalized_template,
+        preview: String::new(),
+    }
+}
+
+pub fn validate_linux_template_strict(template: &str) -> Result<(), LaunchError> {
+    let rep = validate_linux_template(template);
+    if rep.ok {
+        Ok(())
+    } else {
+        Err(LaunchError::InvalidTemplate(rep.errors.join("; ")))
+    }
+}
+
+fn normalize_template_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn count_substring(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack.match_indices(needle).count()
+}
+
+pub fn linux_template_preview(
+    base: &Path,
+    enabled_mods: &[String],
+    extra_args: &str,
+    settings: &LaunchSettings,
+) -> Result<LinuxTemplateValidation, LaunchError> {
+    let plan = build_args_plan(base, enabled_mods, extra_args)?;
+
+    let mut rep = validate_linux_template(&settings.arma3.linux.template);
+
+    let args_str = join_shell_escaped(&plan.base_args);
+
+    let mod_arg = build_mod_arg(&plan.mods, settings.arma3.linux.mod_path_style.clone());
+    let mods_str = match mod_arg {
+        Some(ma) => join_shell_escaped(&[ma]),
+        None => String::new(),
+    };
+
+    if !rep.ok {
+        rep.preview = rep.normalized_template.clone();
+        return Ok(rep);
+    }
+
+    rep.preview = render_linux_template_strict(&rep.normalized_template, &args_str, &mods_str);
+    Ok(rep)
+}
+
+fn render_linux_template_strict(template: &str, args_str: &str, mods_str: &str) -> String {
+    let mut out = template.to_string();
+    out = out.replace("$ARGS", args_str);
+    out = out.replace("$MODS", mods_str);
+
+    normalize_template_ws(&out)
 }
 
 #[cfg(target_os = "windows")]
@@ -254,38 +356,19 @@ fn plan_windows(plan: ArgsPlan, settings: &LaunchSettings) -> Result<Arma3Launch
 fn plan_linux(plan: ArgsPlan, settings: &LaunchSettings) -> Result<Arma3LaunchPlan, LaunchError> {
     let lin = &settings.arma3.linux;
 
+    validate_linux_template_strict(&lin.template)?;
+
+    let normalized_template = normalize_template_ws(&lin.template);
+
     let mod_arg = build_mod_arg(&plan.mods, lin.mod_path_style);
 
     let args_str = join_shell_escaped(&plan.base_args);
-
     let mods_str = match mod_arg {
         Some(ma) => join_shell_escaped(&[ma]),
         None => String::new(),
     };
 
-    let mut cmd = lin.template.clone();
-
-    let had_args = cmd.contains("$ARGS");
-    let had_mods = cmd.contains("$MODS");
-
-    cmd = cmd.replace("$ARGS", &args_str);
-    cmd = cmd.replace("$MODS", &mods_str);
-
-    if !had_args {
-        if !args_str.is_empty() {
-            cmd.push(' ');
-            cmd.push_str(&args_str);
-        }
-    }
-
-    if !had_mods {
-        if !mods_str.is_empty() {
-            cmd.push(' ');
-            cmd.push_str(&mods_str);
-        }
-    }
-
-    let cmd_norm = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd_norm = render_linux_template_strict(&normalized_template, &args_str, &mods_str);
 
     Ok(Arma3LaunchPlan {
         preview: cmd_norm.clone(),
@@ -336,7 +419,6 @@ fn quote_preview(arg: &str) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn join_shell_escaped(tokens: &[String]) -> String {
     tokens
         .iter()

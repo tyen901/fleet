@@ -140,8 +140,8 @@ fn run_shell(command: &str, shell: Option<&str>) -> Result<(), PlatformError> {
 
     #[cfg(not(target_os = "linux"))]
     {
-            let _ = command;
-            let _ = shell;
+        let _ = command;
+        let _ = shell;
         Err(PlatformError::Unsupported(
             "shell launch actions are only supported on linux".to_string(),
         ))
