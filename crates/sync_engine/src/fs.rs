@@ -155,6 +155,7 @@ pub(crate) async fn quarantine_move_path(
 ) -> anyhow::Result<PathBuf> {
     let qroot = quarantine_root(checkout_root, quarantine_id);
     let dst = qroot.join(mod_id).join(rel_path);
+    let dst = unique_quarantine_dst(&dst).await?;
     if let Some(parent) = dst.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -163,7 +164,10 @@ pub(crate) async fn quarantine_move_path(
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
             let md = tokio::fs::symlink_metadata(abs_path).await?;
             if is_symlink_or_reparse(&md) {
-                anyhow::bail!("refusing to quarantine symlink/reparse point {}", abs_path.display());
+                anyhow::bail!(
+                    "refusing to quarantine symlink/reparse point {}",
+                    abs_path.display()
+                );
             }
             tokio::task::spawn_blocking({
                 let abs_path = abs_path.to_path_buf();
@@ -182,20 +186,40 @@ pub(crate) async fn quarantine_move_path(
     }
 }
 
+async fn unique_quarantine_dst(dst: &Path) -> anyhow::Result<PathBuf> {
+    if !tokio::fs::try_exists(dst).await? {
+        return Ok(dst.to_path_buf());
+    }
+
+    let parent = dst
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("quarantine dst has no parent: {}", dst.display()))?;
+    let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("path");
+
+    for i in 1u32..=10_000 {
+        let candidate = parent.join(format!("{name}.{i}"));
+        if !tokio::fs::try_exists(&candidate).await? {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!("unable to find free quarantine path for {}", dst.display());
+}
+
 fn copy_path_blocking(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let md = std::fs::symlink_metadata(src)?;
     if is_symlink_or_reparse(&md) {
-        anyhow::bail!("refusing to quarantine symlink/reparse point {}", src.display());
+        anyhow::bail!(
+            "refusing to quarantine symlink/reparse point {}",
+            src.display()
+        );
     }
     if md.is_dir() {
         std::fs::create_dir_all(dst)?;
         for entry in walkdir::WalkDir::new(src) {
             let entry = entry?;
             if entry.file_type().is_symlink() {
-                anyhow::bail!(
-                    "refusing to quarantine symlink {}",
-                    entry.path().display()
-                );
+                anyhow::bail!("refusing to quarantine symlink {}", entry.path().display());
             }
             let rel = entry.path().strip_prefix(src)?;
             let out = dst.join(rel);
@@ -224,7 +248,9 @@ pub(crate) struct StagedFile {
 
 impl StagedFile {
     pub(crate) async fn create_next_to(final_path: &Path) -> anyhow::Result<StagedFile> {
-        let parent = final_path.parent().ok_or_else(|| anyhow::anyhow!("final_path has no parent"))?;
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("final_path has no parent"))?;
         tokio::fs::create_dir_all(parent).await?;
 
         let name = final_path
@@ -244,7 +270,11 @@ impl StagedFile {
         Ok(StagedFile { tmp_path })
     }
 
-    pub(crate) async fn commit(self, final_path: &Path, durability: Durability) -> anyhow::Result<()> {
+    pub(crate) async fn commit(
+        self,
+        final_path: &Path,
+        durability: Durability,
+    ) -> anyhow::Result<()> {
         if let Ok(md) = tokio::fs::symlink_metadata(final_path).await {
             if md.is_dir() {
                 tokio::fs::remove_dir_all(final_path).await?;
@@ -255,7 +285,13 @@ impl StagedFile {
 
         tokio::fs::rename(&self.tmp_path, final_path)
             .await
-            .map_err(|e| anyhow::anyhow!("rename {} -> {}: {e}", self.tmp_path.display(), final_path.display()))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "rename {} -> {}: {e}",
+                    self.tmp_path.display(),
+                    final_path.display()
+                )
+            })?;
 
         if matches!(durability, Durability::Strict) {
             fsync_parent_dir(final_path).await;

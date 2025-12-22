@@ -1,22 +1,22 @@
-use crate::ports::{FileEntry, FilePart, ModManifest};
 use crate::fs::{validate_mod_id, validate_rel_path};
+use crate::ports::{FileEntry, FilePart, ModManifest};
 use anyhow::{bail, Context, Result};
 
 #[derive(Clone, Debug)]
-pub struct ValidatedModManifest {
+pub(crate) struct ValidatedModManifest {
     pub mod_id: String,
     pub files: Vec<ValidatedFileEntry>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ValidatedFileEntry {
+pub(crate) struct ValidatedFileEntry {
     pub rel_path: String,
     pub size: u64,
     pub file_checksum: Vec<u8>,
     pub parts: Vec<FilePart>,
 }
 
-pub fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<ValidatedModManifest> {
+pub(crate) fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<ValidatedModManifest> {
     validate_mod_id(&m.mod_id).with_context(|| format!("invalid mod_id {}", m.mod_id))?;
 
     let mut files = Vec::with_capacity(m.files.len());

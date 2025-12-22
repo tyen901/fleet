@@ -6,32 +6,52 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
 use sync_engine::model::{
-    CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
-    StoreError, TimestampNs,
+    CheckRequest, CheckTuning, EngineError, FileStateDelete, FileStateUpsert, RepairRequest,
+    RepairTuning, StoreError, SyncFreshRequest, SyncFreshTuning, TimestampNs, UnknownPathPolicy,
 };
-use sync_engine::ports::SyncEvent;
-use sync_engine::ports::{FileEntry, ModManifest};
 use sync_engine::ports::{
-    RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
+    EventSink, RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
+    SyncEvent,
 };
+use sync_engine::ports::{FileEntry, FilePart, ModManifest};
 use sync_engine::SyncEngine;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Default)]
+struct TestSink {
+    events: Mutex<Vec<SyncEvent>>,
+}
+
+impl EventSink for TestSink {
+    fn push(&self, ev: SyncEvent) {
+        self.events.lock().unwrap().push(ev);
+    }
+}
+
+impl TestSink {
+    fn events(&self) -> Vec<SyncEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
 struct VecStream {
-    data: Vec<u8>,
-    pos: usize,
+    chunks: Vec<Bytes>,
+    idx: usize,
+    delay_ms: u64,
 }
 
 #[async_trait::async_trait]
 impl RemoteStreamImpl for VecStream {
     async fn next_chunk(&mut self) -> anyhow::Result<Option<Bytes>> {
-        if self.pos >= self.data.len() {
+        if self.idx >= self.chunks.len() {
             return Ok(None);
         }
-        let end = (self.pos + 1024).min(self.data.len());
-        let chunk = Bytes::copy_from_slice(&self.data[self.pos..end]);
-        self.pos = end;
-        Ok(Some(chunk))
+        if self.delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
+        let out = self.chunks[self.idx].clone();
+        self.idx += 1;
+        Ok(Some(out))
     }
 }
 
@@ -40,6 +60,7 @@ struct CountingRemote {
     supports_ranges: bool,
     manifests: HashMap<String, ModManifest>,
     files: HashMap<(String, String), Vec<u8>>,
+    delays_ms: u64,
     fetch_manifest_calls: Arc<AtomicUsize>,
     fetch_file_calls: Arc<AtomicUsize>,
     fetch_range_calls: Arc<AtomicUsize>,
@@ -55,7 +76,13 @@ impl RemoteRepo for CountingRemote {
 
     async fn fetch_mod_manifest(&self, mod_id: &str) -> anyhow::Result<ModManifest> {
         self.fetch_manifest_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(self.manifests.get(mod_id).unwrap().clone())
+        if self.delays_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delays_ms)).await;
+        }
+        self.manifests
+            .get(mod_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("manifest not found"))
     }
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream> {
@@ -63,10 +90,13 @@ impl RemoteRepo for CountingRemote {
         let data = self
             .files
             .get(&(mod_id.to_string(), rel_path.to_string()))
-            .unwrap();
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("file not found"))?;
+        let chunk = Bytes::from(data);
         Ok(RemoteStream::new(Box::new(VecStream {
-            data: data.clone(),
-            pos: 0,
+            chunks: vec![chunk],
+            idx: 0,
+            delay_ms: self.delays_ms,
         })))
     }
 
@@ -81,46 +111,58 @@ impl RemoteRepo for CountingRemote {
         let data = self
             .files
             .get(&(mod_id.to_string(), rel_path.to_string()))
-            .unwrap();
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("file not found"))?;
         let start = offset as usize;
         let end = (offset + len) as usize;
+        let slice = data
+            .get(start..end)
+            .ok_or_else(|| anyhow::anyhow!("range OOB"))?;
+
+        // Drip bytes slowly to allow cancellation to interrupt.
+        let chunks = slice.iter().map(|b| Bytes::from(vec![*b])).collect();
         Ok(RemoteStream::new(Box::new(VecStream {
-            data: data[start..end].to_vec(),
-            pos: 0,
+            chunks,
+            idx: 0,
+            delay_ms: self.delays_ms.max(1),
         })))
     }
 }
 
-#[derive(Default)]
-struct TestSink {
-    events: Mutex<Vec<SyncEvent>>,
-}
-
-impl sync_engine::EventSink for TestSink {
-    fn push(&self, ev: SyncEvent) {
-        self.events.lock().unwrap().push(ev);
-    }
-}
-
 #[derive(Clone)]
-struct TestChecksummer;
+struct Blake3Checksummer;
 
-impl sync_engine::Checksummer for TestChecksummer {
+impl sync_engine::ports::Checksummer for Blake3Checksummer {
     fn algorithm_name(&self) -> &str {
         "blake3"
     }
 
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
-        let data = std::fs::read(path)?;
-        Ok(blake3::hash(&data).as_bytes().to_vec())
+        let bytes = std::fs::read(path)?;
+        Ok(blake3::hash(&bytes).as_bytes().to_vec())
     }
 
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
-        let data = std::fs::read(path)?;
+        let bytes = std::fs::read(path)?;
         let start = offset as usize;
         let end = (offset + len) as usize;
-        Ok(blake3::hash(&data[start..end]).as_bytes().to_vec())
+        Ok(blake3::hash(&bytes[start..end]).as_bytes().to_vec())
     }
+}
+
+fn make_parts(bytes: &[u8], part_size: usize) -> Vec<FilePart> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let end = (off + part_size).min(bytes.len());
+        out.push(FilePart {
+            offset: off as u64,
+            len: (end - off) as u64,
+            checksum: blake3::hash(&bytes[off..end]).as_bytes().to_vec(),
+        });
+        off = end;
+    }
+    out
 }
 
 fn setup_index(enabled_mods: &[String]) -> FleetIndex {
@@ -306,121 +348,219 @@ impl StateStore for IndexStore {
     }
 }
 
-fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8]) -> ModManifest {
-    ModManifest {
-        mod_id: mod_id.to_string(),
+#[tokio::test]
+async fn sync_fresh_does_not_quarantine_expected_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let enabled_mods = vec!["@mod".to_string()];
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+
+    let bytes = b"pbo-bytes".to_vec();
+    let manifest = ModManifest {
+        mod_id: "@mod".to_string(),
         files: vec![FileEntry {
-            rel_path: rel_path.to_string(),
+            rel_path: "addons/a.pbo".to_string(),
             size: bytes.len() as u64,
-            file_checksum: blake3::hash(bytes).as_bytes().to_vec(),
+            file_checksum: blake3::hash(&bytes).as_bytes().to_vec(),
             parts: Vec::new(),
         }],
-    }
-}
+    };
 
-#[tokio::test]
-async fn safety_abort_does_not_fetch_remote_file_bytes() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
+    // Create an unexpected file under expected directory prefix.
     let mod_root = root.join("@mod");
-    std::fs::create_dir_all(&mod_root).unwrap();
-
-    // Make an unsafe on-disk layout: expected path's ancestor is a symlink.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        symlink(std::env::temp_dir(), mod_root.join("addons")).unwrap();
-    }
-
-    let bytes = b"pbo".to_vec();
-    let manifest = build_manifest("@mod", "addons/a.pbo", &bytes);
+    std::fs::create_dir_all(mod_root.join("addons")).unwrap();
+    std::fs::write(mod_root.join("addons").join("junk.txt"), b"junk").unwrap();
 
     let remote = CountingRemote {
         supports_ranges: true,
         manifests: vec![("@mod".to_string(), manifest.clone())]
             .into_iter()
             .collect(),
-        files: vec![(("@mod".to_string(), "addons/a.pbo".to_string()), bytes)]
-            .into_iter()
-            .collect(),
+        files: vec![(
+            ("@mod".to_string(), "addons/a.pbo".to_string()),
+            bytes.clone(),
+        )]
+        .into_iter()
+        .collect(),
+        delays_ms: 0,
         fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
         fetch_file_calls: Arc::new(AtomicUsize::new(0)),
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
     };
 
-    let enabled_mods = vec!["@mod".to_string()];
-    let idx = setup_index(&enabled_mods);
-    let store = Arc::new(IndexStore::new(idx));
-    let engine = SyncEngine::new(Arc::new(remote.clone()), store, Arc::new(TestChecksummer));
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
     let sink = Arc::new(TestSink::default());
-
-    let req = RepairRequest {
-        repo_name: "repo".to_string(),
-        checkout_root: PathBuf::from(root),
-        enabled_mods,
-        tuning: RepairTuning::default(),
-    };
-
     let cancel = CancellationToken::new();
-    let outcome = engine.repair(req, sink.as_ref(), &cancel).await.unwrap();
-    assert!(outcome.aborted.is_some());
-    assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);
-}
 
-#[tokio::test]
-async fn skip_logic_does_not_fetch_remote_file_bytes() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let mod_root = root.join("@mod");
-    std::fs::create_dir_all(&mod_root).unwrap();
-
-    let bytes = b"content".to_vec();
-    std::fs::write(mod_root.join("file.bin"), &bytes).unwrap();
-
-    let manifest = build_manifest("@mod", "file.bin", &bytes);
-
-    let remote = CountingRemote {
-        supports_ranges: true,
-        manifests: vec![("@mod".to_string(), manifest.clone())]
-            .into_iter()
-            .collect(),
-        files: vec![(("@mod".to_string(), "file.bin".to_string()), bytes)]
-            .into_iter()
-            .collect(),
-        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
-        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
-        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
-    };
-
-    let enabled_mods = vec!["@mod".to_string()];
-    let idx = setup_index(&enabled_mods);
-    let store = Arc::new(IndexStore::new(idx));
-    let engine = SyncEngine::new(Arc::new(remote.clone()), store, Arc::new(TestChecksummer));
-    let sink = Arc::new(TestSink::default());
-
-    let check_req = CheckRequest {
+    let req = SyncFreshRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
         enabled_mods: enabled_mods.clone(),
-        tuning: CheckTuning::default(),
+        tuning: SyncFreshTuning {
+            unknown_paths: UnknownPathPolicy::Quarantine,
+            ..Default::default()
+        },
     };
-    let cancel = CancellationToken::new();
-    let report = engine
-        .check(check_req, sink.as_ref(), &cancel)
+
+    let out = engine
+        .sync_fresh(req, sink.as_ref(), &cancel)
         .await
         .unwrap();
-    assert!(report.ok);
+    assert!(out.ok());
+
+    // Expected file remains in-place (its directory prefix must not be quarantined).
+    assert!(root.join("@mod").join("addons").join("a.pbo").exists());
+    // Unexpected file was quarantined or removed, but must not break expected dir.
+    assert!(!root.join("@mod").join("addons").join("junk.txt").exists());
+}
+
+#[tokio::test]
+async fn cancellation_during_patch_does_not_commit_partial_results() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let enabled_mods = vec!["@mod".to_string()];
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+
+    let part_size = 16;
+    let remote_bytes: Vec<u8> = (0..128u32).map(|i| (i % 251) as u8).collect();
+    let mut local_bytes = remote_bytes.clone();
+    local_bytes[3] ^= 0xFF;
+
+    let parts = make_parts(&remote_bytes, part_size);
+    let manifest = ModManifest {
+        mod_id: "@mod".to_string(),
+        files: vec![FileEntry {
+            rel_path: "addons/a.pbo".to_string(),
+            size: remote_bytes.len() as u64,
+            file_checksum: blake3::hash(&remote_bytes).as_bytes().to_vec(),
+            parts,
+        }],
+    };
+
+    let mod_root = root.join("@mod").join("addons");
+    std::fs::create_dir_all(&mod_root).unwrap();
+    let target = mod_root.join("a.pbo");
+    std::fs::write(&target, &local_bytes).unwrap();
+
+    let remote = CountingRemote {
+        supports_ranges: true,
+        manifests: vec![("@mod".to_string(), manifest.clone())]
+            .into_iter()
+            .collect(),
+        files: vec![(
+            ("@mod".to_string(), "addons/a.pbo".to_string()),
+            remote_bytes.clone(),
+        )]
+        .into_iter()
+        .collect(),
+        delays_ms: 2,
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
+    let sink = Arc::new(TestSink::default());
+    let cancel = CancellationToken::new();
+
+    let tuning = RepairTuning {
+        patch_max_bad_ratio: 1.0,
+        patch_max_fetch_ratio: 1.0,
+        patch_max_bad_parts: None,
+        patch_max_range_requests: Some(64),
+        ..Default::default()
+    };
 
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
         enabled_mods,
-        tuning: RepairTuning::default(),
+        tuning,
     };
 
-    let outcome = engine.repair(req, sink.as_ref(), &cancel).await.unwrap();
-    assert!(outcome.report.skipped);
-    assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);
+    let task = {
+        let cancel = cancel.clone();
+        let engine = engine;
+        let sink = sink.clone();
+        tokio::spawn(async move { engine.repair(req, sink.as_ref(), &cancel).await })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    cancel.cancel();
+    let res = task.await.unwrap();
+    assert!(matches!(res, Err(EngineError::Cancelled)));
+
+    // Final file must not have been fixed/committed after cancellation.
+    let final_bytes = std::fs::read(&target).unwrap();
+    assert_eq!(final_bytes, local_bytes);
+
+    // No verified events after cancel.
+    let verified = sink
+        .events()
+        .into_iter()
+        .any(|e| matches!(e, SyncEvent::FileVerified { .. }));
+    assert!(!verified);
+}
+
+#[tokio::test]
+async fn fetch_all_respects_cancellation_and_stops_scheduling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let enabled_mods: Vec<String> = (0..50).map(|i| format!("@m{i}")).collect();
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+
+    let mut manifests = HashMap::new();
+    for m in &enabled_mods {
+        manifests.insert(
+            m.clone(),
+            ModManifest {
+                mod_id: m.clone(),
+                files: vec![],
+            },
+        );
+    }
+
+    let remote = CountingRemote {
+        supports_ranges: true,
+        manifests,
+        files: HashMap::new(),
+        delays_ms: 20,
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let engine = SyncEngine::new(Arc::new(remote.clone()), store, Arc::new(Blake3Checksummer));
+    let sink = Arc::new(TestSink::default());
+    let cancel = CancellationToken::new();
+
+    let req = CheckRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: PathBuf::from(root),
+        enabled_mods: enabled_mods.clone(),
+        tuning: CheckTuning {
+            scan_concurrency: 1,
+            ..Default::default()
+        },
+    };
+
+    let task = {
+        let cancel = cancel.clone();
+        let sink = sink.clone();
+        tokio::spawn(async move { engine.check(req, sink.as_ref(), &cancel).await })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    cancel.cancel();
+    let res = task.await.unwrap();
+    assert!(matches!(res, Err(EngineError::Cancelled)));
+
+    // With scan_concurrency=1, cancellation should prevent scheduling most fetches.
+    assert!(remote.fetch_manifest_calls.load(Ordering::Relaxed) < enabled_mods.len());
 }

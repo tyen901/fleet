@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use fleet_remote_http::HttpRemote;
-use sync_engine::RemoteRepo;
 use std::path::PathBuf;
+use sync_engine::RemoteRepo;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 

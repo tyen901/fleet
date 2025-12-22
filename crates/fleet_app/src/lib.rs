@@ -555,7 +555,9 @@ impl FleetIndexStore {
 }
 
 impl sync_engine::StateStore for FleetIndexStore {
-    fn desired_state_get(&self) -> Result<Option<sync_engine::DesiredState>, sync_engine::StoreError> {
+    fn desired_state_get(
+        &self,
+    ) -> Result<Option<sync_engine::DesiredState>, sync_engine::StoreError> {
         self.inner
             .lock()
             .unwrap()
@@ -620,15 +622,9 @@ impl sync_engine::StateStore for FleetIndexStore {
         upserts: Vec<sync_engine::FileStateUpsert>,
         deletes: Vec<sync_engine::FileStateDelete>,
     ) -> Result<(), sync_engine::StoreError> {
-        let up = upserts.into_iter().map(|u| {
-            (
-                u.mod_id,
-                u.rel_path,
-                u.size,
-                u.mtime_ns.0,
-                u.checksum,
-            )
-        });
+        let up = upserts
+            .into_iter()
+            .map(|u| (u.mod_id, u.rel_path, u.size, u.mtime_ns.0, u.checksum));
         let del = deletes.into_iter().map(|d| (d.mod_id, d.rel_path));
         self.inner
             .lock()

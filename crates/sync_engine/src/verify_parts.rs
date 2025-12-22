@@ -1,5 +1,5 @@
-use crate::ports::FilePart;
 use crate::ports::Checksummer;
+use crate::ports::FilePart;
 use anyhow::Result;
 
 pub fn first_part_mismatch(

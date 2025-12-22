@@ -1,6 +1,6 @@
+use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::manifest::ValidatedModManifest;
 use crate::ports::StateStore;
-use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::util::file_mtime_ns;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -42,7 +42,7 @@ pub enum SkipCheckReason {
 pub struct SkipCheckEvidence {
     pub state_id: Option<String>,
     pub verified_state_id: Option<String>,
-    pub verified_at_ns: Option<i64>,
+    pub verified_at: Option<i64>,
 
     pub expected_files: u64,
 
@@ -99,7 +99,7 @@ pub fn evaluate_skip(
     let mut evidence = SkipCheckEvidence {
         state_id: Some(desired.state_id.clone()),
         verified_state_id: verified.as_ref().map(|v| v.state_id.clone()),
-        verified_at_ns: verified.as_ref().map(|v| v.verified_at_ns),
+        verified_at: verified.as_ref().map(|v| v.verified_at.0),
         ..Default::default()
     };
 
@@ -124,10 +124,12 @@ pub fn evaluate_skip(
         });
     }
 
-    let mut cache_by_mod: HashMap<String, HashMap<String, crate::model::FileState>> = HashMap::new();
+    let mut cache_by_mod: HashMap<String, HashMap<String, crate::model::FileState>> =
+        HashMap::new();
 
     for manifest in manifests {
-        let cache_snapshot = store.file_state_get_all_for_mod(&desired.state_id, &manifest.mod_id)?;
+        let cache_snapshot =
+            store.file_state_get_all_for_mod(&desired.state_id, &manifest.mod_id)?;
         cache_by_mod.insert(manifest.mod_id.clone(), cache_snapshot);
 
         for file in &manifest.files {
@@ -219,7 +221,7 @@ pub fn evaluate_skip(
                 continue;
             }
 
-            let Some(actual_mtime_ns) = file_mtime_ns(&md).map(|t| t.0) else {
+            let Some(actual_mtime_ns) = file_mtime_ns(&md) else {
                 evidence.mtime_mismatch += 1;
                 continue;
             };

@@ -56,35 +56,99 @@ impl EventSink for NoopSink {
 
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
-    CheckStarted { repo: String },
-    CheckFinished { ok: bool },
+    CheckStarted {
+        repo: String,
+    },
+    CheckFinished {
+        ok: bool,
+    },
 
-    RepairStarted { repo: String },
-    RepairSkipEvaluated { skippable: bool, reason: Option<String> },
-    RepairFinished { ok: bool, skipped: bool },
+    RepairStarted {
+        repo: String,
+    },
+    RepairSkipEvaluated {
+        skippable: bool,
+        reason: Option<String>,
+    },
+    RepairFinished {
+        ok: bool,
+        skipped: bool,
+    },
 
-    SyncFreshStarted { repo: String },
-    SyncFreshFinished { ok: bool },
+    SyncFreshStarted {
+        repo: String,
+    },
+    SyncFreshFinished {
+        ok: bool,
+    },
 
-    RemoteCapabilities { supports_ranges: bool },
+    RemoteCapabilities {
+        supports_ranges: bool,
+    },
 
-    ModStarted { mod_id: String },
-    ModFinished { mod_id: String },
+    ModStarted {
+        mod_id: String,
+    },
+    ModFinished {
+        mod_id: String,
+    },
 
-    FileUpToDate { mod_id: String, path: String },
-    FileNeedsRepair { mod_id: String, path: String, strategy: String },
-    FileStarted { mod_id: String, path: String, bytes_total: u64 },
-    FileProgress { mod_id: String, path: String, bytes_done: u64, bytes_total: u64 },
-    FileVerified { mod_id: String, path: String },
+    FileUpToDate {
+        mod_id: String,
+        path: String,
+    },
+    FileNeedsRepair {
+        mod_id: String,
+        path: String,
+        strategy: String,
+    },
+    FileStarted {
+        mod_id: String,
+        path: String,
+        bytes_total: u64,
+    },
+    FileProgress {
+        mod_id: String,
+        path: String,
+        bytes_done: u64,
+        bytes_total: u64,
+    },
+    FileVerified {
+        mod_id: String,
+        path: String,
+    },
 
-    UnexpectedPathsFound { mod_id: String, files: u64, dirs: u64, bytes: u64, sample: Vec<String> },
-    UnexpectedPathDeleted { mod_id: String, path: String, bytes: u64, is_dir: bool },
-    UnexpectedPathsActionRequired { mod_id: String, message: String },
-    UnexpectedPathsCapReached { mod_id: String, message: String },
-    EmptyDirDeleted { path: String },
+    UnexpectedPathsFound {
+        mod_id: String,
+        files: u64,
+        dirs: u64,
+        bytes: u64,
+        sample: Vec<String>,
+    },
+    UnexpectedPathDeleted {
+        mod_id: String,
+        path: String,
+        bytes: u64,
+        is_dir: bool,
+    },
+    UnexpectedPathsActionRequired {
+        mod_id: String,
+        message: String,
+    },
+    UnexpectedPathsCapReached {
+        mod_id: String,
+        message: String,
+    },
+    EmptyDirDeleted {
+        path: String,
+    },
 
-    Warning { message: String },
-    Error { message: String },
+    Warning {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]

@@ -2,15 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::ports::SyncEvent;
-use crate::pipeline::fetch_all;
+use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::model::{
     CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileStateDelete, FileStateUpsert,
     TimestampNs,
 };
+use crate::pipeline::fetch_all;
+use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
-use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::util::{file_mtime_ns, now_ns};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -39,11 +39,19 @@ pub(crate) async fn run(
         let desired = store
             .desired_state_get()
             .map_err(crate::model::EngineError::Store)?
-            .ok_or_else(|| crate::model::EngineError::InvalidInput("desired_state missing".to_string()))?;
+            .ok_or_else(|| {
+                crate::model::EngineError::InvalidInput("desired_state missing".to_string())
+            })?;
         super::validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)
             .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
-        let fetch = fetch_all(remote.clone(), &req.enabled_mods, req.tuning.scan_concurrency).await?;
+        let fetch = fetch_all(
+            remote.clone(),
+            &req.enabled_mods,
+            req.tuning.scan_concurrency,
+            cancel,
+        )
+        .await?;
         sink.push(SyncEvent::RemoteCapabilities {
             supports_ranges: fetch.capabilities.supports_ranges,
         });
@@ -104,13 +112,9 @@ pub(crate) async fn run(
             && report.unsafe_path == 0;
 
         if report.ok {
-            store
-                .verified_set(&desired.state_id, TimestampNs(now_ns()))
-                .map_err(crate::model::EngineError::Store)?;
+            let _ = store.verified_set(&desired.state_id, TimestampNs(now_ns()));
         } else {
-            store
-                .verified_clear()
-                .map_err(crate::model::EngineError::Store)?;
+            let _ = store.verified_clear();
         }
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -185,7 +189,7 @@ struct VerifyOutcome {
     rel_path: String,
     ok: bool,
     size: u64,
-    mtime_ns: i64,
+    mtime_ns: TimestampNs,
     checksum: Vec<u8>,
     issue: Option<CheckIssueKind>,
     unsafe_message: Option<String>,
@@ -207,7 +211,7 @@ fn verify_one_file(
                 rel_path: rel_path.to_string(),
                 ok: false,
                 size: file.size,
-                mtime_ns: 0,
+                mtime_ns: TimestampNs(0),
                 checksum: file.file_checksum.clone(),
                 issue: Some(CheckIssueKind::UnsafePath),
                 unsafe_message: None,
@@ -223,7 +227,7 @@ fn verify_one_file(
                 rel_path: rel_path.to_string(),
                 ok: false,
                 size: file.size,
-                mtime_ns: 0,
+                mtime_ns: TimestampNs(0),
                 checksum: file.file_checksum.clone(),
                 issue: Some(CheckIssueKind::UnsafeOnDisk),
                 unsafe_message: Some(err.to_string()),
@@ -239,7 +243,7 @@ fn verify_one_file(
                 rel_path: rel_path.to_string(),
                 ok: false,
                 size: file.size,
-                mtime_ns: 0,
+                mtime_ns: TimestampNs(0),
                 checksum: file.file_checksum.clone(),
                 issue: Some(CheckIssueKind::Missing),
                 unsafe_message: None,
@@ -255,7 +259,7 @@ fn verify_one_file(
             rel_path: rel_path.to_string(),
             ok: false,
             size: file.size,
-            mtime_ns: 0,
+            mtime_ns: TimestampNs(0),
             checksum: file.file_checksum.clone(),
             issue: Some(CheckIssueKind::NotAFile),
             unsafe_message: None,
@@ -269,7 +273,7 @@ fn verify_one_file(
             rel_path: rel_path.to_string(),
             ok: false,
             size: file.size,
-            mtime_ns: 0,
+            mtime_ns: TimestampNs(0),
             checksum: file.file_checksum.clone(),
             issue: Some(CheckIssueKind::WrongSize {
                 expected: file.size,
@@ -279,13 +283,13 @@ fn verify_one_file(
         });
     }
 
-    let Some(mtime_ns) = file_mtime_ns(&md).map(|t| t.0) else {
+    let Some(mtime_ns) = file_mtime_ns(&md) else {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
             size: file.size,
-            mtime_ns: 0,
+            mtime_ns: TimestampNs(0),
             checksum: file.file_checksum.clone(),
             issue: Some(CheckIssueKind::PartMismatch { offset: 0, len: 0 }),
             unsafe_message: None,
@@ -293,7 +297,10 @@ fn verify_one_file(
     };
 
     if let Some(cached) = cached {
-        if cached.size == got_size && cached.mtime_ns == mtime_ns && cached.checksum == file.file_checksum {
+        if cached.size == got_size
+            && cached.mtime_ns == mtime_ns
+            && cached.checksum == file.file_checksum
+        {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
@@ -318,7 +325,10 @@ fn verify_one_file(
                 size: file.size,
                 mtime_ns,
                 checksum: file.file_checksum.clone(),
-                issue: Some(CheckIssueKind::PartMismatch { offset: 0, len: file.size }),
+                issue: Some(CheckIssueKind::PartMismatch {
+                    offset: 0,
+                    len: file.size,
+                }),
                 unsafe_message: None,
             });
         }
@@ -372,7 +382,7 @@ fn apply_verify_outcome(
             mod_id: outcome.mod_id.clone(),
             rel_path: outcome.rel_path.clone(),
             size: outcome.size,
-            mtime_ns: TimestampNs(outcome.mtime_ns),
+            mtime_ns: outcome.mtime_ns,
             checksum: outcome.checksum.clone(),
         });
         sink.push(SyncEvent::FileVerified {

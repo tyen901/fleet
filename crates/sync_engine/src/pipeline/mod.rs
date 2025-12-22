@@ -8,6 +8,7 @@ use anyhow::Context;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) mod check;
 pub(crate) mod repair;
@@ -22,23 +23,40 @@ pub(crate) async fn fetch_all(
     remote: Arc<dyn RemoteRepo>,
     enabled_mods: &[String],
     max_concurrency: usize,
+    cancel: &CancellationToken,
 ) -> Result<FetchResult, crate::model::EngineError> {
+    if cancel.is_cancelled() {
+        return Err(crate::model::EngineError::Cancelled);
+    }
     for mod_id in enabled_mods {
         crate::fs::validate_mod_id(mod_id)
             .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
     }
 
-    let caps = remote.capabilities().await.map_err(crate::model::EngineError::Remote)?;
+    let caps = remote
+        .capabilities()
+        .await
+        .map_err(crate::model::EngineError::Remote)?;
 
     let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
     let mut tasks = FuturesUnordered::new();
 
     for mod_id in enabled_mods {
+        if cancel.is_cancelled() {
+            return Err(crate::model::EngineError::Cancelled);
+        }
         let remote = remote.clone();
-        let permit = sem.clone().acquire_owned().await.map_err(|e| crate::model::EngineError::Internal(e.into()))?;
+        let permit = tokio::select! {
+            _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
+            permit = sem.clone().acquire_owned() => permit.map_err(|e| crate::model::EngineError::Internal(e.into()))?,
+        };
         let mod_id = mod_id.clone();
+        let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit;
+            if cancel.is_cancelled() {
+                anyhow::bail!("cancelled");
+            }
             let manifest = remote
                 .fetch_mod_manifest(&mod_id)
                 .await
@@ -57,6 +75,9 @@ pub(crate) async fn fetch_all(
 
     let mut manifests = Vec::new();
     while let Some(res) = tasks.next().await {
+        if cancel.is_cancelled() {
+            return Err(crate::model::EngineError::Cancelled);
+        }
         manifests.push(res.map_err(|e| crate::model::EngineError::Internal(e.into()))??);
     }
 
@@ -98,7 +119,10 @@ pub(crate) fn baseline_digest_hex(rows: &[crate::model::ExpectedFile]) -> String
     hasher.finalize().to_hex().to_string()
 }
 
-pub(crate) fn validate_enabled_mods(expected_hash: &str, enabled_mods: &[String]) -> anyhow::Result<()> {
+pub(crate) fn validate_enabled_mods(
+    expected_hash: &str,
+    enabled_mods: &[String],
+) -> anyhow::Result<()> {
     for mod_id in enabled_mods {
         crate::fs::validate_mod_id(mod_id)?;
     }

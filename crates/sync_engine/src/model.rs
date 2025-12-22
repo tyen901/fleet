@@ -17,14 +17,14 @@ pub struct ExpectedFile {
 #[derive(Clone, Debug)]
 pub struct FileState {
     pub size: u64,
-    pub mtime_ns: i64,
+    pub mtime_ns: TimestampNs,
     pub checksum: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
 pub struct VerifiedState {
     pub state_id: String,
-    pub verified_at_ns: i64,
+    pub verified_at: TimestampNs,
 }
 
 #[derive(Clone, Debug)]

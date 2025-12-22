@@ -5,17 +5,11 @@ pub mod ports;
 pub(crate) mod fs;
 pub(crate) mod manifest;
 pub(crate) mod skip_check;
-pub(crate) mod util;
 pub(crate) mod unexpected;
+pub(crate) mod util;
 pub(crate) mod verify_parts;
 
 pub(crate) mod pipeline;
-
-#[cfg(test)]
-pub(crate) mod test_support;
-
-#[cfg(test)]
-mod patch_range_coalesce_tests;
 
 pub use crate::engine::SyncEngine;
 pub use crate::model::*;

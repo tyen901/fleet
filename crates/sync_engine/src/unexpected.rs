@@ -1,9 +1,10 @@
-use crate::ports::{EventSink, SyncEvent};
 use crate::fs::is_symlink_or_reparse;
 use crate::model::{RepairTuning, UnexpectedPathPolicy};
+use crate::ports::{EventSink, SyncEvent};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Clone, Debug)]
 pub struct UnexpectedStats {
@@ -48,7 +49,11 @@ pub async fn handle_unexpected_paths(
     expected_paths: &HashSet<String>,
     tuning: &RepairTuning,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
 ) -> Result<UnexpectedStats> {
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     let mod_root = checkout_root.join(mod_id);
     if tokio::fs::metadata(&mod_root).await.is_err() {
         return Ok(UnexpectedStats::default());
@@ -96,6 +101,9 @@ pub async fn handle_unexpected_paths(
         }
         UnexpectedPathPolicy::AutoDelete => {
             for action in plan.actions {
+                if cancel.is_cancelled() {
+                    anyhow::bail!("cancelled");
+                }
                 match action {
                     UnexpectedAction::File { abs, rel, size } => {
                         match tokio::fs::remove_file(&abs).await {

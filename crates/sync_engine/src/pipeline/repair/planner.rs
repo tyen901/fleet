@@ -1,8 +1,8 @@
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
+use crate::model::FileState;
 use crate::model::RepairTuning;
 use crate::ports::{Checksummer, FilePart};
-use crate::model::FileState;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +43,7 @@ pub(crate) struct CacheHint {
     pub(crate) mod_id: String,
     pub(crate) rel_path: String,
     pub(crate) size: u64,
-    pub(crate) mtime_ns: i64,
+    pub(crate) mtime_ns: crate::model::TimestampNs,
     pub(crate) checksum: Vec<u8>,
 }
 
@@ -150,7 +150,7 @@ pub(crate) fn plan_mod(
 
 struct CacheMeta {
     size: u64,
-    mtime_ns: i64,
+    mtime_ns: crate::model::TimestampNs,
 }
 
 fn plan_one_file(
@@ -179,10 +179,12 @@ fn plan_one_file(
     };
 
     if let Some(parent) = abs_path.parent() {
-        ensure_no_symlink_ancestors_blocking(ctx.mod_root, parent).map_err(|e| PlanError::UnsafeOnDisk {
-            mod_id: ctx.mod_id.to_string(),
-            rel_path: file.rel_path.clone(),
-            source: e,
+        ensure_no_symlink_ancestors_blocking(ctx.mod_root, parent).map_err(|e| {
+            PlanError::UnsafeOnDisk {
+                mod_id: ctx.mod_id.to_string(),
+                rel_path: file.rel_path.clone(),
+                source: e,
+            }
         })?;
     }
 
@@ -190,13 +192,7 @@ fn plan_one_file(
         return Ok((RepairStrategy::Full, file.parts.clone(), file.size, None));
     }
 
-    let mtime_ns = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .and_then(|n| i64::try_from(n).ok())
-        .unwrap_or(0);
+    let mtime_ns = crate::util::file_mtime_ns(&metadata).unwrap_or(crate::model::TimestampNs(0));
 
     if let Some(cached) = ctx.cache_snapshot.get(&file.rel_path) {
         if cached.size == file.size

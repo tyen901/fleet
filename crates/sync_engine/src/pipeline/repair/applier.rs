@@ -1,12 +1,12 @@
-use crate::ports::{EventSink, SyncEvent};
-use crate::model::RepairTuning;
-use crate::ports::Checksummer;
 use super::planner::{PlannedOp, RepairStrategy};
 use crate::fs::ensure_no_symlink_ancestors_blocking;
 use crate::fs::StagedFile;
-use crate::util::file_mtime_ns;
+use crate::model::RepairTuning;
 use crate::model::{AbortReason, Durability, FileFailure, RepairReport};
+use crate::ports::Checksummer;
 use crate::ports::RemoteRepo;
+use crate::ports::{EventSink, SyncEvent};
+use crate::util::file_mtime_ns;
 use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
 use std::path::Path;
@@ -20,7 +20,7 @@ pub(crate) enum IndexUpdate {
         mod_id: String,
         rel_path: String,
         size: u64,
-        mtime_ns: i64,
+        mtime_ns: crate::model::TimestampNs,
         checksum: Vec<u8>,
     },
     DeleteFileState {
@@ -138,7 +138,7 @@ pub(crate) async fn apply_ops(
 }
 
 fn is_cancel_failure(f: &FileFailure) -> bool {
-    !f.aborting && f.message == "cancelled"
+    !f.aborting && f.message.contains("cancelled")
 }
 
 struct ApplyOneSuccess {
@@ -305,7 +305,7 @@ async fn apply_one(
         Ok(md) => md,
         Err(err) => return Err(classify_apply_error(&op, err.into())),
     };
-    let mtime_ns = file_mtime_ns(&md).map(|t| t.0).unwrap_or(0);
+    let mtime_ns = file_mtime_ns(&md).unwrap_or(crate::model::TimestampNs(0));
     let index_updates = vec![IndexUpdate::UpsertFileState {
         mod_id: op.mod_id.clone(),
         rel_path: op.rel_path.clone(),
@@ -379,11 +379,13 @@ async fn apply_full(
         let tmp_path = staged.tmp_path.clone();
         let target = op.target.clone();
         let checksummer = checksummer.clone();
-        tokio::task::spawn_blocking(move || verify_target(&tmp_path, &target, checksummer.as_ref()))
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
-            .and_then(|r| r)
-            .context("verify downloaded file")?;
+        tokio::task::spawn_blocking(move || {
+            verify_target(&tmp_path, &target, checksummer.as_ref())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .and_then(|r| r)
+        .context("verify downloaded file")?;
     }
 
     staged.commit(&op.abs_path, tuning.durability).await?;
@@ -452,11 +454,11 @@ async fn apply_patch(
             let cancel = cancel.clone();
             async move {
                 if cancel.is_cancelled() {
-                    return Ok::<(), anyhow::Error>(());
+                    anyhow::bail!("cancelled");
                 }
                 let _permit = range_sem.acquire_owned().await?;
                 if cancel.is_cancelled() {
-                    return Ok::<(), anyhow::Error>(());
+                    anyhow::bail!("cancelled");
                 }
                 let mut stream = remote
                     .fetch_range(&mod_id, &rel_path, part.offset, part.len)
@@ -476,7 +478,7 @@ async fn apply_patch(
                 let mut remaining = part.len;
                 while remaining > 0 {
                     if cancel.is_cancelled() {
-                        return Ok::<(), anyhow::Error>(());
+                        anyhow::bail!("cancelled");
                     }
                     let chunk = stream
                         .next_chunk()
@@ -510,6 +512,10 @@ async fn apply_patch(
         res?;
     }
 
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
+
     if matches!(tuning.durability, Durability::Strict) {
         let mut f = tokio::fs::OpenOptions::new()
             .read(true)
@@ -522,11 +528,13 @@ async fn apply_patch(
         let tmp_path = staged.tmp_path.clone();
         let target = op.target.clone();
         let checksummer = checksummer.clone();
-        tokio::task::spawn_blocking(move || verify_target(&tmp_path, &target, checksummer.as_ref()))
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
-            .and_then(|r| r)
-            .context("verify patched file")?;
+        tokio::task::spawn_blocking(move || {
+            verify_target(&tmp_path, &target, checksummer.as_ref())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        .and_then(|r| r)
+        .context("verify patched file")?;
     }
 
     staged.commit(&op.abs_path, tuning.durability).await?;
