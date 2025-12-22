@@ -41,6 +41,7 @@ pub(crate) struct ApplyBatchOutcome {
     pub(crate) aborted: Option<AbortReason>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_ops(
     ops: Vec<PlannedOp>,
     checkout_root: &Path,
@@ -156,6 +157,7 @@ fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> FileFailure {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_one(
     op: PlannedOp,
     checkout_root: &Path,
@@ -320,6 +322,7 @@ async fn apply_one(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_full(
     _checkout_root: &Path,
     remote: Arc<dyn RemoteRepo>,
@@ -359,8 +362,13 @@ async fn apply_full(
         if cancel.is_cancelled() {
             anyhow::bail!("cancelled");
         }
+        let expected = op.target.size;
+        let next = written.saturating_add(chunk.len() as u64);
+        if next > expected {
+            anyhow::bail!("download exceeded expected size");
+        }
         f.write_all(&chunk).await?;
-        written = written.saturating_add(chunk.len() as u64);
+        written = next;
         if tuning.emit_progress {
             sink.push(SyncEvent::FileProgress {
                 mod_id: op.mod_id.clone(),
@@ -371,10 +379,21 @@ async fn apply_full(
         }
     }
 
+    if written != op.target.size {
+        anyhow::bail!(
+            "download size mismatch (got {}, expected {})",
+            written,
+            op.target.size
+        );
+    }
+
     f.flush().await?;
     maybe_fsync(&mut f, tuning.durability).await?;
     drop(f);
 
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     {
         let tmp_path = staged.tmp_path.clone();
         let target = op.target.clone();
@@ -388,6 +407,9 @@ async fn apply_full(
         .context("verify downloaded file")?;
     }
 
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
@@ -418,6 +440,7 @@ async fn patch_baseline_ok(path: &Path, expected_size: u64) -> Result<bool> {
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_patch(
     _checkout_root: &Path,
     remote: Arc<dyn RemoteRepo>,
@@ -524,6 +547,9 @@ async fn apply_patch(
         maybe_fsync(&mut f, tuning.durability).await?;
     }
 
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     {
         let tmp_path = staged.tmp_path.clone();
         let target = op.target.clone();
@@ -537,6 +563,9 @@ async fn apply_patch(
         .context("verify patched file")?;
     }
 
+    if cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
@@ -570,6 +599,14 @@ fn verify_target(
     target: &super::planner::FileTarget,
     checksummer: &dyn Checksummer,
 ) -> anyhow::Result<()> {
+    let md = std::fs::symlink_metadata(path)?;
+    if md.len() != target.size {
+        anyhow::bail!(
+            "size mismatch before verify (got {}, expected {})",
+            md.len(),
+            target.size
+        );
+    }
     if target.parts.is_empty() {
         let got = checksummer.hash_file(path)?;
         if got != target.file_checksum {

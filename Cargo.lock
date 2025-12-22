@@ -1475,6 +1475,7 @@ dependencies = [
  "sync_engine",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "walkdir",
 ]
 

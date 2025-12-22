@@ -507,6 +507,75 @@ async fn cancellation_during_patch_does_not_commit_partial_results() {
 }
 
 #[tokio::test]
+async fn staging_tmp_files_are_cleaned_up_on_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    let enabled_mods = vec!["@mod".to_string()];
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+
+    let bytes = b"content".to_vec();
+    let manifest = ModManifest {
+        mod_id: "@mod".to_string(),
+        files: vec![FileEntry {
+            rel_path: "file.bin".to_string(),
+            size: bytes.len() as u64,
+            file_checksum: blake3::hash(&bytes).as_bytes().to_vec(),
+            parts: Vec::new(),
+        }],
+    };
+
+    // Remote has manifest but no file bytes -> stages then fails during download.
+    let remote = CountingRemote {
+        supports_ranges: true,
+        manifests: vec![("@mod".to_string(), manifest.clone())]
+            .into_iter()
+            .collect(),
+        files: HashMap::new(),
+        delays_ms: 0,
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
+    let sink = Arc::new(TestSink::default());
+    let cancel = CancellationToken::new();
+
+    let req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: PathBuf::from(root),
+        enabled_mods,
+        tuning: RepairTuning {
+            patch_max_bad_ratio: 0.0,
+            patch_max_fetch_ratio: 0.0,
+            ..Default::default()
+        },
+    };
+
+    let out = engine.repair(req, sink.as_ref(), &cancel).await.unwrap();
+    assert!(!out.ok());
+
+    // No staged temp file litter under @mod.
+    let mod_root = root.join("@mod");
+    if mod_root.exists() {
+        for entry in walkdir::WalkDir::new(&mod_root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let name = entry.file_name().to_string_lossy();
+            assert!(
+                !name.contains(".fleet.tmp."),
+                "found tmp litter: {}",
+                entry.path().display()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn fetch_all_respects_cancellation_and_stops_scheduling() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

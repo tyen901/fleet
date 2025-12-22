@@ -4,10 +4,10 @@
 /// changes internal enums or payload types.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
-    VerifyStarted {
+    CheckStarted {
         repo: String,
     },
-    VerifyFinished {
+    CheckFinished {
         ok: bool,
     },
     RepairStarted {
@@ -20,6 +20,12 @@ pub enum SyncEvent {
     RepairFinished {
         ok: bool,
         skipped: bool,
+    },
+    SyncFreshStarted {
+        repo: String,
+    },
+    SyncFreshFinished {
+        ok: bool,
     },
     RemoteCapabilities {
         supports_ranges: bool,
@@ -100,13 +106,15 @@ impl From<sync_engine::SyncEvent> for SyncEvent {
     fn from(ev: sync_engine::SyncEvent) -> Self {
         use sync_engine::SyncEvent as E;
         match ev {
-            E::VerifyStarted { repo } => SyncEvent::VerifyStarted { repo },
-            E::VerifyFinished { ok } => SyncEvent::VerifyFinished { ok },
+            E::CheckStarted { repo } => SyncEvent::CheckStarted { repo },
+            E::CheckFinished { ok } => SyncEvent::CheckFinished { ok },
             E::RepairStarted { repo } => SyncEvent::RepairStarted { repo },
             E::RepairSkipEvaluated { skippable, reason } => {
                 SyncEvent::RepairSkipEvaluated { skippable, reason }
             }
             E::RepairFinished { ok, skipped } => SyncEvent::RepairFinished { ok, skipped },
+            E::SyncFreshStarted { repo } => SyncEvent::SyncFreshStarted { repo },
+            E::SyncFreshFinished { ok } => SyncEvent::SyncFreshFinished { ok },
             E::RemoteCapabilities { supports_ranges } => {
                 SyncEvent::RemoteCapabilities { supports_ranges }
             }

@@ -232,7 +232,7 @@ pub(crate) async fn run(
                 checksummer.clone(),
                 &req.tuning,
                 sink,
-                &cancel,
+                cancel,
                 applier::ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
                 },

@@ -558,11 +558,16 @@ impl sync_engine::StateStore for FleetIndexStore {
     fn desired_state_get(
         &self,
     ) -> Result<Option<sync_engine::DesiredState>, sync_engine::StoreError> {
-        self.inner
+        let got = self
+            .inner
             .lock()
             .unwrap()
             .get_desired_state()
-            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))?;
+        Ok(got.map(|s| sync_engine::DesiredState {
+            state_id: s.state_id,
+            enabled_mods_hash: s.enabled_mods_hash,
+        }))
     }
 
     fn expected_replace_all_if_digest_changed(
@@ -571,6 +576,14 @@ impl sync_engine::StateStore for FleetIndexStore {
         rows: Vec<sync_engine::ExpectedFile>,
         digest_hex: &str,
     ) -> Result<(), sync_engine::StoreError> {
+        let rows: Vec<fleet_index::ExpectedFile> = rows
+            .into_iter()
+            .map(|r| fleet_index::ExpectedFile {
+                mod_id: r.mod_id,
+                rel_path: r.rel_path,
+                size: r.size,
+            })
+            .collect();
         self.inner
             .lock()
             .unwrap()
@@ -596,7 +609,11 @@ impl sync_engine::StateStore for FleetIndexStore {
             .lock()
             .unwrap()
             .expected_for_each(state_id, |row| {
-                out.push(row);
+                out.push(sync_engine::ExpectedFile {
+                    mod_id: row.mod_id,
+                    rel_path: row.rel_path,
+                    size: row.size,
+                });
                 Ok(())
             })
             .map_err(|e| sync_engine::StoreError::Other(e.to_string()))?;
@@ -609,11 +626,25 @@ impl sync_engine::StateStore for FleetIndexStore {
         mod_id: &str,
     ) -> Result<std::collections::HashMap<String, sync_engine::FileState>, sync_engine::StoreError>
     {
-        self.inner
+        let got = self
+            .inner
             .lock()
             .unwrap()
             .file_state_get_all_for_mod(state_id, mod_id)
-            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))?;
+        Ok(got
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    sync_engine::FileState {
+                        size: v.size,
+                        mtime_ns: sync_engine::TimestampNs(v.mtime_ns),
+                        checksum: v.checksum,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn file_state_apply_batch(
@@ -647,11 +678,16 @@ impl sync_engine::StateStore for FleetIndexStore {
     }
 
     fn verified_get(&self) -> Result<Option<sync_engine::VerifiedState>, sync_engine::StoreError> {
-        self.inner
+        let got = self
+            .inner
             .lock()
             .unwrap()
             .verified_get()
-            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))?;
+        Ok(got.map(|v| sync_engine::VerifiedState {
+            state_id: v.state_id,
+            verified_at: sync_engine::TimestampNs(v.verified_at_ns),
+        }))
     }
 
     fn verified_set(

@@ -5,7 +5,7 @@ use crate::model::FileState;
 use crate::model::StoreError;
 use crate::ports::{RemoteCapabilities, RemoteRepo, StateStore};
 use anyhow::Context;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -33,52 +33,51 @@ pub(crate) async fn fetch_all(
             .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
     }
 
-    let caps = remote
-        .capabilities()
-        .await
-        .map_err(crate::model::EngineError::Remote)?;
+    let caps = tokio::select! {
+        _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
+        caps = remote.capabilities() => caps.map_err(crate::model::EngineError::Remote)?,
+    };
 
     let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
-    let mut tasks = FuturesUnordered::new();
-
-    for mod_id in enabled_mods {
-        if cancel.is_cancelled() {
-            return Err(crate::model::EngineError::Cancelled);
-        }
-        let remote = remote.clone();
-        let permit = tokio::select! {
-            _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
-            permit = sem.clone().acquire_owned() => permit.map_err(|e| crate::model::EngineError::Internal(e.into()))?,
-        };
-        let mod_id = mod_id.clone();
-        let cancel = cancel.clone();
-        tasks.push(tokio::spawn(async move {
-            let _permit = permit;
-            if cancel.is_cancelled() {
-                anyhow::bail!("cancelled");
-            }
-            let manifest = remote
-                .fetch_mod_manifest(&mod_id)
-                .await
-                .with_context(|| format!("fetch manifest for {mod_id}"))?;
-            if manifest.mod_id != mod_id {
-                anyhow::bail!(
-                    "manifest mod_id mismatch (requested {}, got {})",
-                    mod_id,
-                    manifest.mod_id
-                );
-            }
-            let validated = crate::manifest::validate_and_normalize_manifest(manifest)?;
-            Ok::<ValidatedModManifest, anyhow::Error>(validated)
-        }));
-    }
 
     let mut manifests = Vec::new();
-    while let Some(res) = tasks.next().await {
-        if cancel.is_cancelled() {
-            return Err(crate::model::EngineError::Cancelled);
+    let mut stream = futures::stream::iter(enabled_mods.iter().cloned())
+        .map(|mod_id| {
+            let remote = remote.clone();
+            let sem = sem.clone();
+            let cancel = cancel.clone();
+            async move {
+                let permit = tokio::select! {
+                    _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+                    permit = sem.acquire_owned() => permit.map_err(|e| anyhow::anyhow!(e))?,
+                };
+                let _permit = permit;
+
+                let manifest = tokio::select! {
+                    _ = cancel.cancelled() => anyhow::bail!("cancelled"),
+                    m = remote.fetch_mod_manifest(&mod_id) => m.with_context(|| format!("fetch manifest for {mod_id}"))?,
+                };
+                if manifest.mod_id != mod_id {
+                    anyhow::bail!(
+                        "manifest mod_id mismatch (requested {}, got {})",
+                        mod_id,
+                        manifest.mod_id
+                    );
+                }
+                let validated = crate::manifest::validate_and_normalize_manifest(manifest)?;
+                Ok::<ValidatedModManifest, anyhow::Error>(validated)
+            }
+        })
+        .buffer_unordered(max_concurrency.max(1));
+
+    while let Some(next) = stream.next().await {
+        match next {
+            Ok(v) => manifests.push(v),
+            Err(e) if e.to_string().contains("cancelled") || cancel.is_cancelled() => {
+                return Err(crate::model::EngineError::Cancelled);
+            }
+            Err(e) => return Err(crate::model::EngineError::Internal(e)),
         }
-        manifests.push(res.map_err(|e| crate::model::EngineError::Internal(e.into()))??);
     }
 
     manifests.sort_by(|a, b| a.mod_id.cmp(&b.mod_id));

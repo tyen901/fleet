@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
     pub(crate) ops: Vec<PlannedOp>,
+    #[allow(dead_code)]
     pub(crate) total_bytes: u64,
 }
 
@@ -19,6 +20,7 @@ pub(crate) struct PlannedOp {
     pub(crate) rel_path: String,
     pub(crate) abs_path: PathBuf,
     pub(crate) target: FileTarget,
+    #[allow(dead_code)]
     pub(crate) estimated_bytes: u64,
 }
 

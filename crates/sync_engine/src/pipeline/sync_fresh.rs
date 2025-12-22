@@ -162,7 +162,7 @@ pub(crate) async fn run(
             checksummer.clone(),
             &tuning.concurrency,
             sink,
-            &cancel,
+            cancel,
             ApplyOptions {
                 supports_ranges: fetch.capabilities.supports_ranges,
             },
@@ -323,6 +323,7 @@ struct UnknownStats {
     cap_reached: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_unknown_paths(
     checkout_root: &Path,
     quarantine_id: &str,

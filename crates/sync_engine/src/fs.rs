@@ -246,6 +246,12 @@ pub(crate) struct StagedFile {
     pub(crate) tmp_path: PathBuf,
 }
 
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.tmp_path);
+    }
+}
+
 impl StagedFile {
     pub(crate) async fn create_next_to(final_path: &Path) -> anyhow::Result<StagedFile> {
         let parent = final_path

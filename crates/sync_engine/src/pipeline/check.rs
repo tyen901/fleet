@@ -96,7 +96,7 @@ pub(crate) async fn run(
                     if cancel.is_cancelled() {
                         return Err(crate::model::EngineError::Cancelled);
                     }
-                    return Err(crate::model::EngineError::Internal(e.into()));
+                    return Err(crate::model::EngineError::Internal(e));
                 }
             }
 
@@ -131,6 +131,7 @@ pub(crate) async fn run(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_mod(
     req: &CheckRequest,
     store: &dyn StateStore,

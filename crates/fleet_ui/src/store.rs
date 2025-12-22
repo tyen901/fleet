@@ -330,16 +330,12 @@ pub fn reduce(state: &mut AppState, action: Action) {
             push_log(state, ts_s, line);
 
             match ev {
-                SyncEvent::VerifyStarted { repo } => {
-                    set_task(state, &format!("Verify {repo}"), None, true, None)
+                SyncEvent::CheckStarted { repo } => {
+                    set_task(state, &format!("Check {repo}"), None, true, None)
                 }
-                SyncEvent::VerifyFinished { ok } => set_task(
+                SyncEvent::CheckFinished { ok } => set_task(
                     state,
-                    if ok {
-                        "Verify finished"
-                    } else {
-                        "Verify failed"
-                    },
+                    if ok { "Check finished" } else { "Check failed" },
                     None,
                     false,
                     None,
@@ -364,6 +360,20 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     };
                     set_task(state, label, None, false, None);
                 }
+                SyncEvent::SyncFreshStarted { repo } => {
+                    set_task(state, &format!("SyncFresh {repo}"), None, true, None)
+                }
+                SyncEvent::SyncFreshFinished { ok } => set_task(
+                    state,
+                    if ok {
+                        "SyncFresh finished"
+                    } else {
+                        "SyncFresh failed"
+                    },
+                    None,
+                    false,
+                    None,
+                ),
 
                 SyncEvent::ModStarted { mod_id } => {
                     set_task(state, &format!("Mod {mod_id}"), None, true, None)
@@ -563,8 +573,8 @@ fn push_log(state: &mut AppState, ts_s: f64, text: String) {
 
 fn format_sync_event(ev: &SyncEvent) -> String {
     match ev {
-        SyncEvent::VerifyStarted { repo } => format!("VerifyStarted {repo}"),
-        SyncEvent::VerifyFinished { ok } => format!("VerifyFinished ok={ok}"),
+        SyncEvent::CheckStarted { repo } => format!("CheckStarted {repo}"),
+        SyncEvent::CheckFinished { ok } => format!("CheckFinished ok={ok}"),
         SyncEvent::RepairStarted { repo } => format!("RepairStarted {repo}"),
         SyncEvent::RepairSkipEvaluated { skippable, reason } => {
             format!("RepairSkipEvaluated skippable={skippable} reason={reason:?}")
@@ -572,6 +582,8 @@ fn format_sync_event(ev: &SyncEvent) -> String {
         SyncEvent::RepairFinished { ok, skipped } => {
             format!("RepairFinished ok={ok} skipped={skipped}")
         }
+        SyncEvent::SyncFreshStarted { repo } => format!("SyncFreshStarted {repo}"),
+        SyncEvent::SyncFreshFinished { ok } => format!("SyncFreshFinished ok={ok}"),
         SyncEvent::RemoteCapabilities { supports_ranges } => {
             format!("RemoteCapabilities supports_ranges={supports_ranges}")
         }

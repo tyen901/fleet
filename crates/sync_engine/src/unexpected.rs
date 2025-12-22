@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::fs::is_symlink_or_reparse;
 use crate::model::{RepairTuning, UnexpectedPathPolicy};
 use crate::ports::{EventSink, SyncEvent};
@@ -176,9 +178,14 @@ fn build_unexpected_plan(
     let mut expected_prefixes: HashSet<String> = HashSet::new();
     for path in expected_paths {
         let mut cur = PathBuf::new();
-        for comp in path.split('/') {
+        // Directories only: "a/b/c.pbo" -> "a", "a/b"
+        let mut comps = path.split('/').peekable();
+        while let Some(comp) = comps.next() {
             if comp.is_empty() {
                 continue;
+            }
+            if comps.peek().is_none() {
+                break;
             }
             cur.push(comp);
             if let Some(s) = cur.to_str() {

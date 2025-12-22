@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::manifest::ValidatedModManifest;
 use crate::ports::StateStore;
