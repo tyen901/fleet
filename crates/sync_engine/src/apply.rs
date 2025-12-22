@@ -2,7 +2,7 @@ use crate::events::{EventSink, SyncEvent};
 use crate::model::{Checksummer, RepairTuning};
 use crate::plan::{PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
-use crate::staging::StagedFile;
+use crate::fs::StagedFile;
 use crate::util::file_mtime_ns;
 use crate::model::{AbortReason, Durability, FileFailure, RepairReport};
 use crate::ports::RemoteRepo;

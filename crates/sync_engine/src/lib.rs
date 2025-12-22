@@ -13,7 +13,6 @@ pub(crate) mod remote;
 pub(crate) mod safe_fs;
 pub(crate) mod safe_path;
 pub(crate) mod skip_check;
-pub(crate) mod staging;
 pub(crate) mod util;
 pub(crate) mod unexpected;
 pub(crate) mod verify_parts;
