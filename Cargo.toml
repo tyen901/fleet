@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/fleet_app",
-  "crates/fleet_formats",
   "crates/fleet_index",
   "crates/fleet_remote_http",
   "crates/fleet_scan",

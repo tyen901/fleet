@@ -1479,20 +1479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet_formats"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "manifest_types",
- "md5",
- "relative-path",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "fleet_index"
 version = "0.1.0"
 dependencies = [
@@ -1509,7 +1495,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "fleet_formats",
  "futures-core",
  "futures-util",
  "manifest_types",
@@ -1527,8 +1512,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
- "fleet_formats",
+ "manifest_types",
  "md5",
+ "relative-path",
  "thiserror 1.0.69",
  "walkdir",
 ]
@@ -2442,10 +2428,12 @@ dependencies = [
 name = "manifest_types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "hex",
  "md-5",
  "relative-path",
  "serde",
+ "serde_json",
  "thiserror 2.0.17",
 ]
 

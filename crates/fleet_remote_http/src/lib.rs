@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use fleet_formats::compat;
+use manifest_types::compat;
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
 use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
@@ -153,7 +153,7 @@ impl RemoteRepo for HttpRemote {
                     .files
                     .into_iter()
                     .map(|f| FileEntry {
-                        rel_path: f.path.as_str().replace('\\', "/"),
+                        rel_path: f.path.as_str().to_string(),
                         size: f.length,
                         file_checksum: f.checksum.as_bytes().to_vec(),
                         parts: f
@@ -182,7 +182,7 @@ impl RemoteRepo for HttpRemote {
                 .files
                 .into_iter()
                 .map(|f| FileEntry {
-                    rel_path: f.path.as_str().replace('\\', "/"),
+                    rel_path: f.path.as_str().to_string(),
                     size: f.length,
                     file_checksum: f.checksum.as_bytes().to_vec(),
                     parts: f

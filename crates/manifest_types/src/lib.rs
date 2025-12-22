@@ -3,6 +3,8 @@ use relative_path::RelativePathBuf;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
+pub mod compat;
+
 #[derive(thiserror::Error, Debug)]
 pub enum DigestError {
     #[error("invalid hex digest: {0}")]

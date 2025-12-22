@@ -7,7 +7,6 @@ edition = "2021"
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
-fleet_formats = { path = "../fleet_formats" }
 futures-core = "0.3"
 futures-util = "0.3"
 manifest_types = { path = "../manifest_types" }
