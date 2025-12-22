@@ -4,12 +4,13 @@ use crate::model::{EngineError, SyncFreshOutcome, SyncFreshRequest};
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 
 pub(crate) async fn run(
-    req: SyncFreshRequest,
-    remote: Arc<dyn RemoteRepo>,
-    store: Arc<dyn StateStore>,
-    checksummer: Arc<dyn Checksummer>,
-    sink: &dyn EventSink,
+    _req: SyncFreshRequest,
+    _remote: Arc<dyn RemoteRepo>,
+    _store: Arc<dyn StateStore>,
+    _checksummer: Arc<dyn Checksummer>,
+    _sink: &dyn EventSink,
 ) -> Result<SyncFreshOutcome, EngineError> {
-    crate::flows::sync_fresh(req, remote, store, checksummer, sink).await
+    Err(EngineError::InvalidInput(
+        "sync_fresh not implemented".to_string(),
+    ))
 }
-
