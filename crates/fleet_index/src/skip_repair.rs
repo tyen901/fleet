@@ -5,6 +5,7 @@ use crate::store::file_mtime_ns;
 use crate::types::IndexError;
 use crate::FleetIndex;
 use rusqlite::params;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -57,6 +58,16 @@ pub struct SkipRepairEvidence {
     pub issues: Vec<LocalIssue>,
 }
 
+#[derive(Clone)]
+struct ExpectedRow {
+    mod_id: String,
+    rel_norm: String,
+    expected_size: u64,
+    cached_size: Option<i64>,
+    cached_mtime: Option<i64>,
+    cached_checksum: Option<Vec<u8>>,
+}
+
 impl FleetIndex {
     pub fn evaluate_skip_repair(
         &self,
@@ -78,14 +89,7 @@ impl FleetIndex {
             state_id: Some(desired.state_id.clone()),
             verified_state_id: verified.as_ref().map(|v| v.state_id.clone()),
             verified_at_ns: verified.as_ref().map(|v| v.verified_at_ns),
-            expected_files: 0,
-            local_missing: 0,
-            local_wrong_size: 0,
-            local_not_a_file: 0,
-            local_unsafe_path: 0,
-            cache_missing: 0,
-            mtime_mismatch: 0,
-            issues: Vec::new(),
+            ..Default::default()
         };
 
         let Some(verified_state) = verified else {
@@ -121,6 +125,7 @@ impl FleetIndex {
         )?;
 
         let mut rows = stmt.query(params![desired.state_id])?;
+        let mut all: Vec<ExpectedRow> = Vec::new();
         while let Some(row) = rows.next()? {
             let mod_id: String = row.get(0)?;
             let rel_path: String = row.get(1)?;
@@ -148,10 +153,39 @@ impl FleetIndex {
                 continue;
             }
 
-            let abs_path = checkout_root.join(&mod_id).join(&rel_norm);
-            // Critical: prevent "skip" when any ancestor is a symlink/reparse-point.
-            // This is the exact hole that allowed repair() to incorrectly succeed via skip.
-            let mod_root = checkout_root.join(&mod_id);
+            all.push(ExpectedRow {
+                mod_id,
+                rel_norm,
+                expected_size,
+                cached_size: row.get(3)?,
+                cached_mtime: row.get(4)?,
+                cached_checksum: row.get(5)?,
+            });
+        }
+
+        // Auto-fix casing silently as a pre-step (per mod) so skip evidence isn't polluted by casing artifacts.
+        let mut expected_by_mod: HashMap<String, Vec<(String, u64, Option<Vec<u8>>)>> =
+            HashMap::new();
+        for r in &all {
+            expected_by_mod
+                .entry(r.mod_id.clone())
+                .or_default()
+                .push((r.rel_norm.clone(), r.expected_size, None));
+        }
+        let sweep_tuning = fleet_fs_case::CaseFixTuning::default();
+        for (mod_id, expected) in &expected_by_mod {
+            let _ = fleet_fs_case::case_sweep_and_fix(
+                checkout_root,
+                mod_id,
+                expected,
+                &sweep_tuning,
+                None,
+            );
+        }
+
+        for r in all {
+            let abs_path = checkout_root.join(&r.mod_id).join(&r.rel_norm);
+            let mod_root = checkout_root.join(&r.mod_id);
             if let Some(parent) = abs_path.parent() {
                 if ensure_no_symlink_ancestors(&mod_root, parent).is_err() {
                     evidence.local_unsafe_path += 1;
@@ -159,14 +193,15 @@ impl FleetIndex {
                         &mut evidence.issues,
                         policy.max_issues,
                         LocalIssue {
-                            mod_id,
-                            rel_path: rel_norm,
+                            mod_id: r.mod_id.clone(),
+                            rel_path: r.rel_norm,
                             kind: LocalIssueKind::UnsafePath,
                         },
                     );
                     continue;
                 }
             }
+
             let metadata = match std::fs::symlink_metadata(&abs_path) {
                 Ok(md) => {
                     let ft = md.file_type();
@@ -176,8 +211,8 @@ impl FleetIndex {
                             &mut evidence.issues,
                             policy.max_issues,
                             LocalIssue {
-                                mod_id,
-                                rel_path: rel_norm,
+                                mod_id: r.mod_id.clone(),
+                                rel_path: r.rel_norm,
                                 kind: LocalIssueKind::NotAFile,
                             },
                         );
@@ -191,8 +226,8 @@ impl FleetIndex {
                         &mut evidence.issues,
                         policy.max_issues,
                         LocalIssue {
-                            mod_id,
-                            rel_path: rel_norm,
+                            mod_id: r.mod_id.clone(),
+                            rel_path: r.rel_norm,
                             kind: LocalIssueKind::Missing,
                         },
                     );
@@ -202,16 +237,16 @@ impl FleetIndex {
             };
 
             let got_size = metadata.len();
-            if got_size != expected_size {
+            if got_size != r.expected_size {
                 evidence.local_wrong_size += 1;
                 push_issue(
                     &mut evidence.issues,
                     policy.max_issues,
                     LocalIssue {
-                        mod_id,
-                        rel_path: rel_norm,
+                        mod_id: r.mod_id.clone(),
+                        rel_path: r.rel_norm,
                         kind: LocalIssueKind::WrongSize {
-                            expected: expected_size,
+                            expected: r.expected_size,
                             got: got_size,
                         },
                     },
@@ -219,10 +254,7 @@ impl FleetIndex {
                 continue;
             }
 
-            let cached_size: Option<i64> = row.get(3)?;
-            let cached_mtime: Option<i64> = row.get(4)?;
-            let cached_checksum: Option<Vec<u8>> = row.get(5)?;
-            if cached_size.is_none() || cached_mtime.is_none() || cached_checksum.is_none() {
+            if r.cached_size.is_none() || r.cached_mtime.is_none() || r.cached_checksum.is_none() {
                 evidence.cache_missing += 1;
                 continue;
             }
@@ -232,7 +264,7 @@ impl FleetIndex {
                 continue;
             };
 
-            if Some(actual_mtime_ns) != cached_mtime {
+            if Some(actual_mtime_ns) != r.cached_mtime {
                 evidence.mtime_mismatch += 1;
             }
         }
@@ -269,3 +301,4 @@ fn push_issue(issues: &mut Vec<LocalIssue>, max: usize, issue: LocalIssue) {
         issues.push(issue);
     }
 }
+

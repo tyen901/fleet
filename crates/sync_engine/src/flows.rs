@@ -176,6 +176,32 @@ pub async fn repair(
                 mod_id: manifest.mod_id.clone(),
             });
 
+            if req.tuning.auto_fix_case {
+                let checkout_root = req.checkout_root.clone();
+                let mod_id = manifest.mod_id.clone();
+                let expected: Vec<(String, u64, Option<Vec<u8>>)> = manifest
+                    .files
+                    .iter()
+                    .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
+                    .collect();
+                let checksummer = req.checksummer.clone();
+                let tuning = fleet_fs_case::CaseFixTuning::default();
+                let _ = tokio::task::spawn_blocking(move || {
+                    fleet_fs_case::case_sweep_and_fix(
+                        &checkout_root,
+                        &mod_id,
+                        &expected,
+                        &tuning,
+                        Some(&|p| {
+                            checksummer
+                                .hash_file(p)
+                                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                        }),
+                    )
+                })
+                .await??;
+            }
+
             let cache = if req.tuning.use_index {
                 build_cache_snapshot(idx, &desired.state_id, manifest)?
             } else {
@@ -349,13 +375,42 @@ async fn verify_mod(
     report: &mut VerifyReport,
     sink: Arc<dyn EventSink>,
 ) -> Result<()> {
+    if req.tuning.auto_fix_case {
+        let checkout_root = req.checkout_root.clone();
+        let mod_id = manifest.mod_id.clone();
+        let expected: Vec<(String, u64, Option<Vec<u8>>)> = manifest
+            .files
+            .iter()
+            .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
+            .collect();
+        let checksummer = req.checksummer.clone();
+        let tuning = fleet_fs_case::CaseFixTuning::default();
+        let _ = tokio::task::spawn_blocking(move || {
+            fleet_fs_case::case_sweep_and_fix(
+                &checkout_root,
+                &mod_id,
+                &expected,
+                &tuning,
+                Some(&|p| {
+                    checksummer
+                        .hash_file(p)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                }),
+            )
+        })
+        .await??;
+    }
+
     let sem = Arc::new(tokio::sync::Semaphore::new(
         req.tuning.scan_concurrency.max(1),
     ));
     let mut tasks = futures::stream::FuturesUnordered::new();
 
+    report.expected_files = report
+        .expected_files
+        .saturating_add(manifest.files.len() as u64);
+
     for file in &manifest.files {
-        report.expected_files += 1;
         let mod_id = manifest.mod_id.clone();
         let rel_path = file.rel_path.clone();
         let permit = sem.clone().acquire_owned().await?;
@@ -420,8 +475,8 @@ fn verify_one_file(
         }
     };
 
-    let mod_root = checkout_root.join(mod_id);
     if let Some(parent) = abs_path.parent() {
+        let mod_root = checkout_root.join(mod_id);
         if let Err(err) = ensure_no_symlink_ancestors(&mod_root, parent) {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
@@ -493,9 +548,7 @@ fn verify_one_file(
         .unwrap_or(0);
 
     if let Some(cached) = cached {
-        if cached.size == file.size
-            && cached.mtime_ns == mtime_ns
-            && cached.checksum == file.file_checksum
+        if cached.size == file.size && cached.mtime_ns == mtime_ns && cached.checksum == file.file_checksum
         {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
@@ -527,7 +580,9 @@ fn verify_one_file(
                 unsafe_message: None,
             });
         }
-    } else if let Some((offset, len)) = first_part_mismatch(&abs_path, &file.parts, checksummer)? {
+    } else if let Some((offset, len)) =
+        first_part_mismatch(&abs_path, &file.parts, checksummer)?
+    {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),

@@ -420,6 +420,7 @@ impl FleetApp {
                     max_quarantine_bytes: None,
                     use_index: tuning.use_index,
                     emit_progress: true,
+                    auto_fix_case: sync_engine::types::RepairTuning::default().auto_fix_case,
                 };
 
                 let sink = SyncEventSink { tx: ev_tx.clone() };

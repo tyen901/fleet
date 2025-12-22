@@ -29,6 +29,7 @@ pub struct VerifyTuning {
     pub scan_concurrency: usize,
     pub max_issues: usize,
     pub use_index: bool,
+    pub auto_fix_case: bool,
 }
 
 impl Default for VerifyTuning {
@@ -37,6 +38,7 @@ impl Default for VerifyTuning {
             scan_concurrency: 6,
             max_issues: 500,
             use_index: true,
+            auto_fix_case: true,
         }
     }
 }
@@ -57,6 +59,7 @@ pub struct RepairTuning {
 
     pub use_index: bool,
     pub emit_progress: bool,
+    pub auto_fix_case: bool,
 }
 
 impl Default for RepairTuning {
@@ -73,6 +76,7 @@ impl Default for RepairTuning {
             max_quarantine_bytes: None,
             use_index: true,
             emit_progress: true,
+            auto_fix_case: true,
         }
     }
 }

@@ -1479,10 +1479,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet_fs_case"
+version = "0.1.0"
+dependencies = [
+ "walkdir",
+]
+
+[[package]]
 name = "fleet_index"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "fleet_fs_case",
  "rusqlite",
  "tempfile",
  "thiserror 1.0.69",
@@ -3942,6 +3950,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "fleet_fs_case",
  "fleet_index",
  "futures",
  "tempfile",

@@ -986,6 +986,234 @@ async fn verify_then_repair_skips_without_remote_fetch() {
 }
 
 #[tokio::test]
+async fn repair_fixes_mod_dir_case_without_downloading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let on_disk_mod = root.join("@ACE");
+    std::fs::create_dir_all(&on_disk_mod).unwrap();
+
+    let data = b"content".to_vec();
+    std::fs::write(on_disk_mod.join("file.bin"), &data).unwrap();
+
+    let manifest = build_manifest("@ace", "file.bin", &data, 4);
+    let remote = FakeRemote {
+        supports_ranges: true,
+        manifests: vec![("@ace".to_string(), manifest.clone())]
+            .into_iter()
+            .collect(),
+        files: vec![(("@ace".to_string(), "file.bin".to_string()), data.clone())]
+            .into_iter()
+            .collect(),
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let mut idx = FleetIndex::open_in_memory().unwrap();
+    let enabled_mods = vec!["@ace".to_string()];
+    let mut enabled_sorted = enabled_mods.clone();
+    enabled_sorted.sort();
+    let repo_id = fleet_index::normalize_repo_id("abcd");
+    let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    idx.set_desired_state(DesiredState {
+        repo_url: "http://example".to_string(),
+        repo_id,
+        enabled_mods_hash: enabled_hash,
+        state_id,
+        updated_at_unix_s: 1,
+    })
+    .unwrap();
+
+    let sink = Arc::new(TestSink::default());
+    let repair_req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods,
+        remote: Arc::new(remote.clone()),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: RepairTuning::default(),
+    };
+    let outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+
+    assert!(outcome.ok());
+    assert_eq!(outcome.report.files_downloaded, 0);
+    let res = fleet_fs_case::resolve_mod_dir(root, "@ace").unwrap();
+    assert_eq!(res.matches, vec!["@ace".to_string()]);
+    assert!(!res.has_case_mismatch());
+}
+
+#[tokio::test]
+async fn verify_auto_fixes_file_path_case_mismatch_and_does_not_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(mod_root.join("addons")).unwrap();
+
+    let data = b"pbo".to_vec();
+    std::fs::write(mod_root.join("addons/a.pbo"), &data).unwrap();
+
+    let manifest = build_manifest("@mod", "Addons/A.pbo", &data, 4);
+    let remote = FakeRemote {
+        supports_ranges: true,
+        manifests: vec![("@mod".to_string(), manifest.clone())]
+            .into_iter()
+            .collect(),
+        files: vec![(("@mod".to_string(), "Addons/A.pbo".to_string()), data.clone())]
+            .into_iter()
+            .collect(),
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let mut idx = FleetIndex::open_in_memory().unwrap();
+    let enabled_mods = vec!["@mod".to_string()];
+    let mut enabled_sorted = enabled_mods.clone();
+    enabled_sorted.sort();
+    let repo_id = fleet_index::normalize_repo_id("abcd");
+    let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    idx.set_desired_state(DesiredState {
+        repo_url: "http://example".to_string(),
+        repo_id,
+        enabled_mods_hash: enabled_hash,
+        state_id: state_id.clone(),
+        updated_at_unix_s: 1,
+    })
+    .unwrap();
+
+    let sink = Arc::new(TestSink::default());
+    let verify_req = VerifyRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods: enabled_mods.clone(),
+        remote: Arc::new(remote.clone()),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: VerifyTuning::default(),
+    };
+    let report = sync_engine::flows::verify(verify_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+    assert!(report.ok);
+
+    let remote_calls_before = (
+        remote.fetch_file_calls.load(Ordering::Relaxed),
+        remote.fetch_range_calls.load(Ordering::Relaxed),
+    );
+
+    let repair_req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods,
+        remote: Arc::new(remote.clone()),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: RepairTuning::default(),
+    };
+    let outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+    assert!(outcome.ok());
+
+    let idx_case = fleet_fs_case::build_case_index(&root.join("@mod")).unwrap();
+    let key = fleet_fs_case::case_key("Addons/A.pbo");
+    assert_eq!(
+        idx_case.files.get(&key).cloned(),
+        Some(vec!["Addons/A.pbo".to_string()])
+    );
+
+    assert_eq!(
+        (
+            remote.fetch_file_calls.load(Ordering::Relaxed),
+            remote.fetch_range_calls.load(Ordering::Relaxed)
+        ),
+        remote_calls_before,
+        "case-only repair should not download file data"
+    );
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn verify_auto_resolves_collision_and_does_not_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(mod_root.join("Addons")).unwrap();
+    std::fs::create_dir_all(mod_root.join("addons")).unwrap();
+
+    let canonical = b"canonical".to_vec();
+    let loser = b"loser".to_vec();
+    std::fs::write(mod_root.join("Addons/A.pbo"), &canonical).unwrap();
+    std::fs::write(mod_root.join("addons/a.pbo"), &loser).unwrap();
+
+    let manifest = build_manifest("@mod", "Addons/A.pbo", &canonical, 4);
+    let remote = FakeRemote {
+        supports_ranges: true,
+        manifests: vec![("@mod".to_string(), manifest.clone())]
+            .into_iter()
+            .collect(),
+        files: vec![(("@mod".to_string(), "Addons/A.pbo".to_string()), canonical)]
+            .into_iter()
+            .collect(),
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let mut idx = FleetIndex::open_in_memory().unwrap();
+    let enabled_mods = vec!["@mod".to_string()];
+    let mut enabled_sorted = enabled_mods.clone();
+    enabled_sorted.sort();
+    let repo_id = fleet_index::normalize_repo_id("abcd");
+    let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
+    let state_id = fleet_index::state_id(&repo_id, &enabled_hash);
+    idx.set_desired_state(DesiredState {
+        repo_url: "http://example".to_string(),
+        repo_id,
+        enabled_mods_hash: enabled_hash,
+        state_id,
+        updated_at_unix_s: 1,
+    })
+    .unwrap();
+
+    let sink = Arc::new(TestSink::default());
+    let verify_req = VerifyRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods: enabled_mods.clone(),
+        remote: Arc::new(remote.clone()),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: VerifyTuning::default(),
+    };
+    let report = sync_engine::flows::verify(verify_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+    assert!(report.ok);
+
+    let repair_req = RepairRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: root.to_path_buf(),
+        enabled_mods,
+        remote: Arc::new(remote.clone()),
+        checksummer: Arc::new(TestChecksummer),
+        tuning: RepairTuning::default(),
+    };
+    let outcome = sync_engine::flows::repair(repair_req, &mut idx, sink.clone())
+        .await
+        .unwrap();
+    assert!(outcome.ok());
+
+    let idx_case = fleet_fs_case::build_case_index(&root.join("@mod")).unwrap();
+    let key = fleet_fs_case::case_key("Addons/A.pbo");
+    assert_eq!(
+        idx_case.files.get(&key).cloned(),
+        Some(vec!["Addons/A.pbo".to_string()])
+    );
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn unsafe_on_disk_verify_reports_and_repair_aborts_even_if_cached() {
     let tmp = tempfile::tempdir().unwrap();

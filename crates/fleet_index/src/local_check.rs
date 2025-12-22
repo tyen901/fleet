@@ -2,6 +2,7 @@ use crate::path_safety::{normalize_rel_path, validate_mod_id, validate_rel_path}
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::types::IndexError;
 use crate::FleetIndex;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -76,37 +77,61 @@ impl FleetIndex {
             issues: Vec::new(),
         };
 
+        // Auto-fix casing silently as a pre-step (per mod) so checks aren't polluted by casing artifacts.
+        let mut expected_by_mod: HashMap<String, Vec<(String, u64, Option<Vec<u8>>)>> =
+            HashMap::new();
+        self.expected_for_each(&desired.state_id, |expected| {
+            expected_by_mod
+                .entry(expected.mod_id.clone())
+                .or_default()
+                .push((expected.rel_path.clone(), expected.size, None));
+            Ok(())
+        })?;
+        let sweep_tuning = fleet_fs_case::CaseFixTuning::default();
+        for (mod_id, expected) in &expected_by_mod {
+            let _ = fleet_fs_case::case_sweep_and_fix(
+                checkout_root,
+                mod_id,
+                expected,
+                &sweep_tuning,
+                None,
+            );
+        }
+
         self.expected_for_each(&desired.state_id, |expected| {
             report.expected_files += 1;
 
             let mod_id = expected.mod_id.clone();
             let rel_norm = normalize_rel_path(&expected.rel_path);
 
-            if let Err(_err) = validate_mod_id(&mod_id).and_then(|_| validate_rel_path(&rel_norm)) {
-                report.unsafe_path += 1;
-                push_issue(
-                    &mut report.issues,
-                    opts.max_issues,
-                    LocalIssue {
-                        mod_id,
-                        rel_path: rel_norm,
-                        kind: LocalIssueKind::UnsafePath,
-                    },
-                );
-                return Ok(());
-            }
+                if let Err(_err) =
+                    validate_mod_id(&mod_id).and_then(|_| validate_rel_path(&rel_norm))
+                {
+                    report.unsafe_path += 1;
+                    push_issue(
+                        &mut report.issues,
+                        opts.max_issues,
+                        LocalIssue {
+                            mod_id: mod_id.clone(),
+                            rel_path: rel_norm,
+                            kind: LocalIssueKind::UnsafePath,
+                        },
+                    );
+                    return Ok(());
+                }
 
             let abs_path = checkout_root.join(&mod_id).join(&rel_norm);
+
             // Mirror the operational rule: ancestor symlink/reparse-point is unsafe-on-disk.
-            let mod_root = checkout_root.join(&mod_id);
             if let Some(parent) = abs_path.parent() {
+                let mod_root = checkout_root.join(&mod_id);
                 if ensure_no_symlink_ancestors(&mod_root, parent).is_err() {
                     report.unsafe_path += 1;
                     push_issue(
                         &mut report.issues,
                         opts.max_issues,
                         LocalIssue {
-                            mod_id,
+                            mod_id: mod_id.clone(),
                             rel_path: rel_norm,
                             kind: LocalIssueKind::UnsafePath,
                         },
@@ -122,13 +147,13 @@ impl FleetIndex {
                         push_issue(
                             &mut report.issues,
                             opts.max_issues,
-                            LocalIssue {
-                                mod_id,
-                                rel_path: rel_norm,
-                                kind: LocalIssueKind::NotAFile,
-                            },
-                        );
-                        return Ok(());
+                        LocalIssue {
+                            mod_id: mod_id.clone(),
+                            rel_path: rel_norm,
+                            kind: LocalIssueKind::NotAFile,
+                        },
+                    );
+                    return Ok(());
                     }
 
                     let got = md.len();
@@ -137,12 +162,12 @@ impl FleetIndex {
                         push_issue(
                             &mut report.issues,
                             opts.max_issues,
-                            LocalIssue {
-                                mod_id,
-                                rel_path: rel_norm,
-                                kind: LocalIssueKind::WrongSize {
-                                    expected: expected.size,
-                                    got,
+                        LocalIssue {
+                            mod_id: mod_id.clone(),
+                            rel_path: rel_norm,
+                            kind: LocalIssueKind::WrongSize {
+                                expected: expected.size,
+                                got,
                                 },
                             },
                         );
@@ -157,7 +182,7 @@ impl FleetIndex {
                         &mut report.issues,
                         opts.max_issues,
                         LocalIssue {
-                            mod_id,
+                            mod_id: mod_id.clone(),
                             rel_path: rel_norm,
                             kind: LocalIssueKind::Missing,
                         },
