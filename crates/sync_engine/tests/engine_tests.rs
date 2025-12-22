@@ -246,6 +246,8 @@ fn planner_strategy_selection_respects_ratio_and_part_caps() {
             corrupt_prefix_bytes: 10, // 10/100 = 0.10
             tuning: RepairTuning {
                 patch_max_bad_ratio: 0.3,
+                patch_min_range_bytes: 0,
+                patch_max_fetch_ratio: 1.0,
                 ..Default::default()
             },
             expect: RepairStrategy::Patch,
@@ -256,6 +258,8 @@ fn planner_strategy_selection_respects_ratio_and_part_caps() {
             corrupt_prefix_bytes: 60, // 60/100 = 0.60
             tuning: RepairTuning {
                 patch_max_bad_ratio: 0.3,
+                patch_min_range_bytes: 0,
+                patch_max_fetch_ratio: 1.0,
                 ..Default::default()
             },
             expect: RepairStrategy::Full,
@@ -267,6 +271,8 @@ fn planner_strategy_selection_respects_ratio_and_part_caps() {
             tuning: RepairTuning {
                 patch_max_bad_ratio: 0.9,
                 patch_max_bad_parts: Some(1),
+                patch_min_range_bytes: 0,
+                patch_max_fetch_ratio: 1.0,
                 ..Default::default()
             },
             expect: RepairStrategy::Full,
@@ -580,6 +586,8 @@ async fn patch_event_totals_are_consistent() {
 
     let tuning = RepairTuning {
         patch_max_bad_ratio: 0.5,
+        patch_min_range_bytes: 0,
+        patch_max_fetch_ratio: 1.0,
         ..Default::default()
     };
     let checksummer = TestChecksummer;
@@ -673,6 +681,8 @@ async fn patch_falls_back_to_full_when_remote_lacks_range_support() {
 
     let tuning = RepairTuning {
         patch_max_bad_ratio: 0.9,
+        patch_min_range_bytes: 0,
+        patch_max_fetch_ratio: 1.0,
         ..Default::default()
     };
     let checksummer = TestChecksummer;

@@ -414,6 +414,14 @@ impl FleetApp {
                     scan_concurrency: sync_engine::types::RepairTuning::default().scan_concurrency,
                     patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
                     patch_max_bad_parts: Some(tuning.full_download_part_threshold),
+                    patch_merge_gap_bytes: sync_engine::types::RepairTuning::default()
+                        .patch_merge_gap_bytes,
+                    patch_min_range_bytes: sync_engine::types::RepairTuning::default()
+                        .patch_min_range_bytes,
+                    patch_max_fetch_ratio: sync_engine::types::RepairTuning::default()
+                        .patch_max_fetch_ratio,
+                    patch_max_range_requests: sync_engine::types::RepairTuning::default()
+                        .patch_max_range_requests,
                     durability: sync_engine::types::Durability::BestEffort,
                     quarantine: true,
                     delete_empty_dirs: true,

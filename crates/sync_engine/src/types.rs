@@ -51,6 +51,17 @@ pub struct RepairTuning {
 
     pub patch_max_bad_ratio: f32,
     pub patch_max_bad_parts: Option<usize>,
+    /// Merge ranges when the gap between them is <= this many bytes. The gap bytes may be
+    /// re-downloaded even if they are correct locally, to reduce HTTP request count.
+    pub patch_merge_gap_bytes: u64,
+    /// Enforce a minimum request size for patch range downloads. Smaller ranges are expanded
+    /// (bounded by file size) to amortize per-request overhead.
+    pub patch_min_range_bytes: u64,
+    /// If the total bytes fetched by patch (after coalescing/expansion) exceeds this ratio of
+    /// file size, prefer Full.
+    pub patch_max_fetch_ratio: f32,
+    /// If patch would require too many HTTP range requests (after coalescing), prefer Full.
+    pub patch_max_range_requests: Option<usize>,
     pub durability: Durability,
 
     pub quarantine: bool,
@@ -70,6 +81,10 @@ impl Default for RepairTuning {
             scan_concurrency: 6,
             patch_max_bad_ratio: 0.30,
             patch_max_bad_parts: None,
+            patch_merge_gap_bytes: 4 * 1024,
+            patch_min_range_bytes: 64 * 1024,
+            patch_max_fetch_ratio: 0.60,
+            patch_max_range_requests: Some(64),
             durability: Durability::BestEffort,
             quarantine: true,
             delete_empty_dirs: true,

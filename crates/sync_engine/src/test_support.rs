@@ -40,6 +40,7 @@ pub struct MockRemoteRepo {
     manifests: Mutex<HashMap<String, ModManifest>>,
     files: Mutex<HashMap<(String, String), Bytes>>,
     chunk_size: usize,
+    range_calls: Mutex<Vec<(String, String, u64, u64)>>,
 }
 
 impl MockRemoteRepo {
@@ -51,7 +52,12 @@ impl MockRemoteRepo {
             manifests: Mutex::new(HashMap::new()),
             files: Mutex::new(HashMap::new()),
             chunk_size,
+            range_calls: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn range_calls(&self) -> Vec<(String, String, u64, u64)> {
+        self.range_calls.lock().unwrap().clone()
     }
 
     pub fn with_manifest(self, manifest: ModManifest) -> Self {
@@ -128,6 +134,12 @@ impl RemoteRepo for MockRemoteRepo {
         offset: u64,
         len: u64,
     ) -> Result<RemoteStream> {
+        self.range_calls.lock().unwrap().push((
+            mod_id.to_string(),
+            rel_path.to_string(),
+            offset,
+            len,
+        ));
         let b = self
             .files
             .lock()
