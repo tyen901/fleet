@@ -1,6 +1,6 @@
 use crate::{store, store::SettingsState, ui_kit::UiKit, update, widgets};
 use eframe::egui;
-use fleet_app::{LaunchMode, SyncTuning};
+use fleet_app::{LaunchMode, SafeWipePolicy, SyncMode, SyncTuning, UnknownPathPolicy};
 
 pub enum SettingsCmd {
     Save(SyncTuning),
@@ -30,77 +30,217 @@ pub fn draw(
             ui.add(widgets::Divider::new(kit));
             ui.add_space(kit.theme.spacing.sm);
 
-            section(ui, kit, "Sync tuning", |ui| {
-                egui::Grid::new("settings_sync_tuning_grid")
-                    .num_columns(2)
-                    .spacing([kit.layout.gap, kit.theme.spacing.sm])
-                    .show(ui, |ui| {
-                        key(ui, kit, "Full download part threshold");
-                        ui.add(
-                            egui::DragValue::new(&mut s.draft.full_download_part_threshold)
-                                .speed(1)
-                                .range(1..=100_000),
-                        );
-                        ui.end_row();
-
-                        key(ui, kit, "Full download byte ratio threshold");
-                        ui.add(
-                            egui::DragValue::new(&mut s.draft.full_download_byte_ratio_threshold)
-                                .speed(0.01)
-                                .range(0.0..=1.0)
-                                .fixed_decimals(2),
-                        );
-                        ui.end_row();
-
-                        key(ui, kit, "Max concurrent files (0 = default)");
-                        let mut max_files = s.draft.max_concurrent_files.unwrap_or(0) as i64;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut max_files)
-                                    .speed(1)
-                                    .range(0..=10_000),
-                            )
-                            .changed()
-                        {
-                            s.draft.max_concurrent_files =
-                                (max_files > 0).then_some(max_files as usize);
-                        }
-                        ui.end_row();
-
-                        key(ui, kit, "Max concurrent range requests (0 = default)");
-                        let mut max_ranges =
-                            s.draft.max_concurrent_range_requests.unwrap_or(0) as i64;
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut max_ranges)
-                                    .speed(1)
-                                    .range(0..=10_000),
-                            )
-                            .changed()
-                        {
-                            s.draft.max_concurrent_range_requests =
-                                (max_ranges > 0).then_some(max_ranges as usize);
-                        }
-                        ui.end_row();
-
-                        key(ui, kit, "I/O buffer bytes");
-                        ui.add(
-                            egui::DragValue::new(&mut s.draft.io_buffer_bytes)
-                                .speed(65536)
-                                .range(64 * 1024..=256 * 1024 * 1024),
-                        );
-                        ui.end_row();
-
-                        key(ui, kit, "Use local index");
-                        ui.checkbox(&mut s.draft.use_index, "");
-                        ui.end_row();
-                    });
-
-                ui.add_space(kit.theme.spacing.sm);
+            section(ui, kit, "Sync", |ui| {
                 ui.add(widgets::InlineHint::new(
                     kit,
-                    "These settings are in-memory and affect future Sync runs.",
+                    "These settings affect future Sync runs. Repair uses patch downloads when possible; Sync fresh performs a safe wipe and redownload of expected files.",
                 ));
+                ui.add_space(kit.theme.spacing.sm);
+
+                ui.add(widgets::FieldLabel::new(kit, "Sync mode"));
+                ui.radio_value(&mut s.draft.mode, SyncMode::Repair, "Repair");
+                ui.radio_value(&mut s.draft.mode, SyncMode::SyncFresh, "Sync fresh");
+
+                ui.add_space(kit.layout.gap);
+                ui.add(widgets::Divider::new(kit));
+                ui.add_space(kit.theme.spacing.sm);
+
+                egui::CollapsingHeader::new("Repair tuning (patch planner + fallback)")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add_space(kit.theme.spacing.sm);
+
+                        egui::Grid::new("settings_repair_grid")
+                            .num_columns(2)
+                            .spacing([kit.layout.gap, kit.theme.spacing.sm])
+                            .show(ui, |ui| {
+                                key(ui, kit, "Fallback: max bad parts (exceed ⇒ full)");
+                                ui.add(
+                                    egui::DragValue::new(&mut s.draft.full_download_part_threshold)
+                                        .speed(1)
+                                        .range(1..=1_000_000),
+                                );
+                                ui.end_row();
+
+                                key(ui, kit, "Fallback: max bad bytes ratio (exceed ⇒ full)");
+                                ui.add(
+                                    egui::DragValue::new(
+                                        &mut s.draft.full_download_byte_ratio_threshold,
+                                    )
+                                    .speed(0.01)
+                                    .range(0.0..=1.0)
+                                    .fixed_decimals(2),
+                                );
+                                ui.end_row();
+
+                                key(ui, kit, "Patch: max fetch ratio (fetch/file_size)");
+                                ui.add(
+                                    egui::DragValue::new(&mut s.draft.patch_max_fetch_ratio)
+                                        .speed(0.01)
+                                        .range(0.0..=5.0)
+                                        .fixed_decimals(2),
+                                );
+                                ui.end_row();
+
+                                key(ui, kit, "Patch: merge gap bytes");
+                                ui.add(
+                                    egui::DragValue::new(&mut s.draft.patch_merge_gap_bytes)
+                                        .speed(1024)
+                                        .range(0..=512 * 1024 * 1024),
+                                );
+                                ui.end_row();
+
+                                key(ui, kit, "Patch: min range bytes");
+                                ui.add(
+                                    egui::DragValue::new(&mut s.draft.patch_min_range_bytes)
+                                        .speed(1024)
+                                        .range(0..=512 * 1024 * 1024),
+                                );
+                                ui.end_row();
+
+                                key(ui, kit, "Patch: max range requests (0 = default)");
+                                let mut max_rr = s.draft.patch_max_range_requests.unwrap_or(0) as i64;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut max_rr)
+                                            .speed(1)
+                                            .range(0..=1_000_000),
+                                    )
+                                    .changed()
+                                {
+                                    s.draft.patch_max_range_requests =
+                                        (max_rr > 0).then_some(max_rr as usize);
+                                }
+                                ui.end_row();
+
+                                key(ui, kit, "Concurrency: files (0 = default)");
+                                let mut max_files = s.draft.max_concurrent_files.unwrap_or(0) as i64;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut max_files)
+                                            .speed(1)
+                                            .range(0..=100_000),
+                                    )
+                                    .changed()
+                                {
+                                    s.draft.max_concurrent_files =
+                                        (max_files > 0).then_some(max_files as usize);
+                                }
+                                ui.end_row();
+
+                                key(ui, kit, "Concurrency: range requests (0 = default)");
+                                let mut max_ranges =
+                                    s.draft.max_concurrent_range_requests.unwrap_or(0) as i64;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut max_ranges)
+                                            .speed(1)
+                                            .range(0..=100_000),
+                                    )
+                                    .changed()
+                                {
+                                    s.draft.max_concurrent_range_requests =
+                                        (max_ranges > 0).then_some(max_ranges as usize);
+                                }
+                                ui.end_row();
+
+                                key(ui, kit, "Scan concurrency");
+                                let mut scan = s.draft.scan_concurrency as i64;
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut scan)
+                                            .speed(1)
+                                            .range(1..=100_000),
+                                    )
+                                    .changed()
+                                {
+                                    s.draft.scan_concurrency = (scan.max(1)) as usize;
+                                }
+                                ui.end_row();
+
+                                key(ui, kit, "Use local index");
+                                ui.checkbox(&mut s.draft.use_index, "");
+                                ui.end_row();
+
+                                key(ui, kit, "Emit per-file progress events");
+                                ui.checkbox(&mut s.draft.emit_progress, "");
+                                ui.end_row();
+
+                                key(ui, kit, "Auto-fix case (filename case issues)");
+                                ui.checkbox(&mut s.draft.auto_fix_case, "");
+                                ui.end_row();
+                            });
+                    });
+
+                ui.add_space(kit.layout.gap);
+                ui.add(widgets::Divider::new(kit));
+                ui.add_space(kit.theme.spacing.sm);
+
+                egui::CollapsingHeader::new("Sync fresh tuning (safe wipe + unknown paths)")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add_space(kit.theme.spacing.sm);
+
+                        egui::Grid::new("settings_syncfresh_grid")
+                            .num_columns(2)
+                            .spacing([kit.layout.gap, kit.theme.spacing.sm])
+                            .show(ui, |ui| {
+                                key(ui, kit, "Safe wipe policy");
+                                egui::ComboBox::from_id_salt("safe_wipe_policy")
+                                    .selected_text(format!("{:?}", s.draft.safe_wipe))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut s.draft.safe_wipe,
+                                            SafeWipePolicy::None,
+                                            "None",
+                                        );
+                                        ui.selectable_value(
+                                            &mut s.draft.safe_wipe,
+                                            SafeWipePolicy::ExpectedFromStoreBaseline,
+                                            "Expected from store baseline",
+                                        );
+                                        ui.selectable_value(
+                                            &mut s.draft.safe_wipe,
+                                            SafeWipePolicy::ExpectedFromRemoteManifest,
+                                            "Expected from remote manifest",
+                                        );
+                                        ui.selectable_value(
+                                            &mut s.draft.safe_wipe,
+                                            SafeWipePolicy::ExpectedUnion,
+                                            "Expected union (recommended)",
+                                        );
+                                    });
+                                ui.end_row();
+
+                                key(ui, kit, "Unknown paths");
+                                egui::ComboBox::from_id_salt("unknown_paths_policy")
+                                    .selected_text(format!("{:?}", s.draft.unknown_paths))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut s.draft.unknown_paths,
+                                            UnknownPathPolicy::Keep,
+                                            "Keep",
+                                        );
+                                        ui.selectable_value(
+                                            &mut s.draft.unknown_paths,
+                                            UnknownPathPolicy::Quarantine,
+                                            "Quarantine",
+                                        );
+                                        ui.selectable_value(
+                                            &mut s.draft.unknown_paths,
+                                            UnknownPathPolicy::Delete,
+                                            "Delete",
+                                        );
+                                    });
+                                ui.end_row();
+                            });
+
+                        ui.add_space(kit.theme.spacing.sm);
+                        ui.add(widgets::InlineHint::new(
+                            kit,
+                            "Sync fresh settings apply only when Sync mode is set to Sync fresh.",
+                        ));
+                    });
             });
 
             ui.add_space(kit.layout.gap);

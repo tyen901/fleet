@@ -93,6 +93,9 @@ struct SyncArgs {
     #[arg(long, default_value_t = true)]
     use_index: bool,
 
+    #[arg(long, default_value = "repair")]
+    mode: String,
+
     #[arg(long)]
     json_events: bool,
 }
@@ -133,11 +136,10 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = fleet_app::FleetApp::open_default()?;
 
     match args.cmd.unwrap() {
-        Cmd::Gui => {
-            run_gui()?;
-        }
+        Cmd::Gui => run_gui(),
         Cmd::RegistryPath => {
             println!("{}", app.registry_path());
+            Ok(())
         }
         Cmd::Profile { cmd } => match cmd {
             ProfileCmd::List { json } => {
@@ -149,6 +151,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}  {}  {}  {}", p.id, p.name, p.repo_url, p.checkout_root);
                     }
                 }
+                Ok(())
             }
             ProfileCmd::Show { id, json } => {
                 let profile = if let Some(id) = id {
@@ -168,6 +171,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     println!("path: {}", profile.checkout_root);
                     println!("last_sync_unix_s: {:?}", profile.last_sync_unix_s);
                 }
+                Ok(())
             }
             ProfileCmd::Add {
                 name,
@@ -177,6 +181,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 let profile = app.add_profile(&name, &repo_url, &path, select)?;
                 println!("{}", profile.id);
+                Ok(())
             }
             ProfileCmd::Edit {
                 id,
@@ -193,31 +198,43 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     arma3_extra_args: None,
                 };
                 app.update_profile(&id, update)?;
+                Ok(())
             }
             ProfileCmd::Remove { id, yes } => {
                 if !yes {
                     return Err("refusing to remove without --yes".into());
                 }
                 app.remove_profile(&id)?;
+                Ok(())
             }
             ProfileCmd::Select { id } => {
                 app.select_profile(&id)?;
+                Ok(())
             }
             ProfileCmd::Init => {
                 app.init_registry()?;
+                Ok(())
             }
             ProfileCmd::Path => {
                 println!("{}", app.registry_path());
+                Ok(())
             }
         },
         Cmd::Sync(sa) => {
-            let tuning = fleet_app::SyncTuning {
-                full_download_part_threshold: sa.full_download_part_threshold,
-                full_download_byte_ratio_threshold: sa.full_download_byte_ratio_threshold,
-                max_concurrent_files: sa.max_concurrent_files,
-                max_concurrent_range_requests: sa.max_concurrent_range_requests,
-                io_buffer_bytes: sa.io_buffer_bytes,
-                use_index: sa.use_index,
+            let mut tuning = fleet_app::SyncTuning::default();
+            tuning.full_download_part_threshold = sa.full_download_part_threshold;
+            tuning.full_download_byte_ratio_threshold = sa.full_download_byte_ratio_threshold;
+            tuning.max_concurrent_files = sa.max_concurrent_files;
+            tuning.max_concurrent_range_requests = sa.max_concurrent_range_requests;
+            tuning.io_buffer_bytes = sa.io_buffer_bytes;
+            tuning.use_index = sa.use_index;
+            tuning.emit_progress = true;
+
+            tuning.mode = match sa.mode.as_str() {
+                "repair" => fleet_app::SyncMode::Repair,
+                "fresh" => fleet_app::SyncMode::SyncFresh,
+                "check" => fleet_app::SyncMode::Check,
+                _ => return Err(format!("invalid mode: {}", sa.mode).into()),
             };
 
             let (ev_tx, mut ev_rx) =
@@ -250,7 +267,22 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     res = &mut done_rx => {
                         match res? {
                             Ok(()) => break,
-                            Err(e) => return Err(Box::<dyn std::error::Error>::from(e.to_string())),
+                            Err(e) => {
+                                if let fleet_app::AppError::SyncFailed(outcome) = &e {
+                                    if sa.json_events {
+                                        println!("{}", serde_json::to_string_pretty(outcome)?);
+                                    } else {
+                                        eprintln!("Sync failed: ok=false");
+                                        if let Some(aborted) = &outcome.aborted {
+                                            eprintln!("Abort Reason: {} - {}", aborted.kind, aborted.message);
+                                        }
+                                        for fail in &outcome.failures {
+                                            eprintln!("Failure: {}/{} - {}", fail.mod_id, fail.rel_path, fail.error);
+                                        }
+                                    }
+                                }
+                                return Err(Box::<dyn std::error::Error>::from(e.to_string()));
+                            }
                         }
                     }
                     ev = ev_rx.recv() => {
@@ -264,26 +296,28 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            Ok(())
         }
         Cmd::Launch(launch) => {
             if let Some(path) = launch.path {
                 app.launch_arma3_for_path(&path, &launch.extra_args)?;
+                Ok(())
             } else if let Some(profile) = launch.profile {
                 app.launch_arma3_for_profile(&profile, Some(launch.extra_args))?;
+                Ok(())
             } else {
-                return Err("launch requires --profile or --path".into());
+                Err("launch requires --profile or --path".into())
             }
         }
         Cmd::Update(ua) => {
             update::run(&ua)?;
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
-    fleet_ui::run().map_err(Box::<dyn std::error::Error>::from)
+    fleet_ui::run().map_err(|e| e.to_string().into())
 }
 
 #[cfg(test)]
@@ -310,14 +344,13 @@ mod tests {
             "1024",
         ]);
 
-        let tuning = fleet_app::SyncTuning {
-            full_download_part_threshold: args.full_download_part_threshold,
-            full_download_byte_ratio_threshold: args.full_download_byte_ratio_threshold,
-            max_concurrent_files: args.max_concurrent_files,
-            max_concurrent_range_requests: args.max_concurrent_range_requests,
-            io_buffer_bytes: args.io_buffer_bytes,
-            use_index: true,
-        };
+        let mut tuning = fleet_app::SyncTuning::default();
+        tuning.full_download_part_threshold = args.full_download_part_threshold;
+        tuning.full_download_byte_ratio_threshold = args.full_download_byte_ratio_threshold;
+        tuning.max_concurrent_files = args.max_concurrent_files;
+        tuning.max_concurrent_range_requests = args.max_concurrent_range_requests;
+        tuning.io_buffer_bytes = args.io_buffer_bytes;
+        tuning.use_index = true;
 
         assert_eq!(tuning.full_download_part_threshold, 32);
         assert_eq!(tuning.full_download_byte_ratio_threshold, 1.5);

@@ -54,8 +54,8 @@ fn status_from_task(
 ) -> (String, egui::Color32, bool) {
     match task {
         None => ("READY".to_string(), c.muted, false),
-        Some(t) if t.active => (format!("WORKING: {}", t.phase), c.accent, true),
+        Some(t) if t.active => (t.phase.clone(), c.accent, true),
         Some(t) if t.last_error.is_some() => ("ERROR".to_string(), c.danger, false),
-        Some(_) => ("DONE".to_string(), c.muted, false),
+        Some(_) => ("READY".to_string(), c.muted, false),
     }
 }

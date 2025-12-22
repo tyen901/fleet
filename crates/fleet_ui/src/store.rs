@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use fleet_app::events::SyncEvent;
-use fleet_app::{LaunchMode, LaunchSettings, ProfileSpec, ProfileUpdate, SyncTuning};
+use fleet_app::{LaunchMode, LaunchSettings, ProfileSpec, ProfileUpdate, SyncMode, SyncTuning};
 use velopack::{UpdateCheck, UpdateInfo};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +24,14 @@ pub struct TaskState {
     pub progress: Option<f32>, // None = indeterminate
     pub active: bool,
     pub last_error: Option<String>,
+
+    // New: current-file transfer view (replaces old global download summary)
+    pub bytes_done: Option<u64>,
+    pub bytes_total: Option<u64>,
+
+    // New: surfaced engine capability + repair plan info
+    pub remote_supports_ranges: Option<bool>,
+    pub last_strategy: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -45,14 +53,6 @@ impl Default for UpdateState {
             available: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DownloadSummary {
-    pub total_bytes: u64,
-    pub downloaded_bytes: u64,
-    pub speed_bps: f64,
-    pub eta_s: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,14 +120,23 @@ pub struct SettingsState {
 
 impl SettingsState {
     pub fn is_dirty(&self) -> bool {
-        self.draft.full_download_part_threshold != self.original.full_download_part_threshold
+        self.draft.mode != self.original.mode
+            || self.draft.full_download_part_threshold != self.original.full_download_part_threshold
             || self.draft.full_download_byte_ratio_threshold
                 != self.original.full_download_byte_ratio_threshold
+            || self.draft.patch_max_fetch_ratio != self.original.patch_max_fetch_ratio
+            || self.draft.patch_merge_gap_bytes != self.original.patch_merge_gap_bytes
+            || self.draft.patch_min_range_bytes != self.original.patch_min_range_bytes
+            || self.draft.patch_max_range_requests != self.original.patch_max_range_requests
             || self.draft.max_concurrent_files != self.original.max_concurrent_files
             || self.draft.max_concurrent_range_requests
                 != self.original.max_concurrent_range_requests
-            || self.draft.io_buffer_bytes != self.original.io_buffer_bytes
+            || self.draft.scan_concurrency != self.original.scan_concurrency
             || self.draft.use_index != self.original.use_index
+            || self.draft.emit_progress != self.original.emit_progress
+            || self.draft.auto_fix_case != self.original.auto_fix_case
+            || self.draft.safe_wipe != self.original.safe_wipe
+            || self.draft.unknown_paths != self.original.unknown_paths
     }
 }
 
@@ -143,10 +152,6 @@ pub struct AppState {
 
     pub task: Option<TaskState>,
     pub logs: VecDeque<LogLine>,
-
-    pub download_summary: DownloadSummary,
-    last_speed_sample_ts_s: Option<f64>,
-    last_speed_sample_bytes: u64,
 
     pub warning: Option<String>,
     pub ui_error: Option<String>,
@@ -171,9 +176,6 @@ impl Default for AppState {
             settings_editor: None,
             task: None,
             logs: VecDeque::new(),
-            download_summary: DownloadSummary::default(),
-            last_speed_sample_ts_s: None,
-            last_speed_sample_bytes: 0,
             warning: None,
             ui_error: None,
             tuning: SyncTuning::default(),
@@ -207,6 +209,8 @@ pub enum Action {
 
     SaveSettings(SyncTuning),
     CancelSettings,
+
+    SetSyncMode(SyncMode),
 
     SyncStarted,
     ApplySyncEvent {
@@ -312,17 +316,29 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.route = state.return_route.clone();
         }
 
+        Action::SetSyncMode(mode) => {
+            state.tuning.mode = mode;
+        }
+
         Action::SyncStarted => {
+            let mode_label = match state.tuning.mode {
+                SyncMode::Repair => "Repair",
+                SyncMode::SyncFresh => "SyncFresh",
+                SyncMode::Check => "Check",
+            };
+
             state.task = Some(TaskState {
-                phase: "Starting".into(),
+                phase: format!("{mode_label}: Starting"),
                 progress: None,
                 active: true,
                 last_error: None,
+                bytes_done: None,
+                bytes_total: None,
+                remote_supports_ranges: None,
+                last_strategy: None,
             });
+
             state.logs.clear();
-            state.download_summary = DownloadSummary::default();
-            state.last_speed_sample_ts_s = None;
-            state.last_speed_sample_bytes = 0;
         }
 
         Action::ApplySyncEvent { ev, ts_s } => {
@@ -330,24 +346,65 @@ pub fn reduce(state: &mut AppState, action: Action) {
             push_log(state, ts_s, line);
 
             match ev {
-                SyncEvent::CheckStarted { repo } => {
-                    set_task(state, &format!("Check {repo}"), None, true, None)
+                SyncEvent::RemoteCapabilities { supports_ranges } => {
+                    let t = state.task.get_or_insert_with(TaskState::default);
+                    t.remote_supports_ranges = Some(supports_ranges);
                 }
-                SyncEvent::CheckFinished { ok } => set_task(
+
+                SyncEvent::CheckStarted { repo } => {
+                    set_task(
+                        state,
+                        &format!("Check {repo}"),
+                        None,
+                        true,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+                SyncEvent::CheckFinished { ok } => {
+                    // Keep active=true; final state is driven by Action::SyncFinished
+                    set_task(
+                        state,
+                        if ok { "Check finished" } else { "Check failed" },
+                        None,
+                        true,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+
+                SyncEvent::RepairStarted { repo } => set_task(
                     state,
-                    if ok { "Check finished" } else { "Check failed" },
+                    &format!("Repair {repo}"),
                     None,
-                    false,
+                    true,
+                    None,
+                    None,
                     None,
                 ),
-                SyncEvent::RepairStarted { repo } => {
-                    set_task(state, &format!("Repair {repo}"), None, true, None)
-                }
                 SyncEvent::RepairSkipEvaluated { skippable, reason } => {
                     if skippable {
-                        set_task(state, "Repair skipped (cache valid)", None, true, None);
+                        set_task(
+                            state,
+                            "Repair skipped (cache valid)",
+                            None,
+                            true,
+                            None,
+                            None,
+                            None,
+                        );
                     } else if let Some(r) = reason {
-                        set_task(state, &format!("Repair required ({r})"), None, true, None);
+                        set_task(
+                            state,
+                            &format!("Repair required ({r})"),
+                            None,
+                            true,
+                            None,
+                            None,
+                            None,
+                        );
                     }
                 }
                 SyncEvent::RepairFinished { ok, skipped } => {
@@ -358,11 +415,18 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     } else {
                         "Repair failed"
                     };
-                    set_task(state, label, None, false, None);
+                    set_task(state, label, None, true, None, None, None);
                 }
-                SyncEvent::SyncFreshStarted { repo } => {
-                    set_task(state, &format!("SyncFresh {repo}"), None, true, None)
-                }
+
+                SyncEvent::SyncFreshStarted { repo } => set_task(
+                    state,
+                    &format!("SyncFresh {repo}"),
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                ),
                 SyncEvent::SyncFreshFinished { ok } => set_task(
                     state,
                     if ok {
@@ -371,23 +435,43 @@ pub fn reduce(state: &mut AppState, action: Action) {
                         "SyncFresh failed"
                     },
                     None,
-                    false,
+                    true,
+                    None,
+                    None,
                     None,
                 ),
 
-                SyncEvent::ModStarted { mod_id } => {
-                    set_task(state, &format!("Mod {mod_id}"), None, true, None)
-                }
-                SyncEvent::ModFinished { mod_id } => {
-                    set_task(state, &format!("Finished {mod_id}"), None, true, None)
-                }
+                SyncEvent::ModStarted { mod_id } => set_task(
+                    state,
+                    &format!("Mod {mod_id}"),
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                ),
+                SyncEvent::ModFinished { mod_id } => set_task(
+                    state,
+                    &format!("Finished {mod_id}"),
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                ),
 
-                SyncEvent::FileStarted { mod_id, path, .. } => set_task(
+                SyncEvent::FileStarted {
+                    mod_id,
+                    path,
+                    bytes_total,
+                } => set_task(
                     state,
                     &format!("Downloading {mod_id}/{path}"),
                     Some(0.0),
                     true,
                     None,
+                    Some(0),
+                    Some(bytes_total),
                 ),
 
                 SyncEvent::FileUpToDate { mod_id, path } => set_task(
@@ -396,18 +480,27 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     None,
                     true,
                     None,
+                    None,
+                    None,
                 ),
+
                 SyncEvent::FileNeedsRepair {
                     mod_id,
                     path,
                     strategy,
-                } => set_task(
-                    state,
-                    &format!("Repair {mod_id}/{path} ({strategy})"),
-                    None,
-                    true,
-                    None,
-                ),
+                } => {
+                    let t = state.task.get_or_insert_with(TaskState::default);
+                    t.last_strategy = Some(strategy.to_string());
+                    set_task(
+                        state,
+                        &format!("Repair {mod_id}/{path} ({strategy})"),
+                        None,
+                        true,
+                        None,
+                        None,
+                        None,
+                    );
+                }
 
                 SyncEvent::FileProgress {
                     mod_id,
@@ -420,12 +513,15 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     } else {
                         Some((bytes_done as f32 / bytes_total as f32).clamp(0.0, 1.0))
                     };
+
                     set_task(
                         state,
                         &format!("Downloading {mod_id}/{path}"),
                         frac,
                         true,
                         None,
+                        Some(bytes_done),
+                        Some(bytes_total),
                     );
                 }
 
@@ -435,12 +531,17 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     None,
                     true,
                     None,
+                    None,
+                    None,
                 ),
+
                 SyncEvent::UnexpectedPathsFound { mod_id, .. } => set_task(
                     state,
                     &format!("Unexpected paths in {mod_id}"),
                     None,
                     true,
+                    None,
+                    None,
                     None,
                 ),
                 SyncEvent::UnexpectedPathDeleted { mod_id, path, .. } => set_task(
@@ -449,7 +550,10 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     None,
                     true,
                     None,
+                    None,
+                    None,
                 ),
+
                 SyncEvent::UnexpectedPathsActionRequired { message, .. } => {
                     let t = state.task.get_or_insert_with(TaskState::default);
                     t.last_error = Some(message);
@@ -458,30 +562,34 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     let t = state.task.get_or_insert_with(TaskState::default);
                     t.last_error = Some(message);
                 }
-                SyncEvent::EmptyDirDeleted { path } => {
-                    set_task(state, &format!("Removed {path}"), None, true, None)
-                }
+
+                SyncEvent::EmptyDirDeleted { path } => set_task(
+                    state,
+                    &format!("Removed {path}"),
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                ),
 
                 SyncEvent::Warning { message } => {
                     let t = state.task.get_or_insert_with(TaskState::default);
                     t.last_error = Some(message);
                 }
-                SyncEvent::Error { message } => {
-                    set_task(state, "Error", None, false, Some(message));
-                }
 
-                _ => {}
+                SyncEvent::Error { message } => {
+                    set_task(state, "Error", None, false, Some(message), None, None);
+                }
             }
         }
 
         Action::SyncFinished { ok, message } => {
             if ok {
-                set_task(state, "Done", Some(1.0), false, None);
+                set_task(state, "Done", Some(1.0), false, None, None, None);
             } else {
-                set_task(state, "Failed", None, false, message);
+                set_task(state, "Failed", None, false, message, None, None);
             }
-            state.download_summary.speed_bps = 0.0;
-            state.download_summary.eta_s = None;
         }
 
         Action::UpdateCheckStarted => {
@@ -556,12 +664,18 @@ fn set_task(
     progress: Option<f32>,
     active: bool,
     last_error: Option<String>,
+    bytes_done: Option<u64>,
+    bytes_total: Option<u64>,
 ) {
     let t = state.task.get_or_insert_with(TaskState::default);
+
     t.phase = phase.to_string();
     t.progress = progress;
     t.active = active;
     t.last_error = last_error;
+
+    t.bytes_done = bytes_done;
+    t.bytes_total = bytes_total;
 }
 
 fn push_log(state: &mut AppState, ts_s: f64, text: String) {

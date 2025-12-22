@@ -1,11 +1,12 @@
 use crate::{store, ui_kit::UiKit, widgets};
 use eframe::egui;
-use fleet_app::ProfileSpec;
+use fleet_app::{ProfileSpec, SyncMode};
 use std::collections::VecDeque;
 
 pub enum DashboardCmd {
     Sync,
     CancelSync,
+    SetSyncMode(SyncMode),
     Launch,
     Edit,
 
@@ -17,9 +18,10 @@ pub enum DashboardCmd {
 pub struct DashboardProps<'a> {
     pub profile: &'a ProfileSpec,
     pub task: Option<&'a store::TaskState>,
-    pub download_summary: &'a store::DownloadSummary,
     pub logs: &'a VecDeque<store::LogLine>,
     pub sync_active: bool,
+
+    pub sync_mode: SyncMode,
 
     pub launch_args_preview: Option<&'a str>,
     pub launch_args_error: Option<&'a str>,
@@ -175,18 +177,61 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                 ui.add(widgets::Divider::new(kit));
                 ui.add_space(kit.theme.spacing.sm);
 
+                // Sync mode selector (aligned to Repair vs SyncFresh pipelines)
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+                    ui.add(widgets::FieldLabel::new(kit, "Sync mode"));
+
+                    let mut mode = props.sync_mode;
+                    egui::ComboBox::from_id_salt("dash_sync_mode")
+                        .selected_text(sync_mode_label(mode))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut mode,
+                                SyncMode::Repair,
+                                "Repair (patch if efficient, else full)",
+                            );
+                            ui.selectable_value(
+                                &mut mode,
+                                SyncMode::SyncFresh,
+                                "Sync fresh (safe wipe + redownload expected files)",
+                            );
+                            ui.selectable_value(
+                                &mut mode,
+                                SyncMode::Check,
+                                "Check only (report issues, no changes)",
+                            );
+                        });
+
+                    if mode != props.sync_mode {
+                        cmd = Some(DashboardCmd::SetSyncMode(mode));
+                    }
+                });
+
+                if props.sync_mode == SyncMode::SyncFresh {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::InlineHint::new(
+                        kit,
+                        "Sync fresh will remove expected files (per Safe Wipe policy) and re-download. Configure Safe Wipe and Unknown Paths in Settings.",
+                    ));
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = kit.layout.gap;
 
                     let can_start = !props.sync_active;
-                    if ui
-                        .add(
-                            widgets::AppButton::new(kit, "Sync")
-                                .primary()
-                                .enabled(can_start),
-                        )
-                        .clicked()
-                    {
+
+                    let sync_btn = match props.sync_mode {
+                        SyncMode::Repair => widgets::AppButton::new(kit, "Sync").primary(),
+                        SyncMode::SyncFresh => widgets::AppButton::new(kit, "Sync").danger(),
+                        SyncMode::Check => widgets::AppButton::new(kit, "Check").primary(),
+                    }
+                    .enabled(can_start);
+
+                    if ui.add(sync_btn).clicked() {
                         cmd = Some(DashboardCmd::Sync);
                     }
 
@@ -223,6 +268,7 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                     );
                 });
 
+                // Live sync status aligned to SyncEvent stream
                 if let Some(t) = props.task {
                     ui.add_space(kit.theme.spacing.sm);
 
@@ -244,50 +290,42 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
                                 });
                             }
                         }
+
+                        if let (Some(done), Some(total)) = (t.bytes_done, t.bytes_total) {
+                            ui.add_space(kit.theme.spacing.sm);
+                            ui.add(widgets::InlineHint::new(
+                                kit,
+                                &format!(
+                                    "Current file: {} / {}",
+                                    fmt_bytes(done),
+                                    fmt_bytes(total)
+                                ),
+                            ));
+                        }
+
+                        if let Some(s) = t.remote_supports_ranges {
+                            ui.add_space(kit.theme.spacing.sm);
+                            ui.add(widgets::InlineHint::new(
+                                kit,
+                                if s {
+                                    "Remote: range requests supported (patch downloads enabled)."
+                                } else {
+                                    "Remote: range requests not supported (full downloads only)."
+                                },
+                            ));
+                        }
+
+                        if let Some(strategy) = t.last_strategy.as_deref() {
+                            ui.add_space(kit.theme.spacing.sm);
+                            ui.add(widgets::InlineHint::new(
+                                kit,
+                                &format!("Last repair strategy: {strategy}"),
+                            ));
+                        }
                     } else if let Some(err) = t.last_error.as_deref() {
                         ui.add(widgets::InlineError::new(kit, err));
                     } else {
                         ui.add(widgets::InlineHint::new(kit, "Idle."));
-                    }
-                }
-
-                // Global download progress (derived from per-file progress).
-                if props.sync_active {
-                    ui.add_space(kit.layout.gap);
-                    ui.add(widgets::Divider::new(kit));
-                    ui.add_space(kit.theme.spacing.sm);
-
-                    ui.add(widgets::FieldLabel::new(kit, "Overall download"));
-
-                    if props.download_summary.total_bytes > 0 {
-                        let frac = (props.download_summary.downloaded_bytes as f32
-                            / props.download_summary.total_bytes as f32)
-                            .clamp(0.0, 1.0);
-
-                        ui.add(egui::ProgressBar::new(frac).show_percentage());
-
-                        let speed = fmt_speed(props.download_summary.speed_bps);
-                        let eta = props
-                            .download_summary
-                            .eta_s
-                            .map(fmt_eta)
-                            .unwrap_or_else(|| "ETA —".into());
-
-                        ui.add(widgets::InlineHint::new(
-                            kit,
-                            &format!(
-                                "{} / {} • {} • {}",
-                                fmt_bytes(props.download_summary.downloaded_bytes),
-                                fmt_bytes(props.download_summary.total_bytes),
-                                speed,
-                                eta,
-                            ),
-                        ));
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(14.0));
-                            ui.add(widgets::InlineHint::new(kit, "Waiting for download data…"));
-                        });
                     }
                 }
             });
@@ -329,6 +367,14 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
         });
 
     cmd
+}
+
+fn sync_mode_label(mode: SyncMode) -> &'static str {
+    match mode {
+        SyncMode::Repair => "Repair",
+        SyncMode::SyncFresh => "Sync fresh",
+        SyncMode::Check => "Check only",
+    }
 }
 
 fn kv(ui: &mut egui::Ui, kit: &UiKit, k: &str, v: &str) {
@@ -393,30 +439,5 @@ fn fmt_bytes(bytes: u64) -> String {
         format!("{:.1} KiB", b / KIB)
     } else {
         format!("{bytes} B")
-    }
-}
-
-fn fmt_speed(bps: f64) -> String {
-    if bps <= 0.5 {
-        "—".into()
-    } else {
-        format!("{}/s", fmt_bytes(bps.round() as u64))
-    }
-}
-
-fn fmt_eta(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return "ETA —".into();
-    }
-
-    let s = secs.round() as u64;
-    let h = s / 3600;
-    let m = (s % 3600) / 60;
-    let ss = s % 60;
-
-    if h > 0 {
-        format!("ETA {h}:{m:02}:{ss:02}")
-    } else {
-        format!("ETA {m:02}:{ss:02}")
     }
 }

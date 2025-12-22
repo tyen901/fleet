@@ -443,15 +443,18 @@ impl eframe::App for FleetUiApp {
                             views::dashboard::DashboardProps {
                                 profile: &p,
                                 task: self.state.task.as_ref(),
-                                download_summary: &self.state.download_summary,
                                 logs: &self.state.logs,
                                 sync_active: self.active_sync.is_some(),
+                                sync_mode: self.state.tuning.mode,
                                 launch_args_preview: preview,
                                 launch_args_error: err,
                             },
                         ) {
                             use views::dashboard::DashboardCmd as C;
                             match cmd {
+                                C::SetSyncMode(mode) => {
+                                    reduce(&mut self.state, Action::SetSyncMode(mode))
+                                }
                                 C::Sync => self.start_sync_selected(),
                                 C::CancelSync => self.cancel_sync(),
                                 C::Launch => {

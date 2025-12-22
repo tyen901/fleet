@@ -1,6 +1,7 @@
 pub mod events;
 mod registry;
 mod storage;
+pub mod sync;
 
 pub mod launch;
 pub mod platform;
@@ -36,6 +37,9 @@ pub enum AppError {
 
     #[error("sync error: {0}")]
     SyncEngine(String),
+
+    #[error("sync failed")]
+    SyncFailed(crate::sync::SyncOutcome),
 
     #[error(transparent)]
     Launch(#[from] LaunchError),
@@ -75,32 +79,11 @@ pub struct ProfileUpdate {
     pub arma3_extra_args: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SyncTuning {
-    pub full_download_part_threshold: usize,
-    pub full_download_byte_ratio_threshold: f64,
-    pub max_concurrent_files: Option<usize>,
-    pub max_concurrent_range_requests: Option<usize>,
-    pub io_buffer_bytes: usize,
-    pub use_index: bool,
-}
-
-impl Default for SyncTuning {
-    fn default() -> Self {
-        Self {
-            full_download_part_threshold: 256,
-            full_download_byte_ratio_threshold: 0.60,
-            max_concurrent_files: None,
-            max_concurrent_range_requests: None,
-            io_buffer_bytes: 1024 * 1024,
-            use_index: true,
-        }
-    }
-}
+pub use crate::sync::{SafeWipePolicy, SyncMode, SyncOutcome, SyncTuning, UnknownPathPolicy};
 
 pub struct SyncJob {
     done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
-    handle: tokio::task::JoinHandle<()>,
+    _handle: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,
 }
 
@@ -389,15 +372,20 @@ impl FleetApp {
 
         let handle = handle.spawn(async move {
             let res: Result<(), AppError> = async {
-                let remote = Arc::new(
+                let remote: Arc<fleet_remote_http::HttpRemote> = Arc::new(
                     fleet_remote_http::HttpRemote::new(&repo_url)
                         .map_err(|e| AppError::SyncEngine(e.to_string()))?,
                 );
-
                 let raw_spec = remote
                     .fetch_repo_spec()
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+
+                let gated_remote: Arc<dyn fleet_sync::ports::RemoteRepo> =
+                    Arc::new(crate::sync::GatedRemote {
+                        inner: remote,
+                        enable_patch_repair: tuning.enable_patch_repair,
+                    });
 
                 let repo_name = format!("{} (v{})", raw_spec.repo_name, raw_spec.version);
 
@@ -407,34 +395,6 @@ impl FleetApp {
                     .filter(|m| m.enabled)
                     .map(|m| m.mod_name.clone())
                     .collect();
-
-                let engine_tuning = fleet_sync::RepairTuning {
-                    file_concurrency: tuning
-                        .max_concurrent_files
-                        .unwrap_or(fleet_sync::RepairTuning::default().file_concurrency),
-                    range_concurrency: tuning
-                        .max_concurrent_range_requests
-                        .unwrap_or(fleet_sync::RepairTuning::default().range_concurrency),
-                    scan_concurrency: fleet_sync::RepairTuning::default().scan_concurrency,
-                    patch_max_bad_ratio: tuning.full_download_byte_ratio_threshold as f32,
-                    patch_max_bad_parts: Some(tuning.full_download_part_threshold),
-                    patch_merge_gap_bytes: fleet_sync::RepairTuning::default()
-                        .patch_merge_gap_bytes,
-                    patch_min_range_bytes: fleet_sync::RepairTuning::default()
-                        .patch_min_range_bytes,
-                    patch_max_fetch_ratio: fleet_sync::RepairTuning::default()
-                        .patch_max_fetch_ratio,
-                    patch_max_range_requests: fleet_sync::RepairTuning::default()
-                        .patch_max_range_requests,
-                    durability: fleet_sync::Durability::BestEffort,
-                    unexpected_paths: fleet_sync::UnexpectedPathPolicy::Prompt,
-                    max_unexpected_delete_bytes: fleet_sync::RepairTuning::default()
-                        .max_unexpected_delete_bytes,
-                    delete_empty_dirs: true,
-                    use_index: tuning.use_index,
-                    emit_progress: true,
-                    auto_fix_case: fleet_sync::RepairTuning::default().auto_fix_case,
-                };
 
                 let sink = SyncEventSink { tx: ev_tx.clone() };
 
@@ -462,23 +422,60 @@ impl FleetApp {
                 idx.set_desired_state(desired)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
-                let request = fleet_sync::RepairRequest {
-                    repo_name,
-                    checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
-                    enabled_mods,
-                    tuning: engine_tuning,
+                let store = Arc::new(FleetIndexStore::new(idx));
+                let engine =
+                    fleet_sync::SyncEngine::new(gated_remote, store, Arc::new(Md5Checksummer));
+
+                let outcome = match tuning.mode {
+                    SyncMode::Repair => {
+                        let request = fleet_sync::RepairRequest {
+                            repo_name,
+                            checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                            enabled_mods,
+                            tuning: tuning.to_repair_tuning(),
+                        };
+
+                        let outcome = engine
+                            .repair(request, &sink, &cancel_task)
+                            .await
+                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        sync::SyncOutcome::from_repair(outcome)
+                    }
+
+                    SyncMode::SyncFresh => {
+                        let request = fleet_sync::SyncFreshRequest {
+                            repo_name,
+                            checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                            enabled_mods,
+                            tuning: tuning.to_sync_fresh_tuning(),
+                        };
+
+                        let outcome = engine
+                            .sync_fresh(request, &sink, &cancel_task)
+                            .await
+                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        sync::SyncOutcome::from_sync_fresh(outcome)
+                    }
+
+                    SyncMode::Check => {
+                        let request = fleet_sync::CheckRequest {
+                            repo_name,
+                            checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                            enabled_mods,
+                            tuning: tuning.to_check_tuning(),
+                        };
+
+                        let report = engine
+                            .check(request, &sink, &cancel_task)
+                            .await
+                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        sync::SyncOutcome::from_check_report(report)
+                    }
                 };
 
-                let store = Arc::new(FleetIndexStore::new(idx));
-                let engine = fleet_sync::SyncEngine::new(
-                    remote as Arc<dyn fleet_sync::RemoteRepo>,
-                    store,
-                    Arc::new(Md5Checksummer),
-                );
-                let _outcome = engine
-                    .repair(request, &sink, &cancel_task)
-                    .await
-                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                if !outcome.ok {
+                    return Err(AppError::SyncFailed(outcome));
+                }
                 Ok(())
             }
             .await;
@@ -501,7 +498,7 @@ impl FleetApp {
 
         Ok(SyncJob {
             done_rx: Some(done_rx),
-            handle,
+            _handle: handle,
             cancel,
         })
     }
