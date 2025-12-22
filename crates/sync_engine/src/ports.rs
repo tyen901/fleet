@@ -22,6 +22,8 @@ pub trait StateStore: Send + Sync {
 
     fn baseline_exists(&self, state_id: &str) -> Result<bool, StoreError>;
 
+    fn expected_get_all(&self, state_id: &str) -> Result<Vec<ExpectedFile>, StoreError>;
+
     fn file_state_get_all_for_mod(
         &self,
         state_id: &str,

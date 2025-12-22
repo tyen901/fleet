@@ -580,6 +580,22 @@ impl sync_engine::StateStore for FleetIndexStore {
             .map_err(|e| sync_engine::StoreError::Other(e.to_string()))
     }
 
+    fn expected_get_all(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<sync_engine::ExpectedFile>, sync_engine::StoreError> {
+        let mut out = Vec::new();
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_for_each(state_id, |row| {
+                out.push(row);
+                Ok(())
+            })
+            .map_err(|e| sync_engine::StoreError::Other(e.to_string()))?;
+        Ok(out)
+    }
+
     fn file_state_get_all_for_mod(
         &self,
         state_id: &str,
