@@ -45,14 +45,11 @@ fn validate_parts(file: &FileEntry) -> Result<()> {
         return Ok(());
     }
 
-    let mut prev_end: Option<u64> = None;
     let mut parts = file.parts.clone();
     parts.sort_by_key(|p| p.offset);
 
+    let mut pos = 0u64;
     for p in parts {
-        if p.len == 0 {
-            bail!("invalid part: zero length");
-        }
         let end = p
             .offset
             .checked_add(p.len)
@@ -64,12 +61,22 @@ fn validate_parts(file: &FileEntry) -> Result<()> {
                 file.size
             );
         }
-        if let Some(prev) = prev_end {
-            if p.offset < prev {
-                bail!("invalid parts: overlapping or unsorted ranges");
-            }
+        if p.offset != pos {
+            bail!(
+                "invalid parts: not contiguous (expected offset {}, got {})",
+                pos,
+                p.offset
+            );
         }
-        prev_end = Some(end);
+        pos = end;
+    }
+
+    if pos != file.size {
+        bail!(
+            "invalid parts: do not cover full file (end {} != size {})",
+            pos,
+            file.size
+        );
     }
 
     Ok(())

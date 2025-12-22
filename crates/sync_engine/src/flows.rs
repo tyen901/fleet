@@ -510,7 +510,24 @@ fn verify_one_file(
         }
     }
 
-    if let Some((offset, len)) = first_part_mismatch(&abs_path, &file.parts, checksummer)? {
+    if file.parts.is_empty() {
+        let got = checksummer.hash_file(&abs_path)?;
+        if got != file.file_checksum {
+            return Ok(VerifyOutcome {
+                mod_id: mod_id.to_string(),
+                rel_path: rel_path.to_string(),
+                ok: false,
+                size: file.size,
+                mtime_ns,
+                checksum: file.file_checksum.clone(),
+                issue: Some(VerifyIssueKind::PartMismatch {
+                    offset: 0,
+                    len: file.size,
+                }),
+                unsafe_message: None,
+            });
+        }
+    } else if let Some((offset, len)) = first_part_mismatch(&abs_path, &file.parts, checksummer)? {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),

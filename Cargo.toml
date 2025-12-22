@@ -2,13 +2,11 @@
 resolver = "2"
 members = [
   "crates/fleet_app",
+  "crates/fleet_formats",
   "crates/fleet_index",
+  "crates/fleet_remote_http",
+  "crates/fleet_scan",
   "crates/manifest_types",
-  "crates/remote_core",
-  "crates/remote_http",
-  "crates/remote_adapter",
-  "crates/pbo_parse",
-  "crates/manifest_scan",
   "crates/fleet-ui",
   "crates/sync_engine",
   "apps/fleet",

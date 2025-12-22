@@ -364,11 +364,11 @@ impl FleetApp {
 
         let handle = handle.spawn(async move {
             let res: Result<(), AppError> = async {
-                let remote = remote_adapter::HttpRemoteAdapter::new(&repo_url)
+                let remote = fleet_remote_http::HttpRemote::new(&repo_url)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
                 let raw_spec = remote
-                    .fetch_raw_repo_spec()
+                    .fetch_repo_spec()
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
@@ -424,7 +424,7 @@ impl FleetApp {
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
                     remote: Arc::new(remote),
-                    checksummer: Arc::new(remote_adapter::Md5Checksummer),
+                    checksummer: Arc::new(Md5Checksummer),
                     tuning: engine_tuning,
                 };
 
@@ -492,6 +492,52 @@ impl FleetApp {
         let url = build_arma3_steam_url(base_path, &[], extra_args)?;
         launch_arma3_via_steam_with_mode(url, self.registry.launch.mode.clone())?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct Md5Checksummer;
+
+impl sync_engine::types::Checksummer for Md5Checksummer {
+    fn algorithm_name(&self) -> &str {
+        "md5"
+    }
+
+    fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+        use std::io::Read;
+
+        let mut f = std::fs::File::open(path)?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut ctx = md5::Context::new();
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            ctx.consume(&buf[..n]);
+        }
+        Ok(ctx.compute().0.to_vec())
+    }
+
+    fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        use std::io::{Read, Seek};
+
+        let mut f = std::fs::File::open(path)?;
+        f.seek(std::io::SeekFrom::Start(offset))?;
+
+        let mut ctx = md5::Context::new();
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut remaining = len;
+        while remaining > 0 {
+            let want = (remaining as usize).min(buf.len());
+            let n = f.read(&mut buf[..want])?;
+            if n == 0 {
+                anyhow::bail!("short read {} @{}+{}", path.display(), offset, len);
+            }
+            ctx.consume(&buf[..n]);
+            remaining -= n as u64;
+        }
+        Ok(ctx.compute().0.to_vec())
     }
 }
 

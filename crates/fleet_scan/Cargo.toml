@@ -1,0 +1,16 @@
+[package]
+name = "fleet_scan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+camino = "1"
+fleet_formats = { path = "../fleet_formats" }
+md5 = "0.7"
+thiserror = "1"
+walkdir = "2"
+
+[dev-dependencies]
+camino = "1"
+fleet_formats = { path = "../fleet_formats" }

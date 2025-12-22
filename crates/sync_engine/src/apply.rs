@@ -4,7 +4,6 @@ use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::staging::StagedFile;
 use crate::time_util::file_mtime_ns;
 use crate::types::{AbortReason, Durability, FileFailure, RepairReport, RepairRequest};
-use crate::verify_parts::verify_all_parts;
 use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
 use std::path::Path;
@@ -273,7 +272,7 @@ async fn apply_full(
     maybe_fsync(&mut f, req.tuning.durability).await?;
     drop(f);
 
-    verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
+    verify_target(&staged.tmp_path, &op.target, req.checksummer.as_ref())
         .context("verify downloaded file")?;
 
     staged.commit(&op.abs_path, req.tuning.durability).await?;
@@ -395,7 +394,7 @@ async fn apply_patch(
         maybe_fsync(&mut f, req.tuning.durability).await?;
     }
 
-    verify_all_parts(&staged.tmp_path, &op.target.parts, req.checksummer.as_ref())
+    verify_target(&staged.tmp_path, &op.target, req.checksummer.as_ref())
         .context("verify patched file")?;
 
     staged.commit(&op.abs_path, req.tuning.durability).await?;
@@ -424,4 +423,20 @@ async fn maybe_fsync(f: &mut tokio::fs::File, durability: Durability) -> Result<
         f.sync_data().await?;
     }
     Ok(())
+}
+
+fn verify_target(
+    path: &std::path::Path,
+    target: &crate::plan::FileTarget,
+    checksummer: &dyn crate::types::Checksummer,
+) -> anyhow::Result<()> {
+    if target.parts.is_empty() {
+        let got = checksummer.hash_file(path)?;
+        if got != target.file_checksum {
+            anyhow::bail!("file checksum mismatch for full-file verification");
+        }
+        Ok(())
+    } else {
+        crate::verify_parts::verify_all_parts(path, &target.parts, checksummer)
+    }
 }

@@ -682,12 +682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "byteorder-lite"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1455,17 +1449,33 @@ dependencies = [
 name = "fleet_app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "camino",
  "directories",
  "fleet_index",
+ "fleet_remote_http",
+ "md5",
  "open",
  "percent-encoding",
- "remote_adapter",
  "serde",
  "serde_json",
  "sync_engine",
  "tokio",
  "walkdir",
+]
+
+[[package]]
+name = "fleet_formats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "manifest_types",
+ "md5",
+ "relative-path",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1476,6 +1486,37 @@ dependencies = [
  "rusqlite",
  "tempfile",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "fleet_remote_http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "fleet_formats",
+ "futures-core",
+ "futures-util",
+ "manifest_types",
+ "reqwest",
+ "serde_json",
+ "sync_engine",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "fleet_scan"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "fleet_formats",
+ "md5",
+ "thiserror 1.0.69",
+ "walkdir",
 ]
 
 [[package]]
@@ -2374,20 +2415,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "manifest_scan"
-version = "0.1.0"
-dependencies = [
- "camino",
- "manifest_types",
- "md-5",
- "pbo_parse",
- "relative-path",
- "tempfile",
- "thiserror 2.0.17",
- "walkdir",
-]
-
-[[package]]
 name = "manifest_types"
 version = "0.1.0"
 dependencies = [
@@ -2407,6 +2434,12 @@ dependencies = [
  "cfg-if",
  "digest",
 ]
+
+[[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
@@ -2993,14 +3026,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
-name = "pbo_parse"
-version = "0.1.0"
-dependencies = [
- "byteorder",
- "thiserror 2.0.17",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3397,54 +3422,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "remote_adapter"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "futures",
- "manifest_types",
- "md-5",
- "relative-path",
- "remote_core",
- "remote_http",
- "sync_engine",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "remote_core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-core",
- "manifest_types",
- "relative-path",
- "thiserror 2.0.17",
-]
-
-[[package]]
-name = "remote_http"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures-util",
- "hex",
- "manifest_types",
- "relative-path",
- "remote_core",
- "reqwest",
- "serde_json",
- "tokio",
- "url",
- "wiremock",
 ]
 
 [[package]]

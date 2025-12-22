@@ -216,15 +216,26 @@ fn plan_one_file(
     }
 
     if file.parts.is_empty() {
-        return Ok((
-            RepairStrategy::Skip,
-            Vec::new(),
-            0,
-            Some(CacheMeta {
-                size: file.size,
-                mtime_ns,
-            }),
-        ));
+        let got = ctx
+            .checksummer
+            .hash_file(abs_path)
+            .map_err(|e| PlanError::Other {
+                mod_id: ctx.mod_id.to_string(),
+                rel_path: file.rel_path.clone(),
+                source: e,
+            })?;
+        if got == file.file_checksum {
+            return Ok((
+                RepairStrategy::Skip,
+                Vec::new(),
+                0,
+                Some(CacheMeta {
+                    size: file.size,
+                    mtime_ns,
+                }),
+            ));
+        }
+        return Ok((RepairStrategy::Full, Vec::new(), file.size, None));
     }
 
     let ranges: Vec<(u64, u64)> = file.parts.iter().map(|p| (p.offset, p.len)).collect();

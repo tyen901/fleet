@@ -1,0 +1,22 @@
+[package]
+name = "fleet_remote_http"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+fleet_formats = { path = "../fleet_formats" }
+futures-core = "0.3"
+futures-util = "0.3"
+manifest_types = { path = "../manifest_types" }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+sync_engine = { path = "../sync_engine" }
+tokio = { version = "1", features = ["sync"] }
+url = "2"
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
