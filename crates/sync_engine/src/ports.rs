@@ -5,7 +5,23 @@ use crate::model::{
     TimestampNs, VerifiedState,
 };
 
-pub use crate::model::Checksummer;
+pub trait Checksummer: Send + Sync {
+    fn algorithm_name(&self) -> &str;
+    fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>>;
+    fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>>;
+
+    fn hash_ranges(
+        &self,
+        path: &std::path::Path,
+        ranges: &[(u64, u64)],
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let mut out = Vec::with_capacity(ranges.len());
+        for (off, len) in ranges {
+            out.push(self.hash_range(path, *off, *len)?);
+        }
+        Ok(out)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct FilePart {
@@ -40,12 +56,15 @@ impl EventSink for NoopSink {
 
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
-    VerifyStarted { repo: String },
-    VerifyFinished { ok: bool },
+    CheckStarted { repo: String },
+    CheckFinished { ok: bool },
 
     RepairStarted { repo: String },
     RepairSkipEvaluated { skippable: bool, reason: Option<String> },
     RepairFinished { ok: bool, skipped: bool },
+
+    SyncFreshStarted { repo: String },
+    SyncFreshFinished { ok: bool },
 
     RemoteCapabilities { supports_ranges: bool },
 

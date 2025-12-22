@@ -161,13 +161,17 @@ pub(crate) async fn quarantine_move_path(
     match tokio::fs::rename(abs_path, &dst).await {
         Ok(()) => Ok(dst),
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            let md = tokio::fs::symlink_metadata(abs_path).await?;
+            if is_symlink_or_reparse(&md) {
+                anyhow::bail!("refusing to quarantine symlink/reparse point {}", abs_path.display());
+            }
             tokio::task::spawn_blocking({
                 let abs_path = abs_path.to_path_buf();
                 let dst = dst.clone();
                 move || copy_path_blocking(&abs_path, &dst)
             })
             .await??;
-            if tokio::fs::metadata(abs_path).await.map(|m| m.is_dir()).unwrap_or(false) {
+            if md.is_dir() {
                 tokio::fs::remove_dir_all(abs_path).await?;
             } else {
                 tokio::fs::remove_file(abs_path).await?;
@@ -179,10 +183,20 @@ pub(crate) async fn quarantine_move_path(
 }
 
 fn copy_path_blocking(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    if src.is_dir() {
+    let md = std::fs::symlink_metadata(src)?;
+    if is_symlink_or_reparse(&md) {
+        anyhow::bail!("refusing to quarantine symlink/reparse point {}", src.display());
+    }
+    if md.is_dir() {
         std::fs::create_dir_all(dst)?;
         for entry in walkdir::WalkDir::new(src) {
             let entry = entry?;
+            if entry.file_type().is_symlink() {
+                anyhow::bail!(
+                    "refusing to quarantine symlink {}",
+                    entry.path().display()
+                );
+            }
             let rel = entry.path().strip_prefix(src)?;
             let out = dst.join(rel);
             if entry.file_type().is_dir() {

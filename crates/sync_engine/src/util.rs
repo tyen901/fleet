@@ -14,3 +14,8 @@ pub fn file_mtime_ns(md: &std::fs::Metadata) -> Option<crate::model::TimestampNs
         .as_nanos();
     i64::try_from(nanos).ok().map(crate::model::TimestampNs)
 }
+
+pub fn enabled_mods_hash(mod_ids_sorted: &[String]) -> String {
+    let joined = mod_ids_sorted.join("\n");
+    blake3::hash(joined.as_bytes()).to_hex().to_string()
+}

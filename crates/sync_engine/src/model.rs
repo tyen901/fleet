@@ -1,7 +1,31 @@
 use std::ops::AddAssign;
 use std::path::PathBuf;
 
-pub use fleet_index::types::{DesiredState, ExpectedFile, FileState, VerifiedState};
+#[derive(Clone, Debug)]
+pub struct DesiredState {
+    pub state_id: String,
+    pub enabled_mods_hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExpectedFile {
+    pub mod_id: String,
+    pub rel_path: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileState {
+    pub size: u64,
+    pub mtime_ns: i64,
+    pub checksum: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerifiedState {
+    pub state_id: String,
+    pub verified_at_ns: i64,
+}
 
 #[derive(Clone, Debug)]
 pub struct FileStateUpsert {
@@ -78,7 +102,7 @@ impl Default for CheckTuning {
             scan_concurrency: 6,
             max_issues: 500,
             use_index: true,
-            auto_fix_case: true,
+            auto_fix_case: false,
         }
     }
 }
@@ -316,23 +340,5 @@ pub struct SyncFreshOutcome {
 impl SyncFreshOutcome {
     pub fn ok(&self) -> bool {
         self.aborted.is_none() && self.failures.is_empty()
-    }
-}
-
-pub trait Checksummer: Send + Sync {
-    fn algorithm_name(&self) -> &str;
-    fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>>;
-    fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>>;
-
-    fn hash_ranges(
-        &self,
-        path: &std::path::Path,
-        ranges: &[(u64, u64)],
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(ranges.len());
-        for (off, len) in ranges {
-            out.push(self.hash_range(path, *off, *len)?);
-        }
-        Ok(out)
     }
 }

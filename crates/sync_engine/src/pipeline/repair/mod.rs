@@ -15,8 +15,8 @@ use crate::util::now_ns;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use tokio_util::sync::CancellationToken;
 
-mod applier;
-mod planner;
+pub(crate) mod applier;
+pub(crate) mod planner;
 
 pub(crate) async fn run(
     req: RepairRequest,
@@ -24,6 +24,7 @@ pub(crate) async fn run(
     store: Arc<dyn StateStore>,
     checksummer: Arc<dyn Checksummer>,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
 ) -> Result<RepairOutcome, crate::model::EngineError> {
     let start = Instant::now();
     sink.push(SyncEvent::RepairStarted {
@@ -130,9 +131,11 @@ pub(crate) async fn run(
         let mut report = RepairReport::default();
         let mut failures: Vec<FileFailure> = Vec::new();
         let mut aborted: Option<AbortReason> = None;
-        let cancel = CancellationToken::new();
 
         'mods: for manifest in &fetch.manifests {
+            if cancel.is_cancelled() {
+                return Err(crate::model::EngineError::Cancelled);
+            }
             sink.push(SyncEvent::ModStarted {
                 mod_id: manifest.mod_id.clone(),
             });
@@ -151,6 +154,7 @@ pub(crate) async fn run(
                 fetch.capabilities.supports_ranges,
                 req.tuning.clone(),
                 checksummer.clone(),
+                cancel,
             )
             .await?;
 
@@ -189,9 +193,9 @@ pub(crate) async fn run(
 
             for op in &to_apply {
                 let strategy = match op.target.strategy {
-                    crate::plan::RepairStrategy::Full => "full",
-                    crate::plan::RepairStrategy::Patch => "patch",
-                    crate::plan::RepairStrategy::Skip => "skip",
+                    planner::RepairStrategy::Full => "full",
+                    planner::RepairStrategy::Patch => "patch",
+                    planner::RepairStrategy::Skip => "skip",
                 };
                 sink.push(SyncEvent::FileNeedsRepair {
                     mod_id: op.mod_id.clone(),
@@ -207,7 +211,7 @@ pub(crate) async fn run(
                 });
             }
 
-            let apply_outcome = applier::apply_plan(
+            let apply_outcome = applier::apply_ops(
                 to_apply,
                 &req.checkout_root,
                 remote.clone(),
@@ -215,12 +219,12 @@ pub(crate) async fn run(
                 &req.tuning,
                 sink,
                 &cancel,
-                crate::apply::ApplyOptions {
+                applier::ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
                 },
             )
             .await
-            .map_err(crate::model::EngineError::Internal)?;
+            ?;
 
             report += &apply_outcome.report;
 
@@ -228,7 +232,7 @@ pub(crate) async fn run(
             let mut deletes: Vec<FileStateDelete> = Vec::new();
             for update in apply_outcome.index_updates {
                 match update {
-                    crate::apply::IndexUpdate::UpsertFileState {
+                    applier::IndexUpdate::UpsertFileState {
                         mod_id,
                         rel_path,
                         size,
@@ -241,7 +245,7 @@ pub(crate) async fn run(
                         mtime_ns: TimestampNs(mtime_ns),
                         checksum,
                     }),
-                    crate::apply::IndexUpdate::DeleteFileState { mod_id, rel_path } => {
+                    applier::IndexUpdate::DeleteFileState { mod_id, rel_path } => {
                         deletes.push(FileStateDelete { mod_id, rel_path })
                     }
                 }
@@ -348,11 +352,13 @@ fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::Expec
     rows
 }
 
-fn split_ops(ops: Vec<crate::plan::PlannedOp>) -> (Vec<crate::plan::PlannedOp>, Vec<crate::plan::PlannedOp>) {
+fn split_ops(
+    ops: Vec<planner::PlannedOp>,
+) -> (Vec<planner::PlannedOp>, Vec<planner::PlannedOp>) {
     let mut to_apply = Vec::new();
     let mut skipped = Vec::new();
     for op in ops {
-        if matches!(op.target.strategy, crate::plan::RepairStrategy::Skip) {
+        if matches!(op.target.strategy, planner::RepairStrategy::Skip) {
             skipped.push(op);
         } else {
             to_apply.push(op);

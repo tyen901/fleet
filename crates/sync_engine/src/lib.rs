@@ -2,11 +2,8 @@ pub mod engine;
 pub mod model;
 pub mod ports;
 
-pub(crate) mod apply;
-pub(crate) mod flows;
 pub(crate) mod fs;
 pub(crate) mod manifest;
-pub(crate) mod plan;
 pub(crate) mod skip_check;
 pub(crate) mod util;
 pub(crate) mod unexpected;

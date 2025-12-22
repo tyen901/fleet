@@ -12,6 +12,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use fleet_index::{DesiredState, FleetIndex};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 pub use crate::launch::arma3::{Arma3LaunchPlan, LaunchError};
 pub use registry::{
@@ -100,11 +101,12 @@ impl Default for SyncTuning {
 pub struct SyncJob {
     done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     handle: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
 }
 
 impl SyncJob {
     pub fn cancel(&self) {
-        self.handle.abort();
+        self.cancel.cancel();
     }
 
     pub fn take_done_rx(&mut self) -> Option<oneshot::Receiver<Result<(), AppError>>> {
@@ -382,6 +384,8 @@ impl FleetApp {
         let (done_tx, done_rx) = oneshot::channel::<Result<(), AppError>>();
         let checkout_root_buf = checkout_root.to_owned();
         let store = self.store.clone();
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
 
         let handle = handle.spawn(async move {
             let res: Result<(), AppError> = async {
@@ -472,7 +476,7 @@ impl FleetApp {
                     Arc::new(Md5Checksummer),
                 );
                 let _outcome = engine
-                    .repair(request, &sink)
+                    .repair(request, &sink, &cancel_task)
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 Ok(())
@@ -498,6 +502,7 @@ impl FleetApp {
         Ok(SyncJob {
             done_rx: Some(done_rx),
             handle,
+            cancel,
         })
     }
 

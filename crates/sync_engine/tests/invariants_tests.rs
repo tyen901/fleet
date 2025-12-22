@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
+use tokio_util::sync::CancellationToken;
 use sync_engine::ports::SyncEvent;
 use sync_engine::ports::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore};
 use sync_engine::ports::{FileEntry, ModManifest};
@@ -155,11 +156,16 @@ impl IndexStore {
 
 impl StateStore for IndexStore {
     fn desired_state_get(&self) -> Result<Option<sync_engine::model::DesiredState>, StoreError> {
-        self.inner
+        let got = self
+            .inner
             .lock()
             .unwrap()
             .get_desired_state()
-            .map_err(|e| StoreError::Other(e.to_string()))
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        Ok(got.map(|s| sync_engine::model::DesiredState {
+            state_id: s.state_id,
+            enabled_mods_hash: s.enabled_mods_hash,
+        }))
     }
 
     fn expected_replace_all_if_digest_changed(
@@ -168,6 +174,14 @@ impl StateStore for IndexStore {
         rows: Vec<sync_engine::model::ExpectedFile>,
         digest_hex: &str,
     ) -> Result<(), StoreError> {
+        let rows: Vec<fleet_index::ExpectedFile> = rows
+            .into_iter()
+            .map(|r| fleet_index::ExpectedFile {
+                mod_id: r.mod_id,
+                rel_path: r.rel_path,
+                size: r.size,
+            })
+            .collect();
         self.inner
             .lock()
             .unwrap()
@@ -190,7 +204,11 @@ impl StateStore for IndexStore {
             .lock()
             .unwrap()
             .expected_for_each(state_id, |row| {
-                out.push(row);
+                out.push(sync_engine::model::ExpectedFile {
+                    mod_id: row.mod_id,
+                    rel_path: row.rel_path,
+                    size: row.size,
+                });
                 Ok(())
             })
             .map_err(|e| StoreError::Other(e.to_string()))?;
@@ -202,11 +220,24 @@ impl StateStore for IndexStore {
         state_id: &str,
         mod_id: &str,
     ) -> Result<std::collections::HashMap<String, sync_engine::model::FileState>, StoreError> {
-        self.inner
+        let got = self.inner
             .lock()
             .unwrap()
             .file_state_get_all_for_mod(state_id, mod_id)
-            .map_err(|e| StoreError::Other(e.to_string()))
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        Ok(got
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    sync_engine::model::FileState {
+                        size: v.size,
+                        mtime_ns: v.mtime_ns,
+                        checksum: v.checksum,
+                    },
+                )
+            })
+            .collect())
     }
 
     fn file_state_apply_batch(
@@ -246,11 +277,15 @@ impl StateStore for IndexStore {
     }
 
     fn verified_get(&self) -> Result<Option<sync_engine::model::VerifiedState>, StoreError> {
-        self.inner
+        let got = self.inner
             .lock()
             .unwrap()
             .verified_get()
-            .map_err(|e| StoreError::Other(e.to_string()))
+            .map_err(|e| StoreError::Other(e.to_string()))?;
+        Ok(got.map(|v| sync_engine::model::VerifiedState {
+            state_id: v.state_id,
+            verified_at_ns: v.verified_at_ns,
+        }))
     }
 
     fn verified_set(&self, state_id: &str, verified_at: TimestampNs) -> Result<(), StoreError> {
@@ -327,7 +362,8 @@ async fn safety_abort_does_not_fetch_remote_file_bytes() {
         tuning: RepairTuning::default(),
     };
 
-    let outcome = engine.repair(req, sink.as_ref()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let outcome = engine.repair(req, sink.as_ref(), &cancel).await.unwrap();
     assert!(outcome.aborted.is_some());
     assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
     assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);
@@ -372,7 +408,8 @@ async fn skip_logic_does_not_fetch_remote_file_bytes() {
         enabled_mods: enabled_mods.clone(),
         tuning: CheckTuning::default(),
     };
-    let report = engine.check(check_req, sink.as_ref()).await.unwrap();
+    let cancel = CancellationToken::new();
+    let report = engine.check(check_req, sink.as_ref(), &cancel).await.unwrap();
     assert!(report.ok);
 
     let req = RepairRequest {
@@ -382,7 +419,7 @@ async fn skip_logic_does_not_fetch_remote_file_bytes() {
         tuning: RepairTuning::default(),
     };
 
-    let outcome = engine.repair(req, sink.as_ref()).await.unwrap();
+    let outcome = engine.repair(req, sink.as_ref(), &cancel).await.unwrap();
     assert!(outcome.report.skipped);
     assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
     assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);

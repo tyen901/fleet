@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::apply::{apply_ops, ApplyOptions};
 use crate::ports::SyncEvent;
 use crate::pipeline::fetch_all;
 use crate::manifest::ValidatedModManifest;
@@ -16,15 +15,22 @@ use crate::fs::safe_join_mod_file;
 use crate::util::now_ns;
 use tokio_util::sync::CancellationToken;
 
+use crate::pipeline::repair::applier::{apply_ops, ApplyOptions, IndexUpdate};
+use crate::pipeline::repair::planner::{FileTarget, PlannedOp, RepairStrategy};
+
 pub(crate) async fn run(
     req: SyncFreshRequest,
     remote: Arc<dyn RemoteRepo>,
     store: Arc<dyn StateStore>,
     checksummer: Arc<dyn Checksummer>,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
 ) -> Result<SyncFreshOutcome, crate::model::EngineError> {
     let start = Instant::now();
-    sink.push(SyncEvent::RepairStarted {
+    if cancel.is_cancelled() {
+        return Err(crate::model::EngineError::Cancelled);
+    }
+    sink.push(SyncEvent::SyncFreshStarted {
         repo: req.repo_name.clone(),
     });
 
@@ -41,7 +47,6 @@ pub(crate) async fn run(
             .map_err(|e| crate::model::EngineError::InvalidInput(e.to_string()))?;
 
         let tuning = &req.tuning;
-        let cancel = CancellationToken::new();
 
         let fetch = fetch_all(
             remote.clone(),
@@ -82,6 +87,9 @@ pub(crate) async fn run(
 
         for (mod_id, rels) in &wipe_sets {
             for rel_path in rels {
+                if cancel.is_cancelled() {
+                    return Err(crate::model::EngineError::Cancelled);
+                }
                 let abs = safe_join_mod_file(&req.checkout_root, mod_id, rel_path)?;
                 if let Some(parent) = abs.parent() {
                     let mod_root = req.checkout_root.join(mod_id);
@@ -116,19 +124,19 @@ pub(crate) async fn run(
         }
 
         // Force full download of all expected files.
-        let mut ops: Vec<crate::plan::PlannedOp> = Vec::new();
+        let mut ops: Vec<PlannedOp> = Vec::new();
         for manifest in &fetch.manifests {
             for file in &manifest.files {
                 let abs_path = safe_join_mod_file(&req.checkout_root, &manifest.mod_id, &file.rel_path)?;
-                ops.push(crate::plan::PlannedOp {
+                ops.push(PlannedOp {
                     mod_id: manifest.mod_id.clone(),
                     rel_path: file.rel_path.clone(),
                     abs_path,
-                    target: crate::plan::FileTarget {
+                    target: FileTarget {
                         size: file.size,
                         file_checksum: file.file_checksum.clone(),
                         parts: file.parts.clone(),
-                        strategy: crate::plan::RepairStrategy::Full,
+                        strategy: RepairStrategy::Full,
                         parts_to_fetch: Vec::new(),
                     },
                     estimated_bytes: file.size,
@@ -149,7 +157,7 @@ pub(crate) async fn run(
             },
         )
         .await
-        .map_err(crate::model::EngineError::Internal)?;
+        ?;
 
         let mut report = apply_outcome.report;
         let failures = apply_outcome.failures;
@@ -159,7 +167,7 @@ pub(crate) async fn run(
         let mut deletes: Vec<FileStateDelete> = Vec::new();
         for update in apply_outcome.index_updates {
             match update {
-                crate::apply::IndexUpdate::UpsertFileState {
+                IndexUpdate::UpsertFileState {
                     mod_id,
                     rel_path,
                     size,
@@ -172,7 +180,7 @@ pub(crate) async fn run(
                     mtime_ns: TimestampNs(mtime_ns),
                     checksum,
                 }),
-                crate::apply::IndexUpdate::DeleteFileState { mod_id, rel_path } => {
+                IndexUpdate::DeleteFileState { mod_id, rel_path } => {
                     deletes.push(FileStateDelete { mod_id, rel_path })
                 }
             }
@@ -232,20 +240,14 @@ pub(crate) async fn run(
                 .map_err(crate::model::EngineError::Store)?;
         }
 
-        sink.push(SyncEvent::RepairFinished {
-            ok: outcome.ok(),
-            skipped: false,
-        });
+        sink.push(SyncEvent::SyncFreshFinished { ok: outcome.ok() });
         Ok(outcome)
     }
     .await;
 
     if result.is_err() {
         let _ = store.verified_clear();
-        sink.push(SyncEvent::RepairFinished {
-            ok: false,
-            skipped: false,
-        });
+        sink.push(SyncEvent::SyncFreshFinished { ok: false });
     }
 
     result
@@ -464,7 +466,10 @@ fn build_unknown_plan(mod_root: &Path, expected_paths: &HashSet<String>) -> anyh
         if expected_paths.contains(&rel_path) {
             continue;
         }
-        let md = entry.metadata()?;
+        let md = std::fs::symlink_metadata(entry.path())?;
+        if crate::fs::is_symlink_or_reparse(&md) {
+            continue;
+        }
         let size = if md.is_file() { md.len() } else { 0 };
         if md.is_dir() {
             found_dirs += 1;
@@ -482,6 +487,12 @@ fn build_unknown_plan(mod_root: &Path, expected_paths: &HashSet<String>) -> anyh
             is_dir: md.is_dir(),
         });
     }
+
+    actions.sort_by(|a, b| {
+        let a_depth = a.rel.matches('/').count();
+        let b_depth = b.rel.matches('/').count();
+        (a.is_dir, std::cmp::Reverse(a_depth), &a.rel).cmp(&(b.is_dir, std::cmp::Reverse(b_depth), &b.rel))
+    });
 
     Ok(UnknownPlan {
         actions,

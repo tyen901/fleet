@@ -13,6 +13,7 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::util::{file_mtime_ns, now_ns};
 use futures::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(
     req: CheckRequest,
@@ -20,9 +21,13 @@ pub(crate) async fn run(
     store: Arc<dyn StateStore>,
     checksummer: Arc<dyn Checksummer>,
     sink: &dyn EventSink,
+    cancel: &CancellationToken,
 ) -> Result<CheckReport, crate::model::EngineError> {
     let start = Instant::now();
-    sink.push(SyncEvent::VerifyStarted {
+    if cancel.is_cancelled() {
+        return Err(crate::model::EngineError::Cancelled);
+    }
+    sink.push(SyncEvent::CheckStarted {
         repo: req.repo_name.clone(),
     });
 
@@ -52,6 +57,9 @@ pub(crate) async fn run(
         let mut report = CheckReport::default();
 
         for manifest in &fetch.manifests {
+            if cancel.is_cancelled() {
+                return Err(crate::model::EngineError::Cancelled);
+            }
             sink.push(SyncEvent::ModStarted {
                 mod_id: manifest.mod_id.clone(),
             });
@@ -63,7 +71,7 @@ pub(crate) async fn run(
                 HashMap::new()
             };
 
-            verify_mod(
+            match verify_mod(
                 &req,
                 store.as_ref(),
                 &desired.state_id,
@@ -74,7 +82,15 @@ pub(crate) async fn run(
                 checksummer.clone(),
             )
             .await
-            .map_err(crate::model::EngineError::Internal)?;
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    if cancel.is_cancelled() {
+                        return Err(crate::model::EngineError::Cancelled);
+                    }
+                    return Err(crate::model::EngineError::Internal(e.into()));
+                }
+            }
 
             sink.push(SyncEvent::ModFinished {
                 mod_id: manifest.mod_id.clone(),
@@ -98,14 +114,14 @@ pub(crate) async fn run(
         }
 
         report.elapsed_ms = start.elapsed().as_millis() as u64;
-        sink.push(SyncEvent::VerifyFinished { ok: report.ok });
+        sink.push(SyncEvent::CheckFinished { ok: report.ok });
         Ok(report)
     }
     .await;
 
     if result.is_err() {
         let _ = store.verified_clear();
-        sink.push(SyncEvent::VerifyFinished { ok: false });
+        sink.push(SyncEvent::CheckFinished { ok: false });
     }
 
     result

@@ -104,7 +104,7 @@ pub(crate) fn validate_enabled_mods(expected_hash: &str, enabled_mods: &[String]
     }
     let mut mods_sorted = enabled_mods.to_vec();
     mods_sorted.sort();
-    let got = fleet_index::enabled_mods_hash(&mods_sorted);
+    let got = crate::util::enabled_mods_hash(&mods_sorted);
     if got != expected_hash {
         anyhow::bail!("enabled mods hash mismatch");
     }

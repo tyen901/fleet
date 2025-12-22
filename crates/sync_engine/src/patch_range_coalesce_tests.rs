@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use crate::apply::{apply_ops, ApplyOptions};
     use crate::ports::EventSink;
     use crate::ports::FilePart;
     use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
-    use crate::plan::RepairStrategy;
+    use crate::pipeline::repair::applier::{apply_ops, ApplyOptions};
+    use crate::pipeline::repair::planner::{plan_mod, RepairStrategy};
     use crate::test_support::{MockRemoteRepo, TestSink};
-    use crate::model::{Checksummer, Durability, RepairRequest, RepairTuning};
+    use crate::model::{Durability, RepairRequest, RepairTuning};
+    use crate::ports::Checksummer;
     use bytes::Bytes;
     use std::collections::HashMap;
     use std::fs;
@@ -114,7 +115,7 @@ mod tests {
         };
 
         let checksummer: Arc<dyn Checksummer> = Arc::new(TestChecksummer);
-        let (plan, _hints) = crate::plan::plan_mod(
+        let (plan, _hints) = plan_mod(
             tmp.path(),
             &manifest,
             &HashMap::new(),
@@ -191,7 +192,7 @@ mod tests {
         };
 
         let checksummer: Arc<dyn Checksummer> = Arc::new(TestChecksummer);
-        let (plan, _hints) = crate::plan::plan_mod(
+        let (plan, _hints) = plan_mod(
             tmp.path(),
             &manifest,
             &HashMap::new(),
@@ -269,7 +270,7 @@ mod tests {
         };
 
         let checksummer: Arc<dyn Checksummer> = Arc::new(TestChecksummer);
-        let (plan, _hints) = crate::plan::plan_mod(
+        let (plan, _hints) = plan_mod(
             tmp.path(),
             &manifest,
             &HashMap::new(),
