@@ -1466,13 +1466,13 @@ dependencies = [
  "directories",
  "fleet_index",
  "fleet_remote_http",
+ "fleet_sync",
  "fs2",
  "md5",
  "open",
  "percent-encoding",
  "serde",
  "serde_json",
- "sync_engine",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
@@ -1503,12 +1503,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "fleet_sync",
  "futures-core",
  "futures-util",
  "manifest_types",
  "reqwest",
  "serde_json",
- "sync_engine",
  "tokio",
  "url",
  "wiremock",
@@ -1524,6 +1524,24 @@ dependencies = [
  "md5",
  "relative-path",
  "thiserror 1.0.69",
+ "walkdir",
+]
+
+[[package]]
+name = "fleet_sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "bytes",
+ "fleet_fs_case",
+ "fleet_index",
+ "futures",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
  "walkdir",
 ]
 
@@ -3940,24 +3958,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sync_engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "blake3",
- "bytes",
- "fleet_fs_case",
- "fleet_index",
- "futures",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "walkdir",
 ]
 
 [[package]]

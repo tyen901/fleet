@@ -1,6 +1,6 @@
 /// App-level sync events.
 ///
-/// This type is the UI/API boundary: it should remain stable even if `sync_engine`
+/// This type is the UI/API boundary: it should remain stable even if `fleet_sync`
 /// changes internal enums or payload types.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
@@ -102,9 +102,9 @@ impl SyncEvent {
     }
 }
 
-impl From<sync_engine::SyncEvent> for SyncEvent {
-    fn from(ev: sync_engine::SyncEvent) -> Self {
-        use sync_engine::SyncEvent as E;
+impl From<fleet_sync::SyncEvent> for SyncEvent {
+    fn from(ev: fleet_sync::SyncEvent) -> Self {
+        use fleet_sync::SyncEvent as E;
         match ev {
             E::CheckStarted { repo } => SyncEvent::CheckStarted { repo },
             E::CheckFinished { ok } => SyncEvent::CheckFinished { ok },

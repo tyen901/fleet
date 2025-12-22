@@ -8,7 +8,7 @@ members = [
   "crates/fleet_scan",
   "crates/manifest_types",
   "crates/fleet_ui",
-  "crates/sync_engine",
+  "crates/fleet_sync",
   "apps/fleet",
 ]
 

@@ -11,7 +11,7 @@ futures-core = "0.3"
 futures-util = "0.3"
 manifest_types = { path = "../manifest_types" }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
-sync_engine = { path = "../sync_engine" }
+fleet_sync = { path = "../fleet_sync" }
 tokio = { version = "1", features = ["sync"] }
 url = "2"
 

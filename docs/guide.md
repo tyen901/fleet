@@ -1,6 +1,6 @@
-# fleet_index + sync_engine: Pragmatic Guide (Architecture & Rules)
+# fleet_index + fleet_sync: Pragmatic Guide (Architecture & Rules)
 
-This document explains what the `fleet_index` and `sync_engine` crates are responsible for, what they are not responsible for, and the operational rules they must obey.
+This document explains what the `fleet_index` and `fleet_sync` crates are responsible for, what they are not responsible for, and the operational rules they must obey.
 
 It is intentionally light on implementation detail. It should remain useful even as the internal structure changes.
 
@@ -10,12 +10,12 @@ It is intentionally light on implementation detail. It should remain useful even
 
 Think of the system as two layers:
 
-- **`sync_engine`** is the *doer*: it looks at a checkout on disk, compares it to what the remote says should exist, and (optionally) fixes it.
+- **`fleet_sync`** is the *doer*: it looks at a checkout on disk, compares it to what the remote says should exist, and (optionally) fixes it.
 - **`fleet_index`** is the *memory*: it persists lightweight facts about the checkout and the desired state so future runs can be faster and safer.
 
 A useful way to frame it:
 
-- `sync_engine` answers: **“How do we make the checkout match the remote state?”**
+- `fleet_sync` answers: **“How do we make the checkout match the remote state?”**
 - `fleet_index` answers: **“What do we already know about this checkout and state?”**
 
 ### Key terms (stable, not code-specific)
@@ -34,7 +34,7 @@ A useful way to frame it:
 
 ### What `fleet_index` does
 
-`fleet_index` is responsible for storing and retrieving *local, derived facts* that help `sync_engine` operate efficiently and consistently across runs.
+`fleet_index` is responsible for storing and retrieving *local, derived facts* that help `fleet_sync` operate efficiently and consistently across runs.
 
 It owns:
 
@@ -65,11 +65,11 @@ It owns:
 
 ---
 
-## `sync_engine` (the doer): concerns and non-concerns
+## `fleet_sync` (the doer): concerns and non-concerns
 
-### What `sync_engine` does
+### What `fleet_sync` does
 
-`sync_engine` is responsible for executing *a full pass* over the enabled mods to reach (or confirm) an on-disk state consistent with the remote.
+`fleet_sync` is responsible for executing *a full pass* over the enabled mods to reach (or confirm) an on-disk state consistent with the remote.
 
 It owns:
 
@@ -92,9 +92,9 @@ It owns:
 - **Operational event reporting**  
   Emit informational events about progress and issues (useful for UI/logs), without making those events part of the correctness model.
 
-### What `sync_engine` does *not* do
+### What `fleet_sync` does *not* do
 
-`sync_engine` does not:
+`fleet_sync` does not:
 
 - Manage user configuration (which repo, which mods, where the checkout lives).
 - Provide long-term persistence of state (it delegates that to `fleet_index`).

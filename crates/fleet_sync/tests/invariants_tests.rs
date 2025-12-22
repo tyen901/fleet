@@ -5,16 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
-use sync_engine::model::{
+use fleet_sync::model::{
     CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
     StoreError, TimestampNs,
 };
-use sync_engine::ports::SyncEvent;
-use sync_engine::ports::{FileEntry, ModManifest};
-use sync_engine::ports::{
+use fleet_sync::ports::SyncEvent;
+use fleet_sync::ports::{FileEntry, ModManifest};
+use fleet_sync::ports::{
     RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
 };
-use sync_engine::SyncEngine;
+use fleet_sync::SyncEngine;
 use tokio_util::sync::CancellationToken;
 
 struct VecStream {
@@ -96,7 +96,7 @@ struct TestSink {
     events: Mutex<Vec<SyncEvent>>,
 }
 
-impl sync_engine::EventSink for TestSink {
+impl fleet_sync::EventSink for TestSink {
     fn push(&self, ev: SyncEvent) {
         self.events.lock().unwrap().push(ev);
     }
@@ -105,7 +105,7 @@ impl sync_engine::EventSink for TestSink {
 #[derive(Clone)]
 struct TestChecksummer;
 
-impl sync_engine::Checksummer for TestChecksummer {
+impl fleet_sync::Checksummer for TestChecksummer {
     fn algorithm_name(&self) -> &str {
         "blake3"
     }
@@ -157,14 +157,14 @@ impl IndexStore {
 }
 
 impl StateStore for IndexStore {
-    fn desired_state_get(&self) -> Result<Option<sync_engine::model::DesiredState>, StoreError> {
+    fn desired_state_get(&self) -> Result<Option<fleet_sync::model::DesiredState>, StoreError> {
         let got = self
             .inner
             .lock()
             .unwrap()
             .get_desired_state()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        Ok(got.map(|s| sync_engine::model::DesiredState {
+        Ok(got.map(|s| fleet_sync::model::DesiredState {
             state_id: s.state_id,
             enabled_mods_hash: s.enabled_mods_hash,
         }))
@@ -173,7 +173,7 @@ impl StateStore for IndexStore {
     fn expected_replace_all_if_digest_changed(
         &self,
         state_id: &str,
-        rows: Vec<sync_engine::model::ExpectedFile>,
+        rows: Vec<fleet_sync::model::ExpectedFile>,
         digest_hex: &str,
     ) -> Result<(), StoreError> {
         let rows: Vec<fleet_index::ExpectedFile> = rows
@@ -203,13 +203,13 @@ impl StateStore for IndexStore {
     fn expected_get_all(
         &self,
         state_id: &str,
-    ) -> Result<Vec<sync_engine::model::ExpectedFile>, StoreError> {
+    ) -> Result<Vec<fleet_sync::model::ExpectedFile>, StoreError> {
         let mut out = Vec::new();
         self.inner
             .lock()
             .unwrap()
             .expected_for_each(state_id, |row| {
-                out.push(sync_engine::model::ExpectedFile {
+                out.push(fleet_sync::model::ExpectedFile {
                     mod_id: row.mod_id,
                     rel_path: row.rel_path,
                     size: row.size,
@@ -224,7 +224,7 @@ impl StateStore for IndexStore {
         &self,
         state_id: &str,
         mod_id: &str,
-    ) -> Result<std::collections::HashMap<String, sync_engine::model::FileState>, StoreError> {
+    ) -> Result<std::collections::HashMap<String, fleet_sync::model::FileState>, StoreError> {
         let got = self
             .inner
             .lock()
@@ -236,7 +236,7 @@ impl StateStore for IndexStore {
             .map(|(k, v)| {
                 (
                     k,
-                    sync_engine::model::FileState {
+                    fleet_sync::model::FileState {
                         size: v.size,
                         mtime_ns: TimestampNs(v.mtime_ns),
                         checksum: v.checksum,
@@ -276,14 +276,14 @@ impl StateStore for IndexStore {
             .map_err(|e| StoreError::Other(e.to_string()))
     }
 
-    fn verified_get(&self) -> Result<Option<sync_engine::model::VerifiedState>, StoreError> {
+    fn verified_get(&self) -> Result<Option<fleet_sync::model::VerifiedState>, StoreError> {
         let got = self
             .inner
             .lock()
             .unwrap()
             .verified_get()
             .map_err(|e| StoreError::Other(e.to_string()))?;
-        Ok(got.map(|v| sync_engine::model::VerifiedState {
+        Ok(got.map(|v| fleet_sync::model::VerifiedState {
             state_id: v.state_id,
             verified_at: TimestampNs(v.verified_at_ns),
         }))

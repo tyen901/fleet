@@ -17,7 +17,7 @@ Understood. Below is an updated, concrete overhaul plan that incorporates your r
 ## 2. Concrete module tree
 
 ```text
-crates/sync_engine/src/
+crates/fleet_sync/src/
   lib.rs
   engine.rs            // public facade SyncEngine + command methods
   model.rs             // public request/response/tuning/errors/types
@@ -157,8 +157,8 @@ Where `DesiredState`, `ExpectedFile`, `FileState`, `VerifiedState`, `FileStateUp
 
 ### Adapter
 
-* `FleetIndexStore` lives outside the public API surface (e.g., in `crates/fleet_app` or an internal `sync_engine::adapters` module if you want it colocated).
-* Recommendation: keep it **in fleet_app** to prevent `sync_engine` from re-depending on `fleet_index` directly.
+* `FleetIndexStore` lives outside the public API surface (e.g., in `crates/fleet_app` or an internal `fleet_sync::adapters` module if you want it colocated).
+* Recommendation: keep it **in fleet_app** to prevent `fleet_sync` from re-depending on `fleet_index` directly.
 
 ---
 
@@ -448,7 +448,7 @@ The store adapter must ensure it stores timestamps as 64-bit integers. With rusq
 
 ## 13. What “done” looks like (acceptance criteria)
 
-1. `sync_engine` public API is only:
+1. `fleet_sync` public API is only:
 
    * `SyncEngine`, `model::*`, `ports::*`
 2. No external crate can call planner or applier directly.

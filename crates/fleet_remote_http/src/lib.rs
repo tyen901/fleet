@@ -4,7 +4,7 @@ use bytes::Bytes;
 use manifest_types::{ModManifest as MtModManifest, RepoSpec};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
-use sync_engine::ports::{
+use fleet_sync::ports::{
     FileEntry, FilePart, ModManifest as FetchModManifest, RemoteCapabilities, RemoteRepo,
     RemoteStream, RemoteStreamImpl,
 };
