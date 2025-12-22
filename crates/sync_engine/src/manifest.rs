@@ -41,6 +41,13 @@ pub fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<ValidatedMo
 }
 
 fn validate_parts(file: &FileEntry) -> Result<()> {
+    if file.size == 0 {
+        if !file.parts.is_empty() {
+            bail!("invalid parts: empty file must have no parts");
+        }
+        return Ok(());
+    }
+
     if file.parts.is_empty() {
         return Ok(());
     }
@@ -50,6 +57,9 @@ fn validate_parts(file: &FileEntry) -> Result<()> {
 
     let mut pos = 0u64;
     for p in parts {
+        if p.len == 0 {
+            bail!("invalid part: zero length at offset {}", p.offset);
+        }
         let end = p
             .offset
             .checked_add(p.len)

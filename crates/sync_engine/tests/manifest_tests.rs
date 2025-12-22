@@ -76,3 +76,18 @@ fn manifest_rejects_zero_length_part() {
     );
     assert!(validate_and_normalize_manifest(m).is_err());
 }
+
+#[test]
+fn manifest_rejects_parts_for_empty_file() {
+    let m = build_manifest(
+        "@mod",
+        "empty.bin",
+        0,
+        vec![FilePart {
+            offset: 0,
+            len: 0,
+            checksum: vec![1],
+        }],
+    );
+    assert!(validate_and_normalize_manifest(m).is_err());
+}
