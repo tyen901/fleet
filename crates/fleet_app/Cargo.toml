@@ -7,7 +7,6 @@ edition = "2021"
 anyhow = "1"
 camino = "1.1"
 directories = "5.0"
-md5 = "0.7"
 open = "5.3"
 percent-encoding = "2.3"
 fleet_remote_http = { path = "../fleet_remote_http" }
@@ -17,3 +16,9 @@ sync_engine = { path = "../sync_engine" }
 fleet_index = { path = "../fleet_index" }
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
 walkdir = "2.5"
+md5 = "0.7"
+
+# New: error ergonomics + safe registry writes + file locking
+thiserror = "2"
+atomicwrites = "0.4"
+fs2 = "0.4"

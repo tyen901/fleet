@@ -294,7 +294,7 @@ pub fn draw(ui: &mut egui::Ui, kit: &UiKit, props: DashboardProps<'_>) -> Option
 
             ui.add_space(kit.layout.gap);
 
-            // Log card (simple, utilitarian, extremely helpful for flow/debug)
+            // Log card
             widgets::card_frame(kit).show(ui, |ui| {
                 ui.add(widgets::FieldLabel::new(kit, "Log"));
                 ui.add(widgets::Divider::new(kit));
@@ -352,7 +352,6 @@ fn kv(ui: &mut egui::Ui, kit: &UiKit, k: &str, v: &str) {
 }
 
 fn fmt_unix_age(unix_s: i64) -> String {
-    // Keep it dependency-free and utilitarian: show the unix timestamp and a rough age.
     let now = store_unix_now();
     let delta = now.saturating_sub(unix_s);
     let mins = delta / 60;

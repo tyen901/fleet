@@ -1,9 +1,7 @@
-use std::collections::HashSet;
-use std::io::{Read, Write};
-
 use camino::{Utf8Path, Utf8PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -115,11 +113,7 @@ pub fn registry_path() -> Result<Utf8PathBuf, std::io::Error> {
     let proj = ProjectDirs::from("com", "rts", "fleet")
         .ok_or_else(|| std::io::Error::other("no project dirs"))?;
 
-    let base = proj.data_dir();
-    let p = base
-        .join("appdata")
-        .join("a-safe-place-on-linux")
-        .join("registry.json");
+    let p = proj.data_local_dir().join("registry.json");
 
     Utf8PathBuf::from_path_buf(p).map_err(|_| {
         std::io::Error::new(
@@ -127,55 +121,6 @@ pub fn registry_path() -> Result<Utf8PathBuf, std::io::Error> {
             "registry path not valid UTF-8",
         )
     })
-}
-
-pub fn load_registry(path: &Utf8Path) -> Result<Registry, std::io::Error> {
-    if !path.exists() {
-        return Ok(Registry::default());
-    }
-
-    let mut f = std::fs::File::open(path.as_std_path())?;
-    let mut s = String::new();
-    f.read_to_string(&mut s)?;
-
-    match serde_json::from_str::<Registry>(&s) {
-        Ok(mut reg) => {
-            if reg.schema_version < 3 {
-                reg.schema_version = 3;
-            }
-            if reg.selected_profile.is_none() && !reg.profiles.is_empty() {
-                reg.selected_profile = reg.profiles.first().map(|p| p.id.clone());
-            }
-            Ok(reg)
-        }
-        Err(e) => {
-            let backup = path.with_extension(format!("corrupt-{}.json", unix_now()));
-            let _ = std::fs::rename(path.as_std_path(), backup.as_std_path());
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to parse registry: {e} (moved aside)"),
-            ))
-        }
-    }
-}
-
-pub fn save_registry_atomic(path: &Utf8Path, reg: &Registry) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent.as_std_path())?;
-    }
-
-    let tmp = path.with_extension("json.tmp");
-
-    let bytes = serde_json::to_vec_pretty(reg).map_err(|e| std::io::Error::other(e.to_string()))?;
-
-    {
-        let mut f = std::fs::File::create(tmp.as_std_path())?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-    }
-
-    std::fs::rename(tmp.as_std_path(), path.as_std_path())?;
-    Ok(())
 }
 
 pub fn setup_checkout_root(path: &Utf8Path) -> Result<(), std::io::Error> {

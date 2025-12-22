@@ -27,13 +27,13 @@ enum UiMsg {
 pub struct FleetUiApp {
     kit: UiKit,
 
-    // New backend (registry-driven)
+    // Backend (registry-driven)
     app: FleetApp,
 
     // UI state (pure)
     state: AppState,
 
-    // Async runtime + channels for coordinator events and completion notifications
+    // Async runtime + channels
     rt: tokio::runtime::Runtime,
     coord_tx: tokio::sync::mpsc::Sender<SyncEvent>,
     coord_rx: tokio::sync::mpsc::Receiver<SyncEvent>,
@@ -49,7 +49,6 @@ impl FleetUiApp {
         let kit = UiKit::new(&cc.egui_ctx);
 
         let (mut app, warning) = FleetApp::open_default_with_recovery();
-        // Optional: ensure registry exists (safe if already exists)
         let _ = app.init_registry();
         let launch = app.launch_settings();
 
@@ -59,7 +58,6 @@ impl FleetUiApp {
         let mut state = AppState::new(warning, SyncTuning::default());
         state.launch = launch;
 
-        // Initial route selection
         if let Some(id) = selected.clone() {
             reduce(&mut state, Action::Navigate(Route::Dashboard(id)));
         } else {
@@ -78,7 +76,7 @@ impl FleetUiApp {
             .build()
             .expect("tokio runtime");
 
-        let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<SyncEvent>(512);
+        let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<SyncEvent>(2048);
         let (ui_tx, ui_rx) = tokio::sync::mpsc::channel::<UiMsg>(32);
 
         let mut this = Self {
@@ -208,7 +206,6 @@ impl FleetUiApp {
     }
 
     fn start_sync_selected(&mut self) {
-        // Do not start another one
         if self.active_sync.is_some() {
             return;
         }
@@ -238,10 +235,8 @@ impl FleetUiApp {
 
         self.active_sync = Some(job);
 
-        // Reset UI task state/log and mark active
         reduce(&mut self.state, Action::SyncStarted);
 
-        // Monitor completion asynchronously and report back to UI thread via ui_tx
         let ui_tx = self.ui_tx.clone();
         handle.spawn(async move {
             let result = match done_rx.await {
@@ -275,7 +270,7 @@ impl eframe::App for FleetUiApp {
             reduce(&mut self.state, Action::ApplySyncEvent { ev, ts_s: now_s });
         }
 
-        // 2) Drain UI messages (sync completion)
+        // 2) Drain UI messages
         while let Ok(msg) = self.ui_rx.try_recv() {
             match msg {
                 UiMsg::SyncFinished(res) => {
@@ -359,7 +354,6 @@ impl eframe::App for FleetUiApp {
                             );
                         }
                         components::sidebar::SidebarAction::OpenProfile(id) => {
-                            // Persist selection in registry (best-effort)
                             let _ = self.app.select_profile(&id);
                             reduce(&mut self.state, Action::Navigate(Route::Dashboard(id)));
                             self.refresh_profiles_from_backend();
@@ -377,7 +371,6 @@ impl eframe::App for FleetUiApp {
         egui::CentralPanel::default()
             .frame(widgets::panel_frame(&self.kit))
             .show(ctx, |ui| {
-                // Top-of-view warning/error banner (kept minimal and utilitarian)
                 if let Some(w) = self.state.warning.as_deref() {
                     ui.add(widgets::InlineError::new(&self.kit, w));
                     ui.add_space(self.kit.theme.spacing.sm);
@@ -410,14 +403,10 @@ impl eframe::App for FleetUiApp {
                             use views::settings::SettingsCmd as C;
                             match cmd {
                                 C::Save(tuning) => {
-                                    reduce(&mut self.state, Action::SaveSettings(tuning));
+                                    reduce(&mut self.state, Action::SaveSettings(tuning))
                                 }
-                                C::Cancel => {
-                                    reduce(&mut self.state, Action::CancelSettings);
-                                }
-                                C::ResetToDefaults => {
-                                    settings.draft = SyncTuning::default();
-                                }
+                                C::Cancel => reduce(&mut self.state, Action::CancelSettings),
+                                C::ResetToDefaults => settings.draft = SyncTuning::default(),
                                 C::CheckUpdates => self.start_update_check(),
                                 C::ApplyUpdate => self.start_update_apply(),
                                 C::SetLaunchMode(mode) => {
@@ -613,7 +602,6 @@ impl eframe::App for FleetUiApp {
                 }
             });
 
-        // Repaint while a task is active (smooth progress)
         if self.state.task.as_ref().map(|t| t.active).unwrap_or(false) {
             ctx.request_repaint();
         }

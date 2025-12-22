@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# New backend you showed (underscore name)
 fleet_app = { path = "../fleet_app" }
 
 eframe = "0.33.3"

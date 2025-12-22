@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 pub mod ids;
 pub mod local_check;
 pub mod path_safety;

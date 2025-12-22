@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;

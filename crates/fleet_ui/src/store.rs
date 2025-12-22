@@ -63,7 +63,7 @@ pub struct LogLine {
 
 #[derive(Clone, Debug)]
 pub struct ProfileDraft {
-    pub id: Option<String>, // Some for edit
+    pub id: Option<String>,
     pub name: String,
     pub repo_url: String,
     pub checkout_root: String,
@@ -99,8 +99,6 @@ impl ProfileDraft {
 pub struct EditorState {
     pub draft: ProfileDraft,
     pub original: ProfileDraft,
-
-    // Inline 2-step delete confirmation (armed until time in seconds).
     pub delete_armed_until: Option<f64>,
 }
 
@@ -150,22 +148,13 @@ pub struct AppState {
     last_speed_sample_ts_s: Option<f64>,
     last_speed_sample_bytes: u64,
 
-    // Non-fatal startup warning (corrupt registry recovery, etc.)
     pub warning: Option<String>,
-
-    // Short-lived UI errors (command failures)
     pub ui_error: Option<String>,
 
-    // Expose tuning in state (kept default/simple; can be extended later)
     pub tuning: SyncTuning,
-
-    // Update UI state (Velopack)
     pub update: UpdateState,
-
-    // Launch settings (persisted in registry; mirrored here for UI)
     pub launch: LaunchSettings,
 
-    // Dashboard: cached launch-args preview for the currently viewed profile
     pub launch_args_profile_id: Option<String>,
     pub launch_args_preview: Option<String>,
     pub launch_args_error: Option<String>,
@@ -303,7 +292,6 @@ pub fn reduce(state: &mut AppState, action: Action) {
         } => {
             state.profiles = profiles;
 
-            // Keep route stable, but if we’re on hub and have a selected profile, go to dashboard.
             if matches!(state.route, Route::Hub) {
                 if let Some(id) = selected_id {
                     state.route = Route::Dashboard(id);
@@ -338,11 +326,9 @@ pub fn reduce(state: &mut AppState, action: Action) {
         }
 
         Action::ApplySyncEvent { ev, ts_s } => {
-            // Always append a short log line (bounded).
             let line = format_sync_event(&ev);
             push_log(state, ts_s, line);
 
-            // Update task display fields (simple, utilitarian).
             match ev {
                 SyncEvent::VerifyStarted { repo } => {
                     set_task(state, &format!("Verify {repo}"), None, true, None)
@@ -386,19 +372,13 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     set_task(state, &format!("Finished {mod_id}"), None, true, None)
                 }
 
-                SyncEvent::FileStarted {
-                    mod_id,
-                    path,
-                    bytes_total: _,
-                } => {
-                    set_task(
-                        state,
-                        &format!("Downloading {mod_id}/{path}"),
-                        Some(0.0),
-                        true,
-                        None,
-                    );
-                }
+                SyncEvent::FileStarted { mod_id, path, .. } => set_task(
+                    state,
+                    &format!("Downloading {mod_id}/{path}"),
+                    Some(0.0),
+                    true,
+                    None,
+                ),
 
                 SyncEvent::FileUpToDate { mod_id, path } => set_task(
                     state,
@@ -523,9 +503,7 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.update.status = "Update failed".into();
         }
 
-        Action::SetLaunchMode(mode) => {
-            state.launch.mode = mode;
-        }
+        Action::SetLaunchMode(mode) => state.launch.mode = mode,
 
         Action::SetLaunchArgsPreview { profile_id, result } => {
             state.launch_args_profile_id = Some(profile_id);
@@ -585,18 +563,24 @@ fn format_sync_event(ev: &SyncEvent) -> String {
             mod_id,
             path,
             strategy,
-        } => format!("FileNeedsRepair {mod_id}/{path} {strategy}"),
+        } => {
+            format!("FileNeedsRepair {mod_id}/{path} {strategy}")
+        }
         SyncEvent::FileStarted {
             mod_id,
             path,
             bytes_total,
-        } => format!("FileStarted {mod_id}/{path} total={bytes_total}"),
+        } => {
+            format!("FileStarted {mod_id}/{path} total={bytes_total}")
+        }
         SyncEvent::FileProgress {
             mod_id,
             path,
             bytes_done,
             bytes_total,
-        } => format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}"),
+        } => {
+            format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}")
+        }
         SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
         SyncEvent::PathQuarantined { path, dest } => format!("PathQuarantined {path} -> {dest}"),
         SyncEvent::EmptyDirDeleted { path } => format!("EmptyDirDeleted {path}"),
@@ -632,7 +616,6 @@ pub fn cancel_route(mode: EditorRoute) -> Route {
     }
 }
 
-// Convert editor draft → backend update (only changed fields)
 pub fn draft_to_update(editor: &EditorState) -> ProfileUpdate {
     let d = &editor.draft;
     let o = &editor.original;

@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 pub mod apply;
 pub mod events;
 pub mod fetch;

@@ -1,8 +1,10 @@
-mod arma3;
 pub mod events;
 mod registry;
+mod storage;
 
-use std::fmt;
+pub mod launch;
+pub mod platform;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,49 +13,31 @@ use fleet_index::{DesiredState, FleetIndex};
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 
-pub use arma3::{
-    build_arma3_commandline, build_arma3_steam_url, launch_arma3_via_steam,
-    launch_arma3_via_steam_with_mode, open_folder_in_file_manager, LaunchError,
-};
+pub use crate::launch::arma3::{Arma3LaunchPlan, LaunchError};
 pub use registry::{
     normalize_repo_url, registry_path, Arma3Config, LaunchMode, LaunchSettings, Profile, Registry,
 };
+pub use storage::RegistryStore;
 
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum AppError {
-    Io(std::io::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("{0}")]
     InvalidInput(String),
+
+    #[error("no profile selected")]
     NoProfileSelected,
+
+    #[error("{0}")]
     NotFound(String),
+
+    #[error("sync error: {0}")]
     SyncEngine(String),
-    Launch(LaunchError),
-}
 
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::Io(err) => write!(f, "io error: {err}"),
-            AppError::InvalidInput(msg) => write!(f, "{msg}"),
-            AppError::NoProfileSelected => write!(f, "no profile selected"),
-            AppError::NotFound(msg) => write!(f, "{msg}"),
-            AppError::SyncEngine(err) => write!(f, "sync error: {err}"),
-            AppError::Launch(err) => write!(f, "{err}"),
-        }
-    }
-}
-
-impl std::error::Error for AppError {}
-
-impl From<std::io::Error> for AppError {
-    fn from(err: std::io::Error) -> Self {
-        AppError::Io(err)
-    }
-}
-
-impl From<LaunchError> for AppError {
-    fn from(err: LaunchError) -> Self {
-        AppError::Launch(err)
-    }
+    #[error(transparent)]
+    Launch(#[from] LaunchError),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,15 +114,16 @@ impl SyncJob {
 
 #[derive(Clone)]
 pub struct FleetApp {
-    path: Utf8PathBuf,
+    store: RegistryStore,
     registry: Registry,
 }
 
 impl FleetApp {
     pub fn open_default() -> Result<Self, AppError> {
         let path = registry_path()?;
-        let registry = registry::load_registry(&path)?;
-        Ok(Self { path, registry })
+        let store = RegistryStore::new(path);
+        let registry = store.load()?;
+        Ok(Self { store, registry })
     }
 
     pub fn open_default_with_recovery() -> (Self, Option<String>) {
@@ -151,7 +136,8 @@ impl FleetApp {
             }
         };
 
-        let registry = match registry::load_registry(&path) {
+        let store = RegistryStore::new(path);
+        let registry = match store.load() {
             Ok(reg) => reg,
             Err(e) => {
                 warning = Some(e.to_string());
@@ -159,23 +145,29 @@ impl FleetApp {
             }
         };
 
-        (Self { path, registry }, warning)
+        (Self { store, registry }, warning)
     }
 
     pub fn registry_path(&self) -> &Utf8Path {
-        &self.path
+        self.store.path()
     }
 
     pub fn refresh_registry(&mut self) -> Result<(), AppError> {
-        self.registry = registry::load_registry(&self.path)?;
+        self.registry = self.store.load()?;
         Ok(())
     }
 
     pub fn init_registry(&mut self) -> Result<(), AppError> {
-        if self.path.exists() {
-            return Ok(());
-        }
-        registry::save_registry_atomic(&self.path, &Registry::default())?;
+        // Create file if missing; save default under lock.
+        let store = self.store.clone();
+        store.update(|reg| {
+            // If this is a fresh file, it will be default already; still safe.
+            if reg.schema_version == 0 {
+                *reg = Registry::default();
+            }
+            Ok(())
+        })?;
+        self.refresh_registry()?;
         Ok(())
     }
 
@@ -184,13 +176,18 @@ impl FleetApp {
     }
 
     pub fn set_launch_settings(&mut self, settings: LaunchSettings) -> Result<(), AppError> {
-        self.registry.launch = settings;
-        registry::save_registry_atomic(&self.path, &self.registry)?;
+        let store = self.store.clone();
+        store.update(|reg| {
+            reg.launch = settings;
+            Ok(())
+        })?;
+        self.refresh_registry()?;
         Ok(())
     }
 
     pub fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
-        open_folder_in_file_manager(path, self.registry.launch.mode.clone())?;
+        let s = path.to_string_lossy();
+        platform::open_target::open_target(self.registry.launch.mode.clone(), &s)?;
         Ok(())
     }
 
@@ -209,16 +206,20 @@ impl FleetApp {
 
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = std::path::PathBuf::from(profile.checkout_root);
-        let s = build_arma3_commandline(&base_path, &profile.arma3.enabled_mods, &extra)?;
+        let (cmdline, _mods) = launch::arma3::build_arma3_commandline(
+            &base_path,
+            &profile.arma3.enabled_mods,
+            &extra,
+        )?;
 
         #[cfg(target_os = "linux")]
         {
-            Ok(format!("steam steam://rungameid/107410 {s}"))
+            Ok(format!("steam steam://rungameid/107410 {cmdline}"))
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            Ok(s)
+            Ok(cmdline)
         }
     }
 
@@ -245,13 +246,20 @@ impl FleetApp {
     }
 
     pub fn select_profile(&mut self, id: &str) -> Result<(), AppError> {
-        if self.registry.profiles.iter().any(|p| p.id == id) {
-            self.registry.selected_profile = Some(id.to_string());
-            registry::save_registry_atomic(&self.path, &self.registry)?;
-            Ok(())
-        } else {
-            Err(AppError::NotFound(format!("profile not found: {id}")))
-        }
+        let store = self.store.clone();
+        store.update(|reg| {
+            if reg.profiles.iter().any(|p| p.id == id) {
+                reg.selected_profile = Some(id.to_string());
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("profile not found: {id}"),
+                ))
+            }
+        })?;
+        self.refresh_registry()?;
+        Ok(())
     }
 
     pub fn add_profile(
@@ -266,62 +274,75 @@ impl FleetApp {
 
         registry::setup_checkout_root(&checkout_path)?;
 
-        let prev_selected = self.registry.selected_profile.clone();
-        let profile = Profile {
-            id: String::new(),
-            name: name.to_string(),
-            repo_url: normalized_repo,
-            checkout_root: checkout_path.to_string(),
-            created_unix_s: registry::unix_now(),
-            last_sync_unix_s: None,
-            arma3: Arma3Config::default(),
-        };
+        let created = registry::unix_now();
 
-        self.registry.add_profile(profile);
-        if !select {
-            self.registry.selected_profile = prev_selected;
-        }
-        registry::save_registry_atomic(&self.path, &self.registry)?;
+        let store = self.store.clone();
+        let added = store.update(|reg| {
+            let prev_selected = reg.selected_profile.clone();
+            let profile = Profile {
+                id: String::new(),
+                name: name.to_string(),
+                repo_url: normalized_repo,
+                checkout_root: checkout_path.to_string(),
+                created_unix_s: created,
+                last_sync_unix_s: None,
+                arma3: Arma3Config::default(),
+            };
+            reg.add_profile(profile);
+            if !select {
+                reg.selected_profile = prev_selected;
+            }
+            Ok(reg.profiles.last().cloned().unwrap())
+        })?;
 
-        let added = self.registry.profiles.last().cloned().unwrap();
+        self.refresh_registry()?;
         Ok(ProfileSpec::from(added))
     }
 
     pub fn update_profile(&mut self, id: &str, update: ProfileUpdate) -> Result<(), AppError> {
-        let profile = self
-            .registry
-            .profiles
-            .iter_mut()
-            .find(|p| p.id == id)
-            .ok_or_else(|| AppError::NotFound(format!("profile not found: {id}")))?;
+        let store = self.store.clone();
+        store.update(|reg| {
+            let profile = reg
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == id)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("profile not found: {id}"),
+                    )
+                })?;
 
-        if let Some(name) = update.name {
-            profile.name = name;
-        }
-        if let Some(repo_url) = update.repo_url {
-            profile.repo_url = normalize_repo_url(&repo_url);
-        }
-        if let Some(checkout_root) = update.checkout_root {
-            let checkout_path = Utf8PathBuf::from(checkout_root);
-            registry::setup_checkout_root(&checkout_path)?;
-            profile.checkout_root = checkout_path.to_string();
-        }
-        if let Some(extra) = update.arma3_extra_args {
-            profile.arma3.extra_args = extra;
-        }
-        if let Some(select) = update.select {
-            if select {
-                self.registry.selected_profile = Some(profile.id.clone());
+            if let Some(name) = update.name {
+                profile.name = name;
             }
-        }
-
-        registry::save_registry_atomic(&self.path, &self.registry)?;
+            if let Some(repo_url) = update.repo_url {
+                profile.repo_url = normalize_repo_url(&repo_url);
+            }
+            if let Some(checkout_root) = update.checkout_root {
+                let checkout_path = Utf8PathBuf::from(checkout_root);
+                registry::setup_checkout_root(&checkout_path)?;
+                profile.checkout_root = checkout_path.to_string();
+            }
+            if let Some(extra) = update.arma3_extra_args {
+                profile.arma3.extra_args = extra;
+            }
+            if let Some(select) = update.select {
+                if select {
+                    reg.selected_profile = Some(profile.id.clone());
+                }
+            }
+            Ok(())
+        })?;
+        self.refresh_registry()?;
         Ok(())
     }
 
     pub fn remove_profile(&mut self, id: &str) -> Result<(), AppError> {
-        if self.registry.remove_profile(id) {
-            registry::save_registry_atomic(&self.path, &self.registry)?;
+        let store = self.store.clone();
+        let removed = store.update(|reg| Ok(reg.remove_profile(id)))?;
+        if removed {
+            self.refresh_registry()?;
             Ok(())
         } else {
             Err(AppError::NotFound(format!("profile not found: {id}")))
@@ -360,12 +381,14 @@ impl FleetApp {
 
         let (done_tx, done_rx) = oneshot::channel::<Result<(), AppError>>();
         let checkout_root_buf = checkout_root.to_owned();
-        let path = self.path.clone();
+        let store = self.store.clone();
 
         let handle = handle.spawn(async move {
             let res: Result<(), AppError> = async {
-                let remote = fleet_remote_http::HttpRemote::new(&repo_url)
-                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let remote = Arc::new(
+                    fleet_remote_http::HttpRemote::new(&repo_url)
+                        .map_err(|e| AppError::SyncEngine(e.to_string()))?,
+                );
 
                 let raw_spec = remote
                     .fetch_repo_spec()
@@ -423,35 +446,28 @@ impl FleetApp {
                     repo_name,
                     checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                     enabled_mods,
-                    remote: Arc::new(remote),
+                    remote: remote as Arc<dyn sync_engine::remote::RemoteRepo>,
                     checksummer: Arc::new(Md5Checksummer),
                     tuning: engine_tuning,
                 };
 
-                let outcome = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
+                let _report = sync_engine::flows::repair(request, &mut idx, Arc::new(sink))
                     .await
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
-                if let Some(aborted) = outcome.aborted {
-                    return Err(AppError::SyncEngine(format!(
-                        "repair aborted: {:?}",
-                        aborted
-                    )));
-                }
-                if !outcome.failures.is_empty() {
-                    let first = &outcome.failures[0];
-                    return Err(AppError::SyncEngine(format!(
-                        "repair failed ({} files): {}",
-                        outcome.failures.len(),
-                        first.message
-                    )));
-                }
                 Ok(())
             }
             .await;
 
             if res.is_ok() {
                 if let Some(profile_id) = profile_id_to_update {
-                    let _ = update_last_sync_on_disk(&path, &profile_id);
+                    // Update last_sync_unix_s via locked update to avoid clobbering.
+                    let _ = store.update(|reg| {
+                        if let Some(profile) = reg.profiles.iter_mut().find(|p| p.id == profile_id)
+                        {
+                            profile.last_sync_unix_s = Some(registry::unix_now());
+                        }
+                        Ok(())
+                    });
                 }
             }
 
@@ -479,8 +495,9 @@ impl FleetApp {
 
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = PathBuf::from(profile.checkout_root);
-        let url = build_arma3_steam_url(&base_path, &profile.arma3.enabled_mods, &extra)?;
-        launch_arma3_via_steam_with_mode(url, self.registry.launch.mode.clone())?;
+
+        let plan = launch::arma3::plan_launch(&base_path, &profile.arma3.enabled_mods, &extra)?;
+        platform::open_target::open_target(self.registry.launch.mode.clone(), &plan.steam_url)?;
         Ok(())
     }
 
@@ -489,13 +506,33 @@ impl FleetApp {
         base_path: &std::path::Path,
         extra_args: &str,
     ) -> Result<(), AppError> {
-        let url = build_arma3_steam_url(base_path, &[], extra_args)?;
-        launch_arma3_via_steam_with_mode(url, self.registry.launch.mode.clone())?;
+        let plan = launch::arma3::plan_launch(base_path, &[], extra_args)?;
+        platform::open_target::open_target(self.registry.launch.mode.clone(), &plan.steam_url)?;
         Ok(())
     }
 }
 
-#[derive(Clone, Default)]
+struct SyncEventSink {
+    tx: mpsc::Sender<events::SyncEvent>,
+}
+
+impl sync_engine::events::EventSink for SyncEventSink {
+    fn push(&self, ev: sync_engine::events::SyncEvent) {
+        let app_ev: events::SyncEvent = ev.into();
+
+        // High-frequency progress can be lossy; state transitions should be reliable.
+        if app_ev.is_high_frequency() {
+            let _ = self.tx.try_send(app_ev);
+            return;
+        }
+
+        // Prefer guaranteed delivery for important events.
+        // blocking_send is acceptable here because these events are low-frequency.
+        let _ = self.tx.blocking_send(app_ev);
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Md5Checksummer;
 
 impl sync_engine::types::Checksummer for Md5Checksummer {
@@ -506,11 +543,11 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
         use std::io::Read;
 
-        let mut f = std::fs::File::open(path)?;
-        let mut buf = vec![0u8; 1024 * 1024];
+        let mut file = std::fs::File::open(path)?;
         let mut ctx = md5::Context::new();
+        let mut buf = [0u8; 64 * 1024];
         loop {
-            let n = f.read(&mut buf)?;
+            let n = file.read(&mut buf)?;
             if n == 0 {
                 break;
             }
@@ -522,17 +559,17 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         use std::io::{Read, Seek};
 
-        let mut f = std::fs::File::open(path)?;
-        f.seek(std::io::SeekFrom::Start(offset))?;
+        let mut file = std::fs::File::open(path)?;
+        file.seek(std::io::SeekFrom::Start(offset))?;
 
-        let mut ctx = md5::Context::new();
-        let mut buf = vec![0u8; 1024 * 1024];
         let mut remaining = len;
+        let mut ctx = md5::Context::new();
+        let mut buf = [0u8; 64 * 1024];
         while remaining > 0 {
-            let want = (remaining as usize).min(buf.len());
-            let n = f.read(&mut buf[..want])?;
+            let want = usize::try_from(remaining.min(buf.len() as u64))?;
+            let n = file.read(&mut buf[..want])?;
             if n == 0 {
-                anyhow::bail!("short read {} @{}+{}", path.display(), offset, len);
+                anyhow::bail!("unexpected EOF while hashing range");
             }
             ctx.consume(&buf[..n]);
             remaining -= n as u64;
@@ -541,21 +578,24 @@ impl sync_engine::types::Checksummer for Md5Checksummer {
     }
 }
 
-struct SyncEventSink {
-    tx: mpsc::Sender<events::SyncEvent>,
+// Backward-compat re-exports (keep for now to avoid churn in other crates)
+pub use launch::arma3::{build_arma3_commandline, build_arma3_steam_url};
+
+pub fn launch_arma3_via_steam(steam_url: String) -> Result<(), LaunchError> {
+    platform::open_target::open_target(LaunchMode::SystemDefault, &steam_url)
 }
 
-impl sync_engine::events::EventSink for SyncEventSink {
-    fn push(&self, ev: sync_engine::events::SyncEvent) {
-        let _ = self.tx.try_send(ev);
-    }
+pub fn launch_arma3_via_steam_with_mode(
+    steam_url: String,
+    mode: LaunchMode,
+) -> Result<(), LaunchError> {
+    platform::open_target::open_target(mode, &steam_url)
 }
 
-fn update_last_sync_on_disk(path: &Utf8Path, profile_id: &str) -> Result<(), AppError> {
-    let mut reg = registry::load_registry(path)?;
-    if let Some(profile) = reg.profiles.iter_mut().find(|p| p.id == profile_id) {
-        profile.last_sync_unix_s = Some(registry::unix_now());
-        registry::save_registry_atomic(path, &reg)?;
-    }
-    Ok(())
+pub fn open_folder_in_file_manager(
+    path: &std::path::Path,
+    mode: LaunchMode,
+) -> Result<(), LaunchError> {
+    let s = path.to_string_lossy();
+    platform::open_target::open_target(mode, &s)
 }

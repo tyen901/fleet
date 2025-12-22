@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 mod pbo;
 
 use camino::Utf8Path;

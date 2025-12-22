@@ -99,7 +99,6 @@ pub fn draw(
                 ui.add(widgets::Divider::new(kit));
                 ui.add_space(kit.theme.spacing.sm);
 
-                // Arma3 (kept simple: only extra args)
                 ui.add(widgets::FieldLabel::new(kit, "Arma 3 extra args"));
                 widgets::text_field(
                     ui,
@@ -113,7 +112,6 @@ pub fn draw(
                 ui.add(widgets::Divider::new(kit));
                 ui.add_space(kit.theme.spacing.sm);
 
-                // Actions
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = kit.layout.gap;
 
@@ -172,7 +170,6 @@ pub fn draw(
                     );
                 });
 
-                // Inline status hints
                 let save_enabled = is_valid && is_dirty;
                 if !save_enabled {
                     ui.add_space(kit.theme.spacing.sm);

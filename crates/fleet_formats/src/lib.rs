@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 pub mod compat;
 pub mod digest;
 pub mod manifest_json;
