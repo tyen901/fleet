@@ -1,14 +1,19 @@
 use crate::{store, store::SettingsState, ui_kit::UiKit, update, widgets};
-use eframe::egui;
-use fleet_app::{LaunchMode, SafeWipePolicy, SyncMode, SyncTuning, UnknownPathPolicy};
+use eframe::egui::{self, TextEdit};
+use fleet_app::{
+    LaunchSettings, LinuxModPathStyle, OpenMode, SafeWipePolicy, SyncMode, SyncTuning,
+    UnknownPathPolicy, WindowsLaunchMethod,
+};
 
 pub enum SettingsCmd {
-    Save(SyncTuning),
+    Save {
+        tuning: SyncTuning,
+        launch: LaunchSettings,
+    },
     Cancel,
     ResetToDefaults,
     CheckUpdates,
     ApplyUpdate,
-    SetLaunchMode(LaunchMode),
 }
 
 pub fn draw(
@@ -17,7 +22,6 @@ pub fn draw(
     s: &mut SettingsState,
     upd: &store::UpdateState,
     sync_active: bool,
-    launch_mode: LaunchMode,
 ) -> Option<SettingsCmd> {
     let mut cmd = None;
     let dirty = s.is_dirty();
@@ -266,38 +270,133 @@ pub fn draw(
 
                 ui.add_space(kit.theme.spacing.sm);
 
-                let mut selected = launch_mode;
+                let launch = &mut s.draft_launch;
 
-                ui.add(widgets::FieldLabel::new(kit, "Windows / Linux native"));
-                if ui
-                    .radio_value(
-                        &mut selected,
-                        LaunchMode::SystemDefault,
-                        "System default (recommended on Windows and native Linux installs)",
-                    )
-                    .clicked()
-                {
-                    cmd = Some(SettingsCmd::SetLaunchMode(LaunchMode::SystemDefault));
-                }
-
+                ui.add(widgets::FieldLabel::new(kit, "Open mode"));
+                ui.radio_value(
+                    &mut launch.open_mode,
+                    OpenMode::SystemDefault,
+                    "System default (recommended on Windows and native Linux installs)",
+                );
                 ui.add_space(kit.theme.spacing.sm);
-
-                ui.add(widgets::FieldLabel::new(kit, "Linux Flatpak (Steam)"));
-                if ui
-                    .radio_value(
-                        &mut selected,
-                        LaunchMode::LinuxFlatpakHost,
-                        "Flatpak host open (flatpak-spawn --host xdg-open …)",
-                    )
-                    .clicked()
-                {
-                    cmd = Some(SettingsCmd::SetLaunchMode(LaunchMode::LinuxFlatpakHost));
-                }
-
+                ui.radio_value(
+                    &mut launch.open_mode,
+                    OpenMode::LinuxFlatpakHost,
+                    "Flatpak host open (flatpak-spawn --host xdg-open …)",
+                );
                 ui.add_space(kit.theme.spacing.sm);
                 ui.add(widgets::InlineHint::new(
                     kit,
-                    "Note: if Flatpak host mode is selected outside Flatpak, it may fail if flatpak-spawn is unavailable.",
+                    "Note: if Flatpak host mode is selected outside Flatpak, flatpak-spawn must be available.",
+                ));
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::FieldLabel::new(kit, "Windows launch method"));
+                let win = &mut launch.arma3.windows;
+                ui.radio_value(
+                    &mut win.method,
+                    WindowsLaunchMethod::DirectExe,
+                    "Direct exe (Arma3_x64.exe)",
+                );
+                ui.radio_value(
+                    &mut win.method,
+                    WindowsLaunchMethod::SteamAppLaunch,
+                    "Steam.exe -applaunch 107410",
+                );
+                ui.radio_value(
+                    &mut win.method,
+                    WindowsLaunchMethod::SteamUri,
+                    "steam://rungameid/107410...",
+                );
+
+                if win.method == WindowsLaunchMethod::DirectExe {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::FieldLabel::new(kit, "Arma3_x64.exe"));
+                    let mut exe = win.arma3_exe.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut exe)
+                                .hint_text("C:\\Program Files\\Arma 3\\Arma3_x64.exe"),
+                        )
+                        .changed()
+                    {
+                        win.arma3_exe = if exe.trim().is_empty() {
+                            None
+                        } else {
+                            Some(exe.clone())
+                        };
+                    }
+                }
+
+                if win.method == WindowsLaunchMethod::SteamAppLaunch {
+                    ui.add_space(kit.theme.spacing.sm);
+                    ui.add(widgets::FieldLabel::new(kit, "Steam.exe"));
+                    let mut steam = win.steam_exe.clone().unwrap_or_default();
+                    if ui
+                        .add(
+                            TextEdit::singleline(&mut steam)
+                                .hint_text("C:\\Program Files\\Steam\\Steam.exe"),
+                        )
+                        .changed()
+                    {
+                        win.steam_exe = if steam.trim().is_empty() {
+                            None
+                        } else {
+                            Some(steam.clone())
+                        };
+                    }
+                }
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::Divider::new(kit));
+                ui.add_space(kit.theme.spacing.sm);
+
+                ui.add(widgets::FieldLabel::new(kit, "Linux template"));
+                let lin = &mut launch.arma3.linux;
+                ui.add(
+                    TextEdit::singleline(&mut lin.template)
+                        .hint_text("steam -applaunch 107410 $ARGS $MODS"),
+                );
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::InlineHint::new(
+                    kit,
+                    "$ARGS and $MODS are replaced with shell-escaped extra args and mod lists.",
+                ));
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::FieldLabel::new(kit, "Linux mod path style"));
+                egui::ComboBox::from_id_salt("linux_mod_path_style")
+                    .selected_text(format!("{:?}", lin.mod_path_style))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut lin.mod_path_style,
+                            LinuxModPathStyle::Native,
+                            "Native host paths",
+                        );
+                        ui.selectable_value(
+                            &mut lin.mod_path_style,
+                            LinuxModPathStyle::ProtonZ,
+                            "Proton Z: drive",
+                        );
+                    });
+
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::FieldLabel::new(kit, "Linux shell"));
+                let mut shell = lin.shell.clone().unwrap_or_default();
+                if ui
+                    .add(TextEdit::singleline(&mut shell).hint_text("sh"))
+                    .changed()
+                {
+                    lin.shell = if shell.trim().is_empty() {
+                        None
+                    } else {
+                        Some(shell.clone())
+                    };
+                }
+                ui.add_space(kit.theme.spacing.sm);
+                ui.add(widgets::InlineHint::new(
+                    kit,
+                    "Leave shell blank to use the default (sh).",
                 ));
             });
 
@@ -408,7 +507,10 @@ pub fn draw(
                     )
                     .clicked()
                 {
-                    cmd = Some(SettingsCmd::Save(s.draft.clone()));
+                    cmd = Some(SettingsCmd::Save {
+                        tuning: s.draft.clone(),
+                        launch: s.draft_launch.clone(),
+                    });
                 }
 
                 if ui

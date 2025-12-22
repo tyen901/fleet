@@ -51,8 +51,8 @@ impl RegistryStore {
     }
 
     fn upgrade_registry(mut reg: Registry) -> Registry {
-        if reg.schema_version < 3 {
-            reg.schema_version = 3;
+        if reg.schema_version < 4 {
+            reg.schema_version = 4;
         }
         if reg.selected_profile.is_none() && !reg.profiles.is_empty() {
             reg.selected_profile = reg.profiles.first().map(|p| p.id.clone());
@@ -116,6 +116,7 @@ impl RegistryStore {
         ))
     }
 
+    #[allow(dead_code)]
     pub fn save(&self, reg: &Registry) -> Result<(), std::io::Error> {
         let lock = self.open_lock_file()?;
         lock.lock_exclusive()?;

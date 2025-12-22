@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use manifest_types::{ModManifest as MtModManifest, RepoSpec};
-use reqwest::header::{HeaderValue, RANGE};
-use std::sync::Mutex;
 use fleet_sync::ports::{
     FileEntry, FilePart, ModManifest as FetchModManifest, RemoteCapabilities, RemoteRepo,
     RemoteStream, RemoteStreamImpl,
 };
+use manifest_types::{ModManifest as MtModManifest, RepoSpec};
+use reqwest::header::{HeaderValue, RANGE};
+use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 

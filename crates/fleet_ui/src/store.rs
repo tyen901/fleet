@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use fleet_app::events::SyncEvent;
-use fleet_app::{LaunchMode, LaunchSettings, ProfileSpec, ProfileUpdate, SyncMode, SyncTuning};
+use fleet_app::{LaunchSettings, ProfileSpec, ProfileUpdate, SyncMode, SyncTuning};
 use velopack::{UpdateCheck, UpdateInfo};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,7 +115,9 @@ impl EditorState {
 #[derive(Clone, Debug)]
 pub struct SettingsState {
     pub draft: SyncTuning,
+    pub draft_launch: LaunchSettings,
     pub original: SyncTuning,
+    pub original_launch: LaunchSettings,
 }
 
 impl SettingsState {
@@ -137,6 +139,7 @@ impl SettingsState {
             || self.draft.auto_fix_case != self.original.auto_fix_case
             || self.draft.safe_wipe != self.original.safe_wipe
             || self.draft.unknown_paths != self.original.unknown_paths
+            || self.draft_launch != self.original_launch
     }
 }
 
@@ -207,7 +210,10 @@ pub enum Action {
 
     SetUiError(String),
 
-    SaveSettings(SyncTuning),
+    SaveSettings {
+        tuning: SyncTuning,
+        launch: LaunchSettings,
+    },
     CancelSettings,
 
     SetSyncMode(SyncMode),
@@ -230,7 +236,6 @@ pub enum Action {
     UpdateProgress(f32),
     UpdateApplyError(String),
 
-    SetLaunchMode(LaunchMode),
     SetLaunchArgsPreview {
         profile_id: String,
         result: Result<String, String>,
@@ -273,7 +278,9 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     state.return_route = prev;
                     Some(SettingsState {
                         draft: state.tuning.clone(),
+                        draft_launch: state.launch.clone(),
                         original: state.tuning.clone(),
+                        original_launch: state.launch.clone(),
                     })
                 }
                 _ => None,
@@ -304,12 +311,6 @@ pub fn reduce(state: &mut AppState, action: Action) {
         }
 
         Action::SetUiError(msg) => state.ui_error = Some(msg),
-
-        Action::SaveSettings(tuning) => {
-            state.tuning = tuning;
-            state.settings_editor = None;
-            state.route = state.return_route.clone();
-        }
 
         Action::CancelSettings => {
             state.settings_editor = None;
@@ -640,7 +641,12 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.update.status = "Update failed".into();
         }
 
-        Action::SetLaunchMode(mode) => state.launch.mode = mode,
+        Action::SaveSettings { tuning, launch } => {
+            state.tuning = tuning;
+            state.launch = launch;
+            state.settings_editor = None;
+            state.route = state.return_route.clone();
+        }
 
         Action::SetLaunchArgsPreview { profile_id, result } => {
             state.launch_args_profile_id = Some(profile_id);

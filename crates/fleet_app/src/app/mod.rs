@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::events;
-use crate::launch;
+use crate::launch::arma3;
 use crate::registry;
 use crate::registry::{normalize_repo_url, registry_path, Profile, Registry};
 use crate::settings::{Arma3Config, LaunchSettings};
@@ -144,12 +144,11 @@ impl FleetApp {
     }
 
     pub fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
-        let s = path.to_string_lossy();
-        crate::platform::open_target::open_target(self.registry.launch.mode.clone(), &s)?;
+        crate::platform::runner::open_path(self.registry.launch.open_mode.clone(), path)?;
         Ok(())
     }
 
-    pub fn arma3_launch_args_for_profile(
+    pub fn arma3_launch_preview_for_profile(
         &self,
         id: &str,
         extra_args_override: Option<String>,
@@ -164,21 +163,15 @@ impl FleetApp {
 
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = std::path::PathBuf::from(profile.checkout_root);
-        let (cmdline, _mods) = launch::arma3::build_arma3_commandline(
+
+        let plan = arma3::plan_launch(
             &base_path,
             &profile.arma3.enabled_mods,
             &extra,
+            &self.registry.launch,
         )?;
 
-        #[cfg(target_os = "linux")]
-        {
-            Ok(format!("steam steam://rungameid/107410 {cmdline}"))
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(cmdline)
-        }
+        Ok(plan.preview)
     }
 
     pub fn list_profiles(&self) -> Vec<ProfileSpec> {
@@ -492,11 +485,14 @@ impl FleetApp {
         let extra = extra_args_override.unwrap_or(profile.arma3.extra_args);
         let base_path = PathBuf::from(profile.checkout_root);
 
-        let plan = launch::arma3::plan_launch(&base_path, &profile.arma3.enabled_mods, &extra)?;
-        crate::platform::open_target::open_target(
-            self.registry.launch.mode.clone(),
-            &plan.steam_url,
+        let plan = arma3::plan_launch(
+            &base_path,
+            &profile.arma3.enabled_mods,
+            &extra,
+            &self.registry.launch,
         )?;
+
+        crate::platform::execute(self.registry.launch.open_mode.clone(), plan.action)?;
         Ok(())
     }
 
@@ -505,11 +501,9 @@ impl FleetApp {
         base_path: &std::path::Path,
         extra_args: &str,
     ) -> Result<(), AppError> {
-        let plan = launch::arma3::plan_launch(base_path, &[], extra_args)?;
-        crate::platform::open_target::open_target(
-            self.registry.launch.mode.clone(),
-            &plan.steam_url,
-        )?;
+        let plan = arma3::plan_launch(base_path, &[], extra_args, &self.registry.launch)?;
+
+        crate::platform::execute(self.registry.launch.open_mode.clone(), plan.action)?;
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
-use fleet_fs::{normalize_rel_path, validate_mod_id, validate_rel_path};
 use crate::schema;
 use crate::types::{DesiredState, ExpectedFile, FileState, IndexError, VerifiedState};
+use fleet_fs::{normalize_rel_path, validate_mod_id, validate_rel_path};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

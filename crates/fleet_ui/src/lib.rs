@@ -9,7 +9,7 @@ mod widgets;
 use eframe::egui;
 
 use fleet_app::events::SyncEvent;
-use fleet_app::{FleetApp, SyncTuning};
+use fleet_app::{FleetApp, LaunchSettings, SyncTuning};
 
 use store::{reduce, Action, AppState, Route};
 use ui_kit::UiKit;
@@ -398,21 +398,14 @@ impl eframe::App for FleetUiApp {
                             settings,
                             &self.state.update,
                             self.active_sync.is_some(),
-                            self.state.launch.mode.clone(),
                         ) {
                             use views::settings::SettingsCmd as C;
                             match cmd {
-                                C::Save(tuning) => {
-                                    reduce(&mut self.state, Action::SaveSettings(tuning))
-                                }
-                                C::Cancel => reduce(&mut self.state, Action::CancelSettings),
-                                C::ResetToDefaults => settings.draft = SyncTuning::default(),
-                                C::CheckUpdates => self.start_update_check(),
-                                C::ApplyUpdate => self.start_update_apply(),
-                                C::SetLaunchMode(mode) => {
-                                    let mut s = self.app.launch_settings();
-                                    s.mode = mode.clone();
-                                    if let Err(e) = self.app.set_launch_settings(s) {
+                                C::Save { tuning, launch } => {
+                                    let updated_launch = launch.clone();
+                                    if let Err(e) =
+                                        self.app.set_launch_settings(updated_launch.clone())
+                                    {
                                         reduce(
                                             &mut self.state,
                                             Action::SetUiError(format!(
@@ -420,9 +413,22 @@ impl eframe::App for FleetUiApp {
                                             )),
                                         );
                                     } else {
-                                        reduce(&mut self.state, Action::SetLaunchMode(mode));
+                                        reduce(
+                                            &mut self.state,
+                                            Action::SaveSettings {
+                                                tuning,
+                                                launch: updated_launch,
+                                            },
+                                        );
                                     }
                                 }
+                                C::Cancel => reduce(&mut self.state, Action::CancelSettings),
+                                C::ResetToDefaults => {
+                                    settings.draft = SyncTuning::default();
+                                    settings.draft_launch = LaunchSettings::default();
+                                }
+                                C::CheckUpdates => self.start_update_check(),
+                                C::ApplyUpdate => self.start_update_apply(),
                             }
                         }
                     }
@@ -500,9 +506,9 @@ impl eframe::App for FleetUiApp {
                                         return;
                                     }
 
-                                    let res = self
+                                    let res: Result<String, String> = self
                                         .app
-                                        .arma3_launch_args_for_profile(&p.id, None)
+                                        .arma3_launch_preview_for_profile(&p.id, None)
                                         .map_err(|e| e.to_string());
 
                                     if let Ok(s) = &res {

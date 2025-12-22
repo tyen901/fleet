@@ -28,7 +28,7 @@ pub struct Profile {
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            schema_version: 3,
+            schema_version: 4,
             selected_profile: None,
             profiles: Vec::new(),
             launch: LaunchSettings::default(),

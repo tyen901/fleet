@@ -41,4 +41,3 @@ pub enum IndexError {
     #[error("corrupt index: {0}")]
     Corrupt(String),
 }
-
