@@ -3,7 +3,7 @@ use relative_path::RelativePathBuf;
 
 use crate::{FileManifest, Md5Digest, ModManifest, PartManifest};
 
-pub(super) fn parse_legacy_srf(text: &str) -> Result<ModManifest> {
+pub fn parse(text: &str) -> Result<ModManifest> {
     let mut lines = text.lines().map(|l| l.trim_end_matches('\r'));
 
     let first = lines.next().context("legacy srf: missing first line")?;

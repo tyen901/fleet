@@ -94,8 +94,7 @@ async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
         .await
         .expect("fetch_mod_manifest");
 
-    let parsed =
-        manifest_types::compat::parse_mod_manifest_any(&srf_bytes).expect("parse fixture SRF");
+    let parsed = manifest_types::ModManifest::from_bytes(&srf_bytes).expect("parse fixture SRF");
 
     assert_eq!(mf.mod_id, parsed.name, "mod_id mismatch from SRF");
     assert_eq!(

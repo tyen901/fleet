@@ -1,5 +1,3 @@
-mod pbo;
-
 use camino::Utf8Path;
 use manifest_types::{
     file_checksum_from_parts, mod_checksum_from_files, FileManifest, Md5Digest, ModManifest,
@@ -101,59 +99,18 @@ fn scan_pbo_file(
     let f = std::fs::File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut reader = std::io::BufReader::new(f);
-
-    let meta = pbo::read_pbo_meta(&mut reader)
-        .map_err(|_| ScanError::InvalidPbo("failed to read pbo meta"))?;
-    if meta.header_len > file_len {
-        return Err(ScanError::InvalidPbo("header_len exceeds file length"));
-    }
-    if meta.entries.first().is_some_and(|e| e.data_size != 0) {
-        return Err(ScanError::InvalidPbo(
-            "pbo first entry must have data_size == 0",
-        ));
-    }
+    let ranges = manifest_types::formats::pbo::partition_pbo(&mut reader, file_len)
+        .map_err(|_| ScanError::InvalidPbo("failed to partition pbo"))?;
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
     let mut parts: Vec<PartManifest> = Vec::new();
-    let mut offset = 0u64;
-
-    // Part 1: header (length may be 0; do not drop).
-    parts.push(PartManifest {
-        start: 0,
-        length: meta.header_len,
-        checksum: hash_next_at(&mut reader, 0, meta.header_len)?,
-    });
-    offset += meta.header_len;
-
-    // Swifty/Nimble compatibility: always skip the first entry.
-    for entry in meta.entries.iter().skip(1) {
-        let len = entry.data_size as u64;
+    for (start, length) in ranges {
         parts.push(PartManifest {
-            start: offset,
-            length: len,
-            checksum: hash_next_at(&mut reader, offset, len)?,
+            start,
+            length,
+            checksum: hash_next_at(&mut reader, start, length)?,
         });
-        offset = offset.saturating_add(len);
-    }
-
-    if offset > file_len {
-        return Err(ScanError::InvalidPbo(
-            "pbo parts offset exceeded file length",
-        ));
-    }
-
-    // Final tail part (length may be 0; do not drop).
-    let remaining = file_len - offset;
-    parts.push(PartManifest {
-        start: offset,
-        length: remaining,
-        checksum: hash_next_at(&mut reader, offset, remaining)?,
-    });
-    offset += remaining;
-
-    if offset != file_len {
-        return Err(ScanError::InvalidPbo("parts do not cover file length"));
     }
 
     let checksum = file_checksum_from_parts(&parts);

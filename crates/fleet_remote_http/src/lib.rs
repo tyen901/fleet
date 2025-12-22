@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use manifest_types::compat;
+use manifest_types::{ModManifest as MtModManifest, RepoSpec};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
-use sync_engine::fetch::{FileEntry, FilePart, ModManifest};
+use sync_engine::fetch::{FileEntry, FilePart, ModManifest as FetchModManifest};
 use sync_engine::remote::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
@@ -89,7 +89,7 @@ impl HttpRemote {
             .context("repo.json status")?;
 
         let bytes = resp.bytes().await.context("read repo.json body")?;
-        let repo = compat::parse_repo_spec(&bytes)?;
+        let repo = RepoSpec::from_bytes(&bytes)?;
 
         let basic_auth = repo
             .repo_basic_authentication
@@ -135,7 +135,7 @@ impl RemoteRepo for HttpRemote {
         Ok(self.state.lock().unwrap().caps.clone().unwrap_or_default())
     }
 
-    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest> {
+    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<FetchModManifest> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
 
@@ -146,8 +146,8 @@ impl RemoteRepo for HttpRemote {
         if res.status().as_u16() != 404 {
             let res = res.error_for_status()?;
             let bytes = res.bytes().await?;
-            let parsed = compat::parse_mod_manifest_any(&bytes)?;
-            return Ok(ModManifest {
+            let parsed = MtModManifest::from_bytes(&bytes)?;
+            return Ok(FetchModManifest {
                 mod_id: parsed.name,
                 files: parsed
                     .files
@@ -174,9 +174,9 @@ impl RemoteRepo for HttpRemote {
         let req = apply_basic_auth(self.client.get(srf_url), &auth);
         let res = req.send().await?.error_for_status()?;
         let bytes = res.bytes().await?;
-        let parsed = compat::parse_mod_manifest_any(&bytes)?;
+        let parsed = MtModManifest::from_bytes(&bytes)?;
 
-        Ok(ModManifest {
+        Ok(FetchModManifest {
             mod_id: parsed.name,
             files: parsed
                 .files

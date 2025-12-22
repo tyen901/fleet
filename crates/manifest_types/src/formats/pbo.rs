@@ -117,3 +117,59 @@ pub fn read_pbo_meta<R: BufRead + Seek>(r: &mut R) -> std::io::Result<PboMeta> {
         entries,
     })
 }
+
+#[derive(thiserror::Error, Debug)]
+pub enum PboPartitionError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid pbo: {0}")]
+    Invalid(&'static str),
+}
+
+/// Swifty/Nimble-compatible PBO partitioning.
+///
+/// Returns the list of `(start, length)` parts (header, per-entry, tail).
+pub fn partition_pbo<R: BufRead + Seek>(
+    reader: &mut R,
+    file_len: u64,
+) -> Result<Vec<(u64, u64)>, PboPartitionError> {
+    let meta = read_pbo_meta(reader).map_err(PboPartitionError::Io)?;
+    if meta.header_len > file_len {
+        return Err(PboPartitionError::Invalid("header_len exceeds file length"));
+    }
+    if meta.entries.first().is_some_and(|e| e.data_size != 0) {
+        return Err(PboPartitionError::Invalid(
+            "pbo first entry must have data_size == 0",
+        ));
+    }
+
+    reader.seek(SeekFrom::Start(0))?;
+
+    let mut parts: Vec<(u64, u64)> = Vec::new();
+    let mut offset = 0u64;
+
+    parts.push((0, meta.header_len));
+    offset += meta.header_len;
+
+    for entry in meta.entries.iter().skip(1) {
+        let len = entry.data_size as u64;
+        parts.push((offset, len));
+        offset = offset.saturating_add(len);
+    }
+
+    if offset > file_len {
+        return Err(PboPartitionError::Invalid(
+            "pbo parts offset exceeded file length",
+        ));
+    }
+
+    let remaining = file_len - offset;
+    parts.push((offset, remaining));
+    offset += remaining;
+
+    if offset != file_len {
+        return Err(PboPartitionError::Invalid("parts do not cover file length"));
+    }
+
+    Ok(parts)
+}
