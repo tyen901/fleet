@@ -441,7 +441,11 @@ impl FleetApp {
                 let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
                 let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
-                let mut idx = FleetIndex::open_or_recover(checkout_root_buf.as_std_path())
+                let fleet_dir = checkout_root_buf.as_std_path().join(".fleet");
+                std::fs::create_dir_all(&fleet_dir)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let idx_path = fleet_dir.join("index.sqlite");
+                let mut idx = FleetIndex::open_or_recover_at_path(&idx_path)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let desired = DesiredState {
                     repo_url: repo_url.clone(),

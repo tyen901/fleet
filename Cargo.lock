@@ -1490,7 +1490,6 @@ name = "fleet_index"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "fleet_fs_case",
  "rusqlite",
  "tempfile",
  "thiserror 1.0.69",

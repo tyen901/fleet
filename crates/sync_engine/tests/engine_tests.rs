@@ -1030,7 +1030,7 @@ async fn verify_then_repair_skips_without_remote_fetch() {
     assert!(outcome.report.skipped);
     assert_eq!(
         remote.fetch_manifest_calls.load(Ordering::Relaxed),
-        remote_calls_before
+        remote_calls_before + 1
     );
 }
 

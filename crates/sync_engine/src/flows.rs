@@ -5,6 +5,7 @@ use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::plan::{plan_mod, PlanError, PlannedOp, RepairStrategy};
 use crate::safe_fs::ensure_no_symlink_ancestors;
 use crate::safe_path::{safe_join_mod_file, validate_mod_id};
+use crate::skip_check;
 use crate::time_util::now_ns;
 use crate::types::{
     AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, VerifyIssue,
@@ -13,7 +14,7 @@ use crate::types::{
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::verify_parts::first_part_mismatch;
 use anyhow::Result;
-use fleet_index::{ExpectedFile, FleetIndex, SkipRepairPolicy};
+use fleet_index::{ExpectedFile, FleetIndex};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -124,37 +125,6 @@ pub async fn repair(
             .ok_or_else(|| anyhow::anyhow!("desired_state missing"))?;
         validate_enabled_mods(&desired.enabled_mods_hash, &req.enabled_mods)?;
 
-        let skip = idx.evaluate_skip_repair(&req.checkout_root, SkipRepairPolicy::default())?;
-        match &skip {
-            fleet_index::SkipRepairDecision::Skippable(_) => {
-                sink.push(SyncEvent::RepairSkipEvaluated {
-                    skippable: true,
-                    reason: None,
-                });
-                let report = RepairReport {
-                    skipped: true,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                    ..Default::default()
-                };
-                let outcome = RepairOutcome {
-                    report,
-                    failures: Vec::new(),
-                    aborted: None,
-                };
-                sink.push(SyncEvent::RepairFinished {
-                    ok: true,
-                    skipped: true,
-                });
-                return Ok(outcome);
-            }
-            fleet_index::SkipRepairDecision::NotSkippable { reason, .. } => {
-                sink.push(SyncEvent::RepairSkipEvaluated {
-                    skippable: false,
-                    reason: Some(format!("{reason:?}")),
-                });
-            }
-        }
-
         let fetch = fetch_all(
             req.remote.clone(),
             &req.enabled_mods,
@@ -169,19 +139,13 @@ pub async fn repair(
         let baseline_digest = baseline_digest_hex(&baseline);
         idx.expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)?;
 
-        let mut report = RepairReport::default();
-        let mut failures: Vec<FileFailure> = Vec::new();
-        let mut aborted: Option<AbortReason> = None;
+        type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
 
-        'mods: for manifest in &fetch.manifests {
-            sink.push(SyncEvent::ModStarted {
-                mod_id: manifest.mod_id.clone(),
-            });
-
-            if req.tuning.auto_fix_case {
+        if req.tuning.auto_fix_case {
+            for manifest in &fetch.manifests {
                 let checkout_root = req.checkout_root.clone();
                 let mod_id = manifest.mod_id.clone();
-                let expected: Vec<(String, u64, Option<Vec<u8>>)> = manifest
+                let expected: Vec<ExpectedTriplet> = manifest
                     .files
                     .iter()
                     .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
@@ -204,6 +168,52 @@ pub async fn repair(
                 })
                 .await??;
             }
+        }
+
+        let skip = skip_check::evaluate_skip(
+            idx,
+            &req.checkout_root,
+            &fetch.manifests,
+            skip_check::SkipCheckPolicy::default(),
+        )?;
+        match &skip {
+            skip_check::SkipCheckDecision::Skippable(_) => {
+                sink.push(SyncEvent::RepairSkipEvaluated {
+                    skippable: true,
+                    reason: None,
+                });
+                let report = RepairReport {
+                    skipped: true,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    ..Default::default()
+                };
+                let outcome = RepairOutcome {
+                    report,
+                    failures: Vec::new(),
+                    aborted: None,
+                };
+                sink.push(SyncEvent::RepairFinished {
+                    ok: true,
+                    skipped: true,
+                });
+                return Ok(outcome);
+            }
+            skip_check::SkipCheckDecision::NotSkippable { reason, .. } => {
+                sink.push(SyncEvent::RepairSkipEvaluated {
+                    skippable: false,
+                    reason: Some(format!("{reason:?}")),
+                });
+            }
+        }
+
+        let mut report = RepairReport::default();
+        let mut failures: Vec<FileFailure> = Vec::new();
+        let mut aborted: Option<AbortReason> = None;
+
+        'mods: for manifest in &fetch.manifests {
+            sink.push(SyncEvent::ModStarted {
+                mod_id: manifest.mod_id.clone(),
+            });
 
             let cache = if req.tuning.use_index {
                 build_cache_snapshot(idx, &desired.state_id, manifest)?

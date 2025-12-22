@@ -26,18 +26,14 @@ pub enum DesiredStateChange {
 }
 
 impl FleetIndex {
-    pub fn open_or_recover(checkout_root: &Path) -> Result<Self, IndexError> {
-        let fleet_dir = checkout_root.join(".fleet");
-        std::fs::create_dir_all(&fleet_dir)?;
-        let path = fleet_dir.join("index.sqlite");
-
-        match Self::open_at_path(&path) {
+    pub fn open_or_recover_at_path(path: &Path) -> Result<Self, IndexError> {
+        match Self::open_at_path(path) {
             Ok(idx) => Ok(idx),
             Err(e) => {
                 if should_recover(&e) {
                     let ts = current_unix_s();
-                    recover_broken_sqlite(&path, ts)?;
-                    Self::open_at_path(&path)
+                    recover_broken_sqlite(path, ts)?;
+                    Self::open_at_path(path)
                 } else {
                     Err(e)
                 }
@@ -312,6 +308,14 @@ impl FleetIndex {
         Ok(out)
     }
 
+    pub fn get_metadata_map(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<HashMap<String, FileState>, IndexError> {
+        self.file_state_get_all_for_mod(state_id, mod_id)
+    }
+
     pub fn file_state_upsert(
         &mut self,
         state_id: &str,
@@ -420,7 +424,7 @@ impl FleetIndex {
         Ok(())
     }
 
-    pub(crate) fn baseline_exists(&self, state_id: &str) -> Result<bool, IndexError> {
+    pub fn baseline_exists(&self, state_id: &str) -> Result<bool, IndexError> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM expected_file WHERE state_id = ?1",
             params![state_id],
@@ -449,7 +453,7 @@ impl FleetIndex {
             .optional()?)
     }
 
-    fn open_at_path(path: &Path) -> Result<Self, IndexError> {
+    pub fn open_at_path(path: &Path) -> Result<Self, IndexError> {
         validate_sqlite_header(path)?;
         let conn = Connection::open(path)?;
         set_pragmas(&conn)?;
@@ -535,14 +539,4 @@ fn current_unix_s() -> i64 {
         Ok(d) => d.as_secs() as i64,
         Err(_) => 0,
     }
-}
-
-pub(crate) fn file_mtime_ns(md: &std::fs::Metadata) -> Option<i64> {
-    let nanos = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
-    i64::try_from(nanos).ok()
 }

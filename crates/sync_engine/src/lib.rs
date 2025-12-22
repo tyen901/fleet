@@ -7,6 +7,7 @@ pub mod plan;
 pub mod remote;
 pub mod safe_fs;
 pub mod safe_path;
+pub mod skip_check;
 pub mod staging;
 pub mod time_util;
 pub mod types;
