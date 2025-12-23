@@ -1,5 +1,5 @@
 use camino::Utf8Path;
-use manifest_types::{
+use fleet_types::{
     file_checksum_from_parts, mod_checksum_from_files, FileManifest, Md5Digest, ModManifest,
     PartManifest,
 };
@@ -99,7 +99,7 @@ fn scan_pbo_file(
     let f = std::fs::File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut reader = std::io::BufReader::new(f);
-    let ranges = manifest_types::formats::pbo::partition_pbo(&mut reader, file_len)
+    let ranges = fleet_types::arma::pbo::partition_pbo(&mut reader, file_len)
         .map_err(|_| ScanError::InvalidPbo("failed to partition pbo"))?;
 
     reader.seek(std::io::SeekFrom::Start(0))?;
@@ -123,7 +123,7 @@ fn scan_pbo_file(
     })
 }
 
-/// Scan a mod directory into the canonical manifest model (`manifest_types::ModManifest`).
+/// Scan a mod directory into the canonical manifest model (`fleet_types::ModManifest`).
 ///
 /// Notes:
 /// - Paths are normalized to forward slashes.

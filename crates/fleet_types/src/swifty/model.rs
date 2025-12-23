@@ -1,8 +1,8 @@
 use relative_path::RelativePathBuf;
 use serde::{Deserialize, Serialize};
 
-use crate::serde_helpers::{deserialize_relpath, deserialize_u16_string_or_number};
-use crate::Md5Digest;
+use crate::core::Md5Digest;
+use crate::swifty::serde_utils::{deserialize_relpath, deserialize_u16_string_or_number};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

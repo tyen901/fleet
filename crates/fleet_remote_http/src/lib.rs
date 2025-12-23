@@ -5,7 +5,7 @@ use fleet_sync::ports::{
     FileEntry, FilePart, ModManifest as FetchModManifest, RemoteCapabilities, RemoteRepo,
     RemoteStream, RemoteStreamImpl,
 };
-use manifest_types::{ModManifest as MtModManifest, RepoSpec};
+use fleet_types::{ModManifest as MtModManifest, RepoSpec};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
@@ -31,7 +31,7 @@ pub struct HttpRemote {
 struct State {
     caps: Option<RemoteCapabilities>,
     basic_auth: Option<(String, String)>,
-    repo_spec: Option<manifest_types::RepoSpec>,
+    repo_spec: Option<fleet_types::RepoSpec>,
 }
 
 impl HttpRemote {
@@ -105,7 +105,7 @@ impl HttpRemote {
         Ok(())
     }
 
-    pub async fn fetch_repo_spec(&self) -> Result<manifest_types::RepoSpec> {
+    pub async fn fetch_repo_spec(&self) -> Result<fleet_types::RepoSpec> {
         self.ensure_repo_loaded().await?;
         Ok(self
             .state

@@ -1,4 +1,4 @@
-use crate::PartManifest;
+use crate::swifty::model::PartManifest;
 
 #[derive(thiserror::Error, Debug)]
 pub enum PartValidationError {
@@ -34,7 +34,7 @@ pub fn validate_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Md5Digest;
+    use crate::core::Md5Digest;
 
     fn md5_zero() -> Md5Digest {
         Md5Digest::from_bytes([0u8; 16])

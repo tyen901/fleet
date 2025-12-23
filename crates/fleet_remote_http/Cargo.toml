@@ -9,7 +9,7 @@ async-trait = "0.1"
 bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
-manifest_types = { path = "../manifest_types" }
+fleet_types = { path = "../fleet_types" }
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 fleet_sync = { path = "../fleet_sync" }
 tokio = { version = "1", features = ["sync"] }

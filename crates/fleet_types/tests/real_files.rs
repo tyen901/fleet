@@ -2,13 +2,13 @@ use std::fs;
 use std::io::{BufReader, Seek};
 use std::path::{Path, PathBuf};
 
-use manifest_types::formats::pbo::{partition_pbo, read_pbo_meta};
-use manifest_types::{
+use fleet_types::arma::pbo::{partition_pbo, read_pbo_meta};
+use fleet_types::{
     file_checksum_from_parts, mod_checksum_from_files, validate_parts, ModManifest, RepoSpec,
 };
 
 fn test_files_root() -> PathBuf {
-    // crates/manifest_types -> crates -> repo root -> test_files
+    // crates/fleet_types -> crates -> repo root -> test_files
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

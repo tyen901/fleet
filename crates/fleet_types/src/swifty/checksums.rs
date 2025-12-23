@@ -1,6 +1,7 @@
 use md5::{Digest, Md5};
 
-use crate::{FileManifest, Md5Digest, PartManifest};
+use crate::core::Md5Digest;
+use crate::swifty::model::{FileManifest, PartManifest};
 
 pub fn file_checksum_from_parts(parts: &[PartManifest]) -> Md5Digest {
     let mut ctx = Md5::new();

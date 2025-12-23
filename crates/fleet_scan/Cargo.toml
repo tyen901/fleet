@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1"
 camino = "1"
-manifest_types = { path = "../manifest_types" }
+fleet_types = { path = "../fleet_types" }
 relative-path = "1.9"
 md5 = "0.7"
 thiserror = "1"
@@ -14,4 +14,4 @@ walkdir = "2"
 
 [dev-dependencies]
 camino = "1"
-manifest_types = { path = "../manifest_types" }
+fleet_types = { path = "../fleet_types" }

@@ -6,7 +6,7 @@ members = [
   "crates/fleet_index",
   "crates/fleet_remote_http",
   "crates/fleet_scan",
-  "crates/manifest_types",
+  "crates/fleet_types",
   "crates/fleet_ui",
   "crates/fleet_sync",
   "apps/fleet",
