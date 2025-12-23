@@ -1445,11 +1445,12 @@ dependencies = [
 
 [[package]]
 name = "fleet-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eframe",
  "egui",
  "fleet_app",
+ "parking_lot",
  "rfd",
  "serde_json",
  "tokio",

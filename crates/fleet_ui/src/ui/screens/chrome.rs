@@ -1,7 +1,58 @@
+use crate::core::services::{
+    data::DataService, sync::SyncService, sync::SyncState, update::UpdateService,
+    update::UpdateState,
+};
 use crate::ui_kit::UiKit;
 use crate::widgets;
 use eframe::egui;
-use fleet_app::ProfileSpec;
+
+pub fn header(ui: &mut egui::Ui, kit: &UiKit, title: &str, subtitle: &str, sync: &dyn SyncService) {
+    let c = &kit.theme.colors;
+
+    ui.set_min_width(ui.available_width());
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = kit.layout.gap;
+
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(title)
+                        .size(kit.theme.type_scale.h1)
+                        .strong(),
+                )
+                .truncate(),
+            );
+
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(subtitle)
+                        .size(kit.theme.type_scale.body)
+                        .color(c.muted),
+                )
+                .truncate(),
+            );
+        });
+
+        let snap = sync.snapshot();
+        let (label, color, spinning) = match &snap.state {
+            SyncState::Idle => ("READY".to_string(), c.muted, false),
+            SyncState::Succeeded => ("DONE".to_string(), c.accent, false),
+            SyncState::Failed { .. } => ("ERROR".to_string(), c.danger, false),
+            SyncState::Running { phase, .. } => (phase.clone(), c.accent, true),
+        };
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 0.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.add(widgets::StatusBadge::new(kit, label, color, spinning));
+            },
+        );
+    });
+}
 
 pub enum SidebarAction {
     NewProfile,
@@ -10,19 +61,18 @@ pub enum SidebarAction {
     Refresh,
 }
 
-pub fn draw(
+pub fn sidebar(
     ui: &mut egui::Ui,
     kit: &UiKit,
-    filter: &mut String,
-    profiles: &[ProfileSpec],
+    data: &dyn DataService,
     selected_profile_id: Option<&str>,
 ) -> Option<SidebarAction> {
     let mut out = None;
+    let snap = data.snapshot();
 
     ui.set_min_width(ui.available_width());
 
     ui.vertical(|ui| {
-        // Top row: label + actions right-aligned
         ui.horizontal(|ui| {
             ui.add(widgets::FieldLabel::new(kit, "Profiles"));
 
@@ -58,7 +108,10 @@ pub fn draw(
         ui.add(widgets::Divider::new(kit));
 
         ui.add(widgets::FieldLabel::new(kit, "Filter"));
-        widgets::text_field(ui, kit, filter, "Type to filter…", false);
+        let mut filter = snap.profiles.sidebar_filter.clone();
+        if widgets::text_field(ui, kit, &mut filter, "Type to filter…", false).changed() {
+            data.set_sidebar_filter(filter);
+        }
 
         ui.add(widgets::Divider::new(kit));
 
@@ -70,9 +123,9 @@ pub fn draw(
             .auto_shrink([false, false])
             .max_height(list_h)
             .show(ui, |ui| {
-                let needle = filter.trim().to_lowercase();
+                let needle = snap.profiles.sidebar_filter.trim().to_lowercase();
 
-                for p in profiles {
+                for p in &snap.profiles.profiles {
                     if !needle.is_empty()
                         && !p.name.to_lowercase().contains(&needle)
                         && !p.id.to_lowercase().contains(&needle)
@@ -96,7 +149,7 @@ pub fn draw(
                     }
                 }
 
-                if profiles.is_empty() {
+                if snap.profiles.profiles.is_empty() {
                     ui.add_space(kit.layout.gap);
                     ui.add(widgets::InlineHint::new(kit, "No profiles found."));
                 }
@@ -117,4 +170,25 @@ pub fn draw(
     });
 
     out
+}
+
+pub fn footer_status_row(ui: &mut egui::Ui, kit: &UiKit, update: &dyn UpdateService) {
+    let snap = update.snapshot();
+    ui.add_space(kit.theme.spacing.sm);
+
+    let msg = match snap.state {
+        UpdateState::NotConfigured => "Updates: not configured".to_string(),
+        UpdateState::Idle { status, .. } => format!("Updates: {status}"),
+        UpdateState::Checking { .. } => "Updates: checking…".to_string(),
+        UpdateState::Downloading { progress, .. } => match progress {
+            Some(p) => format!(
+                "Updates: downloading… {:.0}%",
+                (p * 100.0).clamp(0.0, 100.0)
+            ),
+            None => "Updates: downloading…".to_string(),
+        },
+        UpdateState::Failed { error } => format!("Updates: failed ({})", error.message),
+    };
+
+    ui.add(widgets::InlineHint::new(kit, &msg));
 }
