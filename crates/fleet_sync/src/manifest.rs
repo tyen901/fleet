@@ -23,8 +23,11 @@ pub(crate) fn validate_and_normalize_manifest(mut m: ModManifest) -> Result<Vali
     for mut f in m.files.drain(..) {
         f.rel_path = normalize_rel_path(&f.rel_path);
         validate_rel_path(&f.rel_path)
-            .with_context(|| format!("invalid rel_path {}", f.rel_path))?;
-        validate_parts(&f)?;
+            .with_context(|| format!("invalid rel_path {} (mod_id {})", f.rel_path, m.mod_id))?;
+
+        f.parts.retain(|p| p.len != 0);
+        validate_parts(&f)
+            .with_context(|| format!("invalid parts for {} (mod_id {})", f.rel_path, m.mod_id))?;
         files.push(ValidatedFileEntry {
             rel_path: f.rel_path,
             size: f.size,
@@ -57,9 +60,6 @@ fn validate_parts(file: &FileEntry) -> Result<()> {
 
     let mut pos = 0u64;
     for p in parts {
-        if p.len == 0 {
-            bail!("invalid part: zero length at offset {}", p.offset);
-        }
         let end = p
             .offset
             .checked_add(p.len)

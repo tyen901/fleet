@@ -120,6 +120,11 @@ Part entry (`Parts[]`):
   - sum of all part lengths equals `Length`
 - For empty files (`Length == 0`), `Parts` MUST be an empty array.
 
+### Compatibility notes
+- Some real-world manifests have been observed to include **zero-length parts** (`Parts[].Length == 0`). These parts are semantically no-ops.
+  - Producers MUST NOT emit zero-length parts.
+  - Consumers SHOULD ignore/drop zero-length parts before validating contiguity and coverage.
+
 ---
 
 ## 3) `mod.srf` (SRF manifest)
@@ -358,7 +363,7 @@ A consumer/validator should reject a manifest/SRF if any of the following are tr
   - parts sum != length (for non-empty files), or
   - first part does not start at 0, or
   - parts overlap, are unsorted, or contain gaps (for Swifty-compatible manifests).
-- Any part has `Length == 0` (unless the entire file length is 0, in which case parts must be empty).
+- Parts contain `Length == 0` entries and, after ignoring/dropping those entries, the remaining parts still violate the invariants above.
 - Any part range exceeds `Length` (`Start + Length > file.Length`).
 - For PBO Swifty layout generation: the skipped first entry does not have `data_size == 0`.
 
@@ -367,10 +372,10 @@ A consumer/validator should reject a manifest/SRF if any of the following are tr
 ## 8) Compatibility notes for implementers
 
 - Treat `Type` and `Parts[].Path` as informational only; do not make correctness depend on them.
+- If a manifest contains any `Parts[].Length == 0`, treat those as no-ops and ignore/drop them before validating coverage/contiguity.
 - Always normalize path separators before:
   - comparisons
   - sorting
   - checksum input that includes paths
 - Strip UTF‑8 BOMs before parsing JSON or legacy SRF text.
 - Ensure all checksum string concatenations use **uppercase hex digests** for the part/file checksums.
-

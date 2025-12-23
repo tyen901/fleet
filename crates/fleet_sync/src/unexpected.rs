@@ -72,6 +72,7 @@ pub async fn handle_unexpected_paths(
     let mod_id_string = mod_id.to_string();
 
     let plan = tokio::task::spawn_blocking(move || {
+        cleanup_internal_stage_files(&mod_root_clone);
         build_unexpected_plan(&mod_root_clone, &expected_paths, &plan_tuning)
     })
     .await??;
@@ -172,6 +173,39 @@ pub async fn handle_unexpected_paths(
             Ok(stats)
         }
     }
+}
+
+fn cleanup_internal_stage_files(mod_root: &Path) {
+    for entry in walkdir::WalkDir::new(mod_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if is_internal_stage_filename(name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn is_internal_stage_filename(name: &str) -> bool {
+    // Legacy (Swifty) partial download artifact used by older Fleet/Nimble versions.
+    if name.starts_with(".fleet_tmp_") && name.ends_with(".part") {
+        return true;
+    }
+    if name.starts_with(".fleet_stage_") {
+        return true;
+    }
+    // Current Fleet staging file name format: ".{name}.fleet.tmp.{rand}".
+    if name.contains(".fleet.tmp.") {
+        return true;
+    }
+    false
 }
 
 fn build_unexpected_plan(

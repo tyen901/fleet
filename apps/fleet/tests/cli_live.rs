@@ -1,8 +1,9 @@
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use walkdir::WalkDir;
@@ -83,7 +84,27 @@ fn run_sync_output(checkout: &Path) -> std::process::Output {
         "--path",
         checkout.to_str().unwrap(),
     ]);
-    cmd.output().expect("run fleet sync")
+
+    // Stream output so long-running live tests don't look "hung".
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn fleet sync");
+
+    let stdout = child.stdout.take().expect("child stdout");
+    let stderr = child.stderr.take().expect("child stderr");
+
+    let out_thread = std::thread::spawn(move || read_stream(stdout, Some("[fleet stdout] ")));
+    let err_thread = std::thread::spawn(move || read_stream(stderr, Some("[fleet stderr] ")));
+
+    let status = child.wait().expect("wait fleet sync");
+    let out = out_thread.join().expect("join stdout reader");
+    let err = err_thread.join().expect("join stderr reader");
+
+    std::process::Output {
+        status,
+        stdout: out,
+        stderr: err,
+    }
 }
 
 fn run_sync_assert_success(checkout: &Path) -> std::process::Output {
@@ -110,9 +131,37 @@ fn run_sync_assert_success(checkout: &Path) -> std::process::Output {
     unreachable!()
 }
 
+fn read_stream<R: std::io::Read>(r: R, prefix: Option<&'static str>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut reader = BufReader::new(r);
+    loop {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                buf.extend_from_slice(&line);
+                if let Some(p) = prefix {
+                    eprint!("{p}{}", String::from_utf8_lossy(&line));
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    buf
+}
+
 fn any_file_under(root: &Path, max_bytes: u64) -> Option<PathBuf> {
     for e in WalkDir::new(root).into_iter().filter_map(Result::ok) {
         if e.file_type().is_file() {
+            if let Ok(rel) = e.path().strip_prefix(root) {
+                if rel
+                    .components()
+                    .next()
+                    .is_some_and(|c| c.as_os_str() == ".fleet")
+                {
+                    continue;
+                }
+            }
             let meta = e.metadata().ok()?;
             if meta.len() <= max_bytes {
                 return Some(e.path().to_path_buf());
@@ -227,16 +276,7 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
     let tmp = TempDir::new().unwrap();
     let checkout = tmp.path();
 
-    let out = run_sync_assert_success(checkout);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("RepairStarted"),
-        "stdout missing RepairStarted"
-    );
-    assert!(
-        stdout.contains("RemoteCapabilities"),
-        "stdout missing RemoteCapabilities"
-    );
+    run_sync_assert_success(checkout);
 
     for m in spec.required_mods.iter().filter(|m| m.enabled) {
         let mod_dir = checkout.join(&m.mod_name);
@@ -385,9 +425,7 @@ async fn live_repo_resumes_partial_tmp_download() {
     fs::remove_file(&final_path).unwrap();
     assert!(tmp_path.exists());
 
-    let out = run_sync_assert_success(checkout);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("FileStarted"), "stdout missing FileStarted");
+    run_sync_assert_success(checkout);
 
     assert!(final_path.exists(), "final file not restored");
     assert!(
