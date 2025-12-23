@@ -4,6 +4,7 @@ use crate::ui::events::Events;
 use crate::ui::nav::{Navigation, Screens};
 
 pub struct UiContext<'a> {
+    #[allow(dead_code)]
     pub frame: FrameInfo,
 
     pub nav: &'a mut dyn Navigation,
@@ -18,6 +19,7 @@ pub struct UiContext<'a> {
 }
 
 pub trait System: Send + Sync {
+    #[allow(dead_code)]
     fn now_millis(&self) -> u128;
     fn request_repaint(&self);
 }

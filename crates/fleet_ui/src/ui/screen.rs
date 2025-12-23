@@ -2,6 +2,7 @@ use crate::core::types::ScreenId;
 use crate::ui::context::UiContext;
 
 pub trait Screen: 'static {
+    #[allow(dead_code)]
     fn id(&self) -> ScreenId;
     fn name(&self) -> &'static str;
 

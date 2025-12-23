@@ -47,6 +47,7 @@ pub struct LinuxTemplateValidation {
 
 #[derive(Debug, Clone)]
 struct ResolvedMod {
+    #[allow(dead_code)]
     name: String,
     path: PathBuf,
 }

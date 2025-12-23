@@ -1,4 +1,4 @@
-use crate::core::services::update::{UpdateService, UpdateState};
+use crate::core::services::update::{UpdateState};
 use crate::core::types::ScreenId;
 use crate::ui::context::UiContext;
 use crate::ui::events::UiEvent;
@@ -7,8 +7,7 @@ use crate::ui_kit::UiKit;
 use crate::widgets;
 use eframe::egui::{self, TextEdit};
 use fleet_app::{
-    LaunchSettings, LinuxModPathStyle, OpenMode, SafeWipePolicy, SyncMode, UnknownPathPolicy,
-    WindowsLaunchMethod,
+    LinuxModPathStyle, OpenMode, SyncMode, WindowsLaunchMethod,
 };
 
 pub struct SettingsScreen;

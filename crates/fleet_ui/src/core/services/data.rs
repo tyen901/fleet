@@ -236,7 +236,7 @@ impl DataService for FleetDataService {
 
     fn begin_launch_args_preview(&self, profile_id: &str) -> RequestId {
         let req = self.next_req();
-        let mut app = self.app.write();
+        let app = self.app.write();
         let mut inner = self.inner.write();
         let snap = Arc::make_mut(&mut inner.snap);
 
@@ -383,14 +383,14 @@ impl DataService for FleetDataService {
     }
 
     fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
-        let mut app = self.app.write();
+        let app = self.app.write();
         app.open_folder(path)
             .map_err(|e| AppError::new("open_folder_failed", format!("{e}")))?;
         Ok(())
     }
 
     fn launch_arma3_for_profile(&self, profile_id: &str) -> Result<(), AppError> {
-        let mut app = self.app.write();
+        let app = self.app.write();
         app.launch_arma3_for_profile(profile_id, None)
             .map_err(|e| AppError::new("launch_failed", format!("{e}")))?;
         Ok(())
@@ -401,7 +401,7 @@ impl DataService for FleetDataService {
         egui_ctx: &egui::Context,
         profile_id: &str,
     ) -> Result<(), AppError> {
-        let mut app = self.app.write();
+        let app = self.app.write();
         let s = app
             .arma3_launch_preview_for_profile(profile_id, None)
             .map_err(|e| AppError::new("launch_args_failed", format!("{e}")))?;
