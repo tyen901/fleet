@@ -238,16 +238,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
 
-            let (critical_tx, mut critical_rx) =
-                tokio::sync::mpsc::channel::<fleet_app::events::CriticalEvent>(512);
-            let (progress_tx, mut progress_rx) =
-                tokio::sync::watch::channel::<fleet_app::events::ProgressSnapshot>(
-                    fleet_app::events::ProgressSnapshot::default(),
-                );
-            let reporting = fleet_app::SyncReporting {
-                critical_tx,
-                progress_tx,
-            };
+            let model = std::sync::Arc::new(std::sync::RwLock::new(fleet_app::SyncModel::new()));
 
             if sa.repo_url.is_some() ^ sa.path.is_some() {
                 return Err("--repo-url and --path must be provided together".into());
@@ -264,13 +255,13 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     handle.clone(),
                     tuning,
                     None,
-                    reporting.clone(),
+                    model.clone(),
                 )?
             } else if let Some(profile_id) = sa.profile {
                 app.select_profile(&profile_id)?;
-                app.spawn_sync_selected(handle.clone(), tuning, reporting.clone())?
+                app.spawn_sync_selected(handle.clone(), tuning, model.clone())?
             } else {
-                app.spawn_sync_selected(handle.clone(), tuning, reporting.clone())?
+                app.spawn_sync_selected(handle.clone(), tuning, model.clone())?
             };
 
             let done_rx = job
@@ -278,7 +269,6 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("sync job missing completion channel")?;
 
             tokio::pin!(done_rx);
-            let mut last_progress_print = std::time::Instant::now();
             loop {
                 tokio::select! {
                     res = &mut done_rx => {
@@ -302,21 +292,15 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    ev = critical_rx.recv() => {
-                        let Some(ev) = ev else { break; };
-                        if sa.json_events {
-                            let v = serde_json::json!({ "debug": format!("{:?}", ev.as_inner()) });
-                            println!("{}", serde_json::to_string(&v)?);
-                        } else {
-                            println!("{:?}", ev.as_inner());
-                        }
-                    }
-                    changed = progress_rx.changed() => {
-                        if changed.is_ok() && last_progress_print.elapsed() >= std::time::Duration::from_millis(250) {
-                            let snap = progress_rx.borrow().clone();
-                            eprintln!("progress: {:3}% {}", snap.percent, snap.phase);
-                            last_progress_print = std::time::Instant::now();
-                        }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                        let (percent, phase) = match model.read() {
+                            Ok(m) => (m.percent, m.phase.clone()),
+                            Err(e) => {
+                                let m = e.into_inner();
+                                (m.percent, m.phase.clone())
+                            }
+                        };
+                        eprintln!("progress: {:3}% {}", percent, phase);
                     }
                 }
             }

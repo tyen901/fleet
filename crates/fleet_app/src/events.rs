@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 /// App-level sync events.
 ///
 /// This type is the UI/API boundary: it should remain stable even if `fleet_sync`
@@ -99,107 +97,65 @@ pub enum SyncEvent {
 }
 
 impl SyncEvent {
-    /// Telemetry is high-volume and must never block the producer.
-    /// Critical events are state transitions / warnings / errors that should be delivered best-effort.
-    pub fn class(&self) -> SyncEventClass {
+    pub fn apply_to(self, model: &mut crate::sync::model::SyncModel) {
         match self {
-            SyncEvent::FileProgress { .. }
-            | SyncEvent::FileUpToDate { .. }
-            | SyncEvent::FileVerified { .. }
-            | SyncEvent::FileStarted { .. } => SyncEventClass::Telemetry,
-            _ => SyncEventClass::Critical,
-        }
-    }
+            SyncEvent::CheckStarted { repo } => {
+                model.phase = format!("Checking {repo}");
+            }
+            SyncEvent::RepairStarted { repo } => {
+                model.phase = format!("Repairing {repo}");
+            }
+            SyncEvent::SyncFreshStarted { repo } => {
+                model.phase = format!("Syncing {repo}");
+            }
+            SyncEvent::RemoteCapabilities { supports_ranges } => {
+                model.remote_supports_ranges = Some(supports_ranges);
+            }
+            SyncEvent::CheckFinished { .. }
+            | SyncEvent::RepairFinished { .. }
+            | SyncEvent::SyncFreshFinished { .. } => {
+                model.finished = true;
+            }
 
-    pub fn is_telemetry(&self) -> bool {
-        self.class() == SyncEventClass::Telemetry
-    }
+            SyncEvent::FileStarted { bytes_total, .. } => {
+                model.files_started += 1;
+                model.bytes_total = bytes_total;
+                model.bytes_done = 0;
+                model.percent = 0;
+            }
+            SyncEvent::FileProgress {
+                bytes_done,
+                bytes_total,
+                ..
+            } => {
+                model.bytes_done = bytes_done;
+                model.bytes_total = bytes_total;
+                model.percent = if model.bytes_total == 0 {
+                    0
+                } else {
+                    ((model.bytes_done * 100) / model.bytes_total).min(100) as u8
+                };
+            }
+            SyncEvent::FileVerified { .. } => {
+                model.files_verified += 1;
+            }
+            SyncEvent::FileUpToDate { .. } => {
+                model.files_up_to_date += 1;
+            }
+            SyncEvent::FileNeedsRepair { strategy, .. } => {
+                model.last_strategy = Some(strategy);
+            }
+            SyncEvent::Warning { message } => {
+                model.push_warning(message);
+            }
+            SyncEvent::Error { message } => {
+                model.error = Some(message);
+            }
 
-    pub fn is_critical(&self) -> bool {
-        self.class() == SyncEventClass::Critical
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SyncEventClass {
-    Telemetry,
-    Critical,
-}
-
-/// Strongly-typed “critical only” channel payload.
-#[derive(Clone, Debug)]
-pub struct CriticalEvent(pub SyncEvent);
-
-impl CriticalEvent {
-    pub fn new(ev: SyncEvent) -> Option<Self> {
-        ev.is_critical().then_some(Self(ev))
-    }
-
-    pub fn as_inner(&self) -> &SyncEvent {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> SyncEvent {
-        self.0
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TelemetryCounts {
-    pub files_started: u64,
-    pub files_verified: u64,
-    pub files_up_to_date: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct FileProgressSnapshot {
-    pub mod_id: String,
-    pub path: String,
-    pub bytes_done: u64,
-    pub bytes_total: u64,
-}
-
-#[derive(Clone, Debug)]
-pub struct TelemetryLogEntry {
-    pub seq: u64,
-    pub text: String,
-}
-
-/// UI-facing progress snapshot: latest-per-file + rollups.
-#[derive(Clone, Debug)]
-pub struct ProgressSnapshot {
-    pub phase: String,
-    pub percent: u8,
-    pub bytes_done: Option<u64>,
-    pub bytes_total: Option<u64>,
-    pub active_files: Vec<FileProgressSnapshot>,
-    pub counts: TelemetryCounts,
-    pub dropped_critical_count: u64,
-    pub remote_supports_ranges: Option<bool>,
-    pub last_strategy: Option<String>,
-    /// Debug-only: bounded tail of per-file telemetry lines (empty unless enabled).
-    pub telemetry_log_tail: Vec<TelemetryLogEntry>,
-}
-
-impl Default for ProgressSnapshot {
-    fn default() -> Self {
-        Self {
-            phase: "Idle".to_string(),
-            percent: 0,
-            bytes_done: None,
-            bytes_total: None,
-            active_files: Vec::new(),
-            counts: TelemetryCounts::default(),
-            dropped_critical_count: 0,
-            remote_supports_ranges: None,
-            last_strategy: None,
-            telemetry_log_tail: Vec::new(),
+            _ => {}
         }
     }
 }
-
-/// Optional helper for consumers that want a quick lookup.
-pub type ActiveFileMap = HashMap<(String, String), FileProgressSnapshot>;
 
 impl From<fleet_sync::SyncEvent> for SyncEvent {
     fn from(ev: fleet_sync::SyncEvent) -> Self {

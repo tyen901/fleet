@@ -382,7 +382,7 @@ impl Screen for DashboardScreen {
                             for line in sync.logs.iter().rev().take(120).rev() {
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(format!("{:>7.1}s  {}", line.ts_s, line.text))
+                                        egui::RichText::new(&line.text)
                                             .monospace()
                                             .size(kit.theme.type_scale.mono)
                                             .color(kit.theme.colors.text),

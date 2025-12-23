@@ -10,12 +10,13 @@ pub mod settings;
 mod registry;
 mod storage;
 
-pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob, SyncReporting};
+pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob};
 
 // Minimal, intentional exports:
 pub use launch::arma3::{Arma3LaunchPlan, LaunchError, LinuxTemplateValidation};
 pub use platform::{LaunchAction, PlatformError};
 pub use settings::{Arma3Config, LaunchSettings, LinuxModPathStyle, OpenMode, WindowsLaunchMethod};
+pub use sync::model::SyncModel;
 pub use sync::{
     SafeWipePolicy, SyncMode, SyncOutcome, SyncTuning, UnexpectedPathPolicy, UnknownPathPolicy,
 };

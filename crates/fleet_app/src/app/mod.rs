@@ -1,22 +1,22 @@
 pub mod error;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use fleet_index::{DesiredState, FleetIndex};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::events;
 use crate::launch::arma3;
 use crate::registry;
 use crate::registry::{normalize_repo_url, registry_path, Profile, Registry};
 use crate::settings::{Arma3Config, LaunchSettings};
 use crate::storage::RegistryStore;
 use crate::sync;
-use crate::sync::adapters::{FleetIndexStore, Md5Checksummer, SyncReporter};
+use crate::sync::adapters::{FleetIndexStore, Md5Checksummer};
+use crate::sync::{model::SyncModel, sync_model_sink::SyncModelSink};
 
 pub use error::AppError;
 
@@ -58,12 +58,6 @@ pub struct SyncJob {
     done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     _handle: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,
-}
-
-#[derive(Clone)]
-pub struct SyncReporting {
-    pub critical_tx: mpsc::Sender<events::CriticalEvent>,
-    pub progress_tx: watch::Sender<events::ProgressSnapshot>,
 }
 
 impl SyncJob {
@@ -339,7 +333,7 @@ impl FleetApp {
         &mut self,
         handle: tokio::runtime::Handle,
         tuning: sync::SyncTuning,
-        reporting: SyncReporting,
+        model: Arc<RwLock<SyncModel>>,
     ) -> Result<SyncJob, AppError> {
         let profile = self.selected_profile().ok_or(AppError::NoProfileSelected)?;
         let checkout_root = Utf8PathBuf::from(profile.checkout_root.clone());
@@ -349,7 +343,7 @@ impl FleetApp {
             handle,
             tuning,
             Some(profile.id),
-            reporting,
+            model,
         )
     }
 
@@ -360,7 +354,7 @@ impl FleetApp {
         handle: tokio::runtime::Handle,
         tuning: sync::SyncTuning,
         profile_id_to_update: Option<String>,
-        reporting: SyncReporting,
+        model: Arc<RwLock<SyncModel>>,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
         registry::setup_checkout_root(checkout_root)?;
@@ -397,8 +391,13 @@ impl FleetApp {
                     .map(|m| m.mod_name.clone())
                     .collect();
 
-                let sink =
-                    SyncReporter::new(reporting.critical_tx.clone(), reporting.progress_tx.clone());
+                {
+                    let mut m = model.write().unwrap_or_else(|e| e.into_inner());
+                    *m = SyncModel::new();
+                    m.phase = "Starting…".to_string();
+                }
+
+                let sink = SyncModelSink::new(Arc::clone(&model));
 
                 let repo_id = fleet_index::normalize_repo_id(&raw_spec.checksum);
                 let repo_revision = format!("{}|{}", raw_spec.version, raw_spec.checksum);
@@ -437,10 +436,16 @@ impl FleetApp {
                             tuning: tuning.to_repair_tuning(),
                         };
 
-                        let outcome = engine
-                            .repair(request, &sink, &cancel_task)
-                            .await
-                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        let outcome = engine.repair(request, &sink, &cancel_task).await;
+                        let outcome = match outcome {
+                            Ok(o) => o,
+                            Err(e) => {
+                                let mut m = model.write().unwrap_or_else(|e| e.into_inner());
+                                m.error = Some(e.to_string());
+                                m.finished = true;
+                                return Err(AppError::SyncEngine(e.to_string()));
+                            }
+                        };
                         sync::SyncOutcome::from_repair(outcome)
                     }
 
@@ -452,10 +457,16 @@ impl FleetApp {
                             tuning: tuning.to_sync_fresh_tuning(),
                         };
 
-                        let outcome = engine
-                            .sync_fresh(request, &sink, &cancel_task)
-                            .await
-                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        let outcome = engine.sync_fresh(request, &sink, &cancel_task).await;
+                        let outcome = match outcome {
+                            Ok(o) => o,
+                            Err(e) => {
+                                let mut m = model.write().unwrap_or_else(|e| e.into_inner());
+                                m.error = Some(e.to_string());
+                                m.finished = true;
+                                return Err(AppError::SyncEngine(e.to_string()));
+                            }
+                        };
                         sync::SyncOutcome::from_sync_fresh(outcome)
                     }
 
@@ -467,10 +478,16 @@ impl FleetApp {
                             tuning: tuning.to_check_tuning(),
                         };
 
-                        let report = engine
-                            .check(request, &sink, &cancel_task)
-                            .await
-                            .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                        let report = engine.check(request, &sink, &cancel_task).await;
+                        let report = match report {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let mut m = model.write().unwrap_or_else(|e| e.into_inner());
+                                m.error = Some(e.to_string());
+                                m.finished = true;
+                                return Err(AppError::SyncEngine(e.to_string()));
+                            }
+                        };
                         sync::SyncOutcome::from_check_report(report)
                     }
                 };

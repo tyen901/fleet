@@ -1,11 +1,8 @@
 use crate::core::types::{AppError, RequestId};
-use fleet_app::events::{CriticalEvent, ProgressSnapshot, SyncEvent};
-use fleet_app::{FleetApp, SyncJob, SyncMode, SyncReporting, SyncTuning};
+use fleet_app::{FleetApp, SyncJob, SyncMode, SyncModel, SyncTuning};
 use parking_lot::RwLock;
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone)]
 pub enum SyncState {
@@ -27,7 +24,6 @@ pub enum SyncState {
 
 #[derive(Debug, Clone)]
 pub struct LogLine {
-    pub ts_s: f64,
     pub text: String,
 }
 
@@ -58,6 +54,7 @@ pub struct FleetSyncService {
     tokio: tokio::runtime::Handle,
     req: AtomicU64,
     inner: Arc<RwLock<SyncStateInner>>,
+    model: Arc<std::sync::RwLock<SyncModel>>,
 }
 
 impl FleetSyncService {
@@ -73,18 +70,8 @@ impl FleetSyncService {
                 }),
                 rt: SyncRuntime { job: None },
             })),
+            model: Arc::new(std::sync::RwLock::new(SyncModel::new())),
         })
-    }
-
-    fn push_log(inner: &mut SyncStateInner, ts_s: f64, text: String) {
-        let snap = Arc::make_mut(&mut inner.snap);
-        // Keep bounded.
-        let mut buf: VecDeque<LogLine> = snap.logs.drain(..).collect();
-        buf.push_back(LogLine { ts_s, text });
-        while buf.len() > 200 {
-            buf.pop_front();
-        }
-        snap.logs = buf.into_iter().collect();
     }
 
     fn set_failed(inner: &mut SyncStateInner, msg: impl Into<String>) {
@@ -106,60 +93,45 @@ impl FleetSyncService {
         inner.rt.job = None;
     }
 
-    fn apply_critical_event(inner: &mut SyncStateInner, ev: CriticalEvent, ts_s: f64) {
-        Self::push_log(inner, ts_s, format_sync_event(ev.as_inner()));
+    fn refresh_from_model(&self, inner: &mut SyncStateInner) {
+        let model = self.model.read().unwrap_or_else(|e| e.into_inner()).clone();
 
-        if let SyncEvent::Error { message } = ev.into_inner() {
-            FleetSyncService::set_failed(inner, message);
-        }
-    }
-
-    fn apply_progress_snapshot(
-        inner: &mut SyncStateInner,
-        request: RequestId,
-        snap: &ProgressSnapshot,
-    ) {
-        let SyncState::Running {
-            request: running_req,
+        if let SyncState::Running {
             percent,
             phase,
             bytes_done,
             bytes_total,
             remote_supports_ranges,
             last_strategy,
+            ..
         } = &mut Arc::make_mut(&mut inner.snap).state
-        else {
-            return;
-        };
-
-        if *running_req != request {
-            return;
+        {
+            *percent = model.percent;
+            *phase = model.phase.clone();
+            *bytes_done = Some(model.bytes_done);
+            *bytes_total = Some(model.bytes_total);
+            *remote_supports_ranges = model.remote_supports_ranges;
+            *last_strategy = model.last_strategy.clone();
         }
 
-        *percent = snap.percent;
-
-        let mut p = snap.phase.clone();
-        if snap.counts.files_verified > 0 || snap.counts.files_up_to_date > 0 {
-            p = format!(
-                "{p} — Verified {}, Up-to-date {}",
-                snap.counts.files_verified, snap.counts.files_up_to_date
-            );
+        let snap = Arc::make_mut(&mut inner.snap);
+        snap.logs.clear();
+        if let Some(err) = &model.error {
+            snap.logs.push(LogLine {
+                text: format!("Error: {err}"),
+            });
         }
-        if snap.dropped_critical_count > 0 {
-            p = format!("{p} — Dropped critical {}", snap.dropped_critical_count);
+        for w in model.warnings {
+            snap.logs.push(LogLine { text: w });
         }
-        *phase = p;
-
-        *bytes_done = snap.bytes_done;
-        *bytes_total = snap.bytes_total;
-        *remote_supports_ranges = snap.remote_supports_ranges;
-        *last_strategy = snap.last_strategy.clone();
     }
 }
 
 impl SyncService for FleetSyncService {
     fn snapshot(&self) -> Arc<SyncSnapshot> {
-        Arc::clone(&self.inner.read().snap)
+        let mut inner = self.inner.write();
+        self.refresh_from_model(&mut inner);
+        Arc::clone(&inner.snap)
     }
 
     fn start(&self, mode: SyncMode, tuning: SyncTuning) -> RequestId {
@@ -176,10 +148,6 @@ impl SyncService for FleetSyncService {
         let request = RequestId(self.req.fetch_add(1, Ordering::Relaxed));
 
         // Spawn sync via backend.
-        let (critical_tx, mut critical_rx) = mpsc::channel::<CriticalEvent>(512);
-        let (progress_tx, mut progress_rx) =
-            watch::channel::<ProgressSnapshot>(ProgressSnapshot::default());
-
         let handle = self.tokio.clone();
         let mut app = self.app.write();
 
@@ -187,11 +155,7 @@ impl SyncService for FleetSyncService {
         let mut tuning = tuning;
         tuning.mode = mode;
 
-        let reporting = SyncReporting {
-            critical_tx,
-            progress_tx,
-        };
-        let job = match app.spawn_sync_selected(handle, tuning, reporting) {
+        let job = match app.spawn_sync_selected(handle, tuning, Arc::clone(&self.model)) {
             Ok(j) => j,
             Err(e) => {
                 let mut inner = self.inner.write();
@@ -245,42 +209,6 @@ impl SyncService for FleetSyncService {
             }
         });
 
-        // Consumer 1: critical events (batched per wake under one lock).
-        let inner = Arc::clone(&self.inner);
-        self.tokio.spawn(async move {
-            const MAX_DRAIN: usize = 128;
-            while let Some(first) = critical_rx.recv().await {
-                let mut batch = Vec::with_capacity(MAX_DRAIN);
-                batch.push(first);
-                for _ in 1..MAX_DRAIN {
-                    match critical_rx.try_recv() {
-                        Ok(ev) => batch.push(ev),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                let ts_s = egui_time_seconds_fallback();
-                let mut state = inner.write();
-                for ev in batch {
-                    FleetSyncService::apply_critical_event(&mut state, ev, ts_s);
-                }
-            }
-        });
-
-        // Consumer 2: progress snapshots (latest-only).
-        let inner = Arc::clone(&self.inner);
-        self.tokio.spawn(async move {
-            loop {
-                if progress_rx.changed().await.is_err() {
-                    break;
-                }
-                let snap = progress_rx.borrow().clone();
-                let mut state = inner.write();
-                FleetSyncService::apply_progress_snapshot(&mut state, request, &snap);
-            }
-        });
-
         request
     }
 
@@ -290,6 +218,8 @@ impl SyncService for FleetSyncService {
             job.cancel();
         }
         Self::set_idle(&mut inner);
+        let mut model = self.model.write().unwrap_or_else(|e| e.into_inner());
+        *model = SyncModel::new();
     }
 
     fn clear_error(&self) {
@@ -297,86 +227,9 @@ impl SyncService for FleetSyncService {
         if matches!(inner.snap.state, SyncState::Failed { .. }) {
             Arc::make_mut(&mut inner.snap).state = SyncState::Idle;
         }
+        let mut model = self.model.write().unwrap_or_else(|e| e.into_inner());
+        model.error = None;
+        model.warnings.clear();
+        model.finished = false;
     }
-}
-
-// --- helpers
-
-fn format_sync_event(ev: &SyncEvent) -> String {
-    match ev {
-        SyncEvent::CheckStarted { repo } => format!("CheckStarted {repo}"),
-        SyncEvent::CheckFinished { ok } => format!("CheckFinished ok={ok}"),
-        SyncEvent::RepairStarted { repo } => format!("RepairStarted {repo}"),
-        SyncEvent::RepairSkipEvaluated { skippable, reason } => {
-            format!("RepairSkipEvaluated skippable={skippable} reason={reason:?}")
-        }
-        SyncEvent::RepairFinished { ok, skipped } => {
-            format!("RepairFinished ok={ok} skipped={skipped}")
-        }
-        SyncEvent::SyncFreshStarted { repo } => format!("SyncFreshStarted {repo}"),
-        SyncEvent::SyncFreshFinished { ok } => format!("SyncFreshFinished ok={ok}"),
-        SyncEvent::RemoteCapabilities { supports_ranges } => {
-            format!("RemoteCapabilities supports_ranges={supports_ranges}")
-        }
-        SyncEvent::ModStarted { mod_id } => format!("ModStarted {mod_id}"),
-        SyncEvent::ModFinished { mod_id } => format!("ModFinished {mod_id}"),
-        SyncEvent::FileUpToDate { mod_id, path } => format!("FileUpToDate {mod_id}/{path}"),
-        SyncEvent::FileNeedsRepair {
-            mod_id,
-            path,
-            strategy,
-        } => format!("FileNeedsRepair {mod_id}/{path} {strategy}"),
-        SyncEvent::FileStarted {
-            mod_id,
-            path,
-            bytes_total,
-        } => format!("FileStarted {mod_id}/{path} total={bytes_total}"),
-        SyncEvent::FileProgress {
-            mod_id,
-            path,
-            bytes_done,
-            bytes_total,
-        } => {
-            format!("FileProgress {mod_id}/{path} {bytes_done}/{bytes_total}")
-        }
-        SyncEvent::FileVerified { mod_id, path } => format!("FileVerified {mod_id}/{path}"),
-        SyncEvent::UnexpectedPathsFound {
-            mod_id,
-            files,
-            dirs,
-            bytes,
-            sample,
-        } => {
-            format!(
-                "UnexpectedPathsFound {mod_id} files={files} dirs={dirs} bytes={bytes} sample={}",
-                sample.join(",")
-            )
-        }
-        SyncEvent::UnexpectedPathDeleted {
-            mod_id,
-            path,
-            bytes,
-            is_dir,
-        } => {
-            format!("UnexpectedPathDeleted {mod_id}/{path} bytes={bytes} is_dir={is_dir}")
-        }
-        SyncEvent::UnexpectedPathsActionRequired { mod_id, message } => {
-            format!("UnexpectedPathsActionRequired {mod_id} {message}")
-        }
-        SyncEvent::UnexpectedPathsCapReached { mod_id, message } => {
-            format!("UnexpectedPathsCapReached {mod_id} {message}")
-        }
-        SyncEvent::EmptyDirDeleted { path } => format!("EmptyDirDeleted {path}"),
-        SyncEvent::Warning { message } => format!("Warning {message}"),
-        SyncEvent::Error { message } => format!("Error {message}"),
-    }
-}
-
-// egui time is accessible in UI; service uses a fallback.
-fn egui_time_seconds_fallback() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
 }
