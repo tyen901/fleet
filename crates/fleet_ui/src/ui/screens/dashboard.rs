@@ -1,4 +1,4 @@
-use crate::core::services::sync::{SyncState};
+use crate::core::services::sync::SyncState;
 use crate::core::types::ScreenId;
 use crate::ui::context::UiContext;
 use crate::ui::events::UiEvent;
