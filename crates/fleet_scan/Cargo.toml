@@ -4,14 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1"
-camino = "1"
-fleet_types = { path = "../fleet_types" }
-relative-path = "1.9"
-md5 = "0.7"
-thiserror = "1"
-walkdir = "2"
+anyhow = { workspace = true }
+camino = { workspace = true }
+fleet_types = { workspace = true }
+relative-path = { workspace = true }
+md5 = { workspace = true }
+thiserror = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
-camino = "1"
-fleet_types = { path = "../fleet_types" }
+camino = { workspace = true }
+fleet_types = { workspace = true }

@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-thiserror = "2"
-walkdir = "2"
+thiserror = { workspace = true }
+walkdir = { workspace = true }

@@ -1499,7 +1499,7 @@ dependencies = [
  "fleet_fs",
  "rusqlite",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1529,7 +1529,7 @@ dependencies = [
  "fleet_types",
  "md5",
  "relative-path",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "walkdir",
 ]
 
@@ -1545,7 +1545,7 @@ dependencies = [
  "fleet_index",
  "futures",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "walkdir",
