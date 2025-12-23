@@ -7,8 +7,6 @@ edition = "2021"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-futures-core = { workspace = true }
-futures-util = { workspace = true }
 fleet_types = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "rustls-tls"] }
 fleet_sync = { workspace = true }
@@ -17,5 +15,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"
-tokio = { workspace = true }
 wiremock = "0.6"

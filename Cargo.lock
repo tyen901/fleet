@@ -1511,8 +1511,6 @@ dependencies = [
  "bytes",
  "fleet_sync",
  "fleet_types",
- "futures-core",
- "futures-util",
  "reqwest",
  "serde_json",
  "tokio",
@@ -1524,7 +1522,6 @@ dependencies = [
 name = "fleet_scan"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "camino",
  "fleet_types",
  "md5",

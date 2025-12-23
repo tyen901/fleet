@@ -15,9 +15,8 @@ velopack = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
 urlencoding = "2"
 walkdir = "2"
+serde = { workspace = true }
