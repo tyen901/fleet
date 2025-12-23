@@ -10,6 +10,21 @@ use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+
+// encode everything except the common path safe characters. We'll allow sub-delims and
+// standard pchar characters per RFC 3986 except '/' which separates segments.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'#')
+    .add(b'?')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/');
 
 fn apply_basic_auth(
     mut req: reqwest::RequestBuilder,
@@ -54,9 +69,15 @@ impl HttpRemote {
     }
 
     fn url_join(&self, p: &str) -> Result<Url> {
-        // Ensure no leading slash breaks join semantics.
+        // Ensure no leading slash breaks join semantics and percent-encode each
+        // path segment so characters like '@' are not treated as userinfo.
         let p = p.trim_start_matches('/');
-        Ok(self.base.join(p)?)
+        let segments: Vec<String> = p
+            .split('/')
+            .map(|seg| utf8_percent_encode(seg, PATH_SEGMENT_ENCODE_SET).to_string())
+            .collect();
+        let encoded = segments.join("/");
+        Ok(self.base.join(&encoded)?)
     }
 
     async fn ensure_repo_loaded(&self) -> Result<()> {
@@ -140,38 +161,6 @@ impl RemoteRepo for HttpRemote {
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<FetchModManifest> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
-
-        // Prefer manifest.json, fall back to mod.srf. Both may contain BOM / legacy SRF.
-        let manifest_url = self.url_join(&format!("{}/manifest.json", mod_id))?;
-        let req = apply_basic_auth(self.client.get(manifest_url), &auth);
-        let res = req.send().await?;
-        if res.status().as_u16() != 404 {
-            let res = res.error_for_status()?;
-            let bytes = res.bytes().await?;
-            let parsed = MtModManifest::from_bytes(&bytes)?;
-            return Ok(FetchModManifest {
-                mod_id: parsed.name,
-                files: parsed
-                    .files
-                    .into_iter()
-                    .map(|f| FileEntry {
-                        rel_path: f.path.as_str().to_string(),
-                        size: f.length,
-                        file_checksum: f.checksum.as_bytes().to_vec(),
-                        parts: f
-                            .parts
-                            .into_iter()
-                            .map(|p| FilePart {
-                                offset: p.start,
-                                len: p.length,
-                                checksum: p.checksum.as_bytes().to_vec(),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            });
-        }
-
         let srf_url = self.url_join(&format!("{}/mod.srf", mod_id))?;
         let req = apply_basic_auth(self.client.get(srf_url), &auth);
         let res = req.send().await?.error_for_status()?;

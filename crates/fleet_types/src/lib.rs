@@ -18,6 +18,7 @@ impl RepoSpec {
 
 impl ModManifest {
     pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        let bytes = swifty::formats::strip_utf8_bom(bytes);
         swifty::formats::mod_manifest::parse_any(bytes)
     }
 }

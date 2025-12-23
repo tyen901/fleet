@@ -1513,6 +1513,7 @@ dependencies = [
  "bytes",
  "fleet_sync",
  "fleet_types",
+ "percent-encoding",
  "reqwest",
  "serde_json",
  "tokio",

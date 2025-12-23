@@ -148,7 +148,7 @@ async fn basic_auth_from_repo_json_is_applied_to_manifest_requests() {
     .to_string();
 
     Mock::given(method("GET"))
-        .and(path("/@ace/manifest.json"))
+        .and(path("/@ace/mod.srf"))
         .and(header("authorization", expected_auth.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_string(manifest))
         .mount(&server)
