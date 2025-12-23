@@ -6,7 +6,7 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use fleet_index::{DesiredState, FleetIndex};
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::events;
@@ -16,7 +16,7 @@ use crate::registry::{normalize_repo_url, registry_path, Profile, Registry};
 use crate::settings::{Arma3Config, LaunchSettings};
 use crate::storage::RegistryStore;
 use crate::sync;
-use crate::sync::adapters::{FleetIndexStore, Md5Checksummer, SyncEventSink};
+use crate::sync::adapters::{FleetIndexStore, Md5Checksummer, SyncReporter};
 
 pub use error::AppError;
 
@@ -58,6 +58,12 @@ pub struct SyncJob {
     done_rx: Option<oneshot::Receiver<Result<(), AppError>>>,
     _handle: tokio::task::JoinHandle<()>,
     cancel: CancellationToken,
+}
+
+#[derive(Clone)]
+pub struct SyncReporting {
+    pub critical_tx: mpsc::Sender<events::CriticalEvent>,
+    pub progress_tx: watch::Sender<events::ProgressSnapshot>,
 }
 
 impl SyncJob {
@@ -333,7 +339,7 @@ impl FleetApp {
         &mut self,
         handle: tokio::runtime::Handle,
         tuning: sync::SyncTuning,
-        ev_tx: mpsc::Sender<events::SyncEvent>,
+        reporting: SyncReporting,
     ) -> Result<SyncJob, AppError> {
         let profile = self.selected_profile().ok_or(AppError::NoProfileSelected)?;
         let checkout_root = Utf8PathBuf::from(profile.checkout_root.clone());
@@ -343,7 +349,7 @@ impl FleetApp {
             handle,
             tuning,
             Some(profile.id),
-            ev_tx,
+            reporting,
         )
     }
 
@@ -354,7 +360,7 @@ impl FleetApp {
         handle: tokio::runtime::Handle,
         tuning: sync::SyncTuning,
         profile_id_to_update: Option<String>,
-        ev_tx: mpsc::Sender<events::SyncEvent>,
+        reporting: SyncReporting,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
         registry::setup_checkout_root(checkout_root)?;
@@ -391,7 +397,8 @@ impl FleetApp {
                     .map(|m| m.mod_name.clone())
                     .collect();
 
-                let sink = SyncEventSink::new(ev_tx.clone());
+                let sink =
+                    SyncReporter::new(reporting.critical_tx.clone(), reporting.progress_tx.clone());
 
                 let repo_id = fleet_index::normalize_repo_id(&raw_spec.checksum);
                 let repo_revision = format!("{}|{}", raw_spec.version, raw_spec.checksum);

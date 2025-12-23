@@ -1,10 +1,11 @@
 use crate::core::types::{AppError, RequestId};
-use fleet_app::events::SyncEvent;
-use fleet_app::{FleetApp, SyncJob, SyncMode, SyncTuning};
+use fleet_app::events::{CriticalEvent, ProgressSnapshot, SyncEvent};
+use fleet_app::{FleetApp, SyncJob, SyncMode, SyncReporting, SyncTuning};
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone)]
 pub enum SyncState {
@@ -105,149 +106,54 @@ impl FleetSyncService {
         inner.rt.job = None;
     }
 
-    fn apply_event(inner: &mut SyncStateInner, ev: SyncEvent, ts_s: f64) {
-        Self::push_log(inner, ts_s, format_sync_event(&ev));
+    fn apply_critical_event(inner: &mut SyncStateInner, ev: CriticalEvent, ts_s: f64) {
+        Self::push_log(inner, ts_s, format_sync_event(ev.as_inner()));
 
-        // Update running state fields.
-        let mut current = match &inner.snap.state {
-            SyncState::Running {
-                request,
-                percent,
-                phase,
-                bytes_done,
-                bytes_total,
-                remote_supports_ranges,
-                last_strategy,
-            } => (
-                *request,
-                *percent,
-                phase.clone(),
-                *bytes_done,
-                *bytes_total,
-                *remote_supports_ranges,
-                last_strategy.clone(),
-            ),
-            _ => {
-                // If we somehow receive events outside Running, ignore state updates but log.
-                return;
-            }
+        if let SyncEvent::Error { message } = ev.into_inner() {
+            FleetSyncService::set_failed(inner, message);
+        }
+    }
+
+    fn apply_progress_snapshot(
+        inner: &mut SyncStateInner,
+        request: RequestId,
+        snap: &ProgressSnapshot,
+    ) {
+        let SyncState::Running {
+            request: running_req,
+            percent,
+            phase,
+            bytes_done,
+            bytes_total,
+            remote_supports_ranges,
+            last_strategy,
+        } = &mut Arc::make_mut(&mut inner.snap).state
+        else {
+            return;
         };
 
-        match ev {
-            SyncEvent::RemoteCapabilities { supports_ranges } => {
-                current.5 = Some(supports_ranges);
-            }
-            SyncEvent::CheckStarted { repo } => current.2 = format!("Check {repo}"),
-            SyncEvent::CheckFinished { ok } => {
-                current.2 = if ok { "Check finished" } else { "Check failed" }.into()
-            }
-
-            SyncEvent::RepairStarted { repo } => current.2 = format!("Repair {repo}"),
-            SyncEvent::RepairSkipEvaluated { skippable, reason } => {
-                if skippable {
-                    current.2 = "Repair skipped (cache valid)".into();
-                } else if let Some(r) = reason {
-                    current.2 = format!("Repair required ({r})");
-                }
-            }
-            SyncEvent::RepairFinished { ok, skipped } => {
-                current.2 = if skipped {
-                    "Repair skipped".into()
-                } else if ok {
-                    "Repair finished".into()
-                } else {
-                    "Repair failed".into()
-                };
-            }
-
-            SyncEvent::SyncFreshStarted { repo } => current.2 = format!("SyncFresh {repo}"),
-            SyncEvent::SyncFreshFinished { ok } => {
-                current.2 = if ok {
-                    "SyncFresh finished".into()
-                } else {
-                    "SyncFresh failed".into()
-                }
-            }
-
-            SyncEvent::ModStarted { mod_id } => current.2 = format!("Mod {mod_id}"),
-            SyncEvent::ModFinished { mod_id } => current.2 = format!("Finished {mod_id}"),
-
-            SyncEvent::FileStarted {
-                mod_id,
-                path,
-                bytes_total,
-            } => {
-                current.2 = format!("Downloading {mod_id}/{path}");
-                current.3 = Some(0);
-                current.4 = Some(bytes_total);
-                current.1 = 0;
-            }
-
-            SyncEvent::FileUpToDate { mod_id, path } => {
-                current.2 = format!("Up-to-date {mod_id}/{path}");
-            }
-
-            SyncEvent::FileNeedsRepair {
-                mod_id,
-                path,
-                strategy,
-            } => {
-                current.6 = Some(strategy.to_string());
-                current.2 = format!("Repair {mod_id}/{path} ({strategy})");
-            }
-
-            SyncEvent::FileProgress {
-                mod_id,
-                path,
-                bytes_done,
-                bytes_total,
-            } => {
-                current.2 = format!("Downloading {mod_id}/{path}");
-                current.3 = Some(bytes_done);
-                current.4 = Some(bytes_total);
-                current.1 = if bytes_total == 0 {
-                    0
-                } else {
-                    let frac = (bytes_done as f64 / bytes_total as f64).clamp(0.0, 1.0);
-                    (frac * 100.0).round() as u8
-                };
-            }
-
-            SyncEvent::FileVerified { mod_id, path } => {
-                current.2 = format!("Verified {mod_id}/{path}")
-            }
-
-            SyncEvent::UnexpectedPathsFound { mod_id, .. } => {
-                current.2 = format!("Unexpected paths in {mod_id}")
-            }
-            SyncEvent::UnexpectedPathDeleted { mod_id, path, .. } => {
-                current.2 = format!("Deleted unexpected {mod_id}/{path}")
-            }
-
-            SyncEvent::UnexpectedPathsActionRequired { message, .. }
-            | SyncEvent::UnexpectedPathsCapReached { message, .. }
-            | SyncEvent::Warning { message } => {
-                // Keep running but surface message as "phase" for visibility.
-                current.2 = message;
-            }
-
-            SyncEvent::EmptyDirDeleted { path } => current.2 = format!("Removed {path}"),
-
-            SyncEvent::Error { message } => {
-                FleetSyncService::set_failed(inner, message);
-                return;
-            }
+        if *running_req != request {
+            return;
         }
 
-        Arc::make_mut(&mut inner.snap).state = SyncState::Running {
-            request: current.0,
-            percent: current.1,
-            phase: current.2,
-            bytes_done: current.3,
-            bytes_total: current.4,
-            remote_supports_ranges: current.5,
-            last_strategy: current.6,
-        };
+        *percent = snap.percent;
+
+        let mut p = snap.phase.clone();
+        if snap.counts.files_verified > 0 || snap.counts.files_up_to_date > 0 {
+            p = format!(
+                "{p} — Verified {}, Up-to-date {}",
+                snap.counts.files_verified, snap.counts.files_up_to_date
+            );
+        }
+        if snap.dropped_critical_count > 0 {
+            p = format!("{p} — Dropped critical {}", snap.dropped_critical_count);
+        }
+        *phase = p;
+
+        *bytes_done = snap.bytes_done;
+        *bytes_total = snap.bytes_total;
+        *remote_supports_ranges = snap.remote_supports_ranges;
+        *last_strategy = snap.last_strategy.clone();
     }
 }
 
@@ -270,7 +176,9 @@ impl SyncService for FleetSyncService {
         let request = RequestId(self.req.fetch_add(1, Ordering::Relaxed));
 
         // Spawn sync via backend.
-        let (coord_tx, coord_rx) = tokio::sync::mpsc::channel::<SyncEvent>(2048);
+        let (critical_tx, mut critical_rx) = mpsc::channel::<CriticalEvent>(512);
+        let (progress_tx, mut progress_rx) =
+            watch::channel::<ProgressSnapshot>(ProgressSnapshot::default());
 
         let handle = self.tokio.clone();
         let mut app = self.app.write();
@@ -279,7 +187,11 @@ impl SyncService for FleetSyncService {
         let mut tuning = tuning;
         tuning.mode = mode;
 
-        let job = match app.spawn_sync_selected(handle, tuning, coord_tx) {
+        let reporting = SyncReporting {
+            critical_tx,
+            progress_tx,
+        };
+        let job = match app.spawn_sync_selected(handle, tuning, reporting) {
             Ok(j) => j,
             Err(e) => {
                 let mut inner = self.inner.write();
@@ -333,14 +245,39 @@ impl SyncService for FleetSyncService {
             }
         });
 
-        // Event pump (service self-management): continuously drains the coordinator channel.
+        // Consumer 1: critical events (batched per wake under one lock).
         let inner = Arc::clone(&self.inner);
         self.tokio.spawn(async move {
-            let mut coord_rx = coord_rx;
-            while let Some(ev) = coord_rx.recv().await {
+            const MAX_DRAIN: usize = 128;
+            while let Some(first) = critical_rx.recv().await {
+                let mut batch = Vec::with_capacity(MAX_DRAIN);
+                batch.push(first);
+                for _ in 1..MAX_DRAIN {
+                    match critical_rx.try_recv() {
+                        Ok(ev) => batch.push(ev),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
                 let ts_s = egui_time_seconds_fallback();
                 let mut state = inner.write();
-                FleetSyncService::apply_event(&mut state, ev, ts_s);
+                for ev in batch {
+                    FleetSyncService::apply_critical_event(&mut state, ev, ts_s);
+                }
+            }
+        });
+
+        // Consumer 2: progress snapshots (latest-only).
+        let inner = Arc::clone(&self.inner);
+        self.tokio.spawn(async move {
+            loop {
+                if progress_rx.changed().await.is_err() {
+                    break;
+                }
+                let snap = progress_rx.borrow().clone();
+                let mut state = inner.write();
+                FleetSyncService::apply_progress_snapshot(&mut state, request, &snap);
             }
         });
 

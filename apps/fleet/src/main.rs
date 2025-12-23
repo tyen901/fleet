@@ -238,8 +238,16 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             };
 
-            let (ev_tx, mut ev_rx) =
-                tokio::sync::mpsc::channel::<fleet_app::events::SyncEvent>(2048);
+            let (critical_tx, mut critical_rx) =
+                tokio::sync::mpsc::channel::<fleet_app::events::CriticalEvent>(512);
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::watch::channel::<fleet_app::events::ProgressSnapshot>(
+                    fleet_app::events::ProgressSnapshot::default(),
+                );
+            let reporting = fleet_app::SyncReporting {
+                critical_tx,
+                progress_tx,
+            };
 
             if sa.repo_url.is_some() ^ sa.path.is_some() {
                 return Err("--repo-url and --path must be provided together".into());
@@ -250,12 +258,19 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let mut job = if let (Some(repo_url), Some(path)) = (sa.repo_url.as_deref(), sa.path) {
                 let checkout = camino::Utf8PathBuf::from_path_buf(path)
                     .map_err(|_| "checkout path must be valid UTF-8")?;
-                app.spawn_sync(repo_url, &checkout, handle.clone(), tuning, None, ev_tx)?
+                app.spawn_sync(
+                    repo_url,
+                    &checkout,
+                    handle.clone(),
+                    tuning,
+                    None,
+                    reporting.clone(),
+                )?
             } else if let Some(profile_id) = sa.profile {
                 app.select_profile(&profile_id)?;
-                app.spawn_sync_selected(handle.clone(), tuning, ev_tx)?
+                app.spawn_sync_selected(handle.clone(), tuning, reporting.clone())?
             } else {
-                app.spawn_sync_selected(handle.clone(), tuning, ev_tx)?
+                app.spawn_sync_selected(handle.clone(), tuning, reporting.clone())?
             };
 
             let done_rx = job
@@ -263,6 +278,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("sync job missing completion channel")?;
 
             tokio::pin!(done_rx);
+            let mut last_progress_print = std::time::Instant::now();
             loop {
                 tokio::select! {
                     res = &mut done_rx => {
@@ -286,13 +302,20 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    ev = ev_rx.recv() => {
+                    ev = critical_rx.recv() => {
                         let Some(ev) = ev else { break; };
                         if sa.json_events {
-                            let v = serde_json::json!({ "debug": format!("{ev:?}") });
+                            let v = serde_json::json!({ "debug": format!("{:?}", ev.as_inner()) });
                             println!("{}", serde_json::to_string(&v)?);
                         } else {
-                            println!("{ev:?}");
+                            println!("{:?}", ev.as_inner());
+                        }
+                    }
+                    changed = progress_rx.changed() => {
+                        if changed.is_ok() && last_progress_print.elapsed() >= std::time::Duration::from_millis(250) {
+                            let snap = progress_rx.borrow().clone();
+                            eprintln!("progress: {:3}% {}", snap.percent, snap.phase);
+                            last_progress_print = std::time::Instant::now();
                         }
                     }
                 }

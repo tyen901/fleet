@@ -10,7 +10,7 @@ pub mod settings;
 mod registry;
 mod storage;
 
-pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob};
+pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob, SyncReporting};
 
 // Minimal, intentional exports:
 pub use launch::arma3::{Arma3LaunchPlan, LaunchError, LinuxTemplateValidation};
