@@ -221,20 +221,21 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Cmd::Sync(sa) => {
-            let mut tuning = fleet_app::SyncTuning::default();
-            tuning.full_download_part_threshold = sa.full_download_part_threshold;
-            tuning.full_download_byte_ratio_threshold = sa.full_download_byte_ratio_threshold;
-            tuning.max_concurrent_files = sa.max_concurrent_files;
-            tuning.max_concurrent_range_requests = sa.max_concurrent_range_requests;
-            tuning.io_buffer_bytes = sa.io_buffer_bytes;
-            tuning.use_index = sa.use_index;
-            tuning.emit_progress = true;
-
-            tuning.mode = match sa.mode.as_str() {
-                "repair" => fleet_app::SyncMode::Repair,
-                "fresh" => fleet_app::SyncMode::SyncFresh,
-                "check" => fleet_app::SyncMode::Check,
-                _ => return Err(format!("invalid mode: {}", sa.mode).into()),
+            let tuning = fleet_app::SyncTuning {
+                full_download_part_threshold: sa.full_download_part_threshold,
+                full_download_byte_ratio_threshold: sa.full_download_byte_ratio_threshold,
+                max_concurrent_files: sa.max_concurrent_files,
+                max_concurrent_range_requests: sa.max_concurrent_range_requests,
+                io_buffer_bytes: sa.io_buffer_bytes,
+                use_index: sa.use_index,
+                emit_progress: true,
+                mode: match sa.mode.as_str() {
+                    "repair" => fleet_app::SyncMode::Repair,
+                    "fresh" => fleet_app::SyncMode::SyncFresh,
+                    "check" => fleet_app::SyncMode::Check,
+                    _ => return Err(format!("invalid mode: {}", sa.mode).into()),
+                },
+                ..Default::default()
             };
 
             let (ev_tx, mut ev_rx) =
@@ -344,13 +345,15 @@ mod tests {
             "1024",
         ]);
 
-        let mut tuning = fleet_app::SyncTuning::default();
-        tuning.full_download_part_threshold = args.full_download_part_threshold;
-        tuning.full_download_byte_ratio_threshold = args.full_download_byte_ratio_threshold;
-        tuning.max_concurrent_files = args.max_concurrent_files;
-        tuning.max_concurrent_range_requests = args.max_concurrent_range_requests;
-        tuning.io_buffer_bytes = args.io_buffer_bytes;
-        tuning.use_index = true;
+        let tuning = fleet_app::SyncTuning {
+            full_download_part_threshold: args.full_download_part_threshold,
+            full_download_byte_ratio_threshold: args.full_download_byte_ratio_threshold,
+            max_concurrent_files: args.max_concurrent_files,
+            max_concurrent_range_requests: args.max_concurrent_range_requests,
+            io_buffer_bytes: args.io_buffer_bytes,
+            use_index: true,
+            ..Default::default()
+        };
 
         assert_eq!(tuning.full_download_part_threshold, 32);
         assert_eq!(tuning.full_download_byte_ratio_threshold, 1.5);

@@ -26,3 +26,39 @@ pub fn parse_any(bytes: &[u8]) -> Result<ModManifest> {
 
     Ok(manifest)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_any_normalizes_and_sorts_paths_for_json() {
+        // Minimal JSON manifest with unsorted files and Windows path separators.
+        let json = br#"
+                {
+                    "name": "TestMod",
+                    "checksum": "0123456789ABCDEF0123456789ABCDEF",
+                    "files": [
+                        {
+                            "path": "z\\b.txt",
+                            "length": 0,
+                            "checksum": "0123456789ABCDEF0123456789ABCDEF",
+                            "parts": []
+                        },
+                        {
+                            "path": "a\\c.txt",
+                            "length": 0,
+                            "checksum": "0123456789ABCDEF0123456789ABCDEF",
+                            "parts": []
+                        }
+                    ]
+                }
+                "#;
+
+        let m = parse_any(json).expect("parse_any JSON");
+
+        assert_eq!(m.files.len(), 2);
+        assert_eq!(m.files[0].path.as_str(), "a/c.txt");
+        assert_eq!(m.files[1].path.as_str(), "z/b.txt");
+    }
+}

@@ -225,7 +225,7 @@ impl Screen for SettingsScreen {
                             ctx.update.check();
                         }
 
-                        let can_apply = can_interact && matches!(upd.state, UpdateState::Idle { available: Some(_), .. });
+                        let can_apply = can_interact && matches!(upd.state, UpdateState::Idle { available: ref a, .. } if a.is_some());
                         if ui
                             .add(widgets::AppButton::new(&kit, "Update now").primary().enabled(can_apply))
                             .clicked()
@@ -260,18 +260,20 @@ impl Screen for SettingsScreen {
                         _ => {}
                     }
 
-                    if let UpdateState::Idle { available: Some(ref info), .. } = upd.state {
-                        ui.add_space(kit.theme.spacing.sm);
-                        ui.add(widgets::FieldLabel::new(&kit, "Available update details"));
-                        let pretty = serde_json::to_string_pretty(info).unwrap_or_else(|_| format!("{info:?}"));
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(pretty)
-                                    .monospace()
-                                    .size(kit.theme.type_scale.mono),
-                            )
-                            .wrap(),
-                        );
+                    if let UpdateState::Idle { available, .. } = upd.state {
+                        if let Some(ref info) = *available {
+                            ui.add_space(kit.theme.spacing.sm);
+                            ui.add(widgets::FieldLabel::new(&kit, "Available update details"));
+                            let pretty = serde_json::to_string_pretty(info).unwrap_or_else(|_| format!("{info:?}"));
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(pretty)
+                                        .monospace()
+                                        .size(kit.theme.type_scale.mono),
+                                )
+                                .wrap(),
+                            );
+                        }
                     }
                 });
 

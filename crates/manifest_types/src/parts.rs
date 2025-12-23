@@ -30,3 +30,74 @@ pub fn validate_parts(
     }
     Ok(v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Md5Digest;
+
+    fn md5_zero() -> Md5Digest {
+        Md5Digest::from_bytes([0u8; 16])
+    }
+
+    #[test]
+    fn validate_parts_empty_when_expected_zero() {
+        let out = validate_parts(&[], 0).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn validate_parts_rejects_non_contiguous() {
+        let parts = vec![
+            PartManifest {
+                start: 0,
+                length: 5,
+                checksum: md5_zero(),
+            },
+            PartManifest {
+                start: 6,
+                length: 5,
+                checksum: md5_zero(),
+            },
+        ];
+        let err = validate_parts(&parts, 10).unwrap_err();
+        matches!(err, PartValidationError::NotContiguous);
+    }
+
+    #[test]
+    fn validate_parts_rejects_length_mismatch() {
+        let parts = vec![
+            PartManifest {
+                start: 0,
+                length: 5,
+                checksum: md5_zero(),
+            },
+            PartManifest {
+                start: 5,
+                length: 4,
+                checksum: md5_zero(),
+            },
+        ];
+        let err = validate_parts(&parts, 10).unwrap_err();
+        matches!(err, PartValidationError::LengthMismatch);
+    }
+
+    #[test]
+    fn validate_parts_sorts_by_start() {
+        let parts = vec![
+            PartManifest {
+                start: 5,
+                length: 5,
+                checksum: md5_zero(),
+            },
+            PartManifest {
+                start: 0,
+                length: 5,
+                checksum: md5_zero(),
+            },
+        ];
+        let out = validate_parts(&parts, 10).unwrap();
+        assert_eq!(out[0].start, 0);
+        assert_eq!(out[1].start, 5);
+    }
+}

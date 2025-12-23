@@ -9,7 +9,7 @@ pub enum UpdateState {
     NotConfigured,
     Idle {
         status: String,
-        available: Option<UpdateInfo>,
+        available: Box<Option<UpdateInfo>>,
     },
     Checking {
         request: RequestId,
@@ -83,7 +83,7 @@ impl FleetUpdateService {
                     state: if configured {
                         UpdateState::Idle {
                             status: "Not checked".into(),
-                            available: None,
+                            available: Box::new(None),
                         }
                     } else {
                         UpdateState::NotConfigured
@@ -144,14 +144,14 @@ impl UpdateService for FleetUpdateService {
                     guard.available = None;
                     guard.snap.state = UpdateState::Idle {
                         status: "No update available".into(),
-                        available: None,
+                        available: Box::new(None),
                     };
                 }
                 Ok(UpdateCheck::UpdateAvailable(info)) => {
                     guard.available = Some(info.clone());
                     guard.snap.state = UpdateState::Idle {
                         status: "Update available".into(),
-                        available: Some(info),
+                        available: Box::new(Some(info)),
                     };
                 }
             }
@@ -176,7 +176,7 @@ impl UpdateService for FleetUpdateService {
             let Some(info) = inner.available.clone() else {
                 inner.snap.state = UpdateState::Idle {
                     status: "No update to apply".into(),
-                    available: None,
+                    available: Box::new(None),
                 };
                 return request;
             };
@@ -238,7 +238,7 @@ impl UpdateService for FleetUpdateService {
         if matches!(inner.snap.state, UpdateState::Failed { .. }) {
             inner.snap.state = UpdateState::Idle {
                 status: "Not checked".into(),
-                available: inner.available.clone(),
+                available: Box::new(inner.available.clone()),
             };
         }
     }

@@ -3,22 +3,17 @@ use serde::{Deserialize, Serialize};
 use crate::constants::ARMA3_DEFAULT_EXTRA_ARGS;
 
 /// How the app should open URLs/paths (folder open, steam:// handling, etc).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenMode {
     /// Default OS handler (Windows ShellExecute / Linux xdg-open)
+    #[default]
     SystemDefault,
     /// When running inside Flatpak, open via host: `flatpak-spawn --host xdg-open ...`
     LinuxFlatpakHost,
 }
 
-impl Default for OpenMode {
-    fn default() -> Self {
-        Self::SystemDefault
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct LaunchSettings {
     /// NOTE: alias preserves old persisted field name `mode` (from the previous design).
     #[serde(default, alias = "mode")]
@@ -29,16 +24,7 @@ pub struct LaunchSettings {
     pub arma3: Arma3LaunchSettings,
 }
 
-impl Default for LaunchSettings {
-    fn default() -> Self {
-        Self {
-            open_mode: OpenMode::default(),
-            arma3: Arma3LaunchSettings::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Arma3LaunchSettings {
     #[serde(default)]
     pub windows: WindowsArma3LaunchSettings,
@@ -46,16 +32,7 @@ pub struct Arma3LaunchSettings {
     pub linux: LinuxArma3LaunchSettings,
 }
 
-impl Default for Arma3LaunchSettings {
-    fn default() -> Self {
-        Self {
-            windows: WindowsArma3LaunchSettings::default(),
-            linux: LinuxArma3LaunchSettings::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowsLaunchMethod {
     /// Launch Arma 3 directly via Arma3_x64.exe
@@ -63,17 +40,11 @@ pub enum WindowsLaunchMethod {
     /// Launch via Steam executable: Steam.exe -applaunch 107410 <args>
     SteamAppLaunch,
     /// Launch via protocol handler: steam://rungameid/107410//<encoded cmdline>
+    #[default]
     SteamUri,
 }
 
-impl Default for WindowsLaunchMethod {
-    fn default() -> Self {
-        // Default that "works" without requiring Steam.exe path configuration.
-        Self::SteamUri
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WindowsArma3LaunchSettings {
     #[serde(default)]
     pub method: WindowsLaunchMethod,
@@ -85,29 +56,14 @@ pub struct WindowsArma3LaunchSettings {
     pub steam_exe: Option<String>,
 }
 
-impl Default for WindowsArma3LaunchSettings {
-    fn default() -> Self {
-        Self {
-            method: WindowsLaunchMethod::default(),
-            arma3_exe: None,
-            steam_exe: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LinuxModPathStyle {
     /// Use native host paths (e.g. /home/user/...).
+    #[default]
     Native,
     /// Convert host paths to a Windows-ish Z:\... form (for Proton/Wine style usage).
     ProtonZ,
-}
-
-impl Default for LinuxModPathStyle {
-    fn default() -> Self {
-        Self::Native
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
