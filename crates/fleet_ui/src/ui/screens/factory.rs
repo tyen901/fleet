@@ -1,16 +1,17 @@
-use crate::core::services::data::DataService;
-use crate::core::types::ScreenId;
 use crate::ui::nav::Screens;
 use crate::ui::screen::Screen;
 use crate::ui::screens;
 use std::sync::Arc;
 
+use crate::ui::screens::editor::EditorScreen;
+use crate::ui::screens::settings::SettingsScreen;
+
 pub struct ScreenFactory {
-    data: Arc<dyn DataService>,
+    data: Arc<dyn fleet_app::services::data::DataService>,
 }
 
 impl ScreenFactory {
-    pub fn new(data: Arc<dyn DataService>) -> Arc<Self> {
+    pub fn new(data: Arc<dyn fleet_app::services::data::DataService>) -> Arc<Self> {
         Arc::new(Self { data })
     }
 }
@@ -25,37 +26,14 @@ impl Screens for ScreenFactory {
     }
 
     fn editor_new(&self) -> Box<dyn Screen> {
-        let draft = crate::core::services::data::EditorDraft::new_empty();
-        let original = draft.clone();
-        Box::new(screens::editor::EditorScreen::new(
-            ScreenId(0xE001),
-            true,
-            draft,
-            original,
-        ))
+        Box::new(EditorScreen::new_create())
     }
 
-    fn editor_edit(&self, id: String) -> Box<dyn Screen> {
-        let p = self.data.get_profile_for_edit(&id);
-        let draft = p
-            .as_ref()
-            .map(crate::core::services::data::EditorDraft::from_spec)
-            .unwrap_or_else(|| {
-                let mut d = crate::core::services::data::EditorDraft::new_empty();
-                d.id = Some(id);
-                d.name = "Profile".into();
-                d
-            });
-        let original = draft.clone();
-        Box::new(screens::editor::EditorScreen::new(
-            ScreenId(0xE002),
-            false,
-            draft,
-            original,
-        ))
+    fn editor_edit(&self, _id: String) -> Box<dyn Screen> {
+        Box::new(EditorScreen::new_edit(_id))
     }
 
     fn settings(&self) -> Box<dyn Screen> {
-        Box::new(screens::settings::SettingsScreen::new())
+        Box::new(SettingsScreen::new())
     }
 }

@@ -1,4 +1,7 @@
-use crate::core::types::AppError;
+// Use the domain AppError type from fleet_app.  This ensures that UI errors
+// carry the same structure as the backend and avoids depending on the
+// removed `core` module.  The UI never inspects any sensitive fields of
+// `AppError`; it merely forwards the message to the user.
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -6,7 +9,7 @@ use std::sync::Arc;
 pub enum UiEvent {
     Toast { message: String },
     Warning { message: String },
-    Error { error: AppError },
+    Error { message: String },
     Trace { message: String },
 }
 

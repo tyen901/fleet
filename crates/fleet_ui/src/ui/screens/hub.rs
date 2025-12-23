@@ -1,8 +1,7 @@
-use crate::core::types::ScreenId;
 use crate::ui::context::UiContext;
-use crate::ui::screen::Screen;
-use crate::ui_kit::UiKit;
-use crate::widgets;
+use crate::ui::kit::InlineHint;
+use crate::ui::kit::UiKit;
+use crate::ui::screen::{Screen, ScreenId};
 use eframe::egui;
 
 pub struct HubScreen;
@@ -15,6 +14,7 @@ impl HubScreen {
 
 impl Screen for HubScreen {
     fn id(&self) -> ScreenId {
+        // Arbitrary stable id for the Hub screen.
         ScreenId(0xA001)
     }
 
@@ -32,13 +32,13 @@ impl Screen for HubScreen {
         };
 
         let snap = ctx.data.snapshot();
-        if snap.profiles.selected_id.is_some() {
+        if snap.selected_id.is_some() {
             ctx.nav.replace(ctx.screens.dashboard());
             return;
         }
 
         ui.centered_and_justified(|ui| {
-            ui.add(widgets::InlineHint::new(&kit, "Select a profile to begin."));
+            ui.add(InlineHint::new(&kit, "Select a profile to begin."));
         });
     }
 }

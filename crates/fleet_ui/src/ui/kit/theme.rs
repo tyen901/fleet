@@ -1,4 +1,4 @@
-use eframe::egui;
+use egui;
 
 #[derive(Clone, Debug)]
 pub struct Colors {
@@ -28,6 +28,12 @@ pub struct Theme {
     pub colors: Colors,
     pub type_scale: TypeScale,
     pub spacing: Spacing,
+    pub rounding: Rounding,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rounding {
+    pub card: f32,
 }
 
 impl Default for Theme {
@@ -50,6 +56,7 @@ impl Default for Theme {
                     mono: 12.0,
                 },
                 spacing: Spacing { sm: 8.0 },
+                rounding: Rounding { card: 6.0 },
             }
         } else {
             Self {
@@ -68,6 +75,7 @@ impl Default for Theme {
                     mono: 12.0,
                 },
                 spacing: Spacing { sm: 8.0 },
+                rounding: Rounding { card: 6.0 },
             }
         }
     }

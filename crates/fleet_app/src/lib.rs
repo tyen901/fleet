@@ -10,6 +10,17 @@ pub mod settings;
 mod registry;
 mod storage;
 
+/// Services module exposes high‑level UI and CLI services built on top of
+/// `FleetApp`.
+///
+/// The `services` module defines three service traits—`DataService`,
+/// `SyncService`, and `UpdateService`—each of which owns a single
+/// authoritative model.  These services provide a pull‑based API (via a
+/// cheap `snapshot()` call) for retrieving the latest state, and a
+/// command oriented API for mutating that state.  They are intended to
+/// be consumed by the user interface layer and by the CLI.
+pub mod services;
+
 pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob};
 
 // Minimal, intentional exports:

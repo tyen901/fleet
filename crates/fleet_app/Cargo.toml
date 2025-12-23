@@ -19,6 +19,14 @@ fleet_index = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
+# Required for clipboard interactions in the data service.  Although
+# `fleet_app` is primarily a backend crate, it exposes a method to copy
+# launch arguments to the clipboard via an `egui` context.  Declare
+# `egui` as a workspace dependency so that the data service can accept an
+# `&egui::Context` parameter without requiring consumers to pull in
+# `egui` themselves.
+egui = { workspace = true }
+
 md5 = "0.7"
 
 # New: error ergonomics + safe registry writes + file locking
@@ -27,3 +35,7 @@ atomicwrites = "0.4"
 fs2 = "0.4"
 async-trait = { workspace = true }
 uuid = { version = "1.19.0", features = ["v4"] }
+
+# Required for the update service.  Velopack provides facilities for
+# checking, downloading and applying application updates.
+velopack = { workspace = true }

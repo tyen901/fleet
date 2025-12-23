@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 
-mod core;
-mod theme;
 mod ui;
-mod ui_kit;
-mod widgets;
 
 use eframe::egui;
 

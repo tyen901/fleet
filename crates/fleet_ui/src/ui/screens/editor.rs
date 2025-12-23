@@ -1,29 +1,57 @@
-use crate::core::services::data::EditorDraft;
-use crate::core::types::{AppError, ScreenId};
 use crate::ui::context::UiContext;
-use crate::ui::events::UiEvent;
-use crate::ui::screen::Screen;
-use crate::ui_kit::UiKit;
-use crate::widgets;
+use crate::ui::kit::{AppButton, Divider, FieldLabel, InlineError, InlineHint, UiKit};
+use crate::ui::screen::{Screen, ScreenId};
 use eframe::egui;
-use rfd::FileDialog;
+use fleet_app::app::ProfileUpdate;
+use fleet_app::services::data::ProfileCreate;
+
+#[derive(Clone, Debug)]
+pub enum EditorMode {
+    Create,
+    Edit { id: String },
+}
 
 pub struct EditorScreen {
     id: ScreenId,
-    is_new: bool,
-    draft: EditorDraft,
-    original: EditorDraft,
-    delete_armed_until_s: Option<f64>,
+    mode: EditorMode,
+    name: String,
+    repo_url: String,
+    checkout_root: String,
+    arma3_extra_args: String,
+    select_after: bool,
+    dirty: bool,
 }
 
 impl EditorScreen {
-    pub fn new(id: ScreenId, is_new: bool, draft: EditorDraft, original: EditorDraft) -> Self {
+    pub fn new_create() -> Self {
         Self {
-            id,
-            is_new,
-            draft,
-            original,
-            delete_armed_until_s: None,
+            id: ScreenId(0xE001),
+            mode: EditorMode::Create,
+            name: String::new(),
+            repo_url: String::new(),
+            checkout_root: String::new(),
+            arma3_extra_args: String::new(),
+            select_after: true,
+            dirty: false,
+        }
+    }
+
+    pub fn new_edit(id: String) -> Self {
+        Self {
+            id: ScreenId(0xE002),
+            mode: EditorMode::Edit { id },
+            name: String::new(),
+            repo_url: String::new(),
+            checkout_root: String::new(),
+            arma3_extra_args: String::new(),
+            select_after: false,
+            dirty: false,
+        }
+    }
+
+    fn mark_dirty(&mut self, changed: bool) {
+        if changed {
+            self.dirty = true;
         }
     }
 }
@@ -46,242 +74,158 @@ impl Screen for EditorScreen {
             return;
         };
 
-        let now_s = ui.ctx().input(|i| i.time);
+        let snap = ctx.data.snapshot();
 
-        // Validate
-        let name_err = some_if(self.draft.name.trim().is_empty(), "Name is required.");
-        let repo_err = validate_repo(&self.draft.repo_url);
-        let path_err = some_if(
-            self.draft.checkout_root.trim().is_empty(),
-            "Checkout root is required.",
-        );
+        let mut profile_id = None;
+        if let EditorMode::Edit { id } = &self.mode {
+            profile_id = Some(id.as_str());
+        }
 
-        let is_valid = name_err.is_none() && repo_err.is_none() && path_err.is_none();
-        let is_dirty = draft_is_dirty(&self.draft, &self.original);
+        if let Some(id) = profile_id {
+            let profile = snap.profiles.iter().find(|p| p.id == id);
+            let Some(profile) = profile else {
+                ui.add(InlineError::new(&kit, "Profile not found."));
+                ui.add_space(kit.theme.spacing.sm);
+                if ui.add(AppButton::new(&kit, "Back").ghost()).clicked() {
+                    ctx.nav.pop();
+                }
+                return;
+            };
 
-        egui::ScrollArea::vertical()
-            .id_salt("editor_scroll")
-            .auto_shrink([false, false])
+            if !self.dirty {
+                self.name = profile.name.clone();
+                self.repo_url = profile.repo_url.clone();
+                self.checkout_root = profile.checkout_root.clone();
+                self.arma3_extra_args = profile.arma3.extra_args.clone();
+                self.select_after = snap.selected_id.as_deref() == Some(&profile.id);
+            }
+        }
+
+        let title = match self.mode {
+            EditorMode::Create => "Create Profile",
+            EditorMode::Edit { .. } => "Edit Profile",
+        };
+
+        ui.add(FieldLabel::new(&kit, title));
+        ui.add(Divider::new(&kit));
+        ui.add_space(kit.theme.spacing.sm);
+
+        egui::Grid::new("profile_editor_grid")
+            .num_columns(2)
+            .spacing([kit.layout.gap, kit.layout.gap])
             .show(ui, |ui| {
-                widgets::card_frame(&kit).show(ui, |ui| {
-                    ui.add(widgets::FieldLabel::new(&kit, "Editor"));
-                    ui.add(widgets::Divider::new(&kit));
-                    ui.add_space(kit.theme.spacing.sm);
+                ui.add(FieldLabel::new(&kit, "Name"));
+                let changed = ui.text_edit_singleline(&mut self.name).changed();
+                self.mark_dirty(changed);
+                ui.end_row();
 
-                    section(ui, &kit, "Profile name", |ui| {
-                        let mut v = self.draft.name.clone();
-                        if widgets::text_field(ui, &kit, &mut v, "My Unit", false).changed() {
-                            self.draft.name = v;
-                        }
-                        if let Some(e) = name_err.as_deref() {
-                            ui.add(widgets::InlineError::new(&kit, e));
-                        }
-                    });
+                ui.add(FieldLabel::new(&kit, "Repo URL"));
+                let changed = ui.text_edit_singleline(&mut self.repo_url).changed();
+                self.mark_dirty(changed);
+                ui.end_row();
 
-                    section(ui, &kit, "Repository URL", |ui| {
-                        let mut v = self.draft.repo_url.clone();
-                        if widgets::text_field(ui, &kit, &mut v, "https://…", true).changed() {
-                            self.draft.repo_url = v;
-                        }
-                        if let Some(e) = repo_err.as_deref() {
-                            ui.add(widgets::InlineError::new(&kit, e));
-                        } else {
-                            ui.add(widgets::InlineHint::new(
-                                &kit,
-                                "Must start with http:// or https://",
-                            ));
-                        }
-                    });
+                ui.add(FieldLabel::new(&kit, "Checkout root"));
+                let changed = ui.text_edit_singleline(&mut self.checkout_root).changed();
+                self.mark_dirty(changed);
+                ui.end_row();
 
-                    ui.add_space(kit.layout.gap);
-                    ui.add(widgets::FieldLabel::new(&kit, "Checkout root"));
+                ui.add(FieldLabel::new(&kit, "Arma 3 extra args"));
+                let changed = ui
+                    .text_edit_singleline(&mut self.arma3_extra_args)
+                    .changed();
+                self.mark_dirty(changed);
+                ui.end_row();
 
-                    let browse_w = 90.0;
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = kit.layout.gap;
-
-                        let left_w = (ui.available_width() - browse_w).max(0.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(left_w, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                let mut v = self.draft.checkout_root.clone();
-                                if widgets::text_field(ui, &kit, &mut v, "/path/to/checkout", true)
-                                    .changed()
-                                {
-                                    self.draft.checkout_root = v;
-                                }
-                                if let Some(e) = path_err.as_deref() {
-                                    ui.add(widgets::InlineError::new(&kit, e));
-                                }
-                            },
-                        );
-
-                        if ui
-                            .add(widgets::AppButton::new(&kit, "Browse").min_width(browse_w))
-                            .clicked()
-                        {
-                            if let Some(dir) = FileDialog::new().pick_folder() {
-                                self.draft.checkout_root = dir.to_string_lossy().to_string();
-                            }
-                        }
-                    });
-
-                    ui.add_space(kit.layout.gap);
-                    ui.add(widgets::FieldLabel::new(&kit, "Select after save"));
-                    let mut select = self.draft.select;
-                    if ui
-                        .checkbox(&mut select, "Make this the selected profile")
-                        .changed()
-                    {
-                        self.draft.select = select;
-                    }
-
-                    ui.add_space(kit.layout.gap);
-                    ui.add(widgets::FieldLabel::new(&kit, "Arma 3 extra args"));
-                    let mut args = self.draft.arma3_extra_args.clone();
-                    if widgets::text_field(ui, &kit, &mut args, "-mod=…", true).changed() {
-                        self.draft.arma3_extra_args = args;
-                    }
-
-                    ui.add_space(kit.layout.gap);
-                    ui.add(widgets::Divider::new(&kit));
-                    ui.add_space(kit.theme.spacing.sm);
-
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = kit.layout.gap;
-
-                        let save_enabled = is_valid && is_dirty;
-                        if ui
-                            .add(
-                                widgets::AppButton::new(&kit, "Save")
-                                    .primary()
-                                    .min_width(80.0)
-                                    .enabled(save_enabled),
-                            )
-                            .clicked()
-                        {
-                            match ctx.data.save_profile(self.draft.clone()) {
-                                Ok(id) => {
-                                    if let Err(e) = ctx.data.select_profile(&id) {
-                                        ctx.events.emit(UiEvent::Error { error: e });
-                                    }
-                                    ctx.nav.replace(ctx.screens.dashboard());
-                                }
-                                Err(e) => ctx.events.emit(UiEvent::Error { error: e }),
-                            }
-                        }
-
-                        if ui
-                            .add(
-                                widgets::AppButton::new(&kit, "Cancel")
-                                    .ghost()
-                                    .min_width(80.0),
-                            )
-                            .clicked()
-                        {
-                            ctx.nav.pop();
-                        }
-
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width(), 0.0),
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if !self.is_new {
-                                    let armed =
-                                        self.delete_armed_until_s.is_some_and(|t| now_s <= t);
-                                    let label = if armed { "Delete (confirm)" } else { "Delete" };
-
-                                    let can_delete = self.draft.id.is_some();
-                                    if ui
-                                        .add(
-                                            widgets::AppButton::new(&kit, label)
-                                                .danger()
-                                                .min_width(130.0)
-                                                .enabled(can_delete),
-                                        )
-                                        .clicked()
-                                    {
-                                        if armed {
-                                            let Some(id) = self.draft.id.clone() else {
-                                                ctx.events.emit(UiEvent::Error {
-                                                    error: AppError::new(
-                                                        "missing_profile_id",
-                                                        "Missing profile id",
-                                                    ),
-                                                });
-                                                return;
-                                            };
-                                            match ctx.data.delete_profile(&id) {
-                                                Ok(()) => ctx.nav.replace(ctx.screens.hub()),
-                                                Err(e) => {
-                                                    ctx.events.emit(UiEvent::Error { error: e })
-                                                }
-                                            }
-                                        } else {
-                                            self.delete_armed_until_s = Some(now_s + 4.0);
-                                        }
-                                    }
-                                }
-                            },
-                        );
-                    });
-
-                    let save_enabled = is_valid && is_dirty;
-                    if !save_enabled {
-                        ui.add_space(kit.theme.spacing.sm);
-                        ui.add(widgets::InlineHint::new(
-                            &kit,
-                            if !is_valid {
-                                "Fix validation errors to save."
-                            } else {
-                                "No changes to save."
-                            },
-                        ));
-                    } else if !self.is_new {
-                        let armed = self.delete_armed_until_s.is_some_and(|t| now_s <= t);
-                        if armed {
-                            ui.add_space(kit.theme.spacing.sm);
-                            ui.add(widgets::InlineHint::new(
-                                &kit,
-                                "Click Delete again to confirm.",
-                            ));
-                        }
-                    }
-                });
+                ui.add(FieldLabel::new(&kit, "Select after save"));
+                let changed = ui.checkbox(&mut self.select_after, "Make active").changed();
+                self.mark_dirty(changed);
+                ui.end_row();
             });
-    }
-}
 
-fn draft_is_dirty(draft: &EditorDraft, original: &EditorDraft) -> bool {
-    draft.name != original.name
-        || draft.repo_url != original.repo_url
-        || draft.checkout_root != original.checkout_root
-        || draft.arma3_extra_args != original.arma3_extra_args
-        || draft.select != original.select
-}
+        ui.add_space(kit.layout.gap);
 
-fn section(ui: &mut egui::Ui, kit: &UiKit, title: &str, add: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(kit.layout.gap);
-    ui.add(widgets::FieldLabel::new(kit, title));
-    add(ui);
-}
+        let can_submit = !self.name.trim().is_empty()
+            && !self.repo_url.trim().is_empty()
+            && !self.checkout_root.trim().is_empty();
 
-fn validate_repo(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Some("Repository URL is required.".into());
-    }
-    if !(s.starts_with("http://") || s.starts_with("https://")) {
-        return Some("Repository URL must start with http:// or https://".into());
-    }
-    None
-}
+        ui.horizontal(|ui| {
+            match &self.mode {
+                EditorMode::Create => {
+                    let create_btn = AppButton::new(&kit, "Create").primary().enabled(can_submit);
+                    if ui.add(create_btn).clicked() {
+                        let create = ProfileCreate {
+                            name: self.name.trim().to_string(),
+                            repo_url: self.repo_url.trim().to_string(),
+                            checkout_root: self.checkout_root.trim().to_string(),
+                            select: self.select_after,
+                            arma3_extra_args: self.arma3_extra_args.trim().to_string(),
+                        };
+                        match ctx.data.create_profile(create) {
+                            Ok(id) => {
+                                let _ = ctx.data.select_profile(&id);
+                                ctx.nav.replace(ctx.screens.dashboard());
+                            }
+                            Err(e) => {
+                                ctx.events.emit(crate::ui::events::UiEvent::Error {
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                EditorMode::Edit { id } => {
+                    let save_btn = AppButton::new(&kit, "Save")
+                        .primary()
+                        .enabled(can_submit && self.dirty);
+                    if ui.add(save_btn).clicked() {
+                        let update = ProfileUpdate {
+                            name: Some(self.name.trim().to_string()),
+                            repo_url: Some(self.repo_url.trim().to_string()),
+                            checkout_root: Some(self.checkout_root.trim().to_string()),
+                            select: Some(self.select_after),
+                            arma3_extra_args: Some(self.arma3_extra_args.trim().to_string()),
+                        };
+                        match ctx.data.update_profile(id, update) {
+                            Ok(()) => {
+                                if self.select_after {
+                                    let _ = ctx.data.select_profile(id);
+                                }
+                                ctx.nav.pop();
+                            }
+                            Err(e) => {
+                                ctx.events.emit(crate::ui::events::UiEvent::Error {
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
 
-fn some_if(cond: bool, msg: &str) -> Option<String> {
-    if cond {
-        Some(msg.into())
-    } else {
-        None
+                    if ui.add(AppButton::new(&kit, "Delete").danger()).clicked() {
+                        match ctx.data.delete_profile(id) {
+                            Ok(()) => {
+                                ctx.nav.pop_to_root();
+                            }
+                            Err(e) => {
+                                ctx.events.emit(crate::ui::events::UiEvent::Error {
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if ui.add(AppButton::new(&kit, "Back").ghost()).clicked() {
+                ctx.nav.pop();
+            }
+        });
+
+        if !can_submit {
+            ui.add_space(kit.theme.spacing.sm);
+            ui.add(InlineHint::new(
+                &kit,
+                "Name, repo URL, and checkout root are required.",
+            ));
+        }
     }
 }

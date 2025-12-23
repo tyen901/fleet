@@ -1,5 +1,9 @@
-use crate::core::types::ScreenId;
+/// Unique identifier for a screen.  These identifiers have no semantic meaning
+/// beyond allowing the navigation system to differentiate screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ScreenId(pub u64);
 use crate::ui::context::UiContext;
+use eframe::egui;
 
 pub trait Screen: 'static {
     #[allow(dead_code)]

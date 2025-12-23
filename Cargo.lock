@@ -1466,6 +1466,7 @@ dependencies = [
  "atomicwrites",
  "camino",
  "directories",
+ "egui",
  "fleet_index",
  "fleet_remote_http",
  "fleet_sync",
@@ -1481,6 +1482,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "velopack",
 ]
 
 [[package]]

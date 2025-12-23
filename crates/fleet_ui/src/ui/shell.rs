@@ -1,39 +1,38 @@
-use crate::core::services::{data::DataService, sync::SyncService};
-use crate::core::services::{
-    data::FleetDataService, sync::FleetSyncService, update::FleetUpdateService,
-};
-use crate::core::types::FrameInfo;
-use crate::ui::context::{System, UiContext};
+use fleet_app::services::open_default_with_recovery;
+use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
+// FrameInfo definition moved into this module (see below).
+use crate::ui::context::{FrameInfo, System, UiContext};
 use crate::ui::events::{EventBus, Events, UiEvent};
+use crate::ui::kit as widgets;
+use crate::ui::kit::UiKit;
 use crate::ui::nav::{NavHost, Screens};
 use crate::ui::screen::Screen;
 use crate::ui::screens::chrome;
 use crate::ui::screens::factory::ScreenFactory;
-use crate::ui_kit::UiKit;
-use crate::widgets;
 
 use eframe::egui;
-use fleet_app::FleetApp;
-use parking_lot::RwLock;
+// We no longer hold a concrete FleetApp in the UI; the backend is wrapped
+// inside the service implementations returned by `fleet_app::services`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub struct AppShell {
     kit: UiKit,
 
+    // Stack of active screens; the topmost screen is rendered each frame.
     stack: Vec<Box<dyn Screen>>,
     nav_host: NavHost,
     screens: Arc<dyn Screens>,
 
     events: Arc<EventBus>,
 
-    // Services (owned; injected as traits)
-    data: Arc<FleetDataService>,
-    sync: Arc<FleetSyncService>,
-    update: Arc<FleetUpdateService>,
+    // Services (trait objects) injected from fleet_app.  These own the
+    // authoritative models and provide snapshot + command methods.
+    data: Arc<dyn DataService>,
+    sync: Arc<dyn SyncService>,
+    update: Arc<dyn UpdateService>,
 
-    // Backend
-    app: Arc<RwLock<FleetApp>>,
+    // Tokio runtime used by services; kept alive for the lifetime of the UI.
     rt: tokio::runtime::Runtime,
 
     // Frame bookkeeping
@@ -49,26 +48,27 @@ impl AppShell {
         cc.egui_ctx
             .data_mut(|d| d.insert_temp("__fleet_kit".to_string().into(), kit.clone()));
 
-        let (mut app, warning) = FleetApp::open_default_with_recovery();
-        let _ = app.init_registry();
-        let launch = app.launch_settings();
-
+        // Initialise a Tokio runtime.  The runtime must outlive all services
+        // because the services spawn tasks onto it for background work (e.g.
+        // synchronisation and update downloads).
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
 
-        let app = Arc::new(RwLock::new(app));
+        // Construct the service bundle.  This call opens the default
+        // registry, performs any necessary recovery and returns trait
+        // objects for data, sync and update services.  A warning may be
+        // returned if the registry failed to load; the data model will
+        // surface it via its `warning` field.
+        let (services, _warning) = open_default_with_recovery(rt.handle().clone())
+            .expect("failed to initialise Fleet services");
+        let data = services.data;
+        let sync = services.sync;
+        let update = services.update;
 
-        let data = FleetDataService::new(
-            app.clone(),
-            warning,
-            fleet_app::SyncTuning::default(),
-            launch,
-        );
-        let sync = FleetSyncService::new(app.clone(), rt.handle().clone());
-        let update = FleetUpdateService::new(rt.handle().clone());
-
+        // Build screen factory from the data service.  The factory
+        // constructs concrete screens on demand.
         let screens = ScreenFactory::new(data.clone());
 
         let mut shell = Self {
@@ -80,14 +80,13 @@ impl AppShell {
             data,
             sync,
             update,
-            app,
             rt,
             last_frame: Instant::now(),
             frame_number: 0,
         };
 
         // Initial screen: dashboard if a profile is selected, else hub.
-        let selected = shell.data.snapshot().profiles.selected_id.clone();
+        let selected = shell.data.snapshot().selected_id.clone();
         if selected.is_some() {
             shell.stack.push(shell.screens.dashboard());
         } else {
@@ -257,9 +256,9 @@ impl AppShell {
         hook: &str,
         screens: &dyn crate::ui::nav::Screens,
         events: &crate::ui::events::EventBus,
-        sync: &dyn crate::core::services::sync::SyncService,
-        data: &dyn crate::core::services::data::DataService,
-        update: &dyn crate::core::services::update::UpdateService,
+        sync: &dyn SyncService,
+        data: &dyn DataService,
+        update: &dyn UpdateService,
         mut f: impl FnMut(&mut UiContext),
     ) {
         // This is only used for lifecycle hooks where no drawing occurs.
@@ -304,15 +303,14 @@ impl AppShell {
 
     fn subtitle(&self) -> String {
         let snap = self.data.snapshot();
-        if snap.settings.is_some() {
-            return "Settings".into();
-        }
-        if let Some(id) = snap.profiles.selected_id.as_deref() {
-            let p = snap.profiles.profiles.iter().find(|p| p.id == id);
+        // Show the name of the selected profile if one is selected.
+        if let Some(id) = snap.selected_id.as_deref() {
+            let p = snap.profiles.iter().find(|p| p.id == id);
             return p
                 .map(|p| format!("Profile: {}", p.name))
                 .unwrap_or_else(|| "Profile".into());
         }
+        // Default subtitle when no profile is selected.
         "No profile selected".into()
     }
 
@@ -329,7 +327,7 @@ impl AppShell {
                         .resizable(false)
                         .frame(widgets::panel_frame(&self.kit))
                         .show(ctx, |ui| {
-                            ui.add(crate::widgets::InlineHint::new(&self.kit, &message));
+                            ui.add(crate::ui::kit::InlineHint::new(&self.kit, &message));
                         });
                 }
                 UiEvent::Warning { message } => {
@@ -337,19 +335,15 @@ impl AppShell {
                         .resizable(false)
                         .frame(widgets::panel_frame(&self.kit))
                         .show(ctx, |ui| {
-                            ui.add(crate::widgets::InlineError::new(&self.kit, &message));
+                            ui.add(crate::ui::kit::InlineError::new(&self.kit, &message));
                         });
                 }
-                UiEvent::Error { error } => {
+                UiEvent::Error { message } => {
                     egui::TopBottomPanel::bottom("fleet_error")
                         .resizable(false)
                         .frame(widgets::panel_frame(&self.kit))
                         .show(ctx, |ui| {
-                            ui.add(crate::widgets::InlineError::new(&self.kit, &error.message));
-                            if let Some(d) = error.detail.as_deref() {
-                                ui.add_space(self.kit.theme.spacing.sm);
-                                ui.add(crate::widgets::InlineHint::new(&self.kit, d));
-                            }
+                            ui.add(crate::ui::kit::InlineError::new(&self.kit, &message));
                         });
                 }
                 UiEvent::Trace { .. } => {}
@@ -416,7 +410,7 @@ impl eframe::App for AppShell {
             .frame(widgets::panel_frame(&self.kit))
             .show(egui_ctx, |ui| {
                 let data = frame_ctx.data.snapshot();
-                let selected_profile_id = data.profiles.selected_id.as_deref();
+                let selected_profile_id = data.selected_id.as_deref();
 
                 if let Some(action) =
                     chrome::sidebar(ui, &self.kit, frame_ctx.data, selected_profile_id)
@@ -427,7 +421,9 @@ impl eframe::App for AppShell {
                         }
                         chrome::SidebarAction::OpenProfile(id) => {
                             if let Err(e) = frame_ctx.data.select_profile(&id) {
-                                frame_ctx.events.emit(UiEvent::Error { error: e });
+                                frame_ctx.events.emit(UiEvent::Error {
+                                    message: e.to_string(),
+                                });
                             } else {
                                 frame_ctx.nav.replace(frame_ctx.screens.dashboard());
                             }
@@ -436,7 +432,7 @@ impl eframe::App for AppShell {
                             frame_ctx.nav.push(frame_ctx.screens.settings());
                         }
                         chrome::SidebarAction::Refresh => {
-                            frame_ctx.data.refresh_profiles();
+                            let _ = frame_ctx.data.refresh_profiles();
                         }
                     }
                 }
@@ -447,18 +443,17 @@ impl eframe::App for AppShell {
         egui::CentralPanel::default()
             .frame(widgets::panel_frame(&self.kit))
             .show(egui_ctx, |ui| {
+                // Display any warning returned by the data service.  The
+                // warning indicates that the registry failed to load and
+                // defaults were created instead.
                 let snap = frame_ctx.data.snapshot();
-                if let Some(w) = snap.profiles.warning.as_deref() {
-                    ui.add(crate::widgets::InlineError::new(&self.kit, w));
-                    ui.add_space(self.kit.theme.spacing.sm);
-                }
-                if let Some(e) = snap.profiles.ui_error.as_deref() {
-                    ui.add(crate::widgets::InlineError::new(&self.kit, e));
+                if let Some(w) = snap.warning.as_deref() {
+                    ui.add(crate::ui::kit::InlineError::new(&self.kit, w));
                     ui.add_space(self.kit.theme.spacing.sm);
                 }
 
                 let Some(top) = self.stack.last_mut() else {
-                    ui.add(crate::widgets::InlineError::new(
+                    ui.add(crate::ui::kit::InlineError::new(
                         &self.kit,
                         "No screens on stack.",
                     ));
@@ -476,10 +471,11 @@ impl eframe::App for AppShell {
         self.render_events_toasts(egui_ctx);
 
         // Repaint while syncing.
-        if matches!(
-            self.sync.snapshot().state,
-            crate::core::services::sync::SyncState::Running { .. }
-        ) {
+        // If the synchronisation is not finished request repaint so that
+        // progress updates are shown smoothly.  This avoids polling at a
+        // fixed rate; instead the UI repaint is tied to the progress state.
+        let snap = self.sync.snapshot();
+        if !snap.finished {
             egui_ctx.request_repaint();
         }
     }

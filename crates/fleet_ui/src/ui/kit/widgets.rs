@@ -1,5 +1,5 @@
-use crate::ui_kit::UiKit;
-use eframe::egui;
+use super::kit::UiKit;
+use egui;
 
 pub fn panel_frame(kit: &UiKit) -> egui::Frame {
     let c = &kit.theme.colors;
@@ -14,7 +14,6 @@ pub fn panel_frame(kit: &UiKit) -> egui::Frame {
 pub fn card_frame(kit: &UiKit) -> egui::Frame {
     let c = &kit.theme.colors;
     let pad_px = (kit.layout.pad * 0.85).round().clamp(0.0, i8::MAX as f32) as i8;
-
     egui::Frame::NONE
         .stroke(egui::Stroke::new(1.0, c.border))
         .inner_margin(egui::Margin::same(pad_px))
@@ -143,27 +142,22 @@ impl<'a> AppButton<'a> {
             min_width: None,
         }
     }
-
     pub fn primary(mut self) -> Self {
         self.kind = ButtonKind::Primary;
         self
     }
-
     pub fn ghost(mut self) -> Self {
         self.kind = ButtonKind::Ghost;
         self
     }
-
     pub fn danger(mut self) -> Self {
         self.kind = ButtonKind::Danger;
         self
     }
-
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
     }
-
     pub fn min_width(mut self, w: f32) -> Self {
         self.min_width = Some(w);
         self
@@ -173,17 +167,14 @@ impl<'a> AppButton<'a> {
 impl egui::Widget for AppButton<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let mut button = egui::Button::new(self.label);
-
         if let Some(w) = self.min_width {
             button = button.min_size(egui::vec2(w, self.kit.layout.button_height));
         } else {
             button = button.min_size(egui::vec2(0.0, self.kit.layout.button_height));
         }
-
         let c = &self.kit.theme.colors;
         let visuals = ui.visuals().clone();
         let mut override_visuals = visuals.clone();
-
         match self.kind {
             ButtonKind::Default => {}
             ButtonKind::Ghost => {
@@ -200,20 +191,20 @@ impl egui::Widget for AppButton<'_> {
                 override_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, c.accent);
             }
             ButtonKind::Danger => {
-                override_visuals.widgets.inactive.bg_fill = c.danger.linear_multiply(0.25);
+                override_visuals.widgets.inactive.bg_fill = c.danger.linear_multiply(0.35);
                 override_visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, c.danger);
-                override_visuals.widgets.hovered.bg_fill = c.danger.linear_multiply(0.35);
+                override_visuals.widgets.hovered.bg_fill = c.danger.linear_multiply(0.45);
                 override_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, c.danger);
-                override_visuals.widgets.active.bg_fill = c.danger.linear_multiply(0.45);
+                override_visuals.widgets.active.bg_fill = c.danger.linear_multiply(0.55);
                 override_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, c.danger);
             }
         }
-
-        ui.add_enabled_ui(self.enabled, |ui| {
-            ui.style_mut().visuals = override_visuals;
-            ui.add(button)
-        })
-        .inner
+        // Temporarily override visuals for this button, then restore.
+        let saved = ui.visuals().clone();
+        ui.ctx().set_visuals(override_visuals);
+        let resp = ui.add_enabled(self.enabled, button);
+        ui.ctx().set_visuals(saved);
+        resp
     }
 }
 
@@ -237,46 +228,9 @@ impl<'a> StatusBadge<'a> {
 
 impl egui::Widget for StatusBadge<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if self.spinning {
-                ui.add(egui::Spinner::new().size(14.0));
-            }
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(self.label)
-                        .size(self.kit.theme.type_scale.body)
-                        .color(self.color)
-                        .strong(),
-                )
-                .truncate(),
-            );
-        })
-        .response
-    }
-}
-
-pub fn text_field(
-    ui: &mut egui::Ui,
-    _kit: &UiKit,
-    value: &mut String,
-    hint: &str,
-    mono: bool,
-) -> egui::Response {
-    let mut edit = egui::TextEdit::singleline(value)
-        .hint_text(hint)
-        .desired_width(ui.available_width())
-        .font(if mono {
-            egui::TextStyle::Monospace
-        } else {
-            egui::TextStyle::Body
-        });
-
-    edit = edit.margin(egui::Margin::same(6));
-    let resp = ui.add(edit);
-    if resp.hovered() && !value.is_empty() {
-        resp.on_hover_text(value.clone())
-    } else {
-        resp
+        let text = egui::RichText::new(self.label)
+            .color(self.color)
+            .size(self.kit.theme.type_scale.body);
+        ui.add(egui::Label::new(text))
     }
 }
