@@ -25,19 +25,25 @@ pub fn header(ui: &mut egui::Ui, kit: &UiKit, title: &str, subtitle: &str, sync:
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let snap = sync.snapshot();
-            if !snap.finished {
-                ui.add(
-                    egui::ProgressBar::new(snap.percent as f32 / 100.0)
-                        .text(&snap.status_line)
-                        .desired_width(150.0),
-                );
-            } else if let Some(_err) = &snap.error {
-                if ui
-                    .button(egui::RichText::new("⚠ Sync Error").color(kit.theme.error))
-                    .clicked()
-                {
-                    sync.clear_error();
-                }
+            let c = &kit.theme.colors;
+
+            let (label, color, spinning) = if let Some(err) = snap.error.as_ref() {
+                (format!("ERROR: {}", truncate(err, 40)), c.danger, false)
+            } else if snap.finished {
+                ("IDLE".to_string(), c.muted, false)
+            } else {
+                let pct = (snap.percent as i32).clamp(0, 100);
+                (format!("{} ({}%)", snap.phase, pct), c.accent, true)
+            };
+
+            if spinning {
+                ui.add(egui::Spinner::new().size(14.0));
+            }
+
+            ui.label(egui::RichText::new(label).color(color).strong());
+
+            if snap.error.is_some() && ui.button("Clear").clicked() {
+                sync.clear_error();
             }
         });
     });
@@ -120,6 +126,13 @@ pub fn footer_status_row(ui: &mut egui::Ui, kit: &UiKit, update: &dyn UpdateServ
                     .small()
                     .color(kit.theme.text_dim),
             );
+            if snap.available.is_some() {
+                if ui.small_button("Apply & Restart").clicked() {
+                    let _ = update.apply();
+                }
+            } else if ui.small_button("Check").clicked() {
+                let _ = update.check();
+            }
         }
         UpdateState::Checking => {
             ui.add(egui::Spinner::new().size(10.0));
@@ -143,6 +156,17 @@ pub fn footer_status_row(ui: &mut egui::Ui, kit: &UiKit, update: &dyn UpdateServ
                     .small()
                     .color(kit.theme.error),
             );
+            if ui.small_button("Retry").clicked() {
+                let _ = update.check();
+            }
         }
     });
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max - 1).collect::<String>())
+    }
 }

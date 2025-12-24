@@ -196,6 +196,7 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         checkout_root: path,
                         select,
                         arma3_extra_args,
+                        arma3_enabled_mods: Vec::new(),
                     })?;
                     println!("{created_id}");
                     Ok(())
@@ -214,7 +215,8 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                         repo_url,
                         checkout_root: path,
                         select: if select { Some(true) } else { None },
-                        arma3_extra_args,
+                        arma3_extra_args: arma3_extra_args.clone(),
+                        arma3_enabled_mods: None,
                     };
                     data.update_profile(&id, update)?;
                     Ok(())

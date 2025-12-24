@@ -6,6 +6,12 @@ pub enum AppError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("maintenance error: {0}")]
+    Maintenance(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+
     #[error("{0}")]
     InvalidInput(String),
 

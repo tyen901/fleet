@@ -21,7 +21,7 @@ mod storage;
 /// be consumed by the user interface layer and by the CLI.
 pub mod services;
 
-pub use app::{AppError, FleetApp, ProfileSpec, ProfileUpdate, SyncJob};
+pub use app::{AppError, FleetApp, ProfileCreate, ProfileSpec, ProfileUpdate, SyncJob};
 
 // Minimal, intentional exports:
 pub use launch::arma3::{Arma3LaunchPlan, LaunchError, LinuxTemplateValidation};
@@ -33,6 +33,6 @@ pub use sync::{
 };
 
 // New: export read models (presentation-ready)
-pub use services::data::{AppSettings, DataModel, ProfileCreate};
+pub use services::data::{AppSettings, DataModel};
 pub use services::sync::SyncReadModel;
 pub use services::update::{UpdateModel, UpdateState};

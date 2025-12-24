@@ -1462,6 +1462,7 @@ dependencies = [
  "fleet_index",
  "fleet_remote_http",
  "fleet_sync",
+ "fleet_types",
  "fs2",
  "md5",
  "open",

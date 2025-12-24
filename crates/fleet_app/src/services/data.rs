@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use crate::app::{AppError, FleetApp, ProfileSpec, ProfileUpdate};
+use crate::app::{AppError, FleetApp, ProfileCreate, ProfileSpec, ProfileUpdate};
 use crate::settings::LaunchSettings;
 
 /// User-facing application settings.
@@ -18,16 +18,6 @@ use crate::settings::LaunchSettings;
 /// Fleet persists launch settings in its registry. This typedef exists so that
 /// presenters do not depend directly on internal registry structures.
 pub type AppSettings = LaunchSettings;
-
-/// Request payload for creating a new profile.
-#[derive(Debug, Clone)]
-pub struct ProfileCreate {
-    pub name: String,
-    pub repo_url: String,
-    pub checkout_root: String,
-    pub select: bool,
-    pub arma3_extra_args: String,
-}
 
 /// Presenter-ready authoritative data model (snapshot).
 ///
@@ -43,6 +33,15 @@ pub struct DataModel {
     // Cached outputs for UI/CLI convenience (optional).
     pub launch_args_preview: Option<String>,
     pub launch_args_error: Option<String>,
+
+    pub repo_spec: Option<fleet_types::RepoSpec>,
+    pub repo_spec_error: Option<String>,
+    pub repo_spec_generation: u64,
+
+    pub linux_validation: Option<crate::launch::arma3::LinuxTemplateValidation>,
+    pub linux_validation_error: Option<String>,
+
+    pub last_sync_outcome: Option<crate::sync::SyncOutcome>,
 }
 
 /// Data service trait (port) consumed by UI and CLI.
@@ -74,6 +73,9 @@ pub trait DataService: Send + Sync {
     /// Open a folder in the operating system.
     fn open_folder(&self, path: &Path) -> Result<(), AppError>;
 
+    /// Open the checkout root for the given profile.
+    fn open_checkout_root(&self, profile_id: &str) -> Result<(), AppError>;
+
     /// Launch Arma 3 for the given profile.
     fn launch_arma3_for_profile(&self, profile_id: &str) -> Result<(), AppError>;
 
@@ -86,6 +88,33 @@ pub trait DataService: Send + Sync {
     /// Request that the service compute and cache a preview (and error if any)
     /// into the model.
     fn request_launch_args_preview(&self, profile_id: &str);
+
+    /// Request that the service fetch and cache the repo spec for the profile.
+    fn request_repo_spec(&self, profile_id: &str);
+
+    /// Request that the service fetch and cache the repo spec for a given URL.
+    fn request_repo_spec_for_url(&self, repo_url: &str);
+
+    /// Request that the service validate and cache Linux template for the profile.
+    fn request_linux_validation(&self, profile_id: &str);
+
+    /// Request that the service validate and cache Linux template for the profile with overridden settings.
+    fn request_linux_validation_with_settings(&self, profile_id: &str, settings: AppSettings);
+
+    /// Set the last sync outcome manually (e.g. from the sync job).
+    fn set_last_sync_outcome(&self, outcome: Option<crate::sync::SyncOutcome>);
+
+    /// Rebuild the index for the given profile.
+    fn rebuild_index(&self, profile_id: &str) -> Result<(), AppError>;
+
+    /// Clear the quarantine folder for the given profile.
+    fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError>;
+
+    /// Clear the cache folder for the given profile.
+    fn clear_cache(&self, profile_id: &str) -> Result<(), AppError>;
+
+    /// Clear the last recorded sync outcome.
+    fn clear_last_sync_outcome(&self);
 }
 
 /// Concrete data service implementation backed by a [`FleetApp`].
@@ -116,6 +145,12 @@ impl FleetDataService {
             settings,
             launch_args_preview: None,
             launch_args_error: None,
+            repo_spec: None,
+            repo_spec_error: None,
+            repo_spec_generation: 0,
+            linux_validation: None,
+            linux_validation_error: None,
+            last_sync_outcome: None,
         };
 
         Arc::new(Self {
@@ -137,6 +172,12 @@ impl FleetDataService {
             if clear_preview {
                 model.launch_args_preview = None;
                 model.launch_args_error = None;
+                model.repo_spec = None;
+                model.repo_spec_error = None;
+                model.repo_spec_generation = model.repo_spec_generation.wrapping_add(1);
+                model.linux_validation = None;
+                model.linux_validation_error = None;
+                model.last_sync_outcome = None;
             }
         });
 
@@ -164,26 +205,8 @@ impl DataService for FleetDataService {
     fn create_profile(&self, create: ProfileCreate) -> Result<String, AppError> {
         let spec = {
             let mut app = self.app.write().expect("lock poisoned");
-            app.add_profile(
-                &create.name,
-                &create.repo_url,
-                &create.checkout_root,
-                create.select,
-            )?
+            app.add_profile(create)?
         };
-
-        // Immediately update extra args if provided.
-        if !create.arma3_extra_args.is_empty() {
-            let update = ProfileUpdate {
-                name: None,
-                repo_url: None,
-                checkout_root: None,
-                select: None,
-                arma3_extra_args: Some(create.arma3_extra_args.clone()),
-            };
-            let mut app = self.app.write().expect("lock poisoned");
-            app.update_profile(&spec.id, update)?;
-        }
 
         self.refresh_cached_profiles(false)?;
         Ok(spec.id)
@@ -225,6 +248,14 @@ impl DataService for FleetDataService {
         app.open_folder(path)
     }
 
+    fn open_checkout_root(&self, profile_id: &str) -> Result<(), AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        let profile = app
+            .get_profile(profile_id)
+            .ok_or_else(|| AppError::NotFound(format!("profile not found: {profile_id}")))?;
+        app.open_folder(Path::new(&profile.checkout_root))
+    }
+
     fn launch_arma3_for_profile(&self, profile_id: &str) -> Result<(), AppError> {
         let app = self.app.read().expect("lock poisoned");
         app.launch_arma3_for_profile(profile_id, None)
@@ -254,6 +285,163 @@ impl DataService for FleetDataService {
                 model.launch_args_preview = None;
                 model.launch_args_error = Some(e.to_string());
             }
+        });
+    }
+
+    fn request_repo_spec(&self, profile_id: &str) {
+        let app_lock = Arc::clone(&self.app);
+        let model_lock = Arc::clone(&self.model);
+        let profile_id = profile_id.to_string();
+
+        let generation = {
+            let mut gen = 0u64;
+            with_model_mut(&self.model, |model| {
+                model.repo_spec = None;
+                model.repo_spec_error = None;
+                model.repo_spec_generation = model.repo_spec_generation.wrapping_add(1);
+                gen = model.repo_spec_generation;
+            });
+            gen
+        };
+
+        // Repo fetching is async.
+        tokio::spawn(async move {
+            let res = async {
+                let profile = {
+                    let app = app_lock.read().expect("lock poisoned");
+                    app.get_profile(&profile_id)
+                        .ok_or_else(|| AppError::NotFound(profile_id.clone()))?
+                };
+
+                let remote = fleet_remote_http::HttpRemote::new(&profile.repo_url)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                remote
+                    .fetch_repo_spec()
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))
+            }
+            .await;
+
+            with_model_mut(&model_lock, |model| {
+                if model.repo_spec_generation != generation {
+                    return;
+                }
+                match res {
+                    Ok(spec) => {
+                        model.repo_spec = Some(spec);
+                        model.repo_spec_error = None;
+                    }
+                    Err(e) => {
+                        model.repo_spec = None;
+                        model.repo_spec_error = Some(e.to_string());
+                    }
+                }
+            });
+        });
+    }
+
+    fn request_repo_spec_for_url(&self, repo_url: &str) {
+        let model_lock = Arc::clone(&self.model);
+        let repo_url = repo_url.to_string();
+
+        let generation = {
+            let mut gen = 0u64;
+            with_model_mut(&self.model, |model| {
+                model.repo_spec = None;
+                model.repo_spec_error = None;
+                model.repo_spec_generation = model.repo_spec_generation.wrapping_add(1);
+                gen = model.repo_spec_generation;
+            });
+            gen
+        };
+
+        tokio::spawn(async move {
+            let res = async {
+                let remote = fleet_remote_http::HttpRemote::new(&repo_url)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                remote
+                    .fetch_repo_spec()
+                    .await
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))
+            }
+            .await;
+
+            with_model_mut(&model_lock, |model| {
+                if model.repo_spec_generation != generation {
+                    return;
+                }
+                match res {
+                    Ok(spec) => {
+                        model.repo_spec = Some(spec);
+                        model.repo_spec_error = None;
+                    }
+                    Err(e) => {
+                        model.repo_spec = None;
+                        model.repo_spec_error = Some(e.to_string());
+                    }
+                }
+            });
+        });
+    }
+
+    fn request_linux_validation(&self, profile_id: &str) {
+        let result = {
+            let app = self.app.read().expect("lock poisoned");
+            app.arma3_linux_template_validation_for_profile(profile_id, None, None)
+        };
+        with_model_mut(&self.model, |model| match result {
+            Ok(v) => {
+                model.linux_validation = Some(v);
+                model.linux_validation_error = None;
+            }
+            Err(e) => {
+                model.linux_validation = None;
+                model.linux_validation_error = Some(e.to_string());
+            }
+        });
+    }
+
+    fn request_linux_validation_with_settings(&self, profile_id: &str, settings: AppSettings) {
+        let result = {
+            let app = self.app.read().expect("lock poisoned");
+            app.arma3_linux_template_validation_for_profile(profile_id, None, Some(settings))
+        };
+        with_model_mut(&self.model, |model| match result {
+            Ok(v) => {
+                model.linux_validation = Some(v);
+                model.linux_validation_error = None;
+            }
+            Err(e) => {
+                model.linux_validation = None;
+                model.linux_validation_error = Some(e.to_string());
+            }
+        });
+    }
+
+    fn set_last_sync_outcome(&self, outcome: Option<crate::sync::SyncOutcome>) {
+        with_model_mut(&self.model, |model| {
+            model.last_sync_outcome = outcome;
+        });
+    }
+
+    fn rebuild_index(&self, profile_id: &str) -> Result<(), AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        app.clear_index(profile_id)
+    }
+
+    fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        app.clear_quarantine(profile_id)
+    }
+
+    fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        app.clear_cache(profile_id)
+    }
+
+    fn clear_last_sync_outcome(&self) {
+        with_model_mut(&self.model, |model| {
+            model.last_sync_outcome = None;
         });
     }
 }

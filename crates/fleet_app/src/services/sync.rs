@@ -179,6 +179,11 @@ impl SyncService for FleetSyncService {
                     let _ = data.refresh_profiles();
                 }
                 Ok(Err(err)) => {
+                    if let AppError::SyncFailed(outcome) = &err {
+                        data.set_last_sync_outcome(Some(outcome.clone()));
+                    } else {
+                        data.set_last_sync_outcome(None);
+                    }
                     let mut d = domain.write().expect("lock poisoned");
                     d.error = Some(err.to_string());
                 }

@@ -19,6 +19,8 @@ pub enum SyncMode {
     SyncFresh,
     /// Read-only check.
     Check,
+    /// Alias for Check used by UI.
+    Verify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -207,6 +209,10 @@ impl SyncTuning {
             max_issues: 500,
             auto_fix_case: self.auto_fix_case,
         }
+    }
+
+    pub fn to_verify_tuning(&self) -> CheckTuning {
+        self.to_check_tuning()
     }
 }
 

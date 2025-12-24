@@ -46,12 +46,23 @@ impl From<Profile> for ProfileSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProfileCreate {
+    pub name: String,
+    pub repo_url: String,
+    pub checkout_root: String,
+    pub select: bool,
+    pub arma3_extra_args: String,
+    pub arma3_enabled_mods: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProfileUpdate {
     pub name: Option<String>,
     pub repo_url: Option<String>,
     pub checkout_root: Option<String>,
     pub select: Option<bool>,
     pub arma3_extra_args: Option<String>,
+    pub arma3_enabled_mods: Option<Vec<String>>,
 }
 
 pub struct SyncJob {
@@ -181,6 +192,7 @@ impl FleetApp {
         &self,
         id: &str,
         extra_args_override: Option<String>,
+        settings_override: Option<LaunchSettings>,
     ) -> Result<crate::launch::arma3::LinuxTemplateValidation, AppError> {
         let profile = self
             .registry
@@ -197,7 +209,7 @@ impl FleetApp {
             &base_path,
             &profile.arma3.enabled_mods,
             &extra,
-            &self.registry.launch,
+            settings_override.as_ref().unwrap_or(&self.registry.launch),
         )?;
 
         Ok(report)
@@ -242,15 +254,18 @@ impl FleetApp {
         Ok(())
     }
 
-    pub fn add_profile(
-        &mut self,
-        name: &str,
-        repo_url: &str,
-        checkout_root: &str,
-        select: bool,
-    ) -> Result<ProfileSpec, AppError> {
-        let normalized_repo = normalize_repo_url(repo_url);
-        let checkout_path = Utf8PathBuf::from(checkout_root);
+    fn require_profile(&self, profile_id: &str) -> Result<ProfileSpec, AppError> {
+        self.get_profile(profile_id)
+            .ok_or_else(|| AppError::NotFound(format!("profile not found: {profile_id}")))
+    }
+
+    fn fleet_dir(checkout_root: &str) -> std::path::PathBuf {
+        std::path::Path::new(checkout_root).join(".fleet")
+    }
+
+    pub fn add_profile(&mut self, create: ProfileCreate) -> Result<ProfileSpec, AppError> {
+        let normalized_repo = normalize_repo_url(&create.repo_url);
+        let checkout_path = Utf8PathBuf::from(&create.checkout_root);
 
         registry::setup_checkout_root(&checkout_path)?;
 
@@ -261,18 +276,28 @@ impl FleetApp {
             let prev_selected = reg.selected_profile.clone();
             let profile = Profile {
                 id: String::new(),
-                name: name.to_string(),
+                name: create.name.to_string(),
                 repo_url: normalized_repo,
                 checkout_root: checkout_path.to_string(),
                 created_unix_s: created,
                 last_sync_unix_s: None,
-                arma3: Arma3Config::default(),
+                arma3: Arma3Config {
+                    extra_args: create.arma3_extra_args,
+                    enabled_mods: create.arma3_enabled_mods,
+                },
             };
             reg.add_profile(profile);
-            if !select {
+
+            let created = reg.profiles.last().cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "profile insert failed")
+            })?;
+
+            if create.select {
+                reg.selected_profile = Some(created.id.clone());
+            } else {
                 reg.selected_profile = prev_selected;
             }
-            Ok(reg.profiles.last().cloned().unwrap())
+            Ok(created)
         })?;
 
         self.refresh_registry()?;
@@ -306,6 +331,9 @@ impl FleetApp {
             }
             if let Some(extra) = update.arma3_extra_args {
                 profile.arma3.extra_args = extra;
+            }
+            if let Some(mods) = update.arma3_enabled_mods {
+                profile.arma3.enabled_mods = mods;
             }
             if let Some(select) = update.select {
                 if select {
@@ -470,12 +498,16 @@ impl FleetApp {
                         sync::SyncOutcome::from_sync_fresh(outcome)
                     }
 
-                    sync::SyncMode::Check => {
+                    sync::SyncMode::Check | sync::SyncMode::Verify => {
                         let request = fleet_sync::CheckRequest {
                             repo_name,
                             checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
                             enabled_mods,
-                            tuning: tuning.to_check_tuning(),
+                            tuning: if tuning.mode == sync::SyncMode::Verify {
+                                tuning.to_verify_tuning()
+                            } else {
+                                tuning.to_check_tuning()
+                            },
                         };
 
                         let report = engine.check(request, &sink, &cancel_task).await;
@@ -557,6 +589,51 @@ impl FleetApp {
         let plan = arma3::plan_launch(base_path, &[], extra_args, &self.registry.launch)?;
 
         crate::platform::execute(self.registry.launch.open_mode.clone(), plan.action)?;
+        Ok(())
+    }
+
+    pub fn clear_index(&self, profile_id: &str) -> Result<(), AppError> {
+        let profile = self.require_profile(profile_id)?;
+        let path = Self::fleet_dir(&profile.checkout_root).join("index.sqlite");
+        std::fs::remove_file(&path)
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| AppError::Maintenance(format!("clear index failed: {e}")))?;
+        Ok(())
+    }
+
+    pub fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError> {
+        let profile = self.require_profile(profile_id)?;
+        let path = Self::fleet_dir(&profile.checkout_root).join("quarantine");
+        std::fs::remove_dir_all(&path)
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| AppError::Maintenance(format!("clear quarantine failed: {e}")))?;
+        Ok(())
+    }
+
+    pub fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
+        let profile = self.require_profile(profile_id)?;
+        let path = Self::fleet_dir(&profile.checkout_root).join("cache");
+        std::fs::remove_dir_all(&path)
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+            .map_err(|e| AppError::Maintenance(format!("clear cache failed: {e}")))?;
         Ok(())
     }
 }

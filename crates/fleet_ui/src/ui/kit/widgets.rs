@@ -46,7 +46,7 @@ impl egui::Widget for AppButton {
 
         if ui.is_rect_visible(rect) {
             let color = if !self.enabled {
-                self.kit.theme.text_dim
+                self.kit.theme.colors.muted
             } else if self.primary {
                 if response.hovered() {
                     self.kit.theme.primary_hover
@@ -56,16 +56,17 @@ impl egui::Widget for AppButton {
             } else if self.ghost {
                 egui::Color32::TRANSPARENT
             } else {
-                self.kit.theme.panel_bg
+                self.kit.theme.colors.panel
             };
 
-            ui.painter().rect_filled(rect, 4.0, color);
+            ui.painter()
+                .rect_filled(rect, self.kit.theme.rounding.card, color);
 
             if self.ghost {
                 ui.painter().rect_stroke(
                     rect,
-                    4.0,
-                    egui::Stroke::new(1.0, self.kit.theme.text_dim),
+                    self.kit.theme.rounding.card,
+                    egui::Stroke::new(1.0, self.kit.theme.colors.muted),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -74,7 +75,7 @@ impl egui::Widget for AppButton {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 &self.text,
-                egui::FontId::proportional(14.0),
+                egui::FontId::proportional(self.kit.theme.type_scale.body),
                 if self.primary {
                     egui::Color32::WHITE
                 } else {
@@ -105,8 +106,8 @@ impl egui::Widget for FieldLabel {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         ui.label(
             egui::RichText::new(self.text)
-                .color(self.kit.theme.text_dim)
-                .size(12.0),
+                .color(self.kit.theme.colors.muted)
+                .size(self.kit.theme.type_scale.body - 2.0),
         )
     }
 }
@@ -128,7 +129,7 @@ impl egui::Widget for Divider {
         ui.painter().hline(
             rect.x_range(),
             rect.center().y,
-            egui::Stroke::new(1.0, self.kit.theme.panel_bg),
+            egui::Stroke::new(1.0, self.kit.theme.colors.panel),
         );
         response
     }
@@ -152,7 +153,7 @@ impl egui::Widget for InlineHint {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("ℹ").color(self.kit.theme.primary));
-            ui.label(egui::RichText::new(self.text).color(self.kit.theme.text_dim));
+            ui.label(egui::RichText::new(self.text).color(self.kit.theme.colors.muted));
         })
         .response
     }
@@ -175,8 +176,8 @@ impl InlineError {
 impl egui::Widget for InlineError {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("⚠").color(self.kit.theme.error));
-            ui.label(egui::RichText::new(self.text).color(self.kit.theme.error));
+            ui.label(egui::RichText::new("⚠").color(self.kit.theme.colors.danger));
+            ui.label(egui::RichText::new(self.text).color(self.kit.theme.colors.danger));
         })
         .response
     }
@@ -184,6 +185,7 @@ impl egui::Widget for InlineError {
 
 pub fn panel_frame(kit: &UiKit) -> egui::Frame {
     egui::Frame::NONE
-        .fill(kit.theme.panel_bg)
+        .fill(kit.theme.colors.panel)
+        .corner_radius(kit.theme.rounding.card)
         .inner_margin(egui::Margin::same(kit.theme.spacing.md as i8))
 }

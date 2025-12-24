@@ -1,16 +1,23 @@
 // crates/fleet_ui/src/ui/screens/settings.rs
 use crate::ui::context::UiContext;
 use crate::ui::kit::{self as widgets, UiKit};
-use crate::ui::screen::Screen;
+use crate::ui::screen::{Screen, ScreenId};
 use fleet_app::services::data::DataService;
 use fleet_app::{AppSettings, LinuxModPathStyle, WindowsLaunchMethod};
 
 use eframe::egui;
 use std::sync::Arc;
 
+#[derive(Default)]
+struct ValidationGate {
+    last_generation: u64,
+    pending_generation: u64,
+}
+
 pub struct SettingsScreen {
     draft: AppSettings,
     dirty: bool,
+    gate: ValidationGate,
 }
 
 impl SettingsScreen {
@@ -19,17 +26,38 @@ impl SettingsScreen {
         Self {
             draft: snap.settings.clone(),
             dirty: false,
+            gate: ValidationGate {
+                last_generation: 0,
+                pending_generation: 1,
+            },
         }
     }
 
     fn mark_dirty(&mut self, changed: bool) {
         if changed {
             self.dirty = true;
+            self.gate.pending_generation = self.gate.pending_generation.wrapping_add(1);
+        }
+    }
+
+    fn maybe_request_validation(&mut self, ctx: &mut UiContext, profile_id: &str) {
+        if self.gate.pending_generation != self.gate.last_generation {
+            self.gate.last_generation = self.gate.pending_generation;
+            ctx.data
+                .request_linux_validation_with_settings(profile_id, self.draft.clone());
         }
     }
 }
 
 impl Screen for SettingsScreen {
+    fn id(&self) -> ScreenId {
+        crate::ui::screen::screen_ids::SETTINGS
+    }
+
+    fn name(&self) -> &'static str {
+        "Settings"
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut UiContext) {
         let kit = UiKit::from_ctx(ui.ctx());
         let snap = ctx.data.snapshot();
@@ -132,12 +160,63 @@ impl Screen for SettingsScreen {
                             let changed = ui.text_edit_singleline(&mut shell).changed();
                             if changed {
                                 let value = shell.trim();
-                                self.draft.arma3.linux.shell =
-                                    if value.is_empty() { None } else { Some(shell) };
+                                self.draft.arma3.linux.shell = if value.is_empty() {
+                                    None
+                                } else {
+                                    Some(shell.to_string())
+                                };
                             }
                             self.mark_dirty(changed);
                             ui.end_row();
                         });
+
+                    // --- Linux Template Validation Feedback
+                    if let Some(profile_id) = &snap.selected_id {
+                        self.maybe_request_validation(ctx, profile_id);
+
+                        if let Some(val) = &snap.linux_validation {
+                            ui.add_space(kit.theme.spacing.sm);
+                            egui::Frame::canvas(ui.style())
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("Validation Preview").strong());
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new(&val.preview).monospace().color(
+                                        if val.ok {
+                                            kit.theme.accent
+                                        } else {
+                                            kit.theme.colors.danger
+                                        },
+                                    ));
+
+                                    if !val.errors.is_empty() {
+                                        ui.add_space(4.0);
+                                        for err in &val.errors {
+                                            ui.label(
+                                                egui::RichText::new(format!("❌ {}", err))
+                                                    .color(kit.theme.colors.danger),
+                                            );
+                                        }
+                                    }
+                                    if !val.warnings.is_empty() {
+                                        ui.add_space(4.0);
+                                        for warn in &val.warnings {
+                                            ui.label(
+                                                egui::RichText::new(format!("⚠️ {}", warn))
+                                                    .color(kit.theme.colors.warning),
+                                            );
+                                        }
+                                    }
+                                });
+                        } else if let Some(err) = &snap.linux_validation_error {
+                            ui.add(widgets::InlineError::new(&kit, err));
+                        }
+                    } else {
+                        ui.add(widgets::InlineHint::new(
+                            &kit,
+                            "Select a profile to see live validation.",
+                        ));
+                    }
 
                     ui.add_space(kit.layout.gap);
                     ui.horizontal(|ui| {
@@ -186,6 +265,35 @@ impl Screen for SettingsScreen {
                         ui.add(widgets::InlineError::new(
                             &kit,
                             "Settings are stored in a recovered registry.",
+                        ));
+                    }
+
+                    ui.add_space(kit.layout.gap);
+                    ui.add(widgets::FieldLabel::new(&kit, "Maintenance"));
+                    ui.add(widgets::Divider::new(&kit));
+                    ui.add_space(kit.theme.spacing.sm);
+
+                    if let Some(profile_id) = &snap.selected_id {
+                        ui.horizontal(|ui| {
+                            if ui.button("Rebuild Index").clicked() {
+                                let _ = ctx.data.rebuild_index(profile_id);
+                            }
+                            if ui.button("Clear Quarantine").clicked() {
+                                let _ = ctx.data.clear_quarantine(profile_id);
+                            }
+                            if ui.button("Clear Cache").clicked() {
+                                let _ = ctx.data.clear_cache(profile_id);
+                            }
+                        });
+                        ui.add_space(kit.theme.spacing.xs);
+                        ui.add(widgets::InlineHint::new(
+                            &kit,
+                            "These actions apply to the currently selected profile.",
+                        ));
+                    } else {
+                        ui.add(widgets::InlineHint::new(
+                            &kit,
+                            "Select a profile to enable maintenance tools.",
                         ));
                     }
                 });

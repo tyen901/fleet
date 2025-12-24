@@ -18,6 +18,7 @@ fleet_sync = { workspace = true }
 fleet_index = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+fleet_types = { workspace = true }
 
 md5 = "0.7"
 
