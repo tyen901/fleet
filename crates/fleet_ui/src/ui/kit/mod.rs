@@ -1,7 +1,7 @@
-pub mod kit;
+pub mod impls;
 pub mod theme;
 pub mod widgets;
 
-pub use kit::{ThemeMode, UiKit};
+pub use impls::{ThemeMode, UiKit};
 pub use theme::Theme;
 pub use widgets::*;

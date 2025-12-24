@@ -32,17 +32,16 @@ pub fn shell(
             let shell_rect =
                 egui::Rect::from_center_size(avail.center(), egui::vec2(shell_w, avail.height()));
 
+            // Allocate the shell region using UiBuilder so the child UI is both positioned and bounded.
             ui.scope_builder(egui::UiBuilder::new().max_rect(shell_rect), |ui| {
-                // Shell frame.
                 egui::Frame::new()
                     .fill(c.bg_shell)
                     .stroke(egui::Stroke::new(1.0, c.border_strong))
                     .inner_margin(egui::Margin::same(0))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            sidebar(ui, kit, frame_ctx, top);
-                            main(ui, kit, frame_ctx, top);
-                        });
+                        // Panels carve the parent Ui. SidePanel first, CentralPanel last.
+                        sidebar(ui, kit, frame_ctx, top);
+                        main(ui, kit, frame_ctx, top);
                     });
             });
         });
@@ -271,6 +270,7 @@ fn cell(ui: &mut egui::Ui, kit: &UiKit, f: impl FnOnce(&mut egui::Ui)) {
         egui::vec2(t.sizes.sidebar_width, t.sizes.sidebar_cell),
         egui::Sense::hover(),
     );
+    // Position the child UI at `rect` (use scope_builder with UiBuilder.max_rect).
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.painter().rect(
             rect,

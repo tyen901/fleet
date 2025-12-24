@@ -289,7 +289,7 @@ impl FleetApp {
             reg.add_profile(profile);
 
             let created = reg.profiles.last().cloned().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "profile insert failed")
+                std::io::Error::other("profile insert failed")
             })?;
 
             if create.select {

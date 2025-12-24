@@ -101,11 +101,9 @@ impl Screen for DashboardScreen {
                             if ui.add(AppButton::new(kit, "Abort").danger()).clicked() {
                                 ctx.sync.cancel();
                             }
-                        } else {
-                            if ui.add(AppButton::new(kit, "Sync").primary()).clicked() {
-                                let tuning = SyncTuning::default();
-                                let _ = ctx.sync.start(self.sync_mode, tuning);
-                            }
+                        } else if ui.add(AppButton::new(kit, "Sync").primary()).clicked() {
+                            let tuning = SyncTuning::default();
+                            let _ = ctx.sync.start(self.sync_mode, tuning);
                         }
                     });
                 });
@@ -141,7 +139,7 @@ impl Screen for DashboardScreen {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(w, track_h), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 0.0, c.bg_surface);
-                    let pct = (sync.percent.max(0).min(100) as f32) / 100.0;
+                    let pct = (sync.percent.clamp(0, 100) as f32) / 100.0;
                     let fill = egui::Rect::from_min_max(
                         rect.min,
                         egui::pos2(rect.min.x + rect.width() * pct, rect.max.y),

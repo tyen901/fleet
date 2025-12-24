@@ -40,7 +40,7 @@ impl Screen for HubScreen {
         let c = &t.colors;
 
         let snap = ctx.data.snapshot();
-        let mut items: Vec<_> = snap.profiles.iter().cloned().collect();
+        let mut items: Vec<_> = snap.profiles.to_vec();
 
         // Filter (simple substring).
         let q = self.q.trim().to_lowercase();
@@ -132,43 +132,41 @@ impl Screen for HubScreen {
                         StrokeKind::Inside,
                     );
 
-                    ui.scope_builder(
-                        egui::UiBuilder::new().max_rect(row.rect.shrink(10.0)),
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(p.name.to_uppercase())
-                                        .size(10.0)
-                                        .color(c.text_main)
-                                        .strong(),
-                                );
+                    // Allocate the content UI at the row rect so widgets are laid out where the row is.
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(row.rect.shrink(10.0)), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(p.name.to_uppercase())
+                                    .size(10.0)
+                                    .color(c.text_main)
+                                    .strong(),
+                            );
 
-                                ui.add_space(t.spacing.sm);
+                            ui.add_space(t.spacing.sm);
 
-                                ui.label(
-                                    egui::RichText::new(truncate(&p.repo_url, 60))
-                                        .size(9.0)
-                                        .color(c.text_muted),
-                                );
+                            ui.label(
+                                egui::RichText::new(truncate(&p.repo_url, 60))
+                                    .size(9.0)
+                                    .color(c.text_muted),
+                            );
 
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        // Fleet doesn’t currently expose a per-profile status enum; approximate from sync snapshot.
-                                        let sync = ctx.sync.snapshot();
-                                        let (lbl, kind) = if !sync.finished {
-                                            ("SYNC", BadgeKind::Warning)
-                                        } else if sync.error.is_some() {
-                                            ("ERR", BadgeKind::Error)
-                                        } else {
-                                            ("OK", BadgeKind::Success)
-                                        };
-                                        crate::ui::kit::badge(ui, kit, lbl, kind);
-                                    },
-                                );
-                            });
-                        },
-                    );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    // Fleet doesn’t currently expose a per-profile status enum; approximate from sync snapshot.
+                                    let sync = ctx.sync.snapshot();
+                                    let (lbl, kind) = if !sync.finished {
+                                        ("SYNC", BadgeKind::Warning)
+                                    } else if sync.error.is_some() {
+                                        ("ERR", BadgeKind::Error)
+                                    } else {
+                                        ("OK", BadgeKind::Success)
+                                    };
+                                    crate::ui::kit::badge(ui, kit, lbl, kind);
+                                },
+                            );
+                        });
+                    });
 
                     if row.clicked() {
                         if let Err(e) = ctx.data.select_profile(&p.id) {
