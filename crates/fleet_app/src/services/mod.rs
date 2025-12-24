@@ -30,23 +30,20 @@ pub struct FleetServices {
 
 /// Open the default registry and construct a full [`FleetServices`] bundle.
 ///
-/// This helper uses [`crate::app::FleetApp::open_default_with_recovery`] to
-/// initialise the backend.  It then wraps the resulting [`FleetApp`] in a
-/// single `Arc<RwLock<…>` and constructs concrete service implementations
-/// around it.  See [`data::FleetDataService`], [`sync::FleetSyncService`]
-/// and [`update::FleetUpdateService`] for details.
+/// Uses `FleetApp::open_default_with_recovery`, wraps it in `Arc<RwLock<_>>`,
+/// then constructs concrete services. Concrete types are kept out of UI via
+/// trait objects.
 pub fn open_default_with_recovery(
     rt: tokio::runtime::Handle,
 ) -> Result<(FleetServices, Option<String>), AppError> {
     let (app, warning) = crate::app::FleetApp::open_default_with_recovery();
     let app = Arc::new(std::sync::RwLock::new(app));
 
-    // Construct concrete implementations.  These types are defined in the
-    // submodules of this module.
     let data: Arc<dyn data::DataService> =
         data::FleetDataService::new(Arc::clone(&app), warning.clone());
-    let sync = sync::FleetSyncService::new(Arc::clone(&app), rt.clone(), Arc::clone(&data));
-    let update = update::FleetUpdateService::new(rt.clone());
+    let sync: Arc<dyn sync::SyncService> =
+        sync::FleetSyncService::new(Arc::clone(&app), rt.clone(), Arc::clone(&data));
+    let update: Arc<dyn update::UpdateService> = update::FleetUpdateService::new(rt);
 
     Ok((FleetServices { data, sync, update }, warning))
 }

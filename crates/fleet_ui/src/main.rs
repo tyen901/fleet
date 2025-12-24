@@ -1,6 +1,6 @@
-fn main() -> eframe::Result<()> {
-    // Must be the first thing to run; it may restart/exit the process for install/update tasks.
-    velopack::VelopackApp::build().run();
+// crates/fleet_ui/src/main.rs
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+fn main() -> Result<(), eframe::Error> {
     fleet_ui::run()
 }

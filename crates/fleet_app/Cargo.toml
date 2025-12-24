@@ -19,14 +19,6 @@ fleet_index = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
-# Required for clipboard interactions in the data service.  Although
-# `fleet_app` is primarily a backend crate, it exposes a method to copy
-# launch arguments to the clipboard via an `egui` context.  Declare
-# `egui` as a workspace dependency so that the data service can accept an
-# `&egui::Context` parameter without requiring consumers to pull in
-# `egui` themselves.
-egui = { workspace = true }
-
 md5 = "0.7"
 
 # New: error ergonomics + safe registry writes + file locking

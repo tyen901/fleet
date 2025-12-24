@@ -6,11 +6,11 @@ use fleet_sync::ports::{
     RemoteStream, RemoteStreamImpl,
 };
 use fleet_types::{ModManifest as MtModManifest, RepoSpec};
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 
 // encode everything except the common path safe characters. We'll allow sub-delims and
 // standard pchar characters per RFC 3986 except '/' which separates segments.

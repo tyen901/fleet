@@ -31,3 +31,8 @@ pub use sync::model::SyncModel;
 pub use sync::{
     SafeWipePolicy, SyncMode, SyncOutcome, SyncTuning, UnexpectedPathPolicy, UnknownPathPolicy,
 };
+
+// New: export read models (presentation-ready)
+pub use services::data::{AppSettings, DataModel, ProfileCreate};
+pub use services::sync::SyncReadModel;
+pub use services::update::{UpdateModel, UpdateState};

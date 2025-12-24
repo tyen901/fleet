@@ -1,195 +1,126 @@
+// crates/fleet_ui/src/ui/screens/editor.rs
 use crate::ui::context::UiContext;
-use crate::ui::kit::{AppButton, Divider, FieldLabel, InlineError, InlineHint, UiKit};
-use crate::ui::screen::{Screen, ScreenId};
+use crate::ui::kit::{self as widgets, UiKit};
+use crate::ui::screen::Screen;
+use fleet_app::{ProfileCreate, ProfileSpec, ProfileUpdate};
+
 use eframe::egui;
-use fleet_app::app::ProfileUpdate;
-use fleet_app::services::data::ProfileCreate;
 
-#[derive(Clone, Debug)]
-pub enum EditorMode {
-    Create,
-    Edit { id: String },
-}
-
-pub struct EditorScreen {
-    id: ScreenId,
-    mode: EditorMode,
+pub struct ProfileEditor {
+    id: Option<String>,
     name: String,
     repo_url: String,
     checkout_root: String,
     arma3_extra_args: String,
-    select_after: bool,
     dirty: bool,
 }
 
-impl EditorScreen {
+impl ProfileEditor {
     pub fn new_create() -> Self {
         Self {
-            id: ScreenId(0xE001),
-            mode: EditorMode::Create,
+            id: None,
             name: String::new(),
             repo_url: String::new(),
             checkout_root: String::new(),
             arma3_extra_args: String::new(),
-            select_after: true,
             dirty: false,
         }
     }
 
-    pub fn new_edit(id: String) -> Self {
-        Self {
-            id: ScreenId(0xE002),
-            mode: EditorMode::Edit { id },
-            name: String::new(),
-            repo_url: String::new(),
-            checkout_root: String::new(),
-            arma3_extra_args: String::new(),
-            select_after: false,
-            dirty: false,
-        }
-    }
-
-    fn mark_dirty(&mut self, changed: bool) {
-        if changed {
-            self.dirty = true;
+    pub fn new_edit(id: &str, p: Option<ProfileSpec>) -> Self {
+        if let Some(p) = p {
+            Self {
+                id: Some(id.to_string()),
+                name: p.name,
+                repo_url: p.repo_url,
+                checkout_root: p.checkout_root,
+                arma3_extra_args: p.arma3.extra_args,
+                dirty: false,
+            }
+        } else {
+            Self::new_create()
         }
     }
 }
 
-impl Screen for EditorScreen {
-    fn id(&self) -> ScreenId {
-        self.id
-    }
-
-    fn name(&self) -> &'static str {
-        "Editor"
-    }
-
+impl Screen for ProfileEditor {
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut UiContext) {
-        let kit = ui
-            .ctx()
-            .data_mut(|d| d.get_temp::<UiKit>("__fleet_kit".into()));
-        let Some(kit) = kit else {
-            ui.label("UI kit missing.");
-            return;
-        };
+        let kit = UiKit::from_ctx(ui.ctx());
 
-        let snap = ctx.data.snapshot();
-
-        let mut profile_id = None;
-        if let EditorMode::Edit { id } = &self.mode {
-            profile_id = Some(id.as_str());
-        }
-
-        if let Some(id) = profile_id {
-            let profile = snap.profiles.iter().find(|p| p.id == id);
-            let Some(profile) = profile else {
-                ui.add(InlineError::new(&kit, "Profile not found."));
-                ui.add_space(kit.theme.spacing.sm);
-                if ui.add(AppButton::new(&kit, "Back").ghost()).clicked() {
-                    ctx.nav.pop();
-                }
-                return;
-            };
-
-            if !self.dirty {
-                self.name = profile.name.clone();
-                self.repo_url = profile.repo_url.clone();
-                self.checkout_root = profile.checkout_root.clone();
-                self.arma3_extra_args = profile.arma3.extra_args.clone();
-                self.select_after = snap.selected_id.as_deref() == Some(&profile.id);
-            }
-        }
-
-        let title = match self.mode {
-            EditorMode::Create => "Create Profile",
-            EditorMode::Edit { .. } => "Edit Profile",
-        };
-
-        ui.add(FieldLabel::new(&kit, title));
-        ui.add(Divider::new(&kit));
-        ui.add_space(kit.theme.spacing.sm);
-
-        egui::Grid::new("profile_editor_grid")
-            .num_columns(2)
-            .spacing([kit.layout.gap, kit.layout.gap])
-            .show(ui, |ui| {
-                ui.add(FieldLabel::new(&kit, "Name"));
-                let changed = ui.text_edit_singleline(&mut self.name).changed();
-                self.mark_dirty(changed);
-                ui.end_row();
-
-                ui.add(FieldLabel::new(&kit, "Repo URL"));
-                let changed = ui.text_edit_singleline(&mut self.repo_url).changed();
-                self.mark_dirty(changed);
-                ui.end_row();
-
-                ui.add(FieldLabel::new(&kit, "Checkout root"));
-                let changed = ui.text_edit_singleline(&mut self.checkout_root).changed();
-                self.mark_dirty(changed);
-                ui.end_row();
-
-                ui.add(FieldLabel::new(&kit, "Arma 3 extra args"));
-                let changed = ui
-                    .text_edit_singleline(&mut self.arma3_extra_args)
-                    .changed();
-                self.mark_dirty(changed);
-                ui.end_row();
-
-                ui.add(FieldLabel::new(&kit, "Select after save"));
-                let changed = ui.checkbox(&mut self.select_after, "Make active").changed();
-                self.mark_dirty(changed);
-                ui.end_row();
+        ui.vertical(|ui| {
+            ui.heading(if self.id.is_some() {
+                "Edit Profile"
+            } else {
+                "New Profile"
             });
+            ui.add_space(kit.theme.spacing.md);
 
-        ui.add_space(kit.layout.gap);
+            egui::Grid::new("editor_grid")
+                .num_columns(2)
+                .spacing([kit.layout.gap, kit.layout.gap])
+                .show(ui, |ui| {
+                    ui.add(widgets::FieldLabel::new(&kit, "Name"));
+                    if ui.text_edit_singleline(&mut self.name).changed() {
+                        self.dirty = true;
+                    }
+                    ui.end_row();
 
-        let can_submit = !self.name.trim().is_empty()
-            && !self.repo_url.trim().is_empty()
-            && !self.checkout_root.trim().is_empty();
+                    ui.add(widgets::FieldLabel::new(&kit, "Repository URL"));
+                    if ui.text_edit_singleline(&mut self.repo_url).changed() {
+                        self.dirty = true;
+                    }
+                    ui.end_row();
 
-        ui.horizontal(|ui| {
-            match &self.mode {
-                EditorMode::Create => {
-                    let create_btn = AppButton::new(&kit, "Create").primary().enabled(can_submit);
-                    if ui.add(create_btn).clicked() {
+                    ui.add(widgets::FieldLabel::new(&kit, "Checkout Root"));
+                    ui.horizontal(|ui| {
+                        if ui.text_edit_singleline(&mut self.checkout_root).changed() {
+                            self.dirty = true;
+                        }
+                        if ui.button("...").clicked() {
+                            // File picker requires native OS interaction (e.g. via rfd).
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.add(widgets::FieldLabel::new(&kit, "Extra Arguments"));
+                    if ui.text_edit_multiline(&mut self.arma3_extra_args).changed() {
+                        self.dirty = true;
+                    }
+                    ui.end_row();
+                });
+
+            ui.add_space(kit.theme.spacing.lg);
+
+            ui.horizontal(|ui| {
+                let save_btn = widgets::AppButton::new(&kit, "Save")
+                    .primary()
+                    .enabled(self.dirty && !self.name.is_empty());
+                if ui.add(save_btn).clicked() {
+                    if let Some(id) = &self.id {
+                        let update = ProfileUpdate {
+                            name: Some(self.name.clone()),
+                            repo_url: Some(self.repo_url.clone()),
+                            checkout_root: Some(self.checkout_root.clone()),
+                            select: None,
+                            arma3_extra_args: Some(self.arma3_extra_args.clone()),
+                        };
+                        if let Err(e) = ctx.data.update_profile(id, update) {
+                            ctx.events.emit(crate::ui::events::UiEvent::Error {
+                                message: e.to_string(),
+                            });
+                        } else {
+                            self.dirty = false;
+                        }
+                    } else {
                         let create = ProfileCreate {
-                            name: self.name.trim().to_string(),
-                            repo_url: self.repo_url.trim().to_string(),
-                            checkout_root: self.checkout_root.trim().to_string(),
-                            select: self.select_after,
-                            arma3_extra_args: self.arma3_extra_args.trim().to_string(),
+                            name: self.name.clone(),
+                            repo_url: self.repo_url.clone(),
+                            checkout_root: self.checkout_root.clone(),
+                            select: true,
+                            arma3_extra_args: self.arma3_extra_args.clone(),
                         };
                         match ctx.data.create_profile(create) {
-                            Ok(id) => {
-                                let _ = ctx.data.select_profile(&id);
-                                ctx.nav.replace(ctx.screens.dashboard());
-                            }
-                            Err(e) => {
-                                ctx.events.emit(crate::ui::events::UiEvent::Error {
-                                    message: e.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-                EditorMode::Edit { id } => {
-                    let save_btn = AppButton::new(&kit, "Save")
-                        .primary()
-                        .enabled(can_submit && self.dirty);
-                    if ui.add(save_btn).clicked() {
-                        let update = ProfileUpdate {
-                            name: Some(self.name.trim().to_string()),
-                            repo_url: Some(self.repo_url.trim().to_string()),
-                            checkout_root: Some(self.checkout_root.trim().to_string()),
-                            select: Some(self.select_after),
-                            arma3_extra_args: Some(self.arma3_extra_args.trim().to_string()),
-                        };
-                        match ctx.data.update_profile(id, update) {
-                            Ok(()) => {
-                                if self.select_after {
-                                    let _ = ctx.data.select_profile(id);
-                                }
+                            Ok(_) => {
                                 ctx.nav.pop();
                             }
                             Err(e) => {
@@ -199,33 +130,32 @@ impl Screen for EditorScreen {
                             }
                         }
                     }
+                }
 
-                    if ui.add(AppButton::new(&kit, "Delete").danger()).clicked() {
-                        match ctx.data.delete_profile(id) {
-                            Ok(()) => {
-                                ctx.nav.pop_to_root();
-                            }
-                            Err(e) => {
+                if ui
+                    .add(widgets::AppButton::new(&kit, "Cancel").ghost())
+                    .clicked()
+                {
+                    ctx.nav.pop();
+                }
+
+                if let Some(id) = &self.id {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(egui::RichText::new("Delete Profile").color(kit.theme.error))
+                            .clicked()
+                        {
+                            if let Err(e) = ctx.data.delete_profile(id) {
                                 ctx.events.emit(crate::ui::events::UiEvent::Error {
                                     message: e.to_string(),
                                 });
+                            } else {
+                                ctx.nav.pop_to_root();
                             }
                         }
-                    }
+                    });
                 }
-            }
-
-            if ui.add(AppButton::new(&kit, "Back").ghost()).clicked() {
-                ctx.nav.pop();
-            }
+            });
         });
-
-        if !can_submit {
-            ui.add_space(kit.theme.spacing.sm);
-            ui.add(InlineHint::new(
-                &kit,
-                "Name, repo URL, and checkout root are required.",
-            ));
-        }
     }
 }

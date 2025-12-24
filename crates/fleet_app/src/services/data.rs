@@ -1,34 +1,25 @@
 //! Data service and model for Fleet.
 //!
-//! The data service is responsible for all profile and settings management as
-//! well as any domain‑derived display state that must persist across UI
-//! frames.  It exposes a single authoritative [`DataModel`] protected by
-//! `Arc<RwLock<…>` and provides a pull‑based [`snapshot`] method to obtain
-//! a cheap, read‑only clone of the current state.  All mutation methods
-//! update the underlying model immediately; there are no event streams.
+//! This service is presenter-facing (UI + CLI). It exposes presentation-ready
+//! state via a pull-based snapshot, and exposes intent methods that mutate the
+//! authoritative backend immediately.
+//!
+//! IMPORTANT: this crate must not depend on egui (or any UI framework). UI-only
+//! capabilities (clipboard, dialogs, etc.) are owned by the UI crate.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use egui;
-
 use crate::app::{AppError, FleetApp, ProfileSpec, ProfileUpdate};
 use crate::settings::LaunchSettings;
 
-/// User‑facing application settings.
+/// User-facing application settings.
 ///
-/// At present Fleet persists only launch settings in its registry.  This
-/// typedef exists so that the UI does not depend directly on
-/// [`LaunchSettings`].  Additional settings may be added later without
-/// breaking the public API.
+/// Fleet persists launch settings in its registry. This typedef exists so that
+/// presenters do not depend directly on internal registry structures.
 pub type AppSettings = LaunchSettings;
 
 /// Request payload for creating a new profile.
-///
-/// When creating a profile the caller must specify the profile name,
-/// repository URL, checkout root, whether the profile should become
-/// selected immediately and any extra Arma 3 arguments.  The data service
-/// converts this into a `FleetApp` call via [`FleetApp::add_profile`].
 #[derive(Debug, Clone)]
 pub struct ProfileCreate {
     pub name: String,
@@ -38,31 +29,25 @@ pub struct ProfileCreate {
     pub arma3_extra_args: String,
 }
 
-/// Authoritative data model for the UI.
+/// Presenter-ready authoritative data model (snapshot).
 ///
-/// The fields of this struct are deliberately plain and ready for UI
-/// consumption.  All state that the UI needs to render across frames—such
-/// as the list of profiles, the currently selected profile id, the
-/// persisted settings and any cached launch preview or error—is stored
-/// here.  UI‑only state (e.g. editor drafts, sidebar filter) must be held
-/// locally in the appropriate screen and not cached here.
+/// This model is designed for rendering. It may include derived and cached fields
+/// that should persist across frames (e.g., last preview result).
 #[derive(Debug, Clone)]
 pub struct DataModel {
     pub warning: Option<String>,
     pub profiles: Vec<ProfileSpec>,
     pub selected_id: Option<String>,
     pub settings: AppSettings,
+
+    // Cached outputs for UI/CLI convenience (optional).
     pub launch_args_preview: Option<String>,
     pub launch_args_error: Option<String>,
 }
 
-/// Data service trait.
-///
-/// Consumers obtain an immutable snapshot of the current [`DataModel`] via
-/// [`snapshot`].  Mutations update the underlying model immediately.  See
-/// the implementation on [`FleetDataService`] for details.
+/// Data service trait (port) consumed by UI and CLI.
 pub trait DataService: Send + Sync {
-    /// Return a cheap clone of the current data model.
+    /// Obtain a cheap, immutable snapshot of the current data model.
     fn snapshot(&self) -> Arc<DataModel>;
 
     /// Refresh the profile list from disk.
@@ -71,7 +56,7 @@ pub trait DataService: Send + Sync {
     /// Mark the given profile as selected.
     fn select_profile(&self, id: &str) -> Result<(), AppError>;
 
-    /// Create a new profile.
+    /// Create a new profile. Returns the created profile id.
     fn create_profile(&self, create: ProfileCreate) -> Result<String, AppError>;
 
     /// Update an existing profile.
@@ -89,19 +74,18 @@ pub trait DataService: Send + Sync {
     /// Open a folder in the operating system.
     fn open_folder(&self, path: &Path) -> Result<(), AppError>;
 
-    /// Launch Arma 3 for the given profile.
+    /// Launch Arma 3 for the given profile.
     fn launch_arma3_for_profile(&self, profile_id: &str) -> Result<(), AppError>;
 
-    /// Request a preview of the launch arguments for the given profile.  The
-    /// preview or any error will be written back into the model.
-    fn request_launch_args_preview(&self, profile_id: &str);
+    /// Launch Arma 3 for an explicit path (for CLI parity).
+    fn launch_arma3_for_path(&self, base_path: &Path, extra_args: &str) -> Result<(), AppError>;
 
-    /// Copy the launch arguments for the given profile to the clipboard.
-    fn copy_launch_args_to_clipboard(
-        &self,
-        egui_ctx: &egui::Context,
-        profile_id: &str,
-    ) -> Result<(), AppError>;
+    /// Compute launch args preview for the given profile (pure; no UI types).
+    fn launch_args_preview(&self, profile_id: &str) -> Result<String, AppError>;
+
+    /// Request that the service compute and cache a preview (and error if any)
+    /// into the model.
+    fn request_launch_args_preview(&self, profile_id: &str);
 }
 
 /// Concrete data service implementation backed by a [`FleetApp`].
@@ -111,39 +95,42 @@ pub struct FleetDataService {
 }
 
 impl FleetDataService {
-    /// Create a new data service around the given [`FleetApp`].
     pub fn new(app: Arc<RwLock<FleetApp>>, warning: Option<String>) -> Arc<Self> {
-        let app_settings = {
+        let settings = {
             let app = app.read().expect("lock poisoned");
             app.launch_settings()
         };
-        let profiles;
-        let selected_id;
-        {
+
+        let (profiles, selected_id) = {
             let app = app.read().expect("lock poisoned");
-            profiles = app.list_profiles();
-            selected_id = app.selected_profile().map(|p| p.id.clone());
-        }
+            (
+                app.list_profiles(),
+                app.selected_profile().map(|p| p.id.clone()),
+            )
+        };
+
         let model = DataModel {
             warning,
             profiles,
             selected_id,
-            settings: app_settings,
+            settings,
             launch_args_preview: None,
             launch_args_error: None,
         };
+
         Arc::new(Self {
             app,
             model: Arc::new(RwLock::new(Arc::new(model))),
         })
     }
 
-    /// Internal helper to refresh the cached profile list and selected id.
     fn refresh_cached_profiles(&self, clear_preview: bool) -> Result<(), AppError> {
         let mut app = self.app.write().expect("lock poisoned");
         app.refresh_registry()?;
+
         let profiles = app.list_profiles();
         let selected = app.selected_profile().map(|p| p.id.clone());
+
         with_model_mut(&self.model, |model| {
             model.profiles = profiles;
             model.selected_id = selected;
@@ -152,13 +139,13 @@ impl FleetDataService {
                 model.launch_args_error = None;
             }
         });
+
         Ok(())
     }
 }
 
 impl DataService for FleetDataService {
     fn snapshot(&self) -> Arc<DataModel> {
-        // Cheaply clone the current model.
         self.model.read().expect("lock poisoned").clone()
     }
 
@@ -184,7 +171,8 @@ impl DataService for FleetDataService {
                 create.select,
             )?
         };
-        // Immediately update any extra args.
+
+        // Immediately update extra args if provided.
         if !create.arma3_extra_args.is_empty() {
             let update = ProfileUpdate {
                 name: None,
@@ -196,6 +184,7 @@ impl DataService for FleetDataService {
             let mut app = self.app.write().expect("lock poisoned");
             app.update_profile(&spec.id, update)?;
         }
+
         self.refresh_cached_profiles(false)?;
         Ok(spec.id)
     }
@@ -228,8 +217,7 @@ impl DataService for FleetDataService {
     }
 
     fn reset_settings_to_defaults(&self) -> Result<(), AppError> {
-        let defaults = LaunchSettings::default();
-        self.set_settings(defaults)
+        self.set_settings(LaunchSettings::default())
     }
 
     fn open_folder(&self, path: &Path) -> Result<(), AppError> {
@@ -242,10 +230,19 @@ impl DataService for FleetDataService {
         app.launch_arma3_for_profile(profile_id, None)
     }
 
+    fn launch_arma3_for_path(&self, base_path: &Path, extra_args: &str) -> Result<(), AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        app.launch_arma3_for_path(base_path, extra_args)
+    }
+
+    fn launch_args_preview(&self, profile_id: &str) -> Result<String, AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        app.arma3_launch_preview_for_profile(profile_id, None)
+    }
+
     fn request_launch_args_preview(&self, profile_id: &str) {
         let result = {
             let app = self.app.read().expect("lock poisoned");
-            // Try to preview; capture result or error.
             app.arma3_launch_preview_for_profile(profile_id, None)
         };
         with_model_mut(&self.model, |model| match result {
@@ -258,20 +255,6 @@ impl DataService for FleetDataService {
                 model.launch_args_error = Some(e.to_string());
             }
         });
-    }
-
-    fn copy_launch_args_to_clipboard(
-        &self,
-        egui_ctx: &egui::Context,
-        profile_id: &str,
-    ) -> Result<(), AppError> {
-        let preview = {
-            let app = self.app.read().expect("lock poisoned");
-            app.arma3_launch_preview_for_profile(profile_id, None)?
-        };
-        // Use egui's clipboard API to copy text to the system clipboard.
-        egui_ctx.copy_text(preview);
-        Ok(())
     }
 }
 

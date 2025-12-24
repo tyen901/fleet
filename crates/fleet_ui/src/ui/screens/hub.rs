@@ -1,44 +1,46 @@
+// crates/fleet_ui/src/ui/screens/hub.rs
 use crate::ui::context::UiContext;
-use crate::ui::kit::InlineHint;
-use crate::ui::kit::UiKit;
-use crate::ui::screen::{Screen, ScreenId};
+use crate::ui::kit::{self as widgets, UiKit};
+use crate::ui::screen::Screen;
+
 use eframe::egui;
 
-pub struct HubScreen;
+pub struct HubScreen {}
 
 impl HubScreen {
     pub fn new() -> Self {
-        Self
+        Self {}
+    }
+}
+
+impl Default for HubScreen {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Screen for HubScreen {
-    fn id(&self) -> ScreenId {
-        // Arbitrary stable id for the Hub screen.
-        ScreenId(0xA001)
-    }
+    fn ui(&mut self, ui: &mut egui::Ui, _ctx: &mut UiContext) {
+        let kit = UiKit::from_ctx(ui.ctx());
 
-    fn name(&self) -> &'static str {
-        "Hub"
-    }
+        ui.vertical_centered(|ui| {
+            ui.add_space(100.0);
+            ui.label(egui::RichText::new("Welcome to Fleet").strong().size(32.0));
+            ui.add_space(kit.theme.spacing.md);
+            ui.label(
+                egui::RichText::new(
+                    "Select a profile from the sidebar or create a new one to get started.",
+                )
+                .color(kit.theme.text_dim),
+            );
+            ui.add_space(kit.theme.spacing.lg);
 
-    fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut UiContext) {
-        let kit = ui
-            .ctx()
-            .data_mut(|d| d.get_temp::<UiKit>("__fleet_kit".into()));
-        let Some(kit) = kit else {
-            ui.label("UI kit missing.");
-            return;
-        };
-
-        let snap = ctx.data.snapshot();
-        if snap.selected_id.is_some() {
-            ctx.nav.replace(ctx.screens.dashboard());
-            return;
-        }
-
-        ui.centered_and_justified(|ui| {
-            ui.add(InlineHint::new(&kit, "Select a profile to begin."));
+            if ui
+                .add(widgets::AppButton::new(&kit, "Create First Profile").primary())
+                .clicked()
+            {
+                _ctx.nav.push(_ctx.screens.editor_new());
+            }
         });
     }
 }

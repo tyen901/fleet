@@ -1,177 +1,148 @@
-// Import service traits from the new fleet_app service module.
-use fleet_app::services::{
-    data::DataService,
-    sync::SyncService,
-    update::{UpdateService, UpdateState},
-};
+// crates/fleet_ui/src/ui/screens/chrome.rs
+use crate::ui::kit::{self as widgets, UiKit};
+use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
+use fleet_app::UpdateState;
 
-use crate::ui::kit::UiKit;
-use crate::ui::kit::{AppButton, Divider, FieldLabel, InlineHint, StatusBadge};
 use eframe::egui;
 
+pub enum SidebarAction {
+    OpenProfile(String),
+    NewProfile,
+    OpenSettings,
+    Refresh,
+}
+
 pub fn header(ui: &mut egui::Ui, kit: &UiKit, title: &str, subtitle: &str, sync: &dyn SyncService) {
-    let c = &kit.theme.colors;
-
-    ui.set_min_width(ui.available_width());
-
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = kit.layout.gap;
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = kit.layout.gap;
-
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(title)
-                        .size(kit.theme.type_scale.h1)
-                        .strong(),
-                )
-                .truncate(),
-            );
-
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(subtitle)
-                        .size(kit.theme.type_scale.body)
-                        .color(c.muted),
-                )
-                .truncate(),
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(title).strong().size(18.0));
+            ui.label(
+                egui::RichText::new(subtitle)
+                    .size(12.0)
+                    .color(kit.theme.text_dim),
             );
         });
 
-        let snap = sync.snapshot();
-        // Derive status label and colour from the simplified sync model.
-        let (label, color, spinning) = if snap.error.is_some() {
-            ("ERROR".to_string(), c.danger, false)
-        } else if snap.finished {
-            ("DONE".to_string(), c.accent, false)
-        } else {
-            (snap.phase.clone(), c.accent, true)
-        };
-
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 0.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.add(StatusBadge::new(kit, label, color, spinning));
-            },
-        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let snap = sync.snapshot();
+            if !snap.finished {
+                ui.add(
+                    egui::ProgressBar::new(snap.percent as f32 / 100.0)
+                        .text(&snap.status_line)
+                        .desired_width(150.0),
+                );
+            } else if let Some(_err) = &snap.error {
+                if ui
+                    .button(egui::RichText::new("⚠ Sync Error").color(kit.theme.error))
+                    .clicked()
+                {
+                    sync.clear_error();
+                }
+            }
+        });
     });
-}
-
-pub enum SidebarAction {
-    NewProfile,
-    OpenProfile(String),
-    OpenSettings,
-    Refresh,
 }
 
 pub fn sidebar(
     ui: &mut egui::Ui,
     kit: &UiKit,
     data: &dyn DataService,
-    selected_profile_id: Option<&str>,
+    selected_id: Option<&str>,
 ) -> Option<SidebarAction> {
-    let mut out = None;
+    let mut action = None;
     let snap = data.snapshot();
 
-    ui.set_min_width(ui.available_width());
-
     ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.add(FieldLabel::new(kit, "Profiles"));
+        ui.add(widgets::FieldLabel::new(kit, "PROFILES"));
+        ui.add_space(kit.theme.spacing.xs);
 
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if ui
-                        .add(AppButton::new(kit, "Refresh").ghost().min_width(80.0))
-                        .clicked()
-                    {
-                        out = Some(SidebarAction::Refresh);
-                    }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for p in &snap.profiles {
+                let is_selected = selected_id == Some(&p.id);
+                let mut btn = egui::Button::new(&p.name)
+                    .frame(false)
+                    .fill(if is_selected {
+                        kit.theme.panel_bg
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    });
 
-                    if ui
-                        .add(AppButton::new(kit, "+ New").ghost().min_width(70.0))
-                        .clicked()
-                    {
-                        out = Some(SidebarAction::NewProfile);
-                    }
-                },
-            );
+                if is_selected {
+                    btn = btn.stroke(egui::Stroke::new(1.0, kit.theme.primary));
+                }
+
+                if ui.add_sized([ui.available_width(), 24.0], btn).clicked() {
+                    action = Some(SidebarAction::OpenProfile(p.id.clone()));
+                }
+            }
         });
 
-        ui.add(Divider::new(kit));
-
-        // List all profiles.  Filtering is UI‑local state and has been
-        // removed in this rewrite; a future improvement could store it in
-        // an egui memory slot.
-        let footer_h = kit.layout.button_height + kit.layout.gap + 1.0;
-        let list_h = (ui.available_height() - footer_h).max(0.0);
-
-        egui::ScrollArea::vertical()
-            .id_salt("sidebar_profiles_scroll")
-            .auto_shrink([false, false])
-            .max_height(list_h)
-            .show(ui, |ui| {
-                for p in &snap.profiles {
-                    let selected = selected_profile_id.is_some_and(|id| id == p.id);
-                    let text = egui::RichText::new(&p.name).size(kit.theme.type_scale.body);
-
-                    let mut resp = ui.add_sized(
-                        [ui.available_width(), kit.layout.row_height],
-                        egui::Button::selectable(selected, text),
-                    );
-
-                    if resp.hovered() {
-                        resp = resp.on_hover_text(format!("{}\n{}", p.name, p.id));
-                    }
-                    if resp.clicked() {
-                        out = Some(SidebarAction::OpenProfile(p.id.clone()));
-                    }
-                }
-
-                if snap.profiles.is_empty() {
-                    ui.add_space(kit.layout.gap);
-                    ui.add(InlineHint::new(kit, "No profiles found."));
-                }
-            });
-
-        ui.add(Divider::new(kit));
-
+        ui.add_space(kit.theme.spacing.sm);
         if ui
-            .add(AppButton::new(kit, "Settings").ghost().min_width(90.0))
+            .add(widgets::AppButton::new(kit, "+ New Profile").ghost())
             .clicked()
         {
-            out = Some(SidebarAction::OpenSettings);
+            action = Some(SidebarAction::NewProfile);
         }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if ui
+                .add(widgets::AppButton::new(kit, "Settings").ghost())
+                .clicked()
+            {
+                action = Some(SidebarAction::OpenSettings);
+            }
+            if ui
+                .add(widgets::AppButton::new(kit, "Refresh").ghost())
+                .clicked()
+            {
+                action = Some(SidebarAction::Refresh);
+            }
+        });
     });
 
-    out
+    action
 }
 
 pub fn footer_status_row(ui: &mut egui::Ui, kit: &UiKit, update: &dyn UpdateService) {
     let snap = update.snapshot();
-    ui.add_space(kit.theme.spacing.sm);
-
-    let msg = match &snap.state {
-        UpdateState::NotConfigured => "Updates: not configured".to_string(),
+    ui.horizontal(|ui| match &snap.state {
+        UpdateState::NotConfigured => {
+            ui.label(
+                egui::RichText::new("Updates not configured")
+                    .small()
+                    .color(kit.theme.text_dim),
+            );
+        }
         UpdateState::Idle { status } => {
-            format!("Updates: {status}")
+            ui.label(
+                egui::RichText::new(status)
+                    .small()
+                    .color(kit.theme.text_dim),
+            );
         }
-        UpdateState::Checking => "Updates: checking…".to_string(),
-        UpdateState::Downloading { progress } => match progress {
-            Some(p) => format!(
-                "Updates: downloading… {:.0}%",
-                (p * 100.0).clamp(0.0, 100.0)
-            ),
-            None => "Updates: downloading…".to_string(),
-        },
+        UpdateState::Checking => {
+            ui.add(egui::Spinner::new().size(10.0));
+            ui.label(
+                egui::RichText::new("Checking for updates...")
+                    .small()
+                    .color(kit.theme.text_dim),
+            );
+        }
+        UpdateState::Downloading { progress } => {
+            let p = progress.unwrap_or(0.0);
+            ui.label(
+                egui::RichText::new(format!("Downloading update: {:.0}%", p * 100.0))
+                    .small()
+                    .color(kit.theme.primary),
+            );
+        }
         UpdateState::Failed { error } => {
-            format!("Updates: failed ({})", error)
+            ui.label(
+                egui::RichText::new(format!("Update failed: {}", error))
+                    .small()
+                    .color(kit.theme.error),
+            );
         }
-    };
-
-    ui.add(InlineHint::new(kit, &msg));
+    });
 }

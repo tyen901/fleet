@@ -1,39 +1,40 @@
+// crates/fleet_ui/src/ui/screens/factory.rs
 use crate::ui::nav::Screens;
 use crate::ui::screen::Screen;
-use crate::ui::screens;
+use crate::ui::screens::{dashboard, editor, hub, settings};
+use fleet_app::services::data::DataService;
 use std::sync::Arc;
 
-use crate::ui::screens::editor::EditorScreen;
-use crate::ui::screens::settings::SettingsScreen;
-
 pub struct ScreenFactory {
-    data: Arc<dyn fleet_app::services::data::DataService>,
+    data: Arc<dyn DataService>,
 }
 
 impl ScreenFactory {
-    pub fn new(data: Arc<dyn fleet_app::services::data::DataService>) -> Arc<Self> {
+    pub fn new(data: Arc<dyn DataService>) -> Arc<Self> {
         Arc::new(Self { data })
     }
 }
 
 impl Screens for ScreenFactory {
     fn hub(&self) -> Box<dyn Screen> {
-        Box::new(screens::hub::HubScreen::new())
+        Box::new(hub::HubScreen::new())
     }
 
     fn dashboard(&self) -> Box<dyn Screen> {
-        Box::new(screens::dashboard::DashboardScreen::new())
+        Box::new(dashboard::DashboardScreen::new())
     }
 
     fn editor_new(&self) -> Box<dyn Screen> {
-        Box::new(EditorScreen::new_create())
+        Box::new(editor::ProfileEditor::new_create())
     }
 
-    fn editor_edit(&self, _id: String) -> Box<dyn Screen> {
-        Box::new(EditorScreen::new_edit(_id))
+    fn editor_edit(&self, id: &str) -> Box<dyn Screen> {
+        let snap = self.data.snapshot();
+        let p = snap.profiles.iter().find(|p| p.id == id).cloned();
+        Box::new(editor::ProfileEditor::new_edit(id, p))
     }
 
     fn settings(&self) -> Box<dyn Screen> {
-        Box::new(SettingsScreen::new())
+        Box::new(settings::SettingsScreen::new(self.data.clone()))
     }
 }

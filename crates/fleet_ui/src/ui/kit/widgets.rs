@@ -1,236 +1,189 @@
-use super::kit::UiKit;
-use egui;
+// crates/fleet_ui/src/ui/kit/widgets.rs
+use crate::ui::kit::UiKit;
+use eframe::egui;
 
-pub fn panel_frame(kit: &UiKit) -> egui::Frame {
-    let c = &kit.theme.colors;
-    egui::Frame::NONE
-        .fill(c.panel)
-        .stroke(egui::Stroke::new(1.0, c.border))
-        .inner_margin(egui::Margin::same(
-            kit.layout.pad.round().clamp(0.0, i8::MAX as f32) as i8,
-        ))
-}
-
-pub fn card_frame(kit: &UiKit) -> egui::Frame {
-    let c = &kit.theme.colors;
-    let pad_px = (kit.layout.pad * 0.85).round().clamp(0.0, i8::MAX as f32) as i8;
-    egui::Frame::NONE
-        .stroke(egui::Stroke::new(1.0, c.border))
-        .inner_margin(egui::Margin::same(pad_px))
-}
-
-pub struct Divider<'a> {
-    kit: &'a UiKit,
-}
-
-impl<'a> Divider<'a> {
-    pub fn new(kit: &'a UiKit) -> Self {
-        Self { kit }
-    }
-}
-
-impl egui::Widget for Divider<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        let c = self.kit.theme.colors.border;
-        let (rect, resp) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().line_segment(
-            [rect.left_top(), rect.right_top()],
-            egui::Stroke::new(1.0, c),
-        );
-        resp
-    }
-}
-
-pub struct FieldLabel<'a> {
-    kit: &'a UiKit,
-    text: &'a str,
-}
-
-impl<'a> FieldLabel<'a> {
-    pub fn new(kit: &'a UiKit, text: &'a str) -> Self {
-        Self { kit, text }
-    }
-}
-
-impl egui::Widget for FieldLabel<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(self.text)
-                    .size(self.kit.theme.type_scale.body)
-                    .color(self.kit.theme.colors.muted)
-                    .strong(),
-            )
-            .truncate(),
-        )
-    }
-}
-
-pub struct InlineHint<'a> {
-    kit: &'a UiKit,
-    text: &'a str,
-}
-
-impl<'a> InlineHint<'a> {
-    pub fn new(kit: &'a UiKit, text: &'a str) -> Self {
-        Self { kit, text }
-    }
-}
-
-impl egui::Widget for InlineHint<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(self.text)
-                    .size(self.kit.theme.type_scale.body)
-                    .color(self.kit.theme.colors.muted),
-            )
-            .wrap(),
-        )
-    }
-}
-
-pub struct InlineError<'a> {
-    kit: &'a UiKit,
-    text: &'a str,
-}
-
-impl<'a> InlineError<'a> {
-    pub fn new(kit: &'a UiKit, text: &'a str) -> Self {
-        Self { kit, text }
-    }
-}
-
-impl egui::Widget for InlineError<'_> {
-    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(self.text)
-                    .size(self.kit.theme.type_scale.body)
-                    .color(self.kit.theme.colors.danger)
-                    .strong(),
-            )
-            .wrap(),
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ButtonKind {
-    Default,
-    Primary,
-    Ghost,
-    Danger,
-}
-
-pub struct AppButton<'a> {
-    kit: &'a UiKit,
-    label: &'a str,
-    kind: ButtonKind,
+pub struct AppButton {
+    text: String,
+    primary: bool,
+    ghost: bool,
     enabled: bool,
-    min_width: Option<f32>,
+    kit: UiKit,
 }
 
-impl<'a> AppButton<'a> {
-    pub fn new(kit: &'a UiKit, label: &'a str) -> Self {
+impl AppButton {
+    pub fn new(kit: &UiKit, text: impl Into<String>) -> Self {
         Self {
-            kit,
-            label,
-            kind: ButtonKind::Default,
+            text: text.into(),
+            primary: false,
+            ghost: false,
             enabled: true,
-            min_width: None,
+            kit: kit.clone(),
         }
     }
+
     pub fn primary(mut self) -> Self {
-        self.kind = ButtonKind::Primary;
+        self.primary = true;
         self
     }
+
     pub fn ghost(mut self) -> Self {
-        self.kind = ButtonKind::Ghost;
+        self.ghost = true;
         self
     }
-    pub fn danger(mut self) -> Self {
-        self.kind = ButtonKind::Danger;
-        self
-    }
+
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
     }
-    pub fn min_width(mut self, w: f32) -> Self {
-        self.min_width = Some(w);
-        self
-    }
 }
 
-impl egui::Widget for AppButton<'_> {
+impl egui::Widget for AppButton {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        let mut button = egui::Button::new(self.label);
-        if let Some(w) = self.min_width {
-            button = button.min_size(egui::vec2(w, self.kit.layout.button_height));
-        } else {
-            button = button.min_size(egui::vec2(0.0, self.kit.layout.button_height));
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(80.0), 32.0),
+            egui::Sense::click(),
+        );
+
+        if ui.is_rect_visible(rect) {
+            let color = if !self.enabled {
+                self.kit.theme.text_dim
+            } else if self.primary {
+                if response.hovered() {
+                    self.kit.theme.primary_hover
+                } else {
+                    self.kit.theme.primary
+                }
+            } else if self.ghost {
+                egui::Color32::TRANSPARENT
+            } else {
+                self.kit.theme.panel_bg
+            };
+
+            ui.painter().rect_filled(rect, 4.0, color);
+
+            if self.ghost {
+                ui.painter().rect_stroke(
+                    rect,
+                    4.0,
+                    egui::Stroke::new(1.0, self.kit.theme.text_dim),
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                &self.text,
+                egui::FontId::proportional(14.0),
+                if self.primary {
+                    egui::Color32::WHITE
+                } else {
+                    self.kit.theme.text
+                },
+            );
         }
-        let c = &self.kit.theme.colors;
-        let visuals = ui.visuals().clone();
-        let mut override_visuals = visuals.clone();
-        match self.kind {
-            ButtonKind::Default => {}
-            ButtonKind::Ghost => {
-                override_visuals.widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-                override_visuals.widgets.hovered.bg_fill = c.panel_alt;
-                override_visuals.widgets.active.bg_fill = c.panel_alt;
-            }
-            ButtonKind::Primary => {
-                override_visuals.widgets.inactive.bg_fill = c.accent.linear_multiply(0.35);
-                override_visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, c.accent);
-                override_visuals.widgets.hovered.bg_fill = c.accent.linear_multiply(0.45);
-                override_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, c.accent);
-                override_visuals.widgets.active.bg_fill = c.accent.linear_multiply(0.55);
-                override_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, c.accent);
-            }
-            ButtonKind::Danger => {
-                override_visuals.widgets.inactive.bg_fill = c.danger.linear_multiply(0.35);
-                override_visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, c.danger);
-                override_visuals.widgets.hovered.bg_fill = c.danger.linear_multiply(0.45);
-                override_visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, c.danger);
-                override_visuals.widgets.active.bg_fill = c.danger.linear_multiply(0.55);
-                override_visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, c.danger);
-            }
-        }
-        // Temporarily override visuals for this button, then restore.
-        let saved = ui.visuals().clone();
-        ui.ctx().set_visuals(override_visuals);
-        let resp = ui.add_enabled(self.enabled, button);
-        ui.ctx().set_visuals(saved);
-        resp
+
+        response
     }
 }
 
-pub struct StatusBadge<'a> {
-    kit: &'a UiKit,
-    label: String,
-    color: egui::Color32,
-    spinning: bool,
+pub struct FieldLabel {
+    text: String,
+    kit: UiKit,
 }
 
-impl<'a> StatusBadge<'a> {
-    pub fn new(kit: &'a UiKit, label: String, color: egui::Color32, spinning: bool) -> Self {
+impl FieldLabel {
+    pub fn new(kit: &UiKit, text: impl Into<String>) -> Self {
         Self {
-            kit,
-            label,
-            color,
-            spinning,
+            text: text.into(),
+            kit: kit.clone(),
         }
     }
 }
 
-impl egui::Widget for StatusBadge<'_> {
+impl egui::Widget for FieldLabel {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
-        let text = egui::RichText::new(self.label)
-            .color(self.color)
-            .size(self.kit.theme.type_scale.body);
-        ui.add(egui::Label::new(text))
+        ui.label(
+            egui::RichText::new(self.text)
+                .color(self.kit.theme.text_dim)
+                .size(12.0),
+        )
     }
+}
+
+pub struct Divider {
+    kit: UiKit,
+}
+
+impl Divider {
+    pub fn new(kit: &UiKit) -> Self {
+        Self { kit: kit.clone() }
+    }
+}
+
+impl egui::Widget for Divider {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, response) =
+            ui.allocate_at_least(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().hline(
+            rect.x_range(),
+            rect.center().y,
+            egui::Stroke::new(1.0, self.kit.theme.panel_bg),
+        );
+        response
+    }
+}
+
+pub struct InlineHint {
+    text: String,
+    kit: UiKit,
+}
+
+impl InlineHint {
+    pub fn new(kit: &UiKit, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kit: kit.clone(),
+        }
+    }
+}
+
+impl egui::Widget for InlineHint {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("ℹ").color(self.kit.theme.primary));
+            ui.label(egui::RichText::new(self.text).color(self.kit.theme.text_dim));
+        })
+        .response
+    }
+}
+
+pub struct InlineError {
+    text: String,
+    kit: UiKit,
+}
+
+impl InlineError {
+    pub fn new(kit: &UiKit, text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kit: kit.clone(),
+        }
+    }
+}
+
+impl egui::Widget for InlineError {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("⚠").color(self.kit.theme.error));
+            ui.label(egui::RichText::new(self.text).color(self.kit.theme.error));
+        })
+        .response
+    }
+}
+
+pub fn panel_frame(kit: &UiKit) -> egui::Frame {
+    egui::Frame::NONE
+        .fill(kit.theme.panel_bg)
+        .inner_margin(egui::Margin::same(kit.theme.spacing.md as i8))
 }

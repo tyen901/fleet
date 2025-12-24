@@ -1,21 +1,14 @@
-#![allow(dead_code)]
+// crates/fleet_ui/src/lib.rs
+pub mod ui;
 
-mod ui;
-
-use eframe::egui;
-
-const WINDOW_W: f32 = 980.0;
-const WINDOW_H: f32 = 720.0;
-
-pub fn run() -> eframe::Result<()> {
-    let viewport = egui::ViewportBuilder::default()
-        .with_inner_size(egui::vec2(WINDOW_W, WINDOW_H))
-        .with_min_inner_size(egui::vec2(WINDOW_W, WINDOW_H))
-        .with_max_inner_size(egui::vec2(WINDOW_W, WINDOW_H))
-        .with_resizable(false);
-
+pub fn run() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
-        viewport,
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([800.0, 500.0])
+            .with_title("Fleet")
+            .with_decorations(true)
+            .with_transparent(false),
         ..Default::default()
     };
 

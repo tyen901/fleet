@@ -1,3 +1,5 @@
+// crates/fleet_ui/src/ui/kit/mod.rs
+#[allow(clippy::module_inception)]
 pub mod kit;
 pub mod theme;
 pub mod widgets;
