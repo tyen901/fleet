@@ -1,5 +1,5 @@
 use crate::ui::context::UiContext;
-use crate::ui::kit::{self, BadgeKind, Icon, UiKit};
+use crate::ui::kit::{self, Icon, UiKit};
 use crate::ui::nav::Navigation;
 use crate::ui::screen::screen_ids;
 use eframe::egui;
@@ -201,64 +201,6 @@ fn main(
 
                     top.ui(ui, ctx);
                 });
-
-            // Toasts overlay (minimal, utilitarian).
-            overlay_events(ui.ctx(), kit, ctx);
-        });
-}
-
-fn overlay_events(egui_ctx: &egui::Context, kit: &UiKit, ctx: &mut UiContext) {
-    let t = &kit.theme;
-    let c = &t.colors;
-
-    let now = ctx.sys.now_millis();
-    let mut evs = ctx.events.drain();
-
-    // Re-queue long-lived? No: transient only. Render and drop (Synk style).
-    // Keep only the last few.
-    if evs.len() > 6 {
-        evs = evs.split_off(evs.len() - 6);
-    }
-
-    if evs.is_empty() {
-        return;
-    }
-
-    egui::Area::new("toast_overlay".into())
-        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
-        .show(egui_ctx, |ui| {
-            ui.set_min_width(280.0);
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
-                for te in evs.into_iter().rev() {
-                    let (kind, msg) = match te.ev {
-                        crate::ui::events::UiEvent::Toast { message } => {
-                            (BadgeKind::Success, message)
-                        }
-                        crate::ui::events::UiEvent::Warning { message } => {
-                            (BadgeKind::Warning, message)
-                        }
-                        crate::ui::events::UiEvent::Error { message } => {
-                            (BadgeKind::Error, message)
-                        }
-                    };
-
-                    let _age_ms = now.saturating_sub(te.at_ms);
-
-                    egui::Frame::NONE
-                        .fill(c.bg_subtle)
-                        .stroke(egui::Stroke::new(1.0, c.border))
-                        .inner_margin(egui::Margin::same(10))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                crate::ui::kit::badge(ui, kit, " ", kind);
-                                ui.add_space(t.spacing.xs);
-                                ui.label(egui::RichText::new(msg).size(9.0).color(c.text_main));
-                            });
-                        });
-
-                    ui.add_space(6.0);
-                }
-            });
         });
 }
 
@@ -270,7 +212,6 @@ fn cell(ui: &mut egui::Ui, kit: &UiKit, f: impl FnOnce(&mut egui::Ui)) {
         egui::vec2(t.sizes.sidebar_width, t.sizes.sidebar_cell),
         egui::Sense::hover(),
     );
-    // Position the child UI at `rect` (use scope_builder with UiBuilder.max_rect).
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.painter().rect(
             rect,

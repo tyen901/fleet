@@ -36,7 +36,7 @@ Owns:
 * screen stack framework
 * `Screen` trait + implementations
 * `UiContext` capability injection
-* navigation and ephemeral UX events (toasts/banners)
+* navigation and ephemeral UX events (banners)
 
 Must not own:
 
@@ -129,11 +129,10 @@ Hard restriction:
 
 ## 2.4 Ephemeral UX events (`_ui`)
 
-Events are allowed only for transient UX (toasts/banners), never for state reconstruction or progress. 
+Events are allowed only for transient UX (banners), never for state reconstruction or progress. 
 
 ```rust
 pub enum UiEvent {
-    Toast { message: String },
     Warning { message: String },
     Error { message: String },
 }
@@ -282,7 +281,7 @@ impl Screen for SettingsScreen {
             if let Err(e) = ctx.auth.set_api_key(self.api_key_buf.clone()) {
                 ctx.events.emit(UiEvent::Error { message: e.to_string() });
             } else {
-                ctx.events.emit(UiEvent::Toast { message: "Saved".into() });
+                ctx.events.emit(UiEvent::Warning { message: "Saved".into() });
             }
         }
     }

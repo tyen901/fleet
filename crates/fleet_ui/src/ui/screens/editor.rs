@@ -148,7 +148,7 @@ impl Screen for ProfileEditor {
                                 Ok(()) => {
                                     ctx.events.emit(
                                         ctx.sys.now_millis(),
-                                        crate::ui::events::UiEvent::Toast {
+                                        crate::ui::events::UiEvent::Warning {
                                             message: "Saved".into(),
                                         },
                                     );
@@ -267,7 +267,7 @@ impl Screen for ProfileEditor {
                                     Ok(()) => {
                                         ctx.events.emit(
                                             ctx.sys.now_millis(),
-                                            crate::ui::events::UiEvent::Toast {
+                                            crate::ui::events::UiEvent::Warning {
                                                 message: "Deleted".into(),
                                             },
                                         );

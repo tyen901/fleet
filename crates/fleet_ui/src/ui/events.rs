@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    Toast { message: String },
     Warning { message: String },
     Error { message: String },
 }
