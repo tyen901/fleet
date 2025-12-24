@@ -107,9 +107,6 @@ pub trait DataService: Send + Sync {
     /// Rebuild the index for the given profile.
     fn rebuild_index(&self, profile_id: &str) -> Result<(), AppError>;
 
-    /// Clear the quarantine folder for the given profile.
-    fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError>;
-
     /// Clear the cache folder for the given profile.
     fn clear_cache(&self, profile_id: &str) -> Result<(), AppError>;
 
@@ -427,11 +424,6 @@ impl DataService for FleetDataService {
     fn rebuild_index(&self, profile_id: &str) -> Result<(), AppError> {
         let app = self.app.read().expect("lock poisoned");
         app.clear_index(profile_id)
-    }
-
-    fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError> {
-        let app = self.app.read().expect("lock poisoned");
-        app.clear_quarantine(profile_id)
     }
 
     fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {

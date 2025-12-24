@@ -106,7 +106,7 @@ pub async fn handle_unexpected_paths(
             }
             Ok(stats)
         }
-        UnexpectedPathPolicy::AutoDelete => {
+        UnexpectedPathPolicy::Delete => {
             for action in plan.actions {
                 if cancel.is_cancelled() {
                     return Err(Cancelled.into());
@@ -272,7 +272,7 @@ fn build_unexpected_plan(
             sample.push(rel.clone());
         }
 
-        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::AutoDelete) && !cap_reached {
+        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::Delete) && !cap_reached {
             if let Some(max) = cap {
                 if delete_bytes.saturating_add(size) > max {
                     cap_reached = true;
@@ -325,7 +325,7 @@ fn build_unexpected_plan(
             sample.push(rel.clone());
         }
 
-        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::AutoDelete) && !cap_reached {
+        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::Delete) && !cap_reached {
             if let Some(max) = cap {
                 if delete_bytes.saturating_add(size) > max {
                     cap_reached = true;

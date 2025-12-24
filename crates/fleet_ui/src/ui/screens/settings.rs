@@ -278,9 +278,6 @@ impl Screen for SettingsScreen {
                             if ui.button("Rebuild Index").clicked() {
                                 let _ = ctx.data.rebuild_index(profile_id);
                             }
-                            if ui.button("Clear Quarantine").clicked() {
-                                let _ = ctx.data.clear_quarantine(profile_id);
-                            }
                             if ui.button("Clear Cache").clicked() {
                                 let _ = ctx.data.clear_cache(profile_id);
                             }

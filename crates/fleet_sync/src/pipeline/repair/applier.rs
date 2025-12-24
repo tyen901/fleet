@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use futures::{stream, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -36,7 +37,6 @@ pub(crate) enum IndexUpdate {
 #[derive(Clone, Debug)]
 pub(crate) struct ApplyOptions {
     pub supports_ranges: bool,
-    pub quarantine_id: String,
 }
 
 pub(crate) struct ApplyBatchOutcome {
@@ -223,16 +223,8 @@ async fn apply_one(
 
     match tokio::fs::symlink_metadata(&op.abs_path).await {
         Ok(md) if md.is_dir() => {
-            if let Err(err) = crate::fs::quarantine_move_path(
-                checkout_root,
-                &opts.quarantine_id,
-                &op.mod_id,
-                Path::new(&op.rel_path),
-                &op.abs_path,
-            )
-            .await
-            {
-                return Err(classify_apply_error(&op, err));
+            if let Err(err) = tokio::fs::remove_dir_all(&op.abs_path).await {
+                return Err(classify_apply_error(&op, err.into()));
             }
         }
         Ok(_) => {}
@@ -478,7 +470,6 @@ async fn apply_patch(
     staged: StagedFile,
 ) -> Result<RepairReport> {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
     let total_bytes = op
         .target

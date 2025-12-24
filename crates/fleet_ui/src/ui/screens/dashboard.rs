@@ -144,7 +144,7 @@ impl DashboardScreen {
                                 {
                                     let tuning = SyncTuning {
                                         unexpected_paths:
-                                            fleet_app::sync::UnexpectedPathPolicy::AutoDelete,
+                                            fleet_app::sync::UnexpectedPathPolicy::Delete,
                                         ..Default::default()
                                     };
                                     let _ = ctx.sync.start(self.sync_mode, tuning);
@@ -376,9 +376,6 @@ impl Screen for DashboardScreen {
                             ui.horizontal(|ui| {
                                 if ui.button("Rebuild Index").clicked() {
                                     let _ = ctx.data.rebuild_index(&profile.id);
-                                }
-                                if ui.button("Clear Quarantine").clicked() {
-                                    let _ = ctx.data.clear_quarantine(&profile.id);
                                 }
                             });
                         }

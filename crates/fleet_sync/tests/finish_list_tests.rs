@@ -399,7 +399,7 @@ async fn sync_fresh_does_not_quarantine_expected_directories() {
         checkout_root: PathBuf::from(root),
         enabled_mods: enabled_mods.clone(),
         tuning: SyncFreshTuning {
-            unknown_paths: UnknownPathPolicy::Quarantine,
+            unknown_paths: UnknownPathPolicy::Delete,
             ..Default::default()
         },
     };

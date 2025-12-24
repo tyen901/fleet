@@ -44,8 +44,6 @@ pub(crate) async fn run(
         let desired = prelude.desired;
         let fetch = prelude.fetch;
 
-        let quarantine_id = format!("{}-{}", desired.state_id, crate::util::now_ns());
-
         let expected_from_manifest = expected_sets_from_manifests(&fetch.manifests);
         let expected_from_store = if matches!(
             tuning.safe_wipe,
@@ -95,17 +93,7 @@ pub(crate) async fn run(
                 match tokio::fs::symlink_metadata(&abs).await {
                     Ok(md) => {
                         if md.is_dir() {
-                            let rel = Path::new(rel_path);
-                            if crate::fs::quarantine_move_path(
-                                &req.checkout_root,
-                                &quarantine_id,
-                                mod_id,
-                                rel,
-                                &abs,
-                            )
-                            .await
-                            .is_err()
-                            {
+                            if let Err(_err) = tokio::fs::remove_dir_all(&abs).await {
                                 cancel.cancel();
                                 let report = crate::model::RepairReport {
                                     elapsed_ms: start.elapsed().as_millis() as u64,
@@ -116,7 +104,7 @@ pub(crate) async fn run(
                                     failures: Vec::new(),
                                     aborted: Some(AbortReason::UnsafeOnDisk {
                                         message: format!(
-                                            "failed to quarantine directory at expected file path: {}",
+                                            "failed to remove directory at expected file path: {}",
                                             abs.display()
                                         ),
                                     }),
@@ -158,7 +146,6 @@ pub(crate) async fn run(
             sink,
             cancel,
             fetch.capabilities.supports_ranges,
-            quarantine_id.clone(),
         )
         .await?;
 
@@ -189,7 +176,6 @@ pub(crate) async fn run(
             for (mod_id, expected) in expected_union {
                 let stats = handle_unknown_paths(
                     &req.checkout_root,
-                    &quarantine_id,
                     &mod_id,
                     &expected,
                     tuning.unknown_paths,
@@ -297,7 +283,6 @@ struct Cancelled;
 #[allow(clippy::too_many_arguments)]
 async fn handle_unknown_paths(
     checkout_root: &Path,
-    quarantine_id: &str,
     mod_id: &str,
     expected_paths: &HashSet<String>,
     policy: UnknownPathPolicy,
@@ -372,23 +357,6 @@ async fn handle_unknown_paths(
                         is_dir: true,
                     });
                 }
-                UnknownPathPolicy::Quarantine => {
-                    let dst = crate::fs::quarantine_move_path(
-                        checkout_root,
-                        quarantine_id,
-                        mod_id,
-                        Path::new(&action.rel),
-                        &action.abs,
-                    )
-                    .await?;
-                    sink.push(SyncEvent::Warning {
-                        message: format!(
-                            "quarantined unexpected dir {} -> {}",
-                            action.abs.display(),
-                            dst.display()
-                        ),
-                    });
-                }
                 UnknownPathPolicy::Keep => {}
             }
             bytes_processed = bytes_processed.saturating_add(action.size);
@@ -401,23 +369,6 @@ async fn handle_unknown_paths(
                         path: action.rel.clone(),
                         bytes: action.size,
                         is_dir: false,
-                    });
-                }
-                UnknownPathPolicy::Quarantine => {
-                    let dst = crate::fs::quarantine_move_path(
-                        checkout_root,
-                        quarantine_id,
-                        mod_id,
-                        Path::new(&action.rel),
-                        &action.abs,
-                    )
-                    .await?;
-                    sink.push(SyncEvent::Warning {
-                        message: format!(
-                            "quarantined unexpected file {} -> {}",
-                            action.abs.display(),
-                            dst.display()
-                        ),
                     });
                 }
                 UnknownPathPolicy::Keep => {}

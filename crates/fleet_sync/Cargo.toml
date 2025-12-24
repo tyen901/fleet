@@ -13,6 +13,7 @@ walkdir = { workspace = true }
 blake3 = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 fleet_fs = { workspace = true }
 
 [dev-dependencies]

@@ -96,6 +96,9 @@ struct SyncArgs {
 
     #[arg(long, default_value = "repair")]
     mode: String,
+
+    #[arg(long)]
+    delete_unexpected: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -280,6 +283,11 @@ async fn run_cli(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 use_index: sa.use_index,
                 emit_progress: true,
                 mode,
+                unexpected_paths: if sa.delete_unexpected {
+                    fleet_app::UnexpectedPathPolicy::Delete
+                } else {
+                    fleet_app::UnexpectedPathPolicy::Prompt
+                },
                 ..Default::default()
             };
 

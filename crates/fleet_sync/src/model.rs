@@ -137,10 +137,10 @@ pub struct RepairTuning {
     pub auto_fix_case: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum UnexpectedPathPolicy {
     Prompt,
-    AutoDelete,
+    Delete,
 }
 
 impl Default for RepairTuning {
@@ -308,7 +308,7 @@ impl Default for SyncFreshTuning {
         Self {
             concurrency: RepairTuning::default(),
             safe_wipe: SafeWipePolicy::ExpectedUnion,
-            unknown_paths: UnknownPathPolicy::Quarantine,
+            unknown_paths: UnknownPathPolicy::Delete,
         }
     }
 }
@@ -322,11 +322,10 @@ pub enum SafeWipePolicy {
     ExpectedUnion,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub enum UnknownPathPolicy {
     Keep,
     #[default]
-    Quarantine,
     Delete,
 }
 

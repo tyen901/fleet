@@ -36,7 +36,6 @@ pub enum SafeWipePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum UnknownPathPolicy {
     Keep,
-    Quarantine,
     Delete,
 }
 
@@ -44,7 +43,7 @@ pub enum UnknownPathPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum UnexpectedPathPolicy {
     Prompt,
-    AutoDelete,
+    Delete,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -130,7 +129,7 @@ impl Default for SyncTuning {
             delete_empty_dirs: d.delete_empty_dirs,
 
             safe_wipe: SafeWipePolicy::ExpectedUnion,
-            unknown_paths: UnknownPathPolicy::Quarantine,
+            unknown_paths: UnknownPathPolicy::Delete,
 
             enable_patch_repair: true,
             enable_skip_check: true,
@@ -164,7 +163,7 @@ impl SyncTuning {
 
             unexpected_paths: match self.unexpected_paths {
                 UnexpectedPathPolicy::Prompt => fleet_sync::UnexpectedPathPolicy::Prompt,
-                UnexpectedPathPolicy::AutoDelete => fleet_sync::UnexpectedPathPolicy::AutoDelete,
+                UnexpectedPathPolicy::Delete => fleet_sync::UnexpectedPathPolicy::Delete,
             },
             max_unexpected_delete_bytes: self.max_unexpected_delete_bytes,
             delete_empty_dirs: self.delete_empty_dirs,
@@ -191,7 +190,6 @@ impl SyncTuning {
 
         let unknown_paths = match self.unknown_paths {
             UnknownPathPolicy::Keep => fleet_sync::UnknownPathPolicy::Keep,
-            UnknownPathPolicy::Quarantine => fleet_sync::UnknownPathPolicy::Quarantine,
             UnknownPathPolicy::Delete => fleet_sync::UnknownPathPolicy::Delete,
         };
 

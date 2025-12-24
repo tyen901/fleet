@@ -607,21 +607,6 @@ impl FleetApp {
         Ok(())
     }
 
-    pub fn clear_quarantine(&self, profile_id: &str) -> Result<(), AppError> {
-        let profile = self.require_profile(profile_id)?;
-        let path = Self::fleet_dir(&profile.checkout_root).join("quarantine");
-        std::fs::remove_dir_all(&path)
-            .or_else(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .map_err(|e| AppError::Maintenance(format!("clear quarantine failed: {e}")))?;
-        Ok(())
-    }
-
     pub fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
         let profile = self.require_profile(profile_id)?;
         let path = Self::fleet_dir(&profile.checkout_root).join("cache");

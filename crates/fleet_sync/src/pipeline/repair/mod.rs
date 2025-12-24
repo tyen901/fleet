@@ -42,7 +42,6 @@ pub(crate) async fn apply_full_download_ops(
     sink: &dyn EventSink,
     cancel: &CancellationToken,
     supports_ranges: bool,
-    quarantine_id: String,
 ) -> Result<FullDownloadOutcome, crate::model::EngineError> {
     let planned: Vec<planner::PlannedOp> = ops
         .into_iter()
@@ -69,10 +68,7 @@ pub(crate) async fn apply_full_download_ops(
         tuning,
         sink,
         cancel,
-        applier::ApplyOptions {
-            supports_ranges,
-            quarantine_id,
-        },
+        applier::ApplyOptions { supports_ranges },
     )
     .await?;
 
@@ -124,7 +120,6 @@ pub(crate) async fn run(
         .await?;
         let desired = prelude.desired;
         let fetch = prelude.fetch;
-        let quarantine_id = format!("{}-{}", desired.state_id, now_ns());
 
         type ExpectedTriplet = (String, u64, Option<Vec<u8>>);
 
@@ -299,7 +294,6 @@ pub(crate) async fn run(
                 cancel,
                 applier::ApplyOptions {
                     supports_ranges: fetch.capabilities.supports_ranges,
-                    quarantine_id: quarantine_id.clone(),
                 },
             )
             .await?;
@@ -745,7 +739,6 @@ mod tests {
             &tokio_util::sync::CancellationToken::new(),
             applier::ApplyOptions {
                 supports_ranges: true,
-                quarantine_id: "test".to_string(),
             },
         )
         .await
@@ -824,7 +817,6 @@ mod tests {
             &tokio_util::sync::CancellationToken::new(),
             applier::ApplyOptions {
                 supports_ranges: true,
-                quarantine_id: "test".to_string(),
             },
         )
         .await

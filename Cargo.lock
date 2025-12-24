@@ -1537,6 +1537,7 @@ dependencies = [
  "fleet_fs",
  "fleet_index",
  "futures",
+ "serde",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
