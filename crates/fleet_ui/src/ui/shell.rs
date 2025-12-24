@@ -1,16 +1,13 @@
-use fleet_app::services::open_default_with_recovery;
-use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
-
 use crate::ui::context::{FrameInfo, System, UiContext};
 use crate::ui::events::{EventBus, UiEvent};
-use crate::ui::kit as widgets;
 use crate::ui::kit::UiKit;
 use crate::ui::nav::{NavHost, NavOp, Screens};
 use crate::ui::screen::Screen;
-use crate::ui::screens::chrome;
-use crate::ui::screens::factory::ScreenFactory;
+use crate::ui::screens::{chrome, factory::ScreenFactory};
 
 use eframe::egui;
+use fleet_app::services::open_default_with_recovery;
+use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,16 +34,12 @@ impl AppShell {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let kit = UiKit::new(&cc.egui_ctx);
 
-        cc.egui_ctx.data_mut(|d| {
-            d.insert_temp(egui::Id::new("__fleet_kit"), kit.clone());
-        });
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
 
-        let (services, _warning) = open_default_with_recovery(rt.handle().clone())
+        let (services, warning) = open_default_with_recovery(rt.handle().clone())
             .expect("failed to initialise Fleet services");
 
         let data = services.data;
@@ -54,13 +47,23 @@ impl AppShell {
         let update = services.update;
 
         let screens = ScreenFactory::new(data.clone());
+        let events = EventBus::new();
+
+        if let Some(w) = warning.as_deref() {
+            events.emit(
+                Self::now_millis_local(),
+                UiEvent::Warning {
+                    message: w.to_string(),
+                },
+            );
+        }
 
         let mut shell = Self {
             kit,
             stack: Vec::new(),
             nav_host: NavHost::new(),
             screens,
-            events: EventBus::new(),
+            events,
             data,
             sync,
             update,
@@ -69,112 +72,202 @@ impl AppShell {
             frame_number: 0,
         };
 
-        let selected = shell.data.snapshot().selected_id.clone();
-        if selected.is_some() {
-            shell.stack.push(shell.screens.dashboard());
-        } else {
-            shell.stack.push(shell.screens.hub());
+        // Always start at list; if a profile is already selected, open detail above it.
+        shell.stack.push(shell.screens.list());
+        if let Some(id) = shell.data.snapshot().selected_id.clone() {
+            shell.stack.push(shell.screens.detail(&id));
         }
 
         shell
     }
 
-    fn subtitle(&self) -> String {
-        let snap = self.data.snapshot();
-        if let Some(id) = snap.selected_id.as_deref() {
-            let p = snap.profiles.iter().find(|p| p.id == id);
-            return p
-                .map(|p| format!("Profile: {}", p.name))
-                .unwrap_or_else(|| "Profile".into());
-        }
-        "No profile selected".into()
+    fn now_millis_local() -> u128 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
     }
+
+    // removed make_dummy_ctx to avoid returning references to local temporaries
 
     fn apply_nav_ops(&mut self, ops: Vec<NavOp>, egui_ctx: &egui::Context) {
-        for op in ops {
-            match op {
-                NavOp::Push(screen) => {
-                    self.stack.push(screen);
-                }
-                NavOp::Pop => {
-                    if self.stack.len() > 1 {
-                        let _ = self.stack.pop();
-                    }
-                }
-                NavOp::Replace(screen) => {
-                    let _ = self.stack.pop();
-                    self.stack.push(screen);
-                }
-                NavOp::PopToRoot => {
-                    while self.stack.len() > 1 {
-                        let _ = self.stack.pop();
-                    }
-                }
-                NavOp::CloseApp => {
-                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
-    }
-
-    fn render_event_panels(&self, ctx: &egui::Context) {
-        let events = self.events.drain();
-        if events.is_empty() {
-            return;
-        }
-
-        // Simple “last event wins” bottom panel.
-        // If you want stacking/toast timeouts, do it here, but keep it UI-local.
-        let last = events.last().cloned();
-
-        if let Some(ev) = last {
-            egui::TopBottomPanel::bottom("fleet_events")
-                .resizable(false)
-                .frame(widgets::panel_frame(&self.kit))
-                .show(ctx, |ui| match ev {
-                    UiEvent::Toast { message } => {
-                        ui.add(crate::ui::kit::InlineHint::new(&self.kit, &message));
-                    }
-                    UiEvent::Warning { message } => {
-                        ui.add(crate::ui::kit::InlineError::new(&self.kit, &message));
-                    }
-                    UiEvent::Error { message } => {
-                        ui.add(crate::ui::kit::InlineError::new(&self.kit, &message));
-                    }
-                    UiEvent::Trace { message } => {
-                        ui.add(crate::ui::kit::InlineHint::new(&self.kit, &message));
-                    }
-                });
-        }
-    }
-}
-
-impl eframe::App for AppShell {
-    fn update(&mut self, egui_ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.frame_number += 1;
-
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_frame);
-        self.last_frame = now;
-
-        let mut nav_host = std::mem::take(&mut self.nav_host);
-
         struct EguiSys<'a> {
             ctx: &'a egui::Context,
         }
         impl<'a> System for EguiSys<'a> {
             fn now_millis(&self) -> u128 {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
+                crate::ui::shell::AppShell::now_millis_local()
             }
             fn request_repaint(&self) {
                 self.ctx.request_repaint();
             }
         }
         let sys = EguiSys { ctx: egui_ctx };
+
+        // Clone Arcs to avoid borrowing `self` immutably while also holding mutable borrows to fields.
+        let screens = self.screens.clone();
+        let events = self.events.clone();
+        let data = self.data.clone();
+        let sync = self.sync.clone();
+        let update = self.update.clone();
+
+        let frame_number = self.frame_number;
+
+        // Split the mutable borrows.
+        let (stack, nav_host, kit) = (&mut self.stack, &mut self.nav_host, &mut self.kit);
+
+        for op in ops {
+            match op {
+                NavOp::Push(mut screen) => {
+                    if let Some(top) = stack.last_mut() {
+                        let mut dummy_ctx = UiContext {
+                            frame: FrameInfo {
+                                dt: 0.0,
+                                frame_number,
+                            },
+                            nav: nav_host,
+                            screens: screens.as_ref(),
+                            events: events.as_ref(),
+                            data: data.as_ref(),
+                            sync: sync.as_ref(),
+                            update: update.as_ref(),
+                            kit,
+                            sys: &sys,
+                        };
+                        top.as_mut().on_pause(&mut dummy_ctx);
+                    }
+
+                    {
+                        let mut dummy_ctx = UiContext {
+                            frame: FrameInfo {
+                                dt: 0.0,
+                                frame_number,
+                            },
+                            nav: nav_host,
+                            screens: screens.as_ref(),
+                            events: events.as_ref(),
+                            data: data.as_ref(),
+                            sync: sync.as_ref(),
+                            update: update.as_ref(),
+                            kit,
+                            sys: &sys,
+                        };
+                        screen.as_mut().on_push(&mut dummy_ctx);
+                    }
+
+                    stack.push(screen);
+                }
+
+                NavOp::Pop => {
+                    if stack.len() > 1 {
+                        let mut dummy_ctx = UiContext {
+                            frame: FrameInfo {
+                                dt: 0.0,
+                                frame_number,
+                            },
+                            nav: nav_host,
+                            screens: screens.as_ref(),
+                            events: events.as_ref(),
+                            data: data.as_ref(),
+                            sync: sync.as_ref(),
+                            update: update.as_ref(),
+                            kit,
+                            sys: &sys,
+                        };
+
+                        if let Some(mut popped) = stack.pop() {
+                            popped.as_mut().on_pop(&mut dummy_ctx);
+                        }
+                        if let Some(top) = stack.last_mut() {
+                            top.as_mut().on_resume(&mut dummy_ctx);
+                        }
+                    }
+                }
+
+                NavOp::Replace(mut screen) => {
+                    let mut dummy_ctx = UiContext {
+                        frame: FrameInfo {
+                            dt: 0.0,
+                            frame_number,
+                        },
+                        nav: nav_host,
+                        screens: screens.as_ref(),
+                        events: events.as_ref(),
+                        data: data.as_ref(),
+                        sync: sync.as_ref(),
+                        update: update.as_ref(),
+                        kit,
+                        sys: &sys,
+                    };
+
+                    if let Some(mut popped) = stack.pop() {
+                        popped.as_mut().on_pop(&mut dummy_ctx);
+                    }
+                    screen.as_mut().on_push(&mut dummy_ctx);
+                    stack.push(screen);
+                }
+
+                NavOp::PopToRoot => {
+                    let mut dummy_ctx = UiContext {
+                        frame: FrameInfo {
+                            dt: 0.0,
+                            frame_number,
+                        },
+                        nav: nav_host,
+                        screens: screens.as_ref(),
+                        events: events.as_ref(),
+                        data: data.as_ref(),
+                        sync: sync.as_ref(),
+                        update: update.as_ref(),
+                        kit,
+                        sys: &sys,
+                    };
+
+                    while stack.len() > 1 {
+                        if let Some(mut popped) = stack.pop() {
+                            popped.as_mut().on_pop(&mut dummy_ctx);
+                        }
+                    }
+                    if let Some(top) = stack.last_mut() {
+                        top.as_mut().on_resume(&mut dummy_ctx);
+                    }
+                }
+
+                NavOp::CloseApp => {
+                    egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+}
+
+impl eframe::App for AppShell {
+    fn update(&mut self, egui_ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame_number = self.frame_number.wrapping_add(1);
+
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32();
+        self.last_frame = now;
+
+        // Keep visuals/fonts in sync with current theme.
+        self.kit.apply(egui_ctx);
+        self.kit.store(egui_ctx);
+
+        struct EguiSys<'a> {
+            ctx: &'a egui::Context,
+        }
+        impl<'a> System for EguiSys<'a> {
+            fn now_millis(&self) -> u128 {
+                crate::ui::shell::AppShell::now_millis_local()
+            }
+            fn request_repaint(&self) {
+                self.ctx.request_repaint();
+            }
+        }
+        let sys = EguiSys { ctx: egui_ctx };
+
+        let mut nav_host = std::mem::take(&mut self.nav_host);
 
         let mut frame_ctx = UiContext {
             frame: FrameInfo {
@@ -187,87 +280,22 @@ impl eframe::App for AppShell {
             data: self.data.as_ref(),
             sync: self.sync.as_ref(),
             update: self.update.as_ref(),
+            kit: &mut self.kit,
             sys: &sys,
         };
 
-        let subtitle = self.subtitle();
+        if self.stack.is_empty() {
+            self.stack.push(self.screens.list());
+        }
 
-        egui::TopBottomPanel::top("fleet_header")
-            .exact_height(self.kit.layout.header_height)
-            .frame(widgets::panel_frame(&self.kit))
-            .show(egui_ctx, |ui| {
-                chrome::header(ui, &self.kit, "Fleet", &subtitle, frame_ctx.sync);
-            });
+        let Some(top) = self.stack.last_mut() else {
+            return;
+        };
 
-        egui::SidePanel::left("fleet_sidebar")
-            .exact_width(self.kit.layout.sidebar_width)
-            .resizable(false)
-            .frame(widgets::panel_frame(&self.kit))
-            .show(egui_ctx, |ui| {
-                let data = frame_ctx.data.snapshot();
-                let selected_profile_id = data.selected_id.as_deref();
-
-                if let Some(action) =
-                    chrome::sidebar(ui, &self.kit, frame_ctx.data, selected_profile_id)
-                {
-                    match action {
-                        chrome::SidebarAction::NewProfile => {
-                            frame_ctx.nav.push(self.screens.editor_new());
-                        }
-                        chrome::SidebarAction::OpenProfile(id) => {
-                            if let Err(e) = frame_ctx.data.select_profile(&id) {
-                                frame_ctx.events.emit(UiEvent::Error {
-                                    message: e.to_string(),
-                                });
-                            } else {
-                                frame_ctx.nav.replace(self.screens.dashboard());
-                            }
-                        }
-                        chrome::SidebarAction::OpenSettings => {
-                            frame_ctx.nav.push(self.screens.settings());
-                        }
-                        chrome::SidebarAction::Refresh => {
-                            if let Err(e) = frame_ctx.data.refresh_profiles() {
-                                frame_ctx.events.emit(UiEvent::Error {
-                                    message: e.to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                chrome::footer_status_row(ui, &self.kit, frame_ctx.update);
-            });
-
-        egui::CentralPanel::default()
-            .frame(widgets::panel_frame(&self.kit))
-            .show(egui_ctx, |ui| {
-                let snap = frame_ctx.data.snapshot();
-                if let Some(w) = snap.warning.as_deref() {
-                    ui.add(crate::ui::kit::InlineError::new(&self.kit, w));
-                    ui.add_space(self.kit.theme.spacing.sm);
-                }
-
-                let Some(top) = self.stack.last_mut() else {
-                    ui.add(crate::ui::kit::InlineError::new(
-                        &self.kit,
-                        "No screens on stack.",
-                    ));
-                    return;
-                };
-
-                top.ui(ui, &mut frame_ctx);
-            });
+        chrome::shell(egui_ctx, &mut frame_ctx, &mut **top);
 
         let ops = nav_host.take_ops();
         self.nav_host = nav_host;
         self.apply_nav_ops(ops, egui_ctx);
-
-        self.render_event_panels(egui_ctx);
-
-        // Repaint while syncing to keep progress fluid.
-        if !self.sync.snapshot().finished {
-            egui_ctx.request_repaint();
-        }
     }
 }

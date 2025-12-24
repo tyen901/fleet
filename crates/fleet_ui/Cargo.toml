@@ -1,21 +1,12 @@
 [package]
-name = "fleet-ui"
+name = "fleet_ui"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fleet_app = { path = "../fleet_app" }
-
-eframe = { workspace = true, features = ["glow", "persistence", "wgpu"] }
-egui = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+eframe = { workspace = true }
+tokio = { workspace = true }
 parking_lot = { workspace = true }
-velopack = { workspace = true }
-
-serde = { workspace = true }
-serde_json = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
-chrono = { workspace = true, features = ["serde"] }
-
 tracing = { workspace = true }
-log = { workspace = true }
+
+fleet_app = { workspace = true }

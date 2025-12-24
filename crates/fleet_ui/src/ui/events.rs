@@ -1,36 +1,35 @@
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::collections::VecDeque;
 
-/// High-level UI events used for "ambient" messages like toasts.
-///
-/// These are NOT domain events; they are ephemeral UI notifications.
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Toast { message: String },
     Warning { message: String },
     Error { message: String },
-    Trace { message: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct TimedEvent {
+    pub at_ms: u128,
+    pub ev: UiEvent,
 }
 
 pub struct EventBus {
-    queue: Mutex<Vec<UiEvent>>,
+    queue: Mutex<VecDeque<TimedEvent>>,
 }
 
 impl EventBus {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            queue: Mutex::new(Vec::new()),
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            queue: Mutex::new(VecDeque::new()),
         })
     }
 
-    pub fn emit(&self, event: UiEvent) {
-        self.queue.lock().push(event);
+    pub fn emit(&self, at_ms: u128, ev: UiEvent) {
+        self.queue.lock().push_back(TimedEvent { at_ms, ev });
     }
 
-    pub fn drain(&self) -> Vec<UiEvent> {
-        let mut q = self.queue.lock();
-        let events = q.clone();
-        q.clear();
-        events
+    pub fn drain(&self) -> Vec<TimedEvent> {
+        self.queue.lock().drain(..).collect()
     }
 }

@@ -8,34 +8,21 @@ pub enum NavOp {
     CloseApp,
 }
 
-#[derive(Default)]
+pub trait Navigation {
+    fn push(&mut self, screen: Box<dyn Screen>);
+    fn pop(&mut self);
+    fn replace(&mut self, screen: Box<dyn Screen>);
+    fn pop_to_root(&mut self);
+    fn close_app(&mut self);
+}
+
 pub struct NavHost {
     ops: Vec<NavOp>,
 }
 
 impl NavHost {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn push(&mut self, screen: Box<dyn Screen>) {
-        self.ops.push(NavOp::Push(screen));
-    }
-
-    pub fn pop(&mut self) {
-        self.ops.push(NavOp::Pop);
-    }
-
-    pub fn replace(&mut self, screen: Box<dyn Screen>) {
-        self.ops.push(NavOp::Replace(screen));
-    }
-
-    pub fn pop_to_root(&mut self) {
-        self.ops.push(NavOp::PopToRoot);
-    }
-
-    pub fn close_app(&mut self) {
-        self.ops.push(NavOp::CloseApp);
+        Self { ops: Vec::new() }
     }
 
     pub fn take_ops(&mut self) -> Vec<NavOp> {
@@ -43,14 +30,39 @@ impl NavHost {
     }
 }
 
-/// A registry of screens that can be navigated to.
-pub trait Screens: Send + Sync {
-    fn hub(&self) -> Box<dyn Screen>;
-    fn dashboard(&self) -> Box<dyn Screen>;
-    fn editor_new(&self) -> Box<dyn Screen>;
-    fn editor_edit(&self, id: &str) -> Box<dyn Screen>;
-    fn settings(&self) -> Box<dyn Screen>;
+impl Default for NavHost {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-unsafe impl Send for NavHost {}
-unsafe impl Sync for NavHost {}
+impl Navigation for NavHost {
+    fn push(&mut self, screen: Box<dyn Screen>) {
+        self.ops.push(NavOp::Push(screen));
+    }
+
+    fn pop(&mut self) {
+        self.ops.push(NavOp::Pop);
+    }
+
+    fn replace(&mut self, screen: Box<dyn Screen>) {
+        self.ops.push(NavOp::Replace(screen));
+    }
+
+    fn pop_to_root(&mut self) {
+        self.ops.push(NavOp::PopToRoot);
+    }
+
+    fn close_app(&mut self) {
+        self.ops.push(NavOp::CloseApp);
+    }
+}
+
+/// Screen factory trait (keeps nav ops screen-only).
+pub trait Screens: Send + Sync {
+    fn list(&self) -> Box<dyn Screen>;
+    fn detail(&self, id: &str) -> Box<dyn Screen>;
+    fn form_new(&self) -> Box<dyn Screen>;
+    fn form_edit(&self, id: &str) -> Box<dyn Screen>;
+    fn settings(&self) -> Box<dyn Screen>;
+}

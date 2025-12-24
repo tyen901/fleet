@@ -15,25 +15,25 @@ impl ScreenFactory {
 }
 
 impl Screens for ScreenFactory {
-    fn hub(&self) -> Box<dyn Screen> {
+    fn list(&self) -> Box<dyn Screen> {
         Box::new(hub::HubScreen::new())
     }
 
-    fn dashboard(&self) -> Box<dyn Screen> {
-        Box::new(dashboard::DashboardScreen::new())
+    fn detail(&self, id: &str) -> Box<dyn Screen> {
+        Box::new(dashboard::DashboardScreen::new(id))
     }
 
-    fn editor_new(&self) -> Box<dyn Screen> {
+    fn form_new(&self) -> Box<dyn Screen> {
         Box::new(editor::ProfileEditor::new_create())
     }
 
-    fn editor_edit(&self, id: &str) -> Box<dyn Screen> {
+    fn form_edit(&self, id: &str) -> Box<dyn Screen> {
         let snap = self.data.snapshot();
         let p = snap.profiles.iter().find(|p| p.id == id).cloned();
         Box::new(editor::ProfileEditor::new_edit(id, p))
     }
 
     fn settings(&self) -> Box<dyn Screen> {
-        Box::new(settings::SettingsScreen::new(self.data.clone()))
+        Box::new(settings::SettingsScreen::new())
     }
 }

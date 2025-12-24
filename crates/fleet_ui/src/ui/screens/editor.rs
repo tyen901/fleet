@@ -1,19 +1,23 @@
 use crate::ui::context::UiContext;
-use crate::ui::kit::{self as widgets, UiKit};
-use crate::ui::screen::{Screen, ScreenId};
-use fleet_app::{ProfileCreate, ProfileSpec, ProfileUpdate};
-
+use crate::ui::kit::{self, AppButton, Divider, FieldLabel, Icon, InlineError, InlineHint};
+use crate::ui::nav::Navigation;
+use crate::ui::screen::{screen_ids, Screen, ScreenId};
 use eframe::egui;
+use fleet_app::{ProfileCreate, ProfileSpec, ProfileUpdate};
 
 pub struct ProfileEditor {
     id: Option<String>,
+
     name: String,
     repo_url: String,
     checkout_root: String,
+
     arma3_extra_args: String,
     arma3_enabled_mods: Vec<String>,
-    dirty: bool,
-    last_repo_spec_source: String,
+
+    new_mod: String,
+
+    ensured_selected: bool,
 }
 
 impl ProfileEditor {
@@ -25,221 +29,262 @@ impl ProfileEditor {
             checkout_root: String::new(),
             arma3_extra_args: String::new(),
             arma3_enabled_mods: Vec::new(),
-            dirty: false,
-            last_repo_spec_source: String::new(),
+            new_mod: String::new(),
+            ensured_selected: false,
         }
     }
 
-    pub fn new_edit(id: &str, p: Option<ProfileSpec>) -> Self {
-        if let Some(p) = p {
-            Self {
-                id: Some(id.to_string()),
-                name: p.name,
-                repo_url: p.repo_url,
-                checkout_root: p.checkout_root,
-                arma3_extra_args: p.arma3.extra_args,
-                arma3_enabled_mods: p.arma3.enabled_mods,
-                dirty: false,
-                last_repo_spec_source: String::new(),
-            }
+    pub fn new_edit(id: &str, spec: Option<ProfileSpec>) -> Self {
+        let mut s = Self::new_create();
+        s.id = Some(id.to_string());
+        if let Some(p) = spec {
+            s.name = p.name;
+            s.repo_url = p.repo_url;
+            s.checkout_root = p.checkout_root;
+        }
+        s
+    }
+
+    fn submit(&self, ctx: &mut UiContext) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("Name is required.".into());
+        }
+        if self.repo_url.trim().is_empty() {
+            return Err("Repo URL is required.".into());
+        }
+        if self.checkout_root.trim().is_empty() {
+            return Err("Checkout root is required.".into());
+        }
+
+        if let Some(id) = &self.id {
+            let upd = ProfileUpdate {
+                name: Some(self.name.clone()),
+                repo_url: Some(self.repo_url.clone()),
+                checkout_root: Some(self.checkout_root.clone()),
+                select: None,
+                arma3_extra_args: Some(self.arma3_extra_args.clone()),
+                arma3_enabled_mods: Some(self.arma3_enabled_mods.clone()),
+            };
+            ctx.data
+                .update_profile(id, upd)
+                .map_err(|e| e.to_string())?;
         } else {
-            Self::new_create()
+            let create = ProfileCreate {
+                name: self.name.clone(),
+                repo_url: self.repo_url.clone(),
+                checkout_root: self.checkout_root.clone(),
+                select: false,
+                arma3_extra_args: self.arma3_extra_args.clone(),
+                arma3_enabled_mods: self.arma3_enabled_mods.clone(),
+            };
+            ctx.data.create_profile(create).map_err(|e| e.to_string())?;
         }
-    }
-}
 
-fn normalize_mods(mods: &mut Vec<String>) {
-    mods.sort();
-    mods.dedup();
+        Ok(())
+    }
 }
 
 impl Screen for ProfileEditor {
     fn id(&self) -> ScreenId {
-        crate::ui::screen::screen_ids::PROFILE_EDITOR
+        screen_ids::FORM
     }
 
     fn name(&self) -> &'static str {
-        "Profile Editor"
+        "Form"
+    }
+
+    fn title(&self) -> &str {
+        if self.id.is_some() {
+            "Edit"
+        } else {
+            "New"
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut UiContext) {
-        let kit = UiKit::from_ctx(ui.ctx());
+        let kit_snapshot = ctx.kit.clone();
+        let kit = &kit_snapshot;
+        let t = &kit.theme;
+        let c = &t.colors;
 
-        ui.vertical(|ui| {
-            ui.heading(if self.id.is_some() {
-                "Edit Profile"
-            } else {
-                "New Profile"
-            });
-            ui.add_space(kit.theme.spacing.md);
-
-            egui::Grid::new("editor_grid")
-                .num_columns(2)
-                .spacing([kit.layout.gap, kit.layout.gap])
-                .show(ui, |ui| {
-                    ui.add(widgets::FieldLabel::new(&kit, "Name"));
-                    if ui.text_edit_singleline(&mut self.name).changed() {
-                        self.dirty = true;
-                    }
-                    ui.end_row();
-
-                    ui.add(widgets::FieldLabel::new(&kit, "Repository URL"));
-                    if ui.text_edit_singleline(&mut self.repo_url).changed() {
-                        self.dirty = true;
-                    }
-                    ui.end_row();
-
-                    ui.add(widgets::FieldLabel::new(&kit, "Checkout Root"));
-                    ui.horizontal(|ui| {
-                        if ui.text_edit_singleline(&mut self.checkout_root).changed() {
-                            self.dirty = true;
-                        }
-                        if ui.button("...").clicked() {
-                            // File picker requires native OS interaction (e.g. via rfd).
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.add(widgets::FieldLabel::new(&kit, "Extra Arguments"));
-                    if ui.text_edit_multiline(&mut self.arma3_extra_args).changed() {
-                        self.dirty = true;
-                    }
-                    ui.end_row();
-                });
-
-            ui.add_space(kit.theme.spacing.lg);
-
-            // --- Mod Management
-            ui.heading("Mods");
-            ui.add_space(kit.theme.spacing.sm);
-
-            let data_snap = ctx.data.snapshot();
-            let current_source = self
-                .id
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| self.repo_url.clone());
-            if current_source != self.last_repo_spec_source && !current_source.is_empty() {
-                self.last_repo_spec_source = current_source;
-                if let Some(id) = &self.id {
-                    ctx.data.request_repo_spec(id);
-                } else {
-                    ctx.data.request_repo_spec_for_url(&self.repo_url);
+        // Ensure selected when editing so downstream intents (if any) align.
+        if !self.ensured_selected {
+            if let Some(id) = &self.id {
+                let snap = ctx.data.snapshot();
+                if snap.selected_id.as_deref() != Some(id.as_str()) {
+                    let _ = ctx.data.select_profile(id);
                 }
             }
+            self.ensured_selected = true;
+        }
 
-            if let Some(repo) = &data_snap.repo_spec {
-                egui::ScrollArea::vertical()
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("Compulsory Mods").strong());
-                        for m in &repo.required_mods {
-                            ui.horizontal(|ui| {
-                                let mut checked = true;
-                                ui.add_enabled(false, egui::Checkbox::new(&mut checked, ""));
-                                ui.label(&m.mod_name);
-                            });
+        // Top bar: back + save.
+        egui::Frame::NONE
+            .fill(c.bg_subtle)
+            .stroke(egui::Stroke::new(1.0, c.border))
+            .inner_margin(egui::Margin::symmetric(10, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if kit::icon_button(ui, kit, Icon::Back, false).clicked() {
+                        ctx.nav.pop();
+                    }
+
+                    ui.add_space(t.spacing.sm);
+
+                    ui.label(
+                        egui::RichText::new(self.title().to_uppercase())
+                            .size(10.0)
+                            .color(c.text_main)
+                            .strong(),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut do_save = false;
+                        if ui.add(AppButton::new(kit, "Save").primary()).clicked() {
+                            do_save = true;
                         }
-
-                        if !repo.optional_mods.is_empty() {
-                            ui.add_space(kit.theme.spacing.md);
-                            ui.label(egui::RichText::new("Optional Mods").strong());
-                            for m in &repo.optional_mods {
-                                let mut checked = self.arma3_enabled_mods.contains(&m.mod_name);
-                                if ui.checkbox(&mut checked, &m.mod_name).changed() {
-                                    if checked {
-                                        self.arma3_enabled_mods.push(m.mod_name.clone());
-                                    } else {
-                                        self.arma3_enabled_mods.retain(|x| x != &m.mod_name);
-                                    }
-                                    self.dirty = true;
+                        if do_save {
+                            match self.submit(ctx) {
+                                Ok(()) => {
+                                    ctx.events.emit(
+                                        ctx.sys.now_millis(),
+                                        crate::ui::events::UiEvent::Toast {
+                                            message: "Saved".into(),
+                                        },
+                                    );
+                                    ctx.nav.pop_to_root();
+                                }
+                                Err(e) => {
+                                    ctx.events.emit(
+                                        ctx.sys.now_millis(),
+                                        crate::ui::events::UiEvent::Error { message: e },
+                                    );
                                 }
                             }
                         }
                     });
-            } else if let Some(err) = &data_snap.repo_spec_error {
-                ui.add(widgets::InlineError::new(&kit, err));
-                if ui.button("Retry").clicked() {
-                    if let Some(id) = &self.id {
-                        ctx.data.request_repo_spec(id);
-                    }
-                }
-            } else {
-                ui.add(widgets::InlineHint::new(&kit, "Fetching mod list…"));
-            }
+                });
+            });
 
-            ui.add_space(kit.theme.spacing.lg);
+        ui.add_space(t.spacing.md);
 
-            ui.horizontal(|ui| {
-                let save_btn = widgets::AppButton::new(&kit, "Save")
-                    .primary()
-                    .enabled(self.dirty && !self.name.is_empty());
-                if ui.add(save_btn).clicked() {
-                    let mut mods = self.arma3_enabled_mods.clone();
-                    normalize_mods(&mut mods);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Frame::NONE
+                    .fill(c.bg_surface)
+                    .stroke(egui::Stroke::new(1.0, c.border))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.add(FieldLabel::new(kit, "Basic"));
+                        ui.add(Divider::new(kit));
+                        ui.add_space(t.spacing.sm);
 
-                    if let Some(id) = &self.id {
-                        let update = ProfileUpdate {
-                            name: Some(self.name.clone()),
-                            repo_url: Some(self.repo_url.clone()),
-                            checkout_root: Some(self.checkout_root.clone()),
-                            select: None,
-                            arma3_extra_args: Some(self.arma3_extra_args.clone()),
-                            arma3_enabled_mods: Some(mods),
-                        };
-                        if let Err(e) = ctx.data.update_profile(id, update) {
-                            ctx.events.emit(crate::ui::events::UiEvent::Error {
-                                message: e.to_string(),
-                            });
+                        ui.add(FieldLabel::new(kit, "Name"));
+                        kit::text_input(ui, kit, &mut self.name, "e.g. Alpha");
+                        ui.add_space(t.spacing.sm);
+
+                        ui.add(FieldLabel::new(kit, "Repo URL"));
+                        kit::text_input(ui, kit, &mut self.repo_url, "https://…");
+                        ui.add_space(t.spacing.sm);
+
+                        ui.add(FieldLabel::new(kit, "Checkout Root"));
+                        kit::text_input(ui, kit, &mut self.checkout_root, "C:\\… or /home/…");
+                    });
+
+                ui.add_space(t.spacing.md);
+
+                egui::Frame::NONE
+                    .fill(c.bg_surface)
+                    .stroke(egui::Stroke::new(1.0, c.border))
+                    .inner_margin(egui::Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.add(FieldLabel::new(kit, "Arma 3"));
+                        ui.add(Divider::new(kit));
+                        ui.add_space(t.spacing.sm);
+
+                        ui.add(FieldLabel::new(kit, "Extra Args"));
+                        kit::text_input(ui, kit, &mut self.arma3_extra_args, "-nosplash …");
+                        ui.add_space(t.spacing.md);
+
+                        ui.add(FieldLabel::new(kit, "Enabled Mods"));
+                        ui.add_space(t.spacing.sm);
+
+                        ui.horizontal(|ui| {
+                            kit::text_input(ui, kit, &mut self.new_mod, "@mymod");
+                            if ui.add(AppButton::new(kit, "Add").ghost()).clicked() {
+                                let v = self.new_mod.trim().to_string();
+                                if !v.is_empty() {
+                                    self.arma3_enabled_mods.push(v);
+                                    self.new_mod.clear();
+                                }
+                            }
+                        });
+
+                        ui.add_space(t.spacing.sm);
+
+                        if self.arma3_enabled_mods.is_empty() {
+                            ui.add(InlineHint::new(kit, "—"));
                         } else {
-                            self.dirty = false;
-                        }
-                    } else {
-                        let create = ProfileCreate {
-                            name: self.name.clone(),
-                            repo_url: self.repo_url.clone(),
-                            checkout_root: self.checkout_root.clone(),
-                            select: true,
-                            arma3_extra_args: self.arma3_extra_args.clone(),
-                            arma3_enabled_mods: mods,
-                        };
-                        match ctx.data.create_profile(create) {
-                            Ok(_) => {
-                                ctx.nav.pop();
-                            }
-                            Err(e) => {
-                                ctx.events.emit(crate::ui::events::UiEvent::Error {
-                                    message: e.to_string(),
+                            for i in (0..self.arma3_enabled_mods.len()).rev() {
+                                let v = self.arma3_enabled_mods[i].clone();
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(v).size(9.0).color(c.text_main));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(AppButton::new(kit, "Remove").danger())
+                                                .clicked()
+                                            {
+                                                self.arma3_enabled_mods.remove(i);
+                                            }
+                                        },
+                                    );
                                 });
-                            }
-                        }
-                    }
-                }
-
-                if ui
-                    .add(widgets::AppButton::new(&kit, "Cancel").ghost())
-                    .clicked()
-                {
-                    ctx.nav.pop();
-                }
-
-                if let Some(id) = &self.id {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(egui::RichText::new("Delete Profile").color(kit.theme.error))
-                            .clicked()
-                        {
-                            if let Err(e) = ctx.data.delete_profile(id) {
-                                ctx.events.emit(crate::ui::events::UiEvent::Error {
-                                    message: e.to_string(),
-                                });
-                            } else {
-                                ctx.nav.pop_to_root();
                             }
                         }
                     });
+
+                ui.add_space(t.spacing.md);
+
+                if let Some(id) = &self.id {
+                    egui::Frame::NONE
+                        .fill(c.bg_surface)
+                        .stroke(egui::Stroke::new(1.0, c.border))
+                        .inner_margin(egui::Margin::same(12))
+                        .show(ui, |ui| {
+                            ui.add(FieldLabel::new(kit, "Danger"));
+                            ui.add(Divider::new(kit));
+                            ui.add_space(t.spacing.sm);
+
+                            ui.add(InlineError::new(kit, "Delete is permanent."));
+
+                            ui.add_space(t.spacing.sm);
+
+                            if ui.add(AppButton::new(kit, "Delete").danger()).clicked() {
+                                match ctx.data.delete_profile(id) {
+                                    Ok(()) => {
+                                        ctx.events.emit(
+                                            ctx.sys.now_millis(),
+                                            crate::ui::events::UiEvent::Toast {
+                                                message: "Deleted".into(),
+                                            },
+                                        );
+                                        ctx.nav.pop_to_root();
+                                    }
+                                    Err(e) => {
+                                        ctx.events.emit(
+                                            ctx.sys.now_millis(),
+                                            crate::ui::events::UiEvent::Error {
+                                                message: e.to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        });
                 }
             });
-        });
     }
 }

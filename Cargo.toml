@@ -24,7 +24,7 @@ fleet_remote_http = { path = "crates/fleet_remote_http" }
 fleet_scan = { path = "crates/fleet_scan" }
 fleet_sync = { path = "crates/fleet_sync" }
 fleet_types = { path = "crates/fleet_types" }
-fleet-ui = { path = "crates/fleet_ui" }
+fleet_ui = { path = "crates/fleet_ui" }
 
 # External dependencies
 anyhow = "1.0"
