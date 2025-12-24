@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/screens/dashboard.rs
 use crate::ui::context::UiContext;
 use crate::ui::kit::UiKit;
 use crate::ui::kit::{AppButton, Divider, FieldLabel, InlineError, InlineHint};

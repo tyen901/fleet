@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/context.rs
 use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
 use std::time::Duration;
 

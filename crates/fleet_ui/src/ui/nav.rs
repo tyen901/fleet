@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/nav.rs
 use crate::ui::screen::Screen;
 
 pub enum NavOp {

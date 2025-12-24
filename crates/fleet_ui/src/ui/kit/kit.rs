@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/kit/kit.rs
 use crate::ui::kit::theme::Theme;
 use eframe::egui;
 

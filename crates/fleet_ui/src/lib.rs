@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/lib.rs
 pub mod ui;
 
 pub fn run() -> Result<(), eframe::Error> {

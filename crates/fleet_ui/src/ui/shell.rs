@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/shell.rs
 use fleet_app::services::open_default_with_recovery;
 use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
 

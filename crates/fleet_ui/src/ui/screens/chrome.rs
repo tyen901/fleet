@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/screens/chrome.rs
 use crate::ui::kit::{self as widgets, UiKit};
 use fleet_app::services::{data::DataService, sync::SyncService, update::UpdateService};
 use fleet_app::UpdateState;

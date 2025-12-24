@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/screens/factory.rs
 use crate::ui::nav::Screens;
 use crate::ui::screen::Screen;
 use crate::ui::screens::{dashboard, editor, hub, settings};

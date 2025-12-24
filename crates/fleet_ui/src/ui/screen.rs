@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/screen.rs
 use crate::ui::context::UiContext;
 use eframe::egui;
 

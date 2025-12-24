@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/screens/editor.rs
 use crate::ui::context::UiContext;
 use crate::ui::kit::{self as widgets, UiKit};
 use crate::ui::screen::{Screen, ScreenId};

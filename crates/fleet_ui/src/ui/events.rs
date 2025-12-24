@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/events.rs
 use parking_lot::Mutex;
 use std::sync::Arc;
 

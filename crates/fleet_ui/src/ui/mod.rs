@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/mod.rs
 pub mod context;
 pub mod events;
 pub mod kit;

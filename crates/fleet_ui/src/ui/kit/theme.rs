@@ -1,4 +1,3 @@
-// crates/fleet_ui/src/ui/kit/theme.rs
 use eframe::egui;
 
 #[derive(Clone, Debug)]
