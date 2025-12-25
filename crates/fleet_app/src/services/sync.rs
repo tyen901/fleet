@@ -154,7 +154,7 @@ impl FleetSyncService {
 
         let remaining = domain.bytes_total.saturating_sub(domain.bytes_done);
         let eta_seconds = if throughput_bps > 0 && remaining > 0 {
-            Some((remaining + throughput_bps - 1) / throughput_bps)
+            Some(remaining.div_ceil(throughput_bps))
         } else {
             None
         };
