@@ -6,11 +6,7 @@ export function useSyncLog(isEnabled: boolean) {
   const cursorRef = useRef(0);
 
   useEffect(() => {
-    if (!isEnabled) {
-      cursorRef.current = 0;
-      setEntries([]);
-      return;
-    }
+    if (!isEnabled) return;
 
     const poll = async () => {
       try {
@@ -19,14 +15,14 @@ export function useSyncLog(isEnabled: boolean) {
           cursorRef.current = page.next_cursor;
           setEntries((prev) => [...prev, ...page.entries].slice(-1000));
         }
-      } catch (err) {
-        console.error(err);
+      } catch (e) {
+        console.error("Log fetch error:", e);
       }
     };
 
-    const id = window.setInterval(poll, 500);
+    const interval = setInterval(poll, 500);
     void poll();
-    return () => window.clearInterval(id);
+    return () => clearInterval(interval);
   }, [isEnabled]);
 
   return entries;

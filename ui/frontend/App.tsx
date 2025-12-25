@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { DataModel, dataSnapshot, syncStart, syncCancel } from "./api";
+import { dataLaunchArma3, syncCancel, syncStart } from "./api";
+import { useDataModel } from "./app/model/useDataModel";
 import { useSyncJob } from "./app/model/useSyncJob";
 import { useSyncLog } from "./app/model/useSyncLog";
 import { useUpdater } from "./app/model/useUpdater";
@@ -7,97 +7,142 @@ import { useUpdater } from "./app/model/useUpdater";
 import "./App.css";
 
 export default function App() {
-  const [data, setData] = useState<DataModel | null>(null);
+  const { data, selectProfile } = useDataModel();
   const sync = useSyncJob();
-  const logs = useSyncLog(Boolean(sync));
+  const logs = useSyncLog(Boolean(sync && !sync.finished));
   const updater = useUpdater();
-  const update = updater.model;
 
-  useEffect(() => {
-    // Initial fetch
-    dataSnapshot().then(setData).catch(console.error);
-    
-  }, []);
+  const activeProfile = data?.profiles.find((p) => p.id === data.selected_id);
+
+  const handleLaunch = async () => {
+    if (activeProfile) {
+      await dataLaunchArma3(activeProfile.id);
+    }
+  };
+
+  const updateModel = updater.state;
+  const updateState = updateModel?.state;
+  const available = updateModel?.available;
 
   return (
-    <div className="container">
-      <h1>Fleet UI</h1>
-      
-      <div className="card">
-        <h2>Profile Data</h2>
-        {data ? (
-          <div>
-            <p><strong>Selected:</strong> {data.selected_id ?? "None"}</p>
-            <ul>
-              {data.profiles.map(p => (
-                <li key={p.id}>{p.name} ({p.repo_url})</li>
-              ))}
-            </ul>
-          </div>
-        ) : (
-          <p>Loading data...</p>
-        )}
-      </div>
+    <div className="shell">
+      <header className="app-header">
+        <h1>FLEET</h1>
+        <div className="version-tag">v0.1.0</div>
+      </header>
 
-      <div className="card">
-        <h2>Sync Status</h2>
-        {sync ? (
-          <div>
-             <div className="status-row">
-               <span>{sync.phase}</span>
-               <span>{sync.percent}%</span>
-             </div>
-             <div className="progress-bar">
-               <div className="fill" style={{ width: `${sync.percent}%` }}></div>
-             </div>
-             <div className="controls">
-               <button onClick={() => syncStart("repair")} disabled={!sync.can_start}>
-                 Repair
-               </button>
-               <button onClick={() => syncCancel()} disabled={!sync.can_cancel}>
-                 Cancel
-               </button>
-             </div>
-             {sync.error && <p className="error">{sync.error}</p>}
-          </div>
-        ) : (
-          <p>Waiting for sync service...</p>
-        )}
-      </div>
-
-      <div className="card">
-        <h2>Update Status</h2>
-        {update ? (
-          <div>
-            <p>State: {JSON.stringify(update.state)}</p>
-            <div className="controls">
-              <button onClick={() => updater.check()}>Check Updates</button>
+      <div className="layout">
+        <aside className="sidebar">
+          <h3>Profiles</h3>
+          <div className="profile-list">
+            {data?.profiles.map((p) => (
               <button
-                onClick={() => updater.apply()}
-                disabled={!update.available}
+                key={p.id}
+                className={p.id === data.selected_id ? "active" : ""}
+                onClick={() => selectProfile(p.id)}
               >
-                Apply Update
+                {p.name}
               </button>
-            </div>
-          </div>
-        ) : (
-          <p>Waiting for update service...</p>
-        )}
-      </div>
-
-      <div className="card">
-        <h2>Sync Logs</h2>
-        {logs.length > 0 ? (
-          <div className="log-window">
-            {logs.map((entry) => (
-              <div key={entry.seq}>
-                <strong>[{entry.level}]</strong> {entry.message}
-              </div>
             ))}
+            {!data && <div className="muted">Loading...</div>}
           </div>
-        ) : (
-          <p>No log entries yet.</p>
-        )}
+        </aside>
+
+        <main className="content">
+          {activeProfile ? (
+            <>
+              <section className="card">
+                <h2>{activeProfile.name}</h2>
+                <div className="kv-grid">
+                  <span className="label">Repository:</span>
+                  <span className="value">{activeProfile.repo_url}</span>
+                  <span className="label">Path:</span>
+                  <span className="value">{activeProfile.checkout_root}</span>
+                </div>
+
+                <div className="actions">
+                  <button
+                    className="primary"
+                    onClick={() => void handleLaunch()}
+                    disabled={!sync?.finished}
+                  >
+                    Launch Arma 3
+                  </button>
+                </div>
+              </section>
+
+              <section className="card">
+                <div className="card-head">
+                  <h2>Sync Status</h2>
+                  <div className="controls">
+                    <button onClick={() => syncStart("repair")} disabled={!sync?.can_start}>
+                      Repair
+                    </button>
+                    <button
+                      onClick={() => syncCancel()}
+                      disabled={!sync?.can_cancel}
+                      className="danger"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+
+                <div className="status-box">
+                  <div className="status-line">{sync?.status_line ?? "Idle"}</div>
+                  <div className="progress-container">
+                    <div
+                      className="progress-bar"
+                      style={{ width: `${sync?.percent ?? 0}%` }}
+                    />
+                    <span className="pct">{sync?.percent ?? 0}%</span>
+                  </div>
+                </div>
+
+                <div className="log-viewer">
+                  {logs.length > 0 ? (
+                    logs.map((entry) => (
+                      <div key={entry.seq} className={`log-line ${entry.level.toLowerCase()}`}>
+                        <span className="seq">[{entry.seq}]</span> {entry.message}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="muted">No recent logs.</div>
+                  )}
+                </div>
+              </section>
+            </>
+          ) : (
+            <div className="empty-state">Select a profile to begin.</div>
+          )}
+
+          <section className="card update-card">
+            <h3>Updates</h3>
+            {updateState ? (
+              <>
+                {updateState.type === "idle" && (
+                  <div className="row">
+                    <span>{updateState.status}</span>
+                    <button onClick={() => updater.check()}>Check</button>
+                    {available && (
+                      <button className="primary" onClick={() => updater.apply()}>
+                        Install {available.TargetFullRelease.Version}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {updateState.type === "downloading" && (
+                  <div className="status-line">Downloading update…</div>
+                )}
+                {updateState.type === "failed" && (
+                  <div className="error">Update failed: {updateState.error}</div>
+                )}
+              </>
+            ) : (
+              <div className="muted">Awaiting updater…</div>
+            )}
+          </section>
+        </main>
       </div>
     </div>
   );

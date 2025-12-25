@@ -1,40 +1,32 @@
 import { useEffect, useRef, useState } from "react";
 import {
   subscribeUpdateState,
-  updateApply,
   updateCheck,
+  updateApply,
   type UpdateModel,
 } from "../../api";
 
 export function useUpdater() {
-  const [model, setModel] = useState<UpdateModel | null>(null);
+  const [state, setState] = useState<UpdateModel | null>(null);
   const latestRef = useRef<UpdateModel | null>(null);
 
   useEffect(() => {
     let raf: number;
-
     const loop = () => {
-      if (latestRef.current) {
-        setModel(latestRef.current);
-      }
+      if (latestRef.current) setState(latestRef.current);
       raf = requestAnimationFrame(loop);
     };
-
     raf = requestAnimationFrame(loop);
 
-    const subscription = subscribeUpdateState((next) => {
+    const sub = subscribeUpdateState((next) => {
       latestRef.current = next;
     });
 
     return () => {
       cancelAnimationFrame(raf);
-      void subscription.then((dispose) => dispose());
+      void sub.then((dispose) => dispose?.());
     };
   }, []);
 
-  return {
-    model,
-    check: updateCheck,
-    apply: updateApply,
-  };
+  return { state, check: updateCheck, apply: updateApply };
 }
