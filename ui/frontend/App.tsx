@@ -75,7 +75,10 @@ export default function App() {
                 <div className="card-head">
                   <h2>Sync Status</h2>
                   <div className="controls">
-                    <button onClick={() => syncStart("repair")} disabled={!sync?.can_start}>
+                    <button
+                      onClick={() => syncStart("repair")}
+                      disabled={!sync?.can_start}
+                    >
                       Repair
                     </button>
                     <button
@@ -89,7 +92,9 @@ export default function App() {
                 </div>
 
                 <div className="status-box">
-                  <div className="status-line">{sync?.status_line ?? "Idle"}</div>
+                  <div className="status-line">
+                    {sync?.status_line ?? "Idle"}
+                  </div>
                   <div className="progress-container">
                     <div
                       className="progress-bar"
@@ -102,8 +107,12 @@ export default function App() {
                 <div className="log-viewer">
                   {logs.length > 0 ? (
                     logs.map((entry) => (
-                      <div key={entry.seq} className={`log-line ${entry.level.toLowerCase()}`}>
-                        <span className="seq">[{entry.seq}]</span> {entry.message}
+                      <div
+                        key={entry.seq}
+                        className={`log-line ${entry.level.toLowerCase()}`}
+                      >
+                        <span className="seq">[{entry.seq}]</span>{" "}
+                        {entry.message}
                       </div>
                     ))
                   ) : (
@@ -125,7 +134,10 @@ export default function App() {
                     <span>{updateState.status}</span>
                     <button onClick={() => updater.check()}>Check</button>
                     {available && (
-                      <button className="primary" onClick={() => updater.apply()}>
+                      <button
+                        className="primary"
+                        onClick={() => updater.apply()}
+                      >
                         Install {available.TargetFullRelease.Version}
                       </button>
                     )}
@@ -135,7 +147,9 @@ export default function App() {
                   <div className="status-line">Downloading update…</div>
                 )}
                 {updateState.type === "failed" && (
-                  <div className="error">Update failed: {updateState.error}</div>
+                  <div className="error">
+                    Update failed: {updateState.error}
+                  </div>
                 )}
               </>
             ) : (

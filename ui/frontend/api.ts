@@ -127,11 +127,16 @@ export async function dataSelectProfile(id: string): Promise<void> {
   return invoke("data_select_profile", { id });
 }
 
-export async function dataCreateProfile(create: ProfileCreate): Promise<string> {
+export async function dataCreateProfile(
+  create: ProfileCreate,
+): Promise<string> {
   return invoke("data_create_profile", { create });
 }
 
-export async function dataUpdateProfile(id: string, update: ProfileUpdate): Promise<void> {
+export async function dataUpdateProfile(
+  id: string,
+  update: ProfileUpdate,
+): Promise<void> {
   return invoke("data_update_profile", { id, update });
 }
 
@@ -147,7 +152,10 @@ export async function syncSnapshot(): Promise<SyncReadModel> {
   return invoke("sync_snapshot");
 }
 
-export async function syncStart(mode: SyncMode, tuning?: Partial<SyncTuning>): Promise<void> {
+export async function syncStart(
+  mode: SyncMode,
+  tuning?: Partial<SyncTuning>,
+): Promise<void> {
   const defaultTuning: SyncTuning = {
     mode,
     full_download_part_threshold: 256,
@@ -157,7 +165,10 @@ export async function syncStart(mode: SyncMode, tuning?: Partial<SyncTuning>): P
     emit_progress: true,
   };
 
-  return invoke("sync_start", { mode, tuning: { ...defaultTuning, ...tuning } });
+  return invoke("sync_start", {
+    mode,
+    tuning: { ...defaultTuning, ...tuning },
+  });
 }
 
 export async function syncCancel(): Promise<void> {
@@ -165,7 +176,7 @@ export async function syncCancel(): Promise<void> {
 }
 
 export async function subscribeSyncState(
-  onMessage: (s: SyncReadModel) => void
+  onMessage: (s: SyncReadModel) => void,
 ): Promise<() => void> {
   const ch = new Channel<SyncReadModel>();
   ch.onmessage = onMessage;
@@ -192,7 +203,7 @@ export async function updateApply(): Promise<void> {
 }
 
 export async function subscribeUpdateState(
-  onState: (s: UpdateModel) => void
+  onState: (s: UpdateModel) => void,
 ): Promise<() => void> {
   const ch = new Channel<UpdateModel>();
   ch.onmessage = onState;

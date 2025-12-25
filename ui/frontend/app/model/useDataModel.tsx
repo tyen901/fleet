@@ -18,7 +18,7 @@ export function useDataModel() {
       await dataSelectProfile(id);
       await refresh();
     },
-    [refresh]
+    [refresh],
   );
 
   return { data, selectProfile, refresh };

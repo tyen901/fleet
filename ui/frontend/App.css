@@ -10,7 +10,10 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
 }
 
 .container {
@@ -26,7 +29,10 @@ body {
   margin-bottom: 20px;
 }
 
-h1, h2 { margin-top: 0; }
+h1,
+h2 {
+  margin-top: 0;
+}
 
 .status-row {
   display: flex;
