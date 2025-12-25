@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::watch;
@@ -23,6 +23,8 @@ pub struct SyncReadModel {
     pub bytes_total: u64,
     pub files_verified: u64,
     pub files_up_to_date: u64,
+    pub throughput_bps: u64,
+    pub eta_seconds: Option<u64>,
     pub error: Option<String>,
     pub finished: bool,
     pub status_line: String,
@@ -43,6 +45,48 @@ pub struct LogPage {
     pub next_cursor: u64,
 }
 
+struct ThroughputTracker {
+    last_bytes: u64,
+    last_instant: Instant,
+    throughput_bps: u64,
+}
+
+impl ThroughputTracker {
+    fn new() -> Self {
+        Self {
+            last_bytes: 0,
+            last_instant: Instant::now(),
+            throughput_bps: 0,
+        }
+    }
+
+    fn update(&mut self, job_running: bool, bytes_done: u64) -> u64 {
+        if !job_running {
+            self.reset(bytes_done);
+            return 0;
+        }
+
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_instant);
+        if elapsed >= Duration::from_millis(100) {
+            let delta = bytes_done.saturating_sub(self.last_bytes);
+            if elapsed.as_secs_f64() > 0.0 {
+                self.throughput_bps = (delta as f64 / elapsed.as_secs_f64()) as u64;
+            }
+            self.last_bytes = bytes_done;
+            self.last_instant = now;
+        }
+
+        self.throughput_bps
+    }
+
+    fn reset(&mut self, bytes_done: u64) {
+        self.last_bytes = bytes_done;
+        self.last_instant = Instant::now();
+        self.throughput_bps = 0;
+    }
+}
+
 pub trait SyncService: Send + Sync {
     fn snapshot(&self) -> SyncReadModel;
     fn subscribe_snapshots(&self) -> watch::Receiver<SyncReadModel>;
@@ -60,6 +104,7 @@ pub struct FleetSyncService {
     log_seq: Arc<AtomicU64>,
     job: Arc<RwLock<Option<crate::app::SyncJob>>>,
     data: Arc<dyn DataService>,
+    throughput: Arc<Mutex<ThroughputTracker>>,
 }
 
 impl FleetSyncService {
@@ -72,7 +117,8 @@ impl FleetSyncService {
         domain.phase = "Idle".into();
         domain.finished = true;
 
-        let snapshot = Self::compose_snapshot(&domain, false);
+        let throughput = Arc::new(Mutex::new(ThroughputTracker::new()));
+        let snapshot = Self::compose_snapshot(&domain, false, &throughput);
         let (snapshot_tx, _) = watch::channel(snapshot);
 
         Arc::new(Self {
@@ -84,16 +130,33 @@ impl FleetSyncService {
             log_seq: Arc::new(AtomicU64::new(0)),
             job: Arc::new(RwLock::new(None)),
             data,
+            throughput,
         })
     }
 
-    fn compose_snapshot(domain: &DomainSyncModel, job_running: bool) -> SyncReadModel {
+    fn compose_snapshot(
+        domain: &DomainSyncModel,
+        job_running: bool,
+        throughput: &Arc<Mutex<ThroughputTracker>>,
+    ) -> SyncReadModel {
         let status_line = if let Some(err) = &domain.error {
             format!("Error: {err}")
         } else if job_running && !domain.finished {
             format!("{} ({}%)", domain.phase, domain.percent)
         } else {
             domain.phase.clone()
+        };
+
+        let throughput_bps = {
+            let mut tracker = throughput.lock().expect("lock poisoned");
+            tracker.update(job_running, domain.bytes_done)
+        };
+
+        let remaining = domain.bytes_total.saturating_sub(domain.bytes_done);
+        let eta_seconds = if throughput_bps > 0 && remaining > 0 {
+            Some((remaining + throughput_bps - 1) / throughput_bps)
+        } else {
+            None
         };
 
         SyncReadModel {
@@ -103,6 +166,8 @@ impl FleetSyncService {
             bytes_total: domain.bytes_total,
             files_verified: domain.files_verified,
             files_up_to_date: domain.files_up_to_date,
+            throughput_bps,
+            eta_seconds,
             error: domain.error.clone(),
             finished: domain.finished,
             status_line,
@@ -114,7 +179,7 @@ impl FleetSyncService {
     fn publish_snapshot(&self) {
         let job_running = self.job.read().expect("lock poisoned").is_some();
         let domain = self.domain.read().expect("lock poisoned").clone();
-        let snapshot = Self::compose_snapshot(&domain, job_running);
+        let snapshot = Self::compose_snapshot(&domain, job_running, &self.throughput);
         let _ = self.snapshot_tx.send(snapshot);
     }
 
@@ -149,6 +214,12 @@ impl FleetSyncService {
             guard.pop_front();
         }
         guard.push_back(entry);
+    }
+
+    fn reset_throughput(&self, starting_bytes: u64) {
+        if let Ok(mut tracker) = self.throughput.lock() {
+            tracker.reset(starting_bytes);
+        }
     }
 }
 
@@ -202,11 +273,13 @@ impl SyncService for FleetSyncService {
             *guard = Some(job);
         }
 
-        {
+        let starting_bytes = {
             let mut domain = self.domain.write().expect("lock poisoned");
             domain.finished = false;
             domain.error = None;
-        }
+            domain.bytes_done
+        };
+        self.reset_throughput(starting_bytes);
 
         self.push_log("info", format!("Sync job started ({mode:?})"));
         self.publish_snapshot();
@@ -217,6 +290,7 @@ impl SyncService for FleetSyncService {
         let log_seq = Arc::clone(&self.log_seq);
         let data = Arc::clone(&self.data);
         let snapshot_tx = self.snapshot_tx.clone();
+        let throughput = Arc::clone(&self.throughput);
 
         self.tokio.spawn(async move {
             match done_rx.await {
@@ -263,7 +337,7 @@ impl SyncService for FleetSyncService {
             let snapshot = {
                 let job_running = false;
                 let dom = domain.read().expect("lock poisoned").clone();
-                FleetSyncService::compose_snapshot(&dom, job_running)
+                FleetSyncService::compose_snapshot(&dom, job_running, &throughput)
             };
             let _ = snapshot_tx.send(snapshot);
         });
@@ -271,6 +345,7 @@ impl SyncService for FleetSyncService {
         let domain = Arc::clone(&self.domain);
         let job_slot = Arc::clone(&self.job);
         let snapshot_tx = self.snapshot_tx.clone();
+        let throughput = Arc::clone(&self.throughput);
 
         self.tokio.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -278,7 +353,7 @@ impl SyncService for FleetSyncService {
                 interval.tick().await;
                 let running = job_slot.read().expect("lock poisoned").is_some();
                 let dom = domain.read().expect("lock poisoned").clone();
-                let snapshot = FleetSyncService::compose_snapshot(&dom, running);
+                let snapshot = FleetSyncService::compose_snapshot(&dom, running, &throughput);
                 if snapshot_tx.send(snapshot).is_err() {
                     break;
                 }

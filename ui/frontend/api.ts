@@ -74,6 +74,8 @@ export type SyncReadModel = {
   bytes_total: number;
   files_verified: number;
   files_up_to_date: number;
+  throughput_bps: number;
+  eta_seconds: number | null;
   error: string | null;
   finished: boolean;
   can_start: boolean;
@@ -189,8 +191,13 @@ export async function updateApply(): Promise<void> {
   return invoke("update_apply");
 }
 
-export async function subscribeUpdateState(onState: (s: UpdateModel) => void): Promise<void> {
+export async function subscribeUpdateState(
+  onState: (s: UpdateModel) => void
+): Promise<() => void> {
   const ch = new Channel<UpdateModel>();
   ch.onmessage = onState;
-  return invoke("subscribe_update_state", { onState: ch });
+  await invoke("subscribe_update_state", { onState: ch });
+  return () => {
+    // Channel cleanup can be added once exposed by Tauri
+  };
 }

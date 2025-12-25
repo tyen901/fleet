@@ -126,13 +126,7 @@ pub async fn run_cli(args: Args, services: FleetServices) -> Result<(), Box<dyn 
         }
 
         Cmd::RegistryPath => {
-            // Use service to be clean
-            // DataService doesn't expose path directly in our trait, 
-            // but we can just use the direct lib for this specific debug command 
-            // or rely on snapshot warning if we really wanted purity.
-            // For back-compat, we call the static method.
-            let app = fleet_app::FleetApp::open_default()?;
-            println!("{}", app.registry_path());
+            println!("{}", data.registry_path()?);
             Ok(())
         }
 
@@ -214,15 +208,12 @@ pub async fn run_cli(args: Args, services: FleetServices) -> Result<(), Box<dyn 
                 }
 
                 ProfileCmd::Init => {
-                    // Logic remains in app for now or we expose init via service
-                    let mut app = fleet_app::FleetApp::open_default()?;
-                    app.init_registry()?;
+                    data.init_registry()?;
                     Ok(())
                 }
 
                 ProfileCmd::Path => {
-                    let app = fleet_app::FleetApp::open_default()?;
-                    println!("{}", app.registry_path());
+                    println!("{}", data.registry_path()?);
                     Ok(())
                 }
             }

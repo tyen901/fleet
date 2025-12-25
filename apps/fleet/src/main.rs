@@ -16,11 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (services, _warning) = services::open_default_with_recovery(handle)?;
 
-    if args.cmd.is_none() || matches!(args.cmd, Some(cli::Cmd::Gui)) {
-        fleet_lib::run(services);
-        Ok(())
-    } else {
-        rt.block_on(async move { cli::run_cli(args, services).await })?;
-        Ok(())
+    if args.cmd.is_some() && !matches!(args.cmd, Some(cli::Cmd::Gui)) {
+        return rt.block_on(async move { cli::run_cli(args, services).await });
     }
+
+    fleet_lib::run(services);
+    Ok(())
 }

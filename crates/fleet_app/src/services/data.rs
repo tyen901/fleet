@@ -111,6 +111,12 @@ pub trait DataService: Send + Sync {
 
     /// Clear the last recorded sync outcome.
     fn clear_last_sync_outcome(&self);
+
+    /// Initialize the registry file (creating it if necessary) and reload services.
+    fn init_registry(&self) -> Result<(), AppError>;
+
+    /// Return the resolved registry path for diagnostics and scripts.
+    fn registry_path(&self) -> Result<String, AppError>;
 }
 
 /// Concrete data service implementation backed by a [`FleetApp`].
@@ -434,6 +440,19 @@ impl DataService for FleetDataService {
         with_model_mut(&self.model, |model| {
             model.last_sync_outcome = None;
         });
+    }
+
+    fn init_registry(&self) -> Result<(), AppError> {
+        {
+            let mut app = self.app.write().expect("lock poisoned");
+            app.init_registry()?;
+        }
+        self.refresh_cached_profiles(true)
+    }
+
+    fn registry_path(&self) -> Result<String, AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        Ok(app.registry_path().to_string())
     }
 }
 

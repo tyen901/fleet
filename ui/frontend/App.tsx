@@ -1,33 +1,22 @@
 import { useEffect, useState } from "react";
-import {
-  DataModel,
-  UpdateModel,
-  dataSnapshot,
-  subscribeUpdateState,
-  syncStart,
-  syncCancel,
-  updateCheck,
-} from "./api";
+import { DataModel, dataSnapshot, syncStart, syncCancel } from "./api";
 import { useSyncJob } from "./app/model/useSyncJob";
+import { useSyncLog } from "./app/model/useSyncLog";
+import { useUpdater } from "./app/model/useUpdater";
 
 import "./App.css";
 
 export default function App() {
   const [data, setData] = useState<DataModel | null>(null);
-  const [update, setUpdate] = useState<UpdateModel | null>(null);
   const sync = useSyncJob();
+  const logs = useSyncLog(Boolean(sync));
+  const updater = useUpdater();
+  const update = updater.model;
 
   useEffect(() => {
     // Initial fetch
     dataSnapshot().then(setData).catch(console.error);
     
-    // Subscriptions
-    const subUpdate = subscribeUpdateState(setUpdate);
-
-    return () => {
-      // Cleanup if subscriptions supported cancellation tokens or similar
-      void subUpdate;
-    };
   }, []);
 
   return (
@@ -81,10 +70,33 @@ export default function App() {
         {update ? (
           <div>
             <p>State: {JSON.stringify(update.state)}</p>
-            <button onClick={() => updateCheck()}>Check Updates</button>
+            <div className="controls">
+              <button onClick={() => updater.check()}>Check Updates</button>
+              <button
+                onClick={() => updater.apply()}
+                disabled={!update.available}
+              >
+                Apply Update
+              </button>
+            </div>
           </div>
         ) : (
           <p>Waiting for update service...</p>
+        )}
+      </div>
+
+      <div className="card">
+        <h2>Sync Logs</h2>
+        {logs.length > 0 ? (
+          <div className="log-window">
+            {logs.map((entry) => (
+              <div key={entry.seq}>
+                <strong>[{entry.level}]</strong> {entry.message}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p>No log entries yet.</p>
         )}
       </div>
     </div>
