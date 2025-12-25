@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use fleet_index::{DesiredState, FleetIndex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -45,7 +45,7 @@ impl From<Profile> for ProfileSpec {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileCreate {
     pub name: String,
     pub repo_url: String,
@@ -55,7 +55,7 @@ pub struct ProfileCreate {
     pub arma3_enabled_mods: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileUpdate {
     pub name: Option<String>,
     pub repo_url: Option<String>,

@@ -10,7 +10,7 @@ use fleet_sync::{
 };
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncMode {
     /// Normal mode: run `fleet_sync::SyncEngine::repair` (patch when efficient, else full).
@@ -23,7 +23,7 @@ pub enum SyncMode {
     Verify,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafeWipePolicy {
     None,
@@ -32,21 +32,21 @@ pub enum SafeWipePolicy {
     ExpectedUnion,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnknownPathPolicy {
     Keep,
     Delete,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnexpectedPathPolicy {
     Prompt,
     Delete,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncTuning {
     pub mode: SyncMode,
 
