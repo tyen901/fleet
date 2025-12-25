@@ -100,6 +100,17 @@ export type UpdateModel = {
   available: UpdateInfo | null;
 };
 
+export type LogEntry = {
+  seq: number;
+  message: string;
+  level: string;
+};
+
+export type LogPage = {
+  entries: LogEntry[];
+  next_cursor: number;
+};
+
 // -------------------- Commands --------------------
 
 export async function dataSnapshot(): Promise<DataModel> {
@@ -151,10 +162,19 @@ export async function syncCancel(): Promise<void> {
   return invoke("sync_cancel");
 }
 
-export async function subscribeSyncState(onState: (s: SyncReadModel) => void): Promise<void> {
+export async function subscribeSyncState(
+  onMessage: (s: SyncReadModel) => void
+): Promise<() => void> {
   const ch = new Channel<SyncReadModel>();
-  ch.onmessage = onState;
-  return invoke("subscribe_sync_state", { onState: ch });
+  ch.onmessage = onMessage;
+  await invoke("subscribe_sync_state", { onSnapshot: ch });
+  return () => {
+    // Channel close support can be added when exposed by Tauri
+  };
+}
+
+export function getSyncLogs(cursor: number): Promise<LogPage> {
+  return invoke("get_sync_logs", { cursor });
 }
 
 export async function updateSnapshot(): Promise<UpdateModel> {

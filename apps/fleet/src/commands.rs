@@ -96,7 +96,7 @@ pub async fn data_launch_arma3(
 pub async fn sync_snapshot(
     state: State<'_, AppState>,
 ) -> Result<fleet_app::SyncReadModel, ApiError> {
-    Ok((*state.services.sync.snapshot()).clone())
+    Ok(state.services.sync.snapshot())
 }
 
 #[tauri::command]
@@ -117,35 +117,31 @@ pub async fn sync_cancel(state: State<'_, AppState>) -> Result<(), ApiError> {
 #[tauri::command]
 pub async fn subscribe_sync_state(
     state: State<'_, AppState>,
-    on_state: Channel<fleet_app::SyncReadModel>,
+    on_snapshot: Channel<fleet_app::SyncReadModel>,
 ) -> Result<(), ApiError> {
-    let sync = state.services.sync.clone();
-
-    let _ = on_state.send((*sync.snapshot()).clone());
+    let mut rx = state.services.sync.subscribe_snapshots();
 
     tauri::async_runtime::spawn(async move {
-        let mut last_ptr: Option<Arc<fleet_app::SyncReadModel>> = None;
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-
         loop {
-            interval.tick().await;
-
-            let current = sync.snapshot();
-            let changed = match last_ptr.as_ref() {
-                Some(last) => !Arc::ptr_eq(last, &current),
-                None => true,
-            };
-
-            if changed {
-                if on_state.send((*current).clone()).is_err() {
-                    break;
-                }
-                last_ptr = Some(current);
+            let snap = rx.borrow().clone();
+            if on_snapshot.send(snap).is_err() {
+                break;
+            }
+            if rx.changed().await.is_err() {
+                break;
             }
         }
     });
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_sync_logs(
+    state: State<'_, AppState>,
+    cursor: u64,
+) -> Result<fleet_app::LogPage, ApiError> {
+    Ok(state.services.sync.log_page(cursor, 100))
 }
 
 #[tauri::command]

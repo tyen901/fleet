@@ -1,34 +1,31 @@
 import { useEffect, useState } from "react";
 import {
   DataModel,
-  SyncReadModel,
   UpdateModel,
   dataSnapshot,
-  subscribeSyncState,
   subscribeUpdateState,
   syncStart,
   syncCancel,
   updateCheck,
 } from "./api";
+import { useSyncJob } from "./app/model/useSyncJob";
 
 import "./App.css";
 
 export default function App() {
   const [data, setData] = useState<DataModel | null>(null);
-  const [sync, setSync] = useState<SyncReadModel | null>(null);
   const [update, setUpdate] = useState<UpdateModel | null>(null);
+  const sync = useSyncJob();
 
   useEffect(() => {
     // Initial fetch
     dataSnapshot().then(setData).catch(console.error);
     
     // Subscriptions
-    const subSync = subscribeSyncState(setSync);
     const subUpdate = subscribeUpdateState(setUpdate);
 
     return () => {
       // Cleanup if subscriptions supported cancellation tokens or similar
-      void subSync;
       void subUpdate;
     };
   }, []);

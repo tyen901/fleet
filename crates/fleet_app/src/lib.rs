@@ -34,5 +34,5 @@ pub use sync::{
 
 // New: export read models (presentation-ready)
 pub use services::data::{AppSettings, DataModel};
-pub use services::sync::SyncReadModel;
+pub use services::sync::{LogEntry, LogPage, SyncReadModel};
 pub use services::update::{UpdateModel, UpdateState};

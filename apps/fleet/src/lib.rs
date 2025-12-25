@@ -24,6 +24,7 @@ pub fn run(services: FleetServices) {
             commands::sync_start,
             commands::sync_cancel,
             commands::subscribe_sync_state,
+            commands::get_sync_logs,
             commands::update_snapshot,
             commands::update_check,
             commands::update_apply,
