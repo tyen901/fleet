@@ -2,18 +2,24 @@
 name = "fleet"
 version = "0.1.0"
 edition = "2021"
+default-run = "fleet"
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
-clap = { workspace = true }
-camino = { workspace = true }
-fleet_app = { workspace = true }
-fleet_ui = { workspace = true }
-serde_json = { workspace = true }
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-opener = "2.0.0"
+serde = { workspace = true }
 tokio = { workspace = true }
+clap = { workspace = true }
 velopack = { workspace = true }
+serde_json = { workspace = true }
+# Internal crates
+fleet_app = { workspace = true }
 
 [dev-dependencies]
-assert_cmd = "2"
+assert_cmd = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 tempfile = "3"

@@ -10,6 +10,8 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use serde::Serialize;
+
 use crate::app::{AppError, FleetApp};
 use crate::services::data::DataService;
 use crate::sync::{SyncMode, SyncTuning};
@@ -17,11 +19,8 @@ use crate::sync::{SyncMode, SyncTuning};
 /// Internal domain model updated by the sync engine.
 type DomainSyncModel = crate::sync::model::SyncModel;
 
-/// Presentation-ready read model for UI + CLI.
-///
-/// This is the authoritative "snapshot" presenters render. It includes derived
-/// meaning and capability flags to avoid duplicating logic across presenters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncReadModel {
     pub phase: String,
     pub percent: u8,

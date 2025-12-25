@@ -8,13 +8,15 @@
 //! update progress events are delivered to the UI via streams or logs.
 
 use std::sync::{Arc, RwLock};
+use serde::Serialize;
 
 use crate::app::AppError;
 
 use velopack::{UpdateCheck as VeloUpdateCheck, UpdateInfo};
 
 /// Discriminated update state as consumed by the UI.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum UpdateState {
     NotConfigured,
     Idle { status: String },
@@ -24,7 +26,8 @@ pub enum UpdateState {
 }
 
 /// Authoritative model for update state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateModel {
     pub state: UpdateState,
     pub available: Option<UpdateInfo>,

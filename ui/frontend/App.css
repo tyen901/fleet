@@ -1,0 +1,76 @@
+:root {
+  --bg: #1a1b1e;
+  --card: #25262b;
+  --text: #c1c2c5;
+  --primary: #228be6;
+  --danger: #fa5252;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.card {
+  background: var(--card);
+  padding: 15px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+h1, h2 { margin-top: 0; }
+
+.status-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.progress-bar {
+  height: 8px;
+  background: #373a40;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 15px;
+}
+
+.fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+}
+
+button {
+  background: #373a40;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #4c4f56;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  color: var(--danger);
+}

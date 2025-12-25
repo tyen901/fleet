@@ -1,0 +1,17 @@
+{
+  "name": "fleet-root",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm -C ui dev",
+    "build": "pnpm -C ui build",
+    "typecheck": "pnpm -C ui typecheck",
+    "lint": "pnpm -C ui lint",
+    "format": "pnpm -C ui format",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

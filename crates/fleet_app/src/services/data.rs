@@ -10,6 +10,8 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use serde::Serialize;
+
 use crate::app::{AppError, FleetApp, ProfileCreate, ProfileSpec, ProfileUpdate};
 use crate::settings::LaunchSettings;
 
@@ -19,11 +21,8 @@ use crate::settings::LaunchSettings;
 /// presenters do not depend directly on internal registry structures.
 pub type AppSettings = LaunchSettings;
 
-/// Presenter-ready authoritative data model (snapshot).
-///
-/// This model is designed for rendering. It may include derived and cached fields
-/// that should persist across frames (e.g., last preview result).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DataModel {
     pub warning: Option<String>,
     pub profiles: Vec<ProfileSpec>,

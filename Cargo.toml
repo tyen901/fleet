@@ -7,7 +7,6 @@ members = [
   "crates/fleet_remote_http",
   "crates/fleet_scan",
   "crates/fleet_types",
-  "crates/fleet_ui",
   "crates/fleet_sync",
   "apps/fleet",
 ]
@@ -24,7 +23,6 @@ fleet_remote_http = { path = "crates/fleet_remote_http" }
 fleet_scan = { path = "crates/fleet_scan" }
 fleet_sync = { path = "crates/fleet_sync" }
 fleet_types = { path = "crates/fleet_types" }
-fleet_ui = { path = "crates/fleet_ui" }
 
 # External dependencies
 anyhow = "1.0"
@@ -68,6 +66,7 @@ md-5 = "0.10"
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
+assert_cmd = "2.0"
 
 atomicwrites = "0.4"
 fs2 = "0.4"
