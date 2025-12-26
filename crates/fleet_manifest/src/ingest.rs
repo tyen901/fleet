@@ -88,7 +88,13 @@ fn validate_parts(
                 ),
             });
         }
-        expected_offset = part.end_exclusive();
+        let end_exclusive = part.offset.checked_add(part.len).ok_or_else(|| {
+            ManifestError::InvalidParts {
+                rel_path: rel_path.to_string(),
+                msg: "part offset+length overflow".into(),
+            }
+        })?;
+        expected_offset = end_exclusive;
         if expected_offset > file_size {
             return Err(ManifestError::InvalidParts {
                 rel_path: rel_path.to_string(),

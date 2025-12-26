@@ -112,4 +112,38 @@ mod tests {
             _ => panic!("unexpected error: {err:?}"),
         }
     }
+
+    #[test]
+    fn ingest_rejects_part_offset_overflow() {
+        let files = vec![sw::FileManifest {
+            path: RelativePathBuf::from("data.bin"),
+            length: u64::MAX,
+            checksum: md5_from_u8(0x04),
+            parts: vec![
+                sw::PartManifest {
+                    start: 0,
+                    length: u64::MAX,
+                    checksum: md5_from_u8(0x05),
+                },
+                sw::PartManifest {
+                    start: u64::MAX,
+                    length: 1,
+                    checksum: md5_from_u8(0x06),
+                },
+            ],
+        }];
+        let manifest = sw::ModManifest {
+            name: "mod5".to_string(),
+            checksum: mod_checksum_from_files(&files),
+            files,
+        };
+        let err = ingest_mod_manifest(manifest).unwrap_err();
+        match err {
+            ManifestError::InvalidParts { rel_path, msg } => {
+                assert_eq!(rel_path, "data.bin");
+                assert!(msg.contains("overflow"), "msg was: {msg}");
+            }
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
 }
