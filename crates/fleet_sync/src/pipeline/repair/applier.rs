@@ -629,8 +629,8 @@ fn verify_target(
     };
 
     if parts.is_empty() {
-        let got = checksummer.hash_file(path)?;
-        if got.as_slice() != target.file_md5.bytes() {
+        let got = crate::md5::vec_to_md5_16(checksummer.hash_file(path)?)?;
+        if got != *target.file_md5.bytes() {
             anyhow::bail!("file checksum mismatch for full-file verification");
         }
         Ok(())

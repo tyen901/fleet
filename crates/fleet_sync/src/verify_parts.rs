@@ -20,7 +20,8 @@ pub fn first_part_mismatch(
         );
     }
     for (got, part) in hashes.iter().zip(parts.iter()) {
-        if got.as_slice() != part.md5.bytes() {
+        let got = crate::md5::slice_to_md5_16(got.as_slice())?;
+        if got != *part.md5.bytes() {
             return Ok(Some((part.offset, part.len)));
         }
     }

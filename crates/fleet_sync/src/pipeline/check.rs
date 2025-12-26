@@ -298,8 +298,8 @@ fn verify_one_file(
 
     match file.parts() {
         None => {
-            let got = checksummer.hash_file(&abs_path)?;
-            if got.as_slice() != file.file_md5().bytes() {
+            let got = crate::md5::vec_to_md5_16(checksummer.hash_file(&abs_path)?)?;
+            if got != *file.file_md5().bytes() {
                 return Ok(VerifyOutcome {
                     mod_id: mod_id.to_string(),
                     rel_path: rel_path.to_string(),
@@ -319,7 +319,8 @@ fn verify_one_file(
             let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
             let got_hashes = checksummer.hash_ranges(&abs_path, &ranges)?;
             for (idx, got) in got_hashes.into_iter().enumerate() {
-                if got.as_slice() != parts[idx].md5.bytes() {
+                let got = crate::md5::vec_to_md5_16(got)?;
+                if got != *parts[idx].md5.bytes() {
                     let p = &parts[idx];
                     return Ok(VerifyOutcome {
                         mod_id: mod_id.to_string(),

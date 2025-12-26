@@ -226,7 +226,12 @@ fn plan_one_file(
                     rel_path: file.rel_path().as_str().to_string(),
                     source: e,
                 })?;
-            if got.as_slice() == file.file_md5().bytes() {
+            let got = crate::md5::vec_to_md5_16(got).map_err(|e| PlanError::Other {
+                mod_id: ctx.mod_id.to_string(),
+                rel_path: file.rel_path().as_str().to_string(),
+                source: e,
+            })?;
+            if got == *file.file_md5().bytes() {
                 return Ok((
                     RepairStrategy::Skip,
                     Vec::new(),
@@ -249,12 +254,30 @@ fn plan_one_file(
                     rel_path: file.rel_path().as_str().to_string(),
                     source: e,
                 })?;
+            if hashes.len() != parts.len() {
+                return Err(PlanError::Other {
+                    mod_id: ctx.mod_id.to_string(),
+                    rel_path: file.rel_path().as_str().to_string(),
+                    source: anyhow::anyhow!(
+                        "checksummer returned {} hashes for {} parts",
+                        hashes.len(),
+                        parts.len()
+                    ),
+                });
+            }
 
             let mut bad_parts = Vec::new();
             let mut bad_bytes = 0u64;
             for (idx, part) in parts.iter().enumerate() {
                 let got = &hashes[idx];
-                if got.as_slice() != part.md5.bytes() {
+                let got = crate::md5::slice_to_md5_16(got.as_slice()).map_err(|e| {
+                    PlanError::Other {
+                        mod_id: ctx.mod_id.to_string(),
+                        rel_path: file.rel_path().as_str().to_string(),
+                        source: e,
+                    }
+                })?;
+                if got != *part.md5.bytes() {
                     bad_bytes = bad_bytes.saturating_add(part.len);
                     bad_parts.push(part.clone());
                 }
