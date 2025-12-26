@@ -1,12 +1,14 @@
 use fleet_index::FleetIndex;
 
 pub(crate) struct FleetIndexStore {
+    _lock: std::fs::File,
     inner: std::sync::Mutex<FleetIndex>,
 }
 
 impl FleetIndexStore {
-    pub(crate) fn new(idx: FleetIndex) -> Self {
+    pub(crate) fn new(lock: std::fs::File, idx: FleetIndex) -> Self {
         Self {
+            _lock: lock,
             inner: std::sync::Mutex::new(idx),
         }
     }

@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use fleet_index::{DesiredState, FleetIndex};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -388,6 +389,25 @@ impl FleetApp {
         let removed = store.update(|reg| Ok(reg.remove(id)))?;
         if removed {
             self.refresh_storage()?;
+            let data_dir = paths::profile_data_dir(id)
+                .map_err(|e| AppError::Maintenance(format!("profile cleanup failed: {e}")))?;
+            let cache_dir = paths::profile_cache_dir(id)
+                .map_err(|e| AppError::Maintenance(format!("profile cleanup failed: {e}")))?;
+
+            std::fs::remove_dir_all(&data_dir).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+            std::fs::remove_dir_all(&cache_dir).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
             Ok(())
         } else {
             Err(AppError::NotFound(format!("profile not found: {id}")))
@@ -407,7 +427,7 @@ impl FleetApp {
             &checkout_root,
             handle,
             tuning,
-            Some(profile.id),
+            profile.id,
             model,
         )
     }
@@ -418,7 +438,7 @@ impl FleetApp {
         checkout_root: &Utf8Path,
         handle: tokio::runtime::Handle,
         tuning: sync::SyncTuning,
-        profile_id_to_update: Option<String>,
+        profile_id: String,
         model: Arc<RwLock<SyncModel>>,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
@@ -471,12 +491,20 @@ impl FleetApp {
                 let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
                 let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
-                let index_id = profile_id_to_update
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string());
-                let idx_dir =
-                    paths::internal_index_dir().map_err(|e| AppError::SyncEngine(e.to_string()))?;
-                let idx_path = idx_dir.join(format!("{index_id}.sqlite"));
+                let idx_path = paths::profile_index_path(&profile_id)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let lock_path = paths::profile_index_lock_path(&profile_id)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let lock_file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(lock_path)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                lock_file
+                    .lock_exclusive()
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let mut idx = FleetIndex::open_or_recover_at_path(&idx_path)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let desired = DesiredState {
@@ -487,19 +515,16 @@ impl FleetApp {
                     state_id,
                     updated_at_unix_s: profiles::unix_now(),
                 };
-                idx.set_desired_state(desired)
+                idx.set_desired_state(desired.clone())
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let _ = idx.gc_not_state(&desired.state_id);
 
-                let store = Arc::new(FleetIndexStore::new(idx));
+                let store = Arc::new(FleetIndexStore::new(lock_file, idx));
                 let engine =
                     fleet_sync::SyncEngine::new(gated_remote, store, Arc::new(Md5Checksummer));
 
-                let staging_id = profile_id_to_update
-                    .clone()
-                    .unwrap_or_else(|| "default".to_string());
-                let staging_root = paths::internal_staging_dir()
-                    .map_err(|e| AppError::SyncEngine(e.to_string()))?
-                    .join(staging_id);
+                let staging_root = paths::profile_staging_dir(&profile_id)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 std::fs::create_dir_all(&staging_root)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
@@ -582,15 +607,13 @@ impl FleetApp {
             .await;
 
             if res.is_ok() {
-                if let Some(profile_id) = profile_id_to_update {
-                    // Update last_sync_unix_s via locked update to avoid clobbering.
-                    let _ = profiles_store.update(|db| {
-                        if let Some(profile) = db.profiles.iter_mut().find(|p| p.id == profile_id) {
-                            profile.last_sync_unix_s = Some(profiles::unix_now());
-                        }
-                        Ok(())
-                    });
-                }
+                // Update last_sync_unix_s via locked update to avoid clobbering.
+                let _ = profiles_store.update(|db| {
+                    if let Some(profile) = db.profiles.iter_mut().find(|p| p.id == profile_id) {
+                        profile.last_sync_unix_s = Some(profiles::unix_now());
+                    }
+                    Ok(())
+                });
             }
 
             let _ = done_tx.send(res);
@@ -643,26 +666,28 @@ impl FleetApp {
 
     pub fn clear_index(&self, profile_id: &str) -> Result<(), AppError> {
         let _profile = self.require_profile(profile_id)?;
-        let idx_dir = paths::internal_index_dir()
+        let idx_path = paths::profile_index_path(profile_id)
             .map_err(|e| AppError::Maintenance(format!("clear index failed: {e}")))?;
-        let path = idx_dir.join(format!("{profile_id}.sqlite"));
-        std::fs::remove_file(&path)
-            .or_else(|e| {
+        for path in [
+            idx_path.clone(),
+            idx_path.with_extension("sqlite-wal"),
+            idx_path.with_extension("sqlite-shm"),
+        ] {
+            std::fs::remove_file(&path).or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     Ok(())
                 } else {
                     Err(e)
                 }
-            })
-            .map_err(|e| AppError::Maintenance(format!("clear index failed: {e}")))?;
+            })?;
+        }
         Ok(())
     }
 
     pub fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
         let _profile = self.require_profile(profile_id)?;
-        let path = paths::internal_staging_dir()
-            .map_err(|e| AppError::Maintenance(format!("clear cache failed: {e}")))?
-            .join(profile_id);
+        let path = paths::profile_staging_dir(profile_id)
+            .map_err(|e| AppError::Maintenance(format!("clear cache failed: {e}")))?;
         std::fs::remove_dir_all(&path)
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

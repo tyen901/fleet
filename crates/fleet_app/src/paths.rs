@@ -1,5 +1,10 @@
 use camino::Utf8PathBuf;
 use directories::ProjectDirs;
+use std::path::PathBuf;
+
+fn project_dirs() -> Option<ProjectDirs> {
+    ProjectDirs::from("io", "fleet-app", "fleet")
+}
 
 pub fn profiles_path() -> Result<Utf8PathBuf, std::io::Error> {
     if let Ok(p) = std::env::var("FLEET_PROFILES") {
@@ -27,24 +32,44 @@ pub fn settings_path() -> Result<Utf8PathBuf, std::io::Error> {
     Ok(Utf8PathBuf::from("settings.json"))
 }
 
-pub fn internal_index_dir() -> Result<std::path::PathBuf, std::io::Error> {
-    if let Some(dirs) = ProjectDirs::from("io", "fleet-app", "fleet") {
-        let p = dirs.data_dir().join("indices");
+pub fn profile_data_dir(profile_id: &str) -> Result<PathBuf, std::io::Error> {
+    let _ = uuid::Uuid::parse_str(profile_id)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid profile id"))?;
+
+    if let Some(dirs) = project_dirs() {
+        let p = dirs.data_dir().join("profiles").join(profile_id);
         std::fs::create_dir_all(&p)?;
         return Ok(p);
     }
-    let p = std::path::PathBuf::from("indices");
+
+    let p = PathBuf::from("profiles").join(profile_id);
     std::fs::create_dir_all(&p)?;
     Ok(p)
 }
 
-pub fn internal_staging_dir() -> Result<std::path::PathBuf, std::io::Error> {
-    if let Some(dirs) = ProjectDirs::from("io", "fleet-app", "fleet") {
-        let p = dirs.cache_dir().join("staging");
+pub fn profile_cache_dir(profile_id: &str) -> Result<PathBuf, std::io::Error> {
+    let _ = uuid::Uuid::parse_str(profile_id)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid profile id"))?;
+
+    if let Some(dirs) = project_dirs() {
+        let p = dirs.cache_dir().join("profiles").join(profile_id);
         std::fs::create_dir_all(&p)?;
         return Ok(p);
     }
-    let p = std::path::PathBuf::from("staging");
+
+    let p = PathBuf::from("cache").join("profiles").join(profile_id);
     std::fs::create_dir_all(&p)?;
     Ok(p)
+}
+
+pub fn profile_index_path(profile_id: &str) -> Result<PathBuf, std::io::Error> {
+    Ok(profile_data_dir(profile_id)?.join("index.sqlite"))
+}
+
+pub fn profile_index_lock_path(profile_id: &str) -> Result<PathBuf, std::io::Error> {
+    Ok(profile_data_dir(profile_id)?.join("index.sqlite.lock"))
+}
+
+pub fn profile_staging_dir(profile_id: &str) -> Result<PathBuf, std::io::Error> {
+    Ok(profile_cache_dir(profile_id)?.join("staging"))
 }
