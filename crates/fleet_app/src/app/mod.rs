@@ -259,10 +259,6 @@ impl FleetApp {
             .ok_or_else(|| AppError::NotFound(format!("profile not found: {profile_id}")))
     }
 
-    fn fleet_dir(checkout_root: &str) -> std::path::PathBuf {
-        std::path::Path::new(checkout_root).join(".fleet")
-    }
-
     pub fn add_profile(&mut self, create: ProfileCreate) -> Result<ProfileSpec, AppError> {
         let normalized_repo = normalize_repo_url(&create.repo_url);
         let checkout_path = Utf8PathBuf::from(&create.checkout_root);
@@ -436,10 +432,14 @@ impl FleetApp {
                 let enabled_hash = fleet_index::enabled_mods_hash(&enabled_sorted);
                 let state_id = fleet_index::state_id(&repo_id, &enabled_hash, &repo_revision);
 
-                let fleet_dir = checkout_root_buf.as_std_path().join(".fleet");
-                std::fs::create_dir_all(&fleet_dir)
+                let index_id = profile_id_to_update
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                let idx_dir = registry::internal_index_dir()
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
-                let idx_path = fleet_dir.join("index.sqlite");
+                let idx_path = idx_dir
+                    .as_std_path()
+                    .join(format!("{index_id}.sqlite"));
                 let mut idx = FleetIndex::open_or_recover_at_path(&idx_path)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let desired = DesiredState {
@@ -457,11 +457,17 @@ impl FleetApp {
                 let engine =
                     fleet_sync::SyncEngine::new(gated_remote, store, Arc::new(Md5Checksummer));
 
+                let staging_root = registry::internal_staging_dir()
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?
+                    .as_std_path()
+                    .to_path_buf();
+
                 let outcome = match tuning.mode {
                     sync::SyncMode::Repair => {
                         let request = fleet_sync::RepairRequest {
                             repo_name,
                             checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                            staging_root: staging_root.clone(),
                             enabled_mods,
                             tuning: tuning.to_repair_tuning(),
                         };
@@ -483,6 +489,7 @@ impl FleetApp {
                         let request = fleet_sync::SyncFreshRequest {
                             repo_name,
                             checkout_root: checkout_root_buf.as_std_path().to_path_buf(),
+                            staging_root: staging_root.clone(),
                             enabled_mods,
                             tuning: tuning.to_sync_fresh_tuning(),
                         };
@@ -595,8 +602,10 @@ impl FleetApp {
     }
 
     pub fn clear_index(&self, profile_id: &str) -> Result<(), AppError> {
-        let profile = self.require_profile(profile_id)?;
-        let path = Self::fleet_dir(&profile.checkout_root).join("index.sqlite");
+        let _profile = self.require_profile(profile_id)?;
+        let idx_dir = registry::internal_index_dir()
+            .map_err(|e| AppError::Maintenance(format!("clear index failed: {e}")))?;
+        let path = idx_dir.as_std_path().join(format!("{profile_id}.sqlite"));
         std::fs::remove_file(&path)
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -610,8 +619,11 @@ impl FleetApp {
     }
 
     pub fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
-        let profile = self.require_profile(profile_id)?;
-        let path = Self::fleet_dir(&profile.checkout_root).join("cache");
+        let _profile = self.require_profile(profile_id)?;
+        let path = registry::internal_staging_dir()
+            .map_err(|e| AppError::Maintenance(format!("clear cache failed: {e}")))?
+            .as_std_path()
+            .to_path_buf();
         std::fs::remove_dir_all(&path)
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

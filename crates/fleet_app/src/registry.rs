@@ -85,6 +85,48 @@ pub fn registry_path() -> Result<Utf8PathBuf, std::io::Error> {
     Ok(Utf8PathBuf::from("registry.json"))
 }
 
+pub fn internal_index_dir() -> Result<Utf8PathBuf, std::io::Error> {
+    if let Some(dirs) = ProjectDirs::from("io", "fleet-app", "fleet") {
+        let p = dirs.data_dir().join("indices");
+        std::fs::create_dir_all(&p)?;
+        return Utf8PathBuf::from_path_buf(p).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Index dir contains invalid UTF-8: {:?}", e),
+            )
+        });
+    }
+    let p = std::path::PathBuf::from("indices");
+    std::fs::create_dir_all(&p)?;
+    Utf8PathBuf::from_path_buf(p).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Index dir contains invalid UTF-8: {:?}", e),
+        )
+    })
+}
+
+pub fn internal_staging_dir() -> Result<Utf8PathBuf, std::io::Error> {
+    if let Some(dirs) = ProjectDirs::from("io", "fleet-app", "fleet") {
+        let p = dirs.cache_dir().join("staging");
+        std::fs::create_dir_all(&p)?;
+        return Utf8PathBuf::from_path_buf(p).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Staging dir contains invalid UTF-8: {:?}", e),
+            )
+        });
+    }
+    let p = std::path::PathBuf::from("staging");
+    std::fs::create_dir_all(&p)?;
+    Utf8PathBuf::from_path_buf(p).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Staging dir contains invalid UTF-8: {:?}", e),
+        )
+    })
+}
+
 pub fn normalize_repo_url(url: &str) -> String {
     let mut s = url.trim().to_string();
     if s.ends_with('/') {
