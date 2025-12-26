@@ -3,7 +3,7 @@ pub mod model;
 pub mod sync_model_sink;
 
 use async_trait::async_trait;
-use fleet_manifest::{FetchRange, ModManifest, RelPath};
+use fleet_manifest_domain::{FetchRange, ModManifest, RelPath};
 use fleet_sync::ports::{RemoteCapabilities, RemoteRepo, RemoteStream};
 use fleet_sync::{
     AbortReason, CheckReport, CheckTuning, RepairOutcome, RepairTuning, SyncFreshOutcome,

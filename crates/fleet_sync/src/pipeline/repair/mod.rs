@@ -424,9 +424,10 @@ mod tests {
         Checksummer, EventSink, RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl,
     };
     use bytes::Bytes;
-    use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
-    use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
-    use relative_path::RelativePathBuf;
+    use fleet_manifest_domain::{
+        file_checksum_from_parts, FetchRange, FileEntry, ManifestPart, ModManifest, PartMd5,
+        RelPath,
+    };
     use std::collections::HashMap;
     use std::fs;
     use std::io::{Read, Seek, SeekFrom};
@@ -592,36 +593,25 @@ mod tests {
         }
     }
 
-    fn make_parts(bytes: &[u8], part_size: usize) -> Vec<sw::PartManifest> {
-        let mut out = Vec::new();
+    fn make_manifest(mod_id: &str, rel_path: &str, bytes: &[u8], part_size: usize) -> ModManifest {
+        let rel_path = RelPath::new(rel_path).unwrap();
+
+        let mut parts: Vec<ManifestPart> = Vec::new();
         let mut offset: u64 = 0;
         while (offset as usize) < bytes.len() {
             let start = offset as usize;
             let end = (start + part_size).min(bytes.len());
-            out.push(sw::PartManifest {
-                start: offset,
-                length: (end - start) as u64,
-                checksum: fleet_types::Md5Digest::from_bytes(md5_bytes(&bytes[start..end])),
+            parts.push(ManifestPart {
+                offset,
+                len: (end - start) as u64,
+                md5: PartMd5::new(md5_bytes(&bytes[start..end])),
             });
             offset += (end - start) as u64;
         }
-        out
-    }
 
-    fn make_manifest(mod_id: &str, rel_path: &str, bytes: &[u8], part_size: usize) -> ModManifest {
-        let files = vec![sw::FileManifest {
-            path: RelativePathBuf::from(rel_path),
-            length: bytes.len() as u64,
-            checksum: fleet_types::Md5Digest::from_bytes(md5_bytes(bytes)),
-            parts: make_parts(bytes, part_size),
-        }];
-        let checksum = mod_checksum_from_files(&files);
-        let swifty = sw::ModManifest {
-            name: mod_id.to_string(),
-            checksum,
-            files,
-        };
-        ingest_mod_manifest(swifty).unwrap()
+        let file_md5 = file_checksum_from_parts(&parts);
+        let entry = FileEntry::new(rel_path, bytes.len() as u64, file_md5, Some(parts)).unwrap();
+        ModManifest::new(mod_id.to_string(), vec![entry]).unwrap()
     }
 
     fn write_local_file(root: &Path, mod_id: &str, rel_path: &str, bytes: &[u8]) -> PathBuf {

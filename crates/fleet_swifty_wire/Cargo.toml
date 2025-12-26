@@ -1,0 +1,11 @@
+[package]
+name = "fleet_swifty_wire"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fleet_manifest_domain = { path = "../fleet_manifest_domain" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }

@@ -33,7 +33,7 @@ pub struct DataModel {
     pub launch_args_preview: Option<String>,
     pub launch_args_error: Option<String>,
 
-    pub repo_spec: Option<fleet_types::RepoSpec>,
+    pub repo_spec: Option<fleet_swifty_wire::model::RepoSpec>,
     pub repo_spec_error: Option<String>,
     pub repo_spec_generation: u64,
 

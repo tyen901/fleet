@@ -1,0 +1,9 @@
+[package]
+name = "fleet_manifest_domain"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = { workspace = true }
+hex = { workspace = true }
+md-5 = { workspace = true }

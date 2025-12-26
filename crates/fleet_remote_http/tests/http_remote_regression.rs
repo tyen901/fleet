@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use fleet_manifest::{FetchRange, RelPath};
+use fleet_manifest_domain::{FetchRange, RelPath};
 use fleet_remote_http::HttpRemote;
 use fleet_sync::RemoteRepo;
 use std::path::PathBuf;
@@ -36,7 +36,6 @@ fn minimal_repo_json(auth: Option<(&str, &str)>) -> String {
             "checksum": "ignored",
             "requiredMods": [],
             "optionalMods": [],
-            "requiredDlcs": [],
             "clientParameters": "",
             "version": "1",
             "servers": []
@@ -47,7 +46,6 @@ fn minimal_repo_json(auth: Option<(&str, &str)>) -> String {
             "checksum": "ignored",
             "requiredMods": [],
             "optionalMods": [],
-            "requiredDlcs": [],
             "clientParameters": "",
             "version": "1",
             "servers": [],
@@ -58,7 +56,7 @@ fn minimal_repo_json(auth: Option<(&str, &str)>) -> String {
 }
 
 #[tokio::test]
-async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
+async fn fetch_mod_manifest_uses_mod_manifest_json() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -76,15 +74,17 @@ async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/@ace_compat_cup_vehicles/manifest.json"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
-
-    let srf_bytes = read_fixture("@ace_compat_cup_vehicles/mod.srf");
-    Mock::given(method("GET"))
-        .and(path("/@ace_compat_cup_vehicles/mod.srf"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(srf_bytes.clone()))
+        .and(path("/@ace_compat_cup_vehicles/mod_manifest.json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                serde_json::json!({
+                    "name": "@ace_compat_cup_vehicles",
+                    "checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                    "files": []
+                })
+                .to_string(),
+            ),
+        )
         .mount(&server)
         .await;
 
@@ -95,18 +95,8 @@ async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
         .await
         .expect("fetch_mod_manifest");
 
-    let parsed = fleet_types::ModManifest::from_bytes(&srf_bytes).expect("parse fixture SRF");
-
-    assert_eq!(
-        mf.mod_id().as_str(),
-        parsed.name,
-        "mod_id mismatch from SRF"
-    );
-    assert_eq!(
-        mf.files().len(),
-        parsed.files.len(),
-        "file count mismatch from SRF"
-    );
+    assert_eq!(mf.mod_id().as_str(), "@ace_compat_cup_vehicles");
+    assert!(mf.files().is_empty());
 
     for f in mf.files() {
         assert_eq!(
@@ -147,17 +137,19 @@ async fn basic_auth_from_repo_json_is_applied_to_manifest_requests() {
         .mount(&server)
         .await;
 
-    let manifest = serde_json::json!({
-        "Name": "@ace",
-        "Checksum": "D41D8CD98F00B204E9800998ECF8427E",
-        "Files": []
-    })
-    .to_string();
-
     Mock::given(method("GET"))
-        .and(path("/@ace/mod.srf"))
+        .and(path("/@ace/mod_manifest.json"))
         .and(header("authorization", expected_auth.as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_string(manifest))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                serde_json::json!({
+                    "name": "@ace",
+                    "checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                    "files": []
+                })
+                .to_string(),
+            ),
+        )
         .mount(&server)
         .await;
 

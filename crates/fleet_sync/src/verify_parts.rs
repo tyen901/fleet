@@ -1,6 +1,6 @@
 use crate::ports::Checksummer;
 use anyhow::Result;
-use fleet_manifest::ManifestPart;
+use fleet_manifest_domain::ManifestPart;
 
 pub fn first_part_mismatch(
     path: &std::path::Path,

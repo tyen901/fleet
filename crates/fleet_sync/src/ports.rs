@@ -5,7 +5,7 @@ use crate::model::{
     TimestampNs, VerifiedState,
 };
 use async_trait::async_trait;
-use fleet_manifest::{FetchRange, ModManifest, RelPath};
+use fleet_manifest_domain::{FetchRange, ModManifest, RelPath};
 
 pub trait Checksummer: Send + Sync {
     fn algorithm_name(&self) -> &str;

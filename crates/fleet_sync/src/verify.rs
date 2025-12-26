@@ -1,6 +1,6 @@
 use crate::ports::Checksummer;
 use anyhow::Result;
-use fleet_manifest::ManifestPart;
+use fleet_manifest_domain::ManifestPart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct VerifyMismatch {

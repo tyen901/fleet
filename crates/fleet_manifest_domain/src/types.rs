@@ -32,11 +32,15 @@ impl RelPath {
     }
 
     pub fn new(raw: &str) -> Result<Self, ManifestError> {
-        if raw.trim().is_empty() {
+        let raw = raw.trim();
+        if raw.is_empty() {
             return Err(ManifestError::InvalidRelPath("empty".into()));
         }
-
-        let raw = raw.replace('\\', "/");
+        if raw.contains('\\') {
+            return Err(ManifestError::InvalidRelPath(
+                "backslashes are not allowed; use forward slashes".into(),
+            ));
+        }
         if raw.starts_with('/') {
             return Err(ManifestError::InvalidRelPath(format!(
                 "absolute path: {raw}"
@@ -46,7 +50,7 @@ impl RelPath {
             return Err(ManifestError::InvalidRelPath("contains NUL".into()));
         }
 
-        let p = Path::new(&raw);
+        let p = Path::new(raw);
         let mut out = Vec::<Cow<'_, str>>::new();
 
         for comp in p.components() {

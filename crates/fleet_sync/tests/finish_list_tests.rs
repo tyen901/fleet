@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
-use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_manifest_domain::{
+    file_checksum_from_parts, FetchRange, FileEntry, ManifestPart, ModManifest, PartMd5, RelPath,
+};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, EngineError, FileStateDelete, FileStateUpsert, RepairRequest,
     RepairTuning, StoreError, SyncFreshRequest, SyncFreshTuning, TimestampNs, UnknownPathPolicy,
@@ -15,8 +17,6 @@ use fleet_sync::ports::{
     SyncEvent,
 };
 use fleet_sync::SyncEngine;
-use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
-use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -151,54 +151,37 @@ impl fleet_sync::ports::Checksummer for Md5Checksummer {
     }
 }
 
-fn make_parts(bytes: &[u8], part_size: usize) -> Vec<sw::PartManifest> {
-    let mut out = Vec::new();
-    let mut off = 0usize;
-    while off < bytes.len() {
-        let end = (off + part_size).min(bytes.len());
-        out.push(sw::PartManifest {
-            length: (end - off) as u64,
-            start: off as u64,
-            checksum: fleet_types::Md5Digest::from_bytes(md5::compute(&bytes[off..end]).0),
-        });
-        off = end;
-    }
-    out
-}
-
 fn build_manifest(
     mod_id: &str,
     rel_path: &str,
     bytes: &[u8],
     part_size: Option<usize>,
 ) -> ModManifest {
-    let parts = part_size
-        .map(|sz| make_parts(bytes, sz))
-        .unwrap_or_default();
-    let files = vec![sw::FileManifest {
-        path: RelativePathBuf::from(rel_path),
-        length: bytes.len() as u64,
-        checksum: fleet_types::Md5Digest::from_bytes(md5::compute(bytes).0),
-        parts,
-    }];
-    let checksum = mod_checksum_from_files(&files);
-    let swifty = sw::ModManifest {
-        name: mod_id.to_string(),
-        checksum,
-        files,
-    };
-    ingest_mod_manifest(swifty).unwrap()
+    let rel_path = RelPath::new(rel_path).unwrap();
+    let mut parts: Vec<ManifestPart> = Vec::new();
+
+    if !bytes.is_empty() {
+        let part_size = part_size.unwrap_or(bytes.len());
+        let mut off = 0usize;
+        while off < bytes.len() {
+            let end = (off + part_size).min(bytes.len());
+            parts.push(ManifestPart {
+                offset: off as u64,
+                len: (end - off) as u64,
+                md5: PartMd5::new(md5::compute(&bytes[off..end]).0),
+            });
+            off = end;
+        }
+    }
+
+    let file_md5 = file_checksum_from_parts(&parts);
+    let parts_opt = if bytes.is_empty() { None } else { Some(parts) };
+    let entry = FileEntry::new(rel_path, bytes.len() as u64, file_md5, parts_opt).unwrap();
+    ModManifest::new(mod_id.to_string(), vec![entry]).unwrap()
 }
 
 fn build_empty_manifest(mod_id: &str) -> ModManifest {
-    let files: Vec<sw::FileManifest> = Vec::new();
-    let checksum = mod_checksum_from_files(&files);
-    let swifty = sw::ModManifest {
-        name: mod_id.to_string(),
-        checksum,
-        files,
-    };
-    ingest_mod_manifest(swifty).unwrap()
+    ModManifest::new(mod_id.to_string(), Vec::new()).unwrap()
 }
 
 fn setup_index(enabled_mods: &[String]) -> FleetIndex {

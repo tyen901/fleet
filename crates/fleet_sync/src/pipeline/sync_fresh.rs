@@ -15,7 +15,7 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::unexpected::Cancelled;
 use crate::unexpected::UnexpectedOpts;
 use crate::util::now_ns;
-use fleet_manifest::ModManifest;
+use fleet_manifest_domain::ModManifest;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(

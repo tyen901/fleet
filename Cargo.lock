@@ -1225,10 +1225,10 @@ dependencies = [
  "camino",
  "directories",
  "fleet_index",
- "fleet_manifest",
+ "fleet_manifest_domain",
  "fleet_remote_http",
+ "fleet_swifty_wire",
  "fleet_sync",
- "fleet_types",
  "fs2",
  "md5",
  "open",
@@ -1264,12 +1264,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet_manifest"
+name = "fleet_manifest_domain"
 version = "0.1.0"
 dependencies = [
- "fleet_types",
- "relative-path",
- "thiserror 1.0.69",
+ "hex",
+ "md-5",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1279,9 +1279,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "fleet_manifest",
+ "fleet_manifest_domain",
+ "fleet_swifty_wire",
  "fleet_sync",
- "fleet_types",
  "percent-encoding",
  "reqwest",
  "serde_json",
@@ -1295,10 +1295,21 @@ name = "fleet_scan"
 version = "0.1.0"
 dependencies = [
  "camino",
- "fleet_manifest",
- "md5",
+ "fleet_manifest_domain",
+ "md-5",
  "thiserror 2.0.17",
  "walkdir",
+]
+
+[[package]]
+name = "fleet_swifty_wire"
+version = "0.1.0"
+dependencies = [
+ "fleet_manifest_domain",
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1311,11 +1322,10 @@ dependencies = [
  "bytes",
  "fleet_fs",
  "fleet_index",
- "fleet_manifest",
- "fleet_types",
+ "fleet_manifest_domain",
+ "fleet_swifty_wire",
  "futures",
  "md5",
- "relative-path",
  "serde",
  "tempfile",
  "thiserror 2.0.17",
@@ -1323,19 +1333,6 @@ dependencies = [
  "tokio-util",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "fleet_types"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "md-5",
- "relative-path",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -3584,15 +3581,6 @@ name = "regex-syntax"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a2d987857b319362043e95f5353c0535c1f58eec5336fdfcf626430af7def58"
-
-[[package]]
-name = "relative-path"
-version = "1.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "reqwest"

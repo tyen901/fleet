@@ -1,7 +1,7 @@
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::model::{FileState, RepairTuning};
 use crate::ports::Checksummer;
-use fleet_manifest::{FetchRange, FileEntry, FileMd5, ManifestPart, ModManifest};
+use fleet_manifest_domain::{FetchRange, FileEntry, FileMd5, ManifestPart, ModManifest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ pub(crate) struct Plan {
 #[derive(Clone, Debug)]
 pub(crate) struct PlannedOp {
     pub(crate) mod_id: String,
-    pub(crate) rel_path: fleet_manifest::RelPath,
+    pub(crate) rel_path: fleet_manifest_domain::RelPath,
     pub(crate) abs_path: PathBuf,
     pub(crate) target: FileTarget,
     #[allow(dead_code)]

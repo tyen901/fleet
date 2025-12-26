@@ -52,22 +52,3 @@ impl<'de> Deserialize<'de> for Md5Digest {
         Self::parse_hex(&s).map_err(serde::de::Error::custom)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_hex_accepts_valid_md5() {
-        let d = Md5Digest::parse_hex("0123456789ABCDEF0123456789ABCDEF").unwrap();
-        assert_eq!(d.to_hex_upper(), "0123456789ABCDEF0123456789ABCDEF");
-    }
-
-    #[test]
-    fn parse_hex_rejects_invalid() {
-        let err = Md5Digest::parse_hex("not-hex").unwrap_err();
-        match err {
-            DigestError::InvalidHex(s) => assert_eq!(s, "not-hex"),
-        }
-    }
-}

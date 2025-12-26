@@ -4,7 +4,7 @@ use crate::model::FileState;
 use crate::model::StoreError;
 use crate::ports::{RemoteCapabilities, RemoteRepo, StateStore};
 use anyhow::Context;
-use fleet_manifest::ModManifest;
+use fleet_manifest_domain::ModManifest;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Semaphore;

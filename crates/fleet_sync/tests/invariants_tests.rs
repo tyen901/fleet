@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
-use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_manifest_domain::{
+    file_checksum_from_parts, FetchRange, FileEntry, ManifestPart, ModManifest, PartMd5, RelPath,
+};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
     StoreError, TimestampNs,
@@ -15,8 +17,6 @@ use fleet_sync::ports::{
     RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
 };
 use fleet_sync::SyncEngine;
-use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
-use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 
 struct VecStream {
@@ -308,19 +308,15 @@ impl StateStore for IndexStore {
 }
 
 fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8]) -> ModManifest {
-    let files = vec![sw::FileManifest {
-        path: RelativePathBuf::from(rel_path),
-        length: bytes.len() as u64,
-        checksum: fleet_types::Md5Digest::from_bytes(md5::compute(bytes).0),
-        parts: Vec::new(),
+    let rel_path = RelPath::new(rel_path).unwrap();
+    let parts = vec![ManifestPart {
+        offset: 0,
+        len: bytes.len() as u64,
+        md5: PartMd5::new(md5::compute(bytes).0),
     }];
-    let checksum = mod_checksum_from_files(&files);
-    let swifty = sw::ModManifest {
-        name: mod_id.to_string(),
-        checksum,
-        files,
-    };
-    ingest_mod_manifest(swifty).unwrap()
+    let file_md5 = file_checksum_from_parts(&parts);
+    let entry = FileEntry::new(rel_path, bytes.len() as u64, file_md5, Some(parts)).unwrap();
+    ModManifest::new(mod_id.to_string(), vec![entry]).unwrap()
 }
 
 #[tokio::test]

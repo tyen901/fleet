@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::model::DesiredState;
 use crate::ports::{EventSink, RemoteRepo, StateStore, SyncEvent};
-use fleet_manifest::ModManifest;
+use fleet_manifest_domain::ModManifest;
 use tokio_util::sync::CancellationToken;
 
 use super::{baseline_digest_hex, fetch_all, validate_enabled_mods, FetchResult};

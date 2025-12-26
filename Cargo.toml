@@ -6,8 +6,8 @@ members = [
   "crates/fleet_index",
   "crates/fleet_remote_http",
   "crates/fleet_scan",
-  "crates/fleet_types",
-  "crates/fleet_manifest",
+  "crates/fleet_swifty_wire",
+  "crates/fleet_manifest_domain",
   "crates/fleet_sync",
   "apps/fleet",
 ]
@@ -23,8 +23,8 @@ fleet_index = { path = "crates/fleet_index" }
 fleet_remote_http = { path = "crates/fleet_remote_http" }
 fleet_scan = { path = "crates/fleet_scan" }
 fleet_sync = { path = "crates/fleet_sync" }
-fleet_types = { path = "crates/fleet_types" }
-fleet_manifest = { path = "crates/fleet_manifest" }
+fleet_swifty_wire = { path = "crates/fleet_swifty_wire" }
+fleet_manifest_domain = { path = "crates/fleet_manifest_domain" }
 
 # External dependencies
 anyhow = "1.0"

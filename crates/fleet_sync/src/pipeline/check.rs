@@ -10,7 +10,7 @@ use crate::model::{
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::{file_mtime_ns, now_ns};
-use fleet_manifest::{FileEntry, ModManifest};
+use fleet_manifest_domain::{FileEntry, ModManifest};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 

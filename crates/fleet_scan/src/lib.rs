@@ -1,5 +1,8 @@
 use camino::Utf8Path;
-use fleet_manifest::{FileEntry, FileMd5, ManifestPart, ModManifest, PartMd5, RelPath};
+use fleet_manifest_domain::{
+    file_checksum_from_parts, FileEntry, ManifestPart, ModId, ModManifest, PartMd5, RelPath,
+};
+use md5::{Digest, Md5};
 use thiserror::Error;
 
 const FILE_PART_LEN: u64 = 5_000_000;
@@ -16,25 +19,7 @@ pub enum ScanError {
     #[error("invalid path: {0}")]
     InvalidPath(String),
     #[error("invalid manifest: {0}")]
-    InvalidManifest(#[from] fleet_manifest::ManifestError),
-}
-
-fn hex_upper_16(bytes: &[u8; 16]) -> [u8; 32] {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = [0u8; 32];
-    for (i, b) in bytes.iter().copied().enumerate() {
-        out[i * 2] = HEX[(b >> 4) as usize];
-        out[i * 2 + 1] = HEX[(b & 0x0F) as usize];
-    }
-    out
-}
-
-fn file_md5_from_parts(parts: &[ManifestPart]) -> FileMd5 {
-    let mut ctx = md5::Context::new();
-    for p in parts {
-        ctx.consume(hex_upper_16(p.md5.bytes()));
-    }
-    FileMd5::new(ctx.compute().0)
+    InvalidManifest(#[from] fleet_manifest_domain::ManifestError),
 }
 
 fn hash_next_at(
@@ -45,7 +30,7 @@ fn hash_next_at(
     use std::io::{Read, Seek};
 
     reader.seek(std::io::SeekFrom::Start(start))?;
-    let mut ctx = md5::Context::new();
+    let mut hasher = Md5::new();
     let mut remaining = len;
     let mut buf = vec![0u8; 1024 * 1024];
 
@@ -55,11 +40,11 @@ fn hash_next_at(
         if n == 0 {
             return Err(ScanError::InvalidPbo("short read while hashing"));
         }
-        ctx.consume(&buf[..n]);
+        hasher.update(&buf[..n]);
         remaining -= n as u64;
     }
 
-    Ok(PartMd5::new(ctx.compute().0))
+    Ok(PartMd5::new(hasher.finalize().into()))
 }
 
 fn scan_regular_file(
@@ -70,7 +55,7 @@ fn scan_regular_file(
     let rel = RelPath::new(&rel_str)?;
 
     if size == 0 {
-        let file_md5 = file_md5_from_parts(&[]);
+        let file_md5 = file_checksum_from_parts(&[]);
         return Ok(FileEntry::new(rel, size, file_md5, None)?);
     }
 
@@ -88,7 +73,7 @@ fn scan_regular_file(
         offset += len;
     }
 
-    let file_md5 = file_md5_from_parts(&parts);
+    let file_md5 = file_checksum_from_parts(&parts);
     Ok(FileEntry::new(rel, size, file_md5, Some(parts))?)
 }
 
@@ -104,7 +89,7 @@ fn scan_pbo_file(
     let f = std::fs::File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut reader = std::io::BufReader::new(f);
-    let ranges = fleet_manifest::arma::pbo::partition_pbo(&mut reader, file_len)
+    let ranges = fleet_manifest_domain::arma::pbo::partition_pbo(&mut reader, file_len)
         .map_err(|_| ScanError::InvalidPbo("failed to partition pbo"))?;
 
     reader.seek(std::io::SeekFrom::Start(0))?;
@@ -118,22 +103,23 @@ fn scan_pbo_file(
         });
     }
 
-    let file_md5 = file_md5_from_parts(&parts);
+    let file_md5 = file_checksum_from_parts(&parts);
     Ok(FileEntry::new(rel, file_len, file_md5, Some(parts))?)
 }
 
-/// Scan a mod directory into the canonical manifest model (`fleet_manifest::ModManifest`).
+/// Scan a mod directory into the canonical manifest model (`fleet_manifest_domain::ModManifest`).
 ///
 /// Notes:
 /// - Paths are normalized to forward slashes.
 /// - `.fleet/` and temporary fleet files are excluded.
-/// - `mod.srf` is excluded.
+/// - `mod_manifest.json` is excluded.
 /// - PBO partitioning follows your existing rules (header, skip-first-entry, tail).
 pub fn scan_mod(
     mod_root: &Utf8Path,
     mod_id: &str,
     _opts: ScanOptions,
 ) -> Result<ModManifest, ScanError> {
+    let _ = ModId::new(mod_id.to_string())?;
     let mut files: Vec<FileEntry> = Vec::new();
 
     for entry in walkdir::WalkDir::new(mod_root)
@@ -156,7 +142,7 @@ pub fn scan_mod(
         if rel_str.starts_with(".fleet/")
             || file_name.starts_with(".fleet_tmp_")
             || file_name.starts_with(".fleet_stage_")
-            || file_name.eq_ignore_ascii_case("mod.srf")
+            || file_name.eq_ignore_ascii_case("mod_manifest.json")
         {
             continue;
         }

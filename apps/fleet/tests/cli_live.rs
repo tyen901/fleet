@@ -19,45 +19,74 @@ fn base_url() -> String {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
 struct RepoSpec {
     repo_name: String,
+    checksum: String,
     required_mods: Vec<RepoMod>,
+    optional_mods: Vec<RepoMod>,
+    client_parameters: String,
     repo_basic_authentication: Option<RepoBasicAuth>,
     version: String,
+    #[serde(default)]
+    servers: Vec<RepoServer>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
 struct RepoMod {
     mod_name: String,
+    #[serde(rename = "checkSum")]
+    checksum: String,
     enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
 struct RepoBasicAuth {
     username: String,
     password: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModManifest {
-    #[serde(alias = "Name")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+struct RepoServer {
     name: String,
-    #[serde(alias = "Files")]
+    address: String,
+    port: u16,
+    password: String,
+    battle_eye: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+struct ModManifest {
+    name: String,
+    checksum: String,
     files: Vec<FileManifest>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
 struct FileManifest {
-    #[serde(alias = "Path")]
     path: String,
-    #[serde(alias = "Length")]
     length: u64,
-    #[serde(alias = "Checksum")]
+    checksum: String,
+    parts: Vec<PartManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(dead_code)]
+struct PartManifest {
+    start: u64,
+    length: u64,
     checksum: String,
 }
 
@@ -215,8 +244,7 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> T {
         .unwrap();
 
     let bytes = resp.bytes().await.unwrap();
-    let bytes = strip_utf8_bom(&bytes);
-    serde_json::from_slice::<T>(bytes).unwrap()
+    serde_json::from_slice::<T>(&bytes).unwrap()
 }
 
 async fn fetch_json_opt<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
@@ -241,25 +269,15 @@ async fn fetch_json_opt<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
     }
     let resp = resp.error_for_status().ok()?;
     let bytes = resp.bytes().await.ok()?;
-    let bytes = strip_utf8_bom(&bytes);
-    serde_json::from_slice::<T>(bytes).ok()
-}
-
-fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
-    const BOM: &[u8] = b"\xEF\xBB\xBF";
-    bytes.strip_prefix(BOM).unwrap_or(bytes)
+    serde_json::from_slice::<T>(&bytes).ok()
 }
 
 async fn fetch_manifest_for(mod_name: &str) -> ModManifest {
     let enc_mod = urlencoding::encode(mod_name);
-    let url_primary = format!("{}{}/manifest.json", base_url(), enc_mod);
-    if let Some(m) = fetch_json_opt(&url_primary).await {
-        return m;
-    }
-    let url_fallback = format!("{}{}/mod.srf", base_url(), enc_mod);
-    fetch_json_opt(&url_fallback)
+    let url = format!("{}{}/mod_manifest.json", base_url(), enc_mod);
+    fetch_json_opt(&url)
         .await
-        .unwrap_or_else(|| panic!("missing manifest for {mod_name}: {url_fallback}"))
+        .unwrap_or_else(|| panic!("missing manifest for {mod_name}: {url}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

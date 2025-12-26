@@ -4,7 +4,7 @@ use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::ports::StateStore;
 use crate::util::file_mtime_ns;
 use anyhow::Result;
-use fleet_manifest::ModManifest;
+use fleet_manifest_domain::ModManifest;
 use std::collections::HashMap;
 use std::path::Path;
 

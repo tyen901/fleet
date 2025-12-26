@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_manifest_domain::{FetchRange, ModManifest, RelPath};
+use fleet_swifty_wire::model::RepoSpec;
 use fleet_sync::ports::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
-use fleet_types::{ModManifest as MtModManifest, RepoSpec};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::header::{HeaderValue, RANGE};
 use std::sync::Mutex;
@@ -44,7 +44,7 @@ pub struct HttpRemote {
 struct State {
     caps: Option<RemoteCapabilities>,
     basic_auth: Option<(String, String)>,
-    repo_spec: Option<fleet_types::RepoSpec>,
+    repo_spec: Option<RepoSpec>,
 }
 
 impl HttpRemote {
@@ -110,7 +110,8 @@ impl HttpRemote {
             .context("repo.json status")?;
 
         let bytes = resp.bytes().await.context("read repo.json body")?;
-        let repo = RepoSpec::from_bytes(&bytes)?;
+        let repo = fleet_swifty_wire::parse_repo_spec_json(&bytes)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
         let basic_auth = repo
             .repo_basic_authentication
@@ -124,7 +125,7 @@ impl HttpRemote {
         Ok(())
     }
 
-    pub async fn fetch_repo_spec(&self) -> Result<fleet_types::RepoSpec> {
+    pub async fn fetch_repo_spec(&self) -> Result<RepoSpec> {
         self.ensure_repo_loaded().await?;
         Ok(self
             .state
@@ -159,12 +160,13 @@ impl RemoteRepo for HttpRemote {
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
-        let srf_url = self.url_join(&format!("{}/mod.srf", mod_id))?;
-        let req = apply_basic_auth(self.client.get(srf_url), &auth);
+        let url = self.url_join(&format!("{}/mod_manifest.json", mod_id))?;
+        let req = apply_basic_auth(self.client.get(url), &auth);
         let res = req.send().await?.error_for_status()?;
         let bytes = res.bytes().await?;
-        let swifty = MtModManifest::from_bytes(&bytes)?;
-        Ok(ingest_mod_manifest(swifty)?)
+        let wire = fleet_swifty_wire::parse_mod_manifest_json(&bytes)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(fleet_swifty_wire::ingest_mod_manifest(wire)?)
     }
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> Result<RemoteStream> {

@@ -7,8 +7,8 @@ edition = "2021"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-fleet_types = { workspace = true }
-fleet_manifest = { workspace = true, features = ["swifty"] }
+fleet_manifest_domain = { workspace = true }
+fleet_swifty_wire = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "rustls-tls"] }
 fleet_sync = { workspace = true }
 tokio = { workspace = true }

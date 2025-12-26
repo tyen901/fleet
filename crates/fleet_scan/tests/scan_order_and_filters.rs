@@ -10,7 +10,7 @@ fn fixture_root() -> PathBuf {
 }
 
 #[test]
-fn scan_mod_is_deterministic_and_orders_by_rel_path_and_excludes_mod_srf() {
+fn scan_mod_is_deterministic_and_orders_by_rel_path_and_excludes_mod_manifest_json() {
     let mod_root = fixture_root().join("@ace_compat_cup_vehicles");
     let mod_root_utf8 =
         Utf8PathBuf::from_path_buf(mod_root.clone()).expect("fixture path should be utf8");
@@ -28,8 +28,10 @@ fn scan_mod_is_deterministic_and_orders_by_rel_path_and_excludes_mod_srf() {
         .map(|f| f.rel_path().as_str().to_string())
         .collect();
     assert!(
-        !paths.iter().any(|p| p.eq_ignore_ascii_case("mod.srf")),
-        "scan should exclude mod.srf"
+        !paths
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case("mod_manifest.json")),
+        "scan should exclude mod_manifest.json"
     );
 
     let mut sorted = paths.clone();
