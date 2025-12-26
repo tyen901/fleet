@@ -5,7 +5,7 @@ use crate::{
     model::{FileEntry, ManifestPart, ModManifest},
     types::{FileMd5, ModId, PartMd5, RelPath},
 };
-use fleet_types::swifty::model as sw;
+use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 
 fn file_md5_from_swifty(d: &fleet_types::Md5Digest) -> FileMd5 {
     FileMd5::new(*d.as_bytes())
@@ -17,6 +17,12 @@ fn part_md5_from_swifty(d: &fleet_types::Md5Digest) -> PartMd5 {
 
 pub fn ingest_mod_manifest(swifty: sw::ModManifest) -> Result<ModManifest, ManifestError> {
     let mod_id = ModId::new(swifty.name)?;
+    let checksum = mod_checksum_from_files(&swifty.files);
+    if checksum != swifty.checksum {
+        return Err(ManifestError::InvalidManifest(
+            "mod checksum mismatch".into(),
+        ));
+    }
 
     let mut files_by_path: BTreeMap<RelPath, FileEntry> = BTreeMap::new();
 

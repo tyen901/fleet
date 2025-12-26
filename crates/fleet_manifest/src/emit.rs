@@ -23,7 +23,7 @@ pub fn emit_mod_manifest(internal: &ModManifest) -> sw::ModManifest {
                         })
                         .collect()
                 })
-                .unwrap_or_else(Vec::new);
+                .unwrap_or_default();
 
             sw::FileManifest {
                 path: RelativePathBuf::from(file.rel_path().as_str()),

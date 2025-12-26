@@ -3,6 +3,7 @@
 mod tests {
     use crate::errors::ManifestError;
     use crate::ingest::ingest_mod_manifest;
+    use fleet_types::swifty::checksums::mod_checksum_from_files;
     use fleet_types::swifty::model as sw;
     use fleet_types::Md5Digest;
     use relative_path::RelativePathBuf;
@@ -13,19 +14,20 @@ mod tests {
 
     #[test]
     fn ingest_valid_manifest() {
+        let files = vec![sw::FileManifest {
+            path: RelativePathBuf::from("foo/bar.pbo"),
+            length: 18,
+            checksum: md5_from_u8(0xBB),
+            parts: vec![sw::PartManifest {
+                start: 0,
+                length: 18,
+                checksum: md5_from_u8(0xCC),
+            }],
+        }];
         let manifest = sw::ModManifest {
             name: "mod1".to_string(),
-            checksum: md5_from_u8(0xAA),
-            files: vec![sw::FileManifest {
-                path: RelativePathBuf::from("foo/bar.pbo"),
-                length: 18,
-                checksum: md5_from_u8(0xBB),
-                parts: vec![sw::PartManifest {
-                    start: 0,
-                    length: 18,
-                    checksum: md5_from_u8(0xCC),
-                }],
-            }],
+            checksum: mod_checksum_from_files(&files),
+            files,
         };
         let internal = ingest_mod_manifest(manifest).unwrap();
         assert_eq!(internal.mod_id().as_str(), "mod1");
@@ -37,23 +39,24 @@ mod tests {
 
     #[test]
     fn ingest_rejects_duplicate_files() {
+        let files = vec![
+            sw::FileManifest {
+                path: RelativePathBuf::from("foo.pbo"),
+                length: 1,
+                checksum: md5_from_u8(0x05),
+                parts: Vec::new(),
+            },
+            sw::FileManifest {
+                path: RelativePathBuf::from("foo.pbo"),
+                length: 1,
+                checksum: md5_from_u8(0x05),
+                parts: Vec::new(),
+            },
+        ];
         let manifest = sw::ModManifest {
             name: "mod2".to_string(),
-            checksum: md5_from_u8(0x01),
-            files: vec![
-                sw::FileManifest {
-                    path: RelativePathBuf::from("foo.pbo"),
-                    length: 1,
-                    checksum: md5_from_u8(0x05),
-                    parts: Vec::new(),
-                },
-                sw::FileManifest {
-                    path: RelativePathBuf::from("foo.pbo"),
-                    length: 1,
-                    checksum: md5_from_u8(0x05),
-                    parts: Vec::new(),
-                },
-            ],
+            checksum: mod_checksum_from_files(&files),
+            files,
         };
         let err = ingest_mod_manifest(manifest).unwrap_err();
         match err {
@@ -64,23 +67,48 @@ mod tests {
 
     #[test]
     fn ingest_rejects_invalid_parts() {
+        let files = vec![sw::FileManifest {
+            path: RelativePathBuf::from("data.bin"),
+            length: 10,
+            checksum: md5_from_u8(0x04),
+            parts: vec![sw::PartManifest {
+                start: 0,
+                length: 5,
+                checksum: md5_from_u8(0x05),
+            }],
+        }];
         let manifest = sw::ModManifest {
             name: "mod3".to_string(),
-            checksum: md5_from_u8(0x03),
-            files: vec![sw::FileManifest {
-                path: RelativePathBuf::from("data.bin"),
-                length: 10,
-                checksum: md5_from_u8(0x04),
-                parts: vec![sw::PartManifest {
-                    start: 0,
-                    length: 5,
-                    checksum: md5_from_u8(0x05),
-                }],
-            }],
+            checksum: mod_checksum_from_files(&files),
+            files,
         };
         let err = ingest_mod_manifest(manifest).unwrap_err();
         match err {
             ManifestError::InvalidParts { rel_path, .. } => assert_eq!(rel_path, "data.bin"),
+            _ => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn ingest_rejects_checksum_mismatch() {
+        let files = vec![sw::FileManifest {
+            path: RelativePathBuf::from("data.bin"),
+            length: 10,
+            checksum: md5_from_u8(0x04),
+            parts: vec![sw::PartManifest {
+                start: 0,
+                length: 10,
+                checksum: md5_from_u8(0x05),
+            }],
+        }];
+        let manifest = sw::ModManifest {
+            name: "mod4".to_string(),
+            checksum: md5_from_u8(0xFF),
+            files,
+        };
+        let err = ingest_mod_manifest(manifest).unwrap_err();
+        match err {
+            ManifestError::InvalidManifest(msg) => assert_eq!(msg, "mod checksum mismatch"),
             _ => panic!("unexpected error: {err:?}"),
         }
     }
