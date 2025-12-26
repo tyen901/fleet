@@ -30,6 +30,7 @@ tempfile = "3"
 urlencoding = "2"
 walkdir = "2"
 serde = { workspace = true }
+fleet_swifty_wire = { workspace = true }
 
 [[bin]]
 name = "fleet"

@@ -1201,6 +1201,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "fleet_app",
+ "fleet_swifty_wire",
  "reqwest",
  "serde",
  "serde_json",

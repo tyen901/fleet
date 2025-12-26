@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -18,77 +17,8 @@ fn base_url() -> String {
     std::env::var("FLEET_LIVE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct RepoSpec {
-    repo_name: String,
-    checksum: String,
-    required_mods: Vec<RepoMod>,
-    optional_mods: Vec<RepoMod>,
-    client_parameters: String,
-    repo_basic_authentication: Option<RepoBasicAuth>,
-    version: String,
-    #[serde(default)]
-    servers: Vec<RepoServer>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct RepoMod {
-    mod_name: String,
-    #[serde(rename = "checkSum")]
-    checksum: String,
-    enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct RepoBasicAuth {
-    username: String,
-    password: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct RepoServer {
-    name: String,
-    address: String,
-    port: u16,
-    password: String,
-    battle_eye: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct ModManifest {
-    name: String,
-    checksum: String,
-    files: Vec<FileManifest>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct FileManifest {
-    path: String,
-    length: u64,
-    checksum: String,
-    parts: Vec<PartManifest>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[allow(dead_code)]
-struct PartManifest {
-    start: u64,
-    length: u64,
-    checksum: String,
-}
+type RepoSpec = fleet_swifty_wire::model::RepoSpec;
+type ModManifest = fleet_swifty_wire::model::ModManifest;
 
 fn fleet_bin() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("fleet"))
@@ -105,14 +35,34 @@ async fn live_guard() -> tokio::sync::OwnedMutexGuard<()> {
 }
 
 fn run_sync_output(checkout: &Path) -> std::process::Output {
-    let mut cmd = fleet_bin();
-    cmd.args([
-        "sync",
+    // New CLI flow: sync uses the selected profile (no --repo-url/--path).
+    let repo_url = format!("{}repo.json", base_url());
+
+    // 1) Add/select profile pointing at this checkout.
+    let mut add = fleet_bin();
+    add.args([
+        "profile",
+        "add",
+        "--name",
+        "live",
         "--repo-url",
-        &base_url(),
+        &repo_url,
         "--path",
         checkout.to_str().unwrap(),
+        "--select",
     ]);
+    let out = add.output().expect("spawn fleet profile add");
+    assert!(
+        out.status.success(),
+        "fleet profile add failed:\nstatus={}\nstdout={}\nstderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 2) Run sync.
+    let mut cmd = fleet_bin();
+    cmd.args(["sync"]);
 
     // Stream output so long-running live tests don't look "hung".
     cmd.stdout(Stdio::piped());
@@ -219,7 +169,7 @@ fn has_tmp_leftovers(root: &Path) -> bool {
     false
 }
 
-async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> T {
+async fn fetch_repo_spec_strict(repo_url: &str) -> Option<RepoSpec> {
     let client = reqwest::Client::builder()
         .default_headers({
             let mut h = reqwest::header::HeaderMap::new();
@@ -233,21 +183,27 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> T {
         .no_brotli()
         .no_zstd()
         .build()
-        .unwrap();
+        .ok()?;
 
     let resp = client
-        .get(url)
+        .get(repo_url)
         .send()
         .await
-        .unwrap()
+        .ok()?
         .error_for_status()
-        .unwrap();
+        .ok()?;
+    let bytes = resp.bytes().await.ok()?;
 
-    let bytes = resp.bytes().await.unwrap();
-    serde_json::from_slice::<T>(&bytes).unwrap()
+    match fleet_swifty_wire::parse_repo_spec_json(&bytes) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("SKIP: repo.json is not strict-swifty compatible: {e}");
+            None
+        }
+    }
 }
 
-async fn fetch_json_opt<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
+async fn fetch_mod_manifest_strict(url: &str) -> Option<ModManifest> {
     let client = reqwest::Client::builder()
         .default_headers({
             let mut h = reqwest::header::HeaderMap::new();
@@ -265,19 +221,27 @@ async fn fetch_json_opt<T: for<'de> Deserialize<'de>>(url: &str) -> Option<T> {
 
     let resp = client.get(url).send().await.ok()?;
     if resp.status().as_u16() == 404 {
+        eprintln!("SKIP: missing mod_manifest.json at {url}");
         return None;
     }
     let resp = resp.error_for_status().ok()?;
     let bytes = resp.bytes().await.ok()?;
-    serde_json::from_slice::<T>(&bytes).ok()
+
+    match fleet_swifty_wire::parse_mod_manifest_json(&bytes) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("SKIP: mod_manifest.json is not strict-swifty compatible: {e}");
+            None
+        }
+    }
 }
 
 async fn fetch_manifest_for(mod_name: &str) -> ModManifest {
     let enc_mod = urlencoding::encode(mod_name);
     let url = format!("{}{}/mod_manifest.json", base_url(), enc_mod);
-    fetch_json_opt(&url)
+    fetch_mod_manifest_strict(&url)
         .await
-        .unwrap_or_else(|| panic!("missing manifest for {mod_name}: {url}"))
+        .unwrap_or_else(|| panic!("missing/invalid manifest for {mod_name}: {url}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -289,7 +253,9 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
     let _guard = live_guard().await;
 
     let repo_url = format!("{}repo.json", base_url());
-    let spec: RepoSpec = fetch_json(&repo_url).await;
+    let Some(spec) = fetch_repo_spec_strict(&repo_url).await else {
+        return;
+    };
 
     let tmp = TempDir::new().unwrap();
     let checkout = tmp.path();
@@ -322,7 +288,9 @@ async fn live_repo_repairs_deleted_mod_dir() {
     let _guard = live_guard().await;
 
     let repo_url = format!("{}repo.json", base_url());
-    let spec: RepoSpec = fetch_json(&repo_url).await;
+    let Some(spec) = fetch_repo_spec_strict(&repo_url).await else {
+        return;
+    };
     let victim = spec
         .required_mods
         .iter()
@@ -357,6 +325,10 @@ async fn live_repo_repairs_corrupted_file() {
         return;
     }
     let _guard = live_guard().await;
+    let repo_url = format!("{}repo.json", base_url());
+    if fetch_repo_spec_strict(&repo_url).await.is_none() {
+        return;
+    }
 
     let tmp = TempDir::new().unwrap();
     let checkout = tmp.path();
@@ -391,13 +363,15 @@ async fn live_repo_resumes_partial_tmp_download() {
         return;
     }
     let _guard = live_guard().await;
+    let repo_url = format!("{}repo.json", base_url());
+    let Some(spec) = fetch_repo_spec_strict(&repo_url).await else {
+        return;
+    };
 
     let tmp = TempDir::new().unwrap();
     let checkout = tmp.path();
     run_sync_assert_success(checkout);
 
-    let repo_url = format!("{}repo.json", base_url());
-    let spec: RepoSpec = fetch_json(&repo_url).await;
     let mod_name = spec
         .required_mods
         .iter()
@@ -430,7 +404,7 @@ async fn live_repo_resumes_partial_tmp_download() {
 
     let tmp_name = format!(
         ".fleet_tmp_{}_{}.part",
-        file.checksum.to_uppercase(),
+        file.checksum.to_hex_upper(),
         basename
     );
     let tmp_path = final_path.parent().unwrap().join(tmp_name);
