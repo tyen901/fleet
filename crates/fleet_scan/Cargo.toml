@@ -8,6 +8,7 @@ camino = { workspace = true }
 md-5 = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+fleet_arma_wire = { workspace = true }
 fleet_manifest_domain = { workspace = true }
 
 [dev-dependencies]

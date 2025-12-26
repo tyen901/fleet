@@ -89,7 +89,7 @@ fn scan_pbo_file(
     let f = std::fs::File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut reader = std::io::BufReader::new(f);
-    let ranges = fleet_manifest_domain::arma::pbo::partition_pbo(&mut reader, file_len)
+    let ranges = fleet_arma_wire::partition_pbo(&mut reader, file_len)
         .map_err(|_| ScanError::InvalidPbo("failed to partition pbo"))?;
 
     reader.seek(std::io::SeekFrom::Start(0))?;

@@ -1,4 +1,3 @@
-pub mod arma;
 pub mod checksums;
 pub mod errors;
 pub mod model;
