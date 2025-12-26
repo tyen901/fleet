@@ -18,7 +18,19 @@ fn base_url() -> String {
 }
 
 type RepoSpec = fleet_swifty_wire::model::RepoSpec;
-type ModManifest = fleet_swifty_wire::model::ModManifest;
+
+#[derive(Debug, Clone)]
+struct SimpleFile {
+    path: String,
+    length: u64,
+    checksum_hex_upper: String,
+}
+
+#[derive(Debug, Clone)]
+struct SimpleManifest {
+    name: String,
+    files: Vec<SimpleFile>,
+}
 
 fn fleet_bin() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("fleet"))
@@ -36,7 +48,7 @@ async fn live_guard() -> tokio::sync::OwnedMutexGuard<()> {
 
 fn run_sync_output(checkout: &Path) -> std::process::Output {
     // New CLI flow: sync uses the selected profile (no --repo-url/--path).
-    let repo_url = format!("{}repo.json", base_url());
+    let repo_url = base_url();
 
     // 1) Add/select profile pointing at this checkout.
     let mut add = fleet_bin();
@@ -203,7 +215,9 @@ async fn fetch_repo_spec_strict(repo_url: &str) -> Option<RepoSpec> {
     }
 }
 
-async fn fetch_mod_manifest_strict(url: &str) -> Option<ModManifest> {
+async fn fetch_manifest_for(mod_name: &str) -> SimpleManifest {
+    let enc_mod = urlencoding::encode(mod_name);
+    let url_fallback = format!("{}{}/mod.srf", base_url(), enc_mod);
     let client = reqwest::Client::builder()
         .default_headers({
             let mut h = reqwest::header::HeaderMap::new();
@@ -217,31 +231,44 @@ async fn fetch_mod_manifest_strict(url: &str) -> Option<ModManifest> {
         .no_brotli()
         .no_zstd()
         .build()
-        .ok()?;
+        .unwrap();
 
-    let resp = client.get(url).send().await.ok()?;
-    if resp.status().as_u16() == 404 {
-        eprintln!("SKIP: missing mod_manifest.json at {url}");
-        return None;
-    }
-    let resp = resp.error_for_status().ok()?;
-    let bytes = resp.bytes().await.ok()?;
-
-    match fleet_swifty_wire::parse_mod_manifest_json(&bytes) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            eprintln!("SKIP: mod_manifest.json is not strict-swifty compatible: {e}");
-            None
-        }
-    }
-}
-
-async fn fetch_manifest_for(mod_name: &str) -> ModManifest {
-    let enc_mod = urlencoding::encode(mod_name);
-    let url = format!("{}{}/mod_manifest.json", base_url(), enc_mod);
-    fetch_mod_manifest_strict(&url)
+    let resp = client
+        .get(&url_fallback)
+        .send()
         .await
-        .unwrap_or_else(|| panic!("missing/invalid manifest for {mod_name}: {url}"))
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let bytes = resp.bytes().await.unwrap();
+    let srf = fleet_swifty_wire::parse_mod_srf(&bytes).expect("parse mod.srf");
+
+    match srf {
+        fleet_swifty_wire::ModSrfWire::Json(srf) => SimpleManifest {
+            name: srf.name,
+            files: srf
+                .files
+                .into_iter()
+                .map(|f| SimpleFile {
+                    path: f.path.replace('\\', "/"),
+                    length: f.length,
+                    checksum_hex_upper: f.checksum.to_hex_upper(),
+                })
+                .collect(),
+        },
+        fleet_swifty_wire::ModSrfWire::LegacyText(srf) => SimpleManifest {
+            name: srf.name,
+            files: srf
+                .files
+                .into_iter()
+                .map(|f| SimpleFile {
+                    path: f.path,
+                    length: f.length,
+                    checksum_hex_upper: f.checksum.to_hex_upper(),
+                })
+                .collect(),
+        },
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -402,11 +429,7 @@ async fn live_repo_resumes_partial_tmp_download() {
         .to_string_lossy()
         .to_string();
 
-    let tmp_name = format!(
-        ".fleet_tmp_{}_{}.part",
-        file.checksum.to_hex_upper(),
-        basename
-    );
+    let tmp_name = format!(".fleet_tmp_{}_{}.part", file.checksum_hex_upper, basename);
     let tmp_path = final_path.parent().unwrap().join(tmp_name);
 
     let full = fs::read(&final_path).unwrap();

@@ -1,381 +1,307 @@
-# Fleet / Nimble Repository File Format Specification (manifest.json, mod.srf, PBO)
+# Fleet / Nimble Repository Formats
 
-This document defines the **exact on-disk / over-HTTP shapes** and **checksum algorithms** used by the Swifty-compatible ecosystem (as implemented in the provided Fleet and Nimble code). The goal is to eliminate future reverse‑engineering and ensure all implementations converge on the same behavior.
+This specification defines the repository formats required for Fleet/Nimble interoperability **without `mod_manifest.json`**.
+It is derived from the real fixtures:
 
-## Conventions
+- `example_repo.json`
+- `example_mod.srf` (JSON SRF, BOM-prefixed)
+- `legacy_text_mod.srf` (legacy text SRF, `ADDON:` format)
+- `example_pbo.pbo` (used to verify PBO partitioning structure)
 
-### Encoding
-- **JSON files** (`repo.json`, `manifest.json`, `mod.srf` JSON) are UTF‑8.
-- Producers MAY include a UTF‑8 BOM (`EF BB BF`) at the start of a JSON file; consumers MUST strip it before JSON parsing.
+## 0. Terms and conventions
 
-### Paths
-- `Path` fields are **relative paths** within a mod root (never absolute).
-- Consumers MUST normalize path separators: **replace `\` with `/`** before validation and before checksum calculations that involve paths.
-- When computing mod checksums, paths are lowercased using **ASCII lowercase** after normalization (see below).
+### 0.1 Encoding and BOM
+- JSON payloads are UTF-8.
+- A UTF-8 BOM (`EF BB BF`) **may** prefix JSON files (observed in `example_mod.srf`).
+  - Consumers **must** strip the BOM before JSON parsing.
+- Legacy text SRF is line-oriented UTF-8 (ASCII subset) and starts with `ADDON:`.
 
-### MD5 representation
-- All digests are **MD5** (16 bytes).
-- In JSON/text, digests are represented as **32 hex characters**.
-- Producers SHOULD emit **uppercase hex**; consumers MUST accept either case, but checksum algorithms below require uppercase hex when concatenating.
+### 0.2 Hex digests
+- In SRF files:
+  - Mod, file, and part checksums are **MD5**, serialized as **32 hex characters**.
+  - Producers commonly emit **uppercase**; consumers should accept either case when parsing.
+- In `repo.json`:
+  - `requiredMods[].checkSum` / `optionalMods[].checkSum` are **MD5** (32 hex).
+  - Other checksum-like fields (e.g. `checksum`, `iconImageChecksum`, `repoImageChecksum`) are **opaque strings**
+    and must not be assumed to be MD5 (real fixture uses 40 hex characters).
+
+### 0.3 Paths
+- All file paths inside a mod are **relative** paths.
+- Normalization used in checksum algorithms:
+  1. Replace backslashes: `\` -> `/`
+  2. ASCII lowercase: `to_ascii_lowercase()`
+
+Safety constraints for paths (recommended validation):
+- Must not be absolute (no leading `/`, no drive prefixes like `C:`)
+- Must not contain parent traversal segments (`..`)
+- Must not contain NUL bytes
 
 ---
 
-## 1) `repo.json` (repository descriptor)
+## 1. Repository root file: `repo.json`
 
-Although the primary focus is manifest/PBO/SRF, `repo.json` is included because it is the entry point for selecting mods and for optional basic auth and server metadata.
+### 1.1 Location
+- Repository root: `repo.json`
 
-### File name and location
-- At repository root: `repo.json`
+### 1.2 JSON shape (camelCase; `checkSum` spelling)
+The real fixture is consistent with the following shape:
 
-### JSON shape (camelCase)
 ```json
 {
-  "repoName": "ExampleRepo",
-  "checksum": "opaque-string",
+  "repoName": "modpack_test",
+  "checksum": "64A98E00EB1A04D3791E463EC87F40E810D9106A",
   "requiredMods": [
-    { "modName": "@ace", "checkSum": "787662722D70C36DF28CD1D5EE8D8E86", "enabled": true }
+    { "modName": "@cba_a3", "checkSum": "6BF82A0530E8E60D1D24EFD07E0B0FC4", "enabled": true }
   ],
-  "optionalMods": [
-    { "modName": "@cba_a3", "checkSum": "44C1B8021822F80E1E560689D2AAB0BF", "enabled": false }
-  ],
-  "clientParameters": "-noLauncher",
-  "repoBasicAuthentication": { "username": "user", "password": "pass" },
-  "version": "1",
+  "optionalMods": [],
+  "clientParameters": "-skipIntro",
+  "repoBasicAuthentication": { "username": "userName", "password": "test" },
+  "version": "3.2.0.0",
   "servers": [
-    { "name": "Main", "address": "127.0.0.1", "port": 2302, "password": "", "battleEye": true }
+    { "name": "My super server", "address": "test.server", "port": "3000", "password": "password", "battleEye": false }
   ]
 }
 ```
 
-### Field types
-- `repoName`: string
-- `checksum`: string (not MD5‑semantics; treated as opaque in Nimble)
-- `requiredMods` / `optionalMods`: arrays of:
-  - `modName`: string (mod directory name, typically begins with `@`)
-  - `checkSum`: **MD5 hex string** (32 chars)
-  - `enabled`: boolean
-- `clientParameters`: string
-- `repoBasicAuthentication`: optional object `{ username: string, password: string }`
-- `version`: string
-- `servers`: array of:
-  - `name`: string
-  - `address`: string (IP or hostname)
-  - `port`: number **or** string containing a number (u16)
-  - `password`: string
-  - `battleEye`: boolean
+### 1.3 Compatibility rules
+- Unknown fields must be ignored for forwards compatibility.
+- `servers[].port` must accept both:
+  - JSON number, or
+  - numeric string (observed: `"3000"`).
+- `servers[].address` is a string and may be a hostname (observed: `"test.server"`).
 
 ---
 
-## 2) `manifest.json` (mod manifest)
+## 2. Mod SRF file: `mod.srf`
 
-### File name and location
-- Under each mod directory:
-  - `{mod_id}/manifest.json`
+### 2.1 Location
+- For a mod identified by `{mod_id}`: `{mod_id}/mod.srf`
 
-### Purpose
-`manifest.json` describes the expected files for a mod, including part boundaries and per‑part checksums.
+### 2.2 Format detection
+After stripping an optional UTF-8 BOM:
+- If the first non-BOM byte is `{`, parse as **JSON SRF** (Section 2.3).
+- Else if the file starts with `ADDON:`, parse as **legacy text SRF** (Section 2.4).
+- Otherwise: unsupported SRF format.
 
-### JSON shape (PascalCase)
-```json
-{
-  "Name": "@ace",
-  "Checksum": "787662722D70C36DF28CD1D5EE8D8E86",
-  "Files": [
-    {
-      "Path": "addons/ace_advanced_ballistics.pbo",
-      "Length": 1234567,
-      "Checksum": "A1B2C3D4E5F60718293A4B5C6D7E8F90",
-      "Parts": [
-        { "Start": 0, "Length": 4096, "Checksum": "..." },
-        { "Start": 4096, "Length": 8192, "Checksum": "..." }
-      ]
-    }
-  ]
-}
-```
+### 2.3 JSON SRF (PascalCase keys)
 
-### Field types
-Top-level:
-- `Name`: string (the mod identifier; used as the remote directory name)
-- `Checksum`: MD5 hex string (32 chars) — **the mod checksum**, computed as described in §6
-- `Files`: array of file entries
-
-File entry (`Files[]`):
-- `Path`: string (relative path within the mod)
-- `Length`: integer (u64)
-- `Checksum`: MD5 hex string — **the file checksum**, computed as described in §6
-- `Parts`: array of parts
-
-Part entry (`Parts[]`):
-- `Start`: integer (u64) — byte offset from start of the file
-- `Length`: integer (u64) — number of bytes
-- `Checksum`: MD5 hex string — MD5 of the part bytes in that range
-
-### Required invariants (Swifty-compatible)
-- `Files[].Path` MUST be a relative path and MUST NOT contain `..`, a leading `/`, a Windows drive prefix (`C:`), or NUL bytes.
-- `Parts` MUST be sorted by `Start` (ascending).
-- For non-empty files, `Parts` MUST cover the entire file:
-  - contiguous, no gaps, no overlaps
-  - first part starts at `0`
-  - sum of all part lengths equals `Length`
-- For empty files (`Length == 0`), `Parts` MUST be an empty array.
-
-### Compatibility notes
-- Some real-world manifests have been observed to include **zero-length parts** (`Parts[].Length == 0`). These parts are semantically no-ops.
-  - Producers MUST NOT emit zero-length parts.
-  - Consumers SHOULD ignore/drop zero-length parts before validating contiguity and coverage.
-
----
-
-## 3) `mod.srf` (SRF manifest)
-
-`mod.srf` exists in two formats:
-1) a **JSON** format (the most common modern format)
-2) a **legacy text** format (older Swifty output)
-
-Fleet treats `.srf` fixtures as JSON despite the extension; Nimble supports both JSON and legacy formats.
-
-### 3.1 JSON `mod.srf`
-
-#### File name and location
-- Under each mod directory:
-  - `{mod_id}/mod.srf`
-
-#### JSON shape
-The JSON `mod.srf` format is structurally aligned with `manifest.json` (PascalCase), with *additional optional fields* that are ignored by tolerant parsers.
+#### 2.3.1 Top-level object
+JSON SRF uses PascalCase field names:
 
 ```json
 {
-  "Name": "@ace",
-  "Checksum": "787662722D70C36DF28CD1D5EE8D8E86",
-  "Files": [
-    {
-      "Path": "addons/ace_advanced_ballistics.pbo",
-      "Length": 1234567,
-      "Checksum": "A1B2C3D4E5F60718293A4B5C6D7E8F90",
-      "Type": "SwiftyPboFile",
-      "Parts": [
-        { "Path": "$$HEADER$$", "Start": 0, "Length": 4096, "Checksum": "..." },
-        { "Path": "some_inner_entry.sqf", "Start": 4096, "Length": 8192, "Checksum": "..." },
-        { "Path": "$$END$$", "Start": 12288, "Length": 123, "Checksum": "..." }
-      ]
-    },
-    {
-      "Path": "keys/ace_key.bikey",
-      "Length": 2048,
-      "Checksum": "....",
-      "Type": "SwiftyFile",
-      "Parts": [
-        { "Path": "ace_key.bikey_5000000", "Start": 0, "Length": 2048, "Checksum": "..." }
-      ]
-    }
-  ]
+  "Name": "@acre2",
+  "Checksum": "FEBE2EFFB7A464B2859752FE6A312E3B",
+  "Files": [ ... ]
 }
 ```
 
-#### Notes
-- `Files[].Type` (string) is OPTIONAL:
-  - `"SwiftyFile"` or `"SwiftyPboFile"`
-- `Parts[].Path` (string) is OPTIONAL; Swifty uses:
-  - For PBO files: `$$HEADER$$`, each PBO entry filename, then `$$END$$`
-  - For regular files: a generated label (e.g., `{filename}_{pos}`)
-- Consumers MUST NOT rely on `Type` or `Parts[].Path` for correctness; **only offsets/lengths and checksums are authoritative**.
+#### 2.3.2 File entries
+Each element of `Files` has:
 
-All checksum and invariant rules from `manifest.json` (§2) apply to JSON `mod.srf`.
-
-### 3.2 Legacy text `mod.srf`
-
-#### Detection
-- Legacy files begin with ASCII `"ADDON"` at the start of the file (Nimble checks the first 5 bytes).
-
-#### Format
-The legacy SRF is a line-oriented, colon-delimited format. It is stateful:
-- First line describes the addon and includes the number of files.
-- Then each file header line is followed by `part_count` part lines.
-
-##### Addon header line
+```json
+{
+  "Path": "addons\\acre_sys_zeus.pbo",
+  "Length": 30835,
+  "Checksum": "220C803A6EE5CE8F2CC1507306E96B5C",
+  "Type": "SwiftyPboFile",
+  "Parts": [ ... ]
+}
 ```
-ADDON:{name}:{file_count}:{checksum}
-```
-- `name`: string (e.g., `@lambs_danger`)
-- `file_count`: u32 (decimal)
-- `checksum`: 32-char MD5 hex digest
 
-##### File header line (repeated `file_count` times)
-```
-{TYPE}:{path}:{length}:{part_count}:{checksum}
-```
-- `TYPE`: `"PBO"` or `"FILE"`
-- `path`: relative path string (as stored; may contain backslashes)
-- `length`: u64 (decimal)
-- `part_count`: u32 (decimal)
-- `checksum`: MD5 hex digest string (uppercase expected)
+Observed `Type` values in real fixture:
+- `SwiftyFile`
+- `SwiftyPboFile`
 
-##### Part line (repeated `part_count` times immediately after a file header)
-```
-{path}:{start}:{length}:{checksum}
-```
-- `path`: string label (may be `$$HEADER$$`, `$$END$$`, or any other label)
-- `start`: u64 (decimal)
-- `length`: u64 (decimal)
-- `checksum`: MD5 hex digest string
+`Type` is informational; consumers must not depend on it for correctness.
 
-#### BOM handling
-Producers have historically emitted BOMs; consumers MUST strip a leading UTF‑8 BOM **before** legacy detection and parsing.
+#### 2.3.3 Part entries
+Each element of `Parts` has:
+
+```json
+{
+  "Path": "$$HEADER$$",
+  "Length": 706,
+  "Start": 0,
+  "Checksum": "7D9BE7DEB043F2926E11B74054A97839"
+}
+```
+
+- `Path` is informational/labeling (see Section 4).
+- Only `Start`, `Length`, and `Checksum` are required for validation and downloads.
+
+#### 2.3.4 Invariants (recommended validation)
+For each file:
+- Parts must be sorted by `Start` ascending.
+- For `Length > 0`, parts must cover the file exactly:
+  - first part `Start == 0`
+  - contiguous: `next.Start == prev.Start + prev.Length`
+  - final end equals `Length`
+- For `Length == 0`, parts must be empty.
+
+Unknown fields in JSON SRF should be ignored.
+
+### 2.4 Legacy text SRF (`ADDON:` format)
+
+Legacy SRF is line-oriented and colon-delimited.
+
+#### 2.4.1 Addon header (first line)
+```
+ADDON:{name}:{file_count}:{mod_checksum}
+```
+
+Example (from fixture):
+```
+ADDON:@lambs_danger:19:44C1B8021822F80E1E560689D2AAB0BF
+```
+
+#### 2.4.2 File header lines
+Then repeat `file_count` times:
+
+```
+{TYPE}:{path}:{length}:{part_count}:{file_checksum}
+```
+
+- `TYPE` observed in Nimble-compatible legacy SRF: `FILE` or `PBO`.
+- `path` may contain backslashes.
+
+#### 2.4.3 Part lines
+Immediately following each file header are `part_count` lines:
+
+```
+{label}:{start}:{length}:{part_checksum}
+```
+
+- `label` is informational (see Section 4).
+- `start` and `length` are decimal integers.
 
 ---
 
-## 4) `.pbo` (Arma PBO file) — subset required for Swifty-compatible hashing
+## 3. Remote file downloads
 
-This section specifies the subset of the PBO binary format required to reproduce Swifty/Nimble checksum partitioning. It intentionally focuses on header parsing sufficient to compute `header_len` and entry `data_size` values.
+Given a repository base URL and a mod id:
+- SRF: `GET {base}/{mod_id}/mod.srf`
+- File bytes: `GET {base}/{mod_id}/{relative_path}`
 
-### 4.1 Header entry record
+### 3.1 Optional HTTP range requests
+Some clients may use `Range: bytes={start}-{end}` to fetch part ranges.
+If ranges are used, servers should respond with `206 Partial Content` for valid ranges.
 
-A PBO begins with a sequence of header entries. Each entry is:
-
-1. `filename`: NUL-terminated byte string (C string). The empty string terminates the header table.
-2. Five little-endian u32 values:
-   - `type`: u32
-   - `original_size`: u32
-   - `offset`: u32
-   - `timestamp`: u32
-   - `data_size`: u32
-
-The header table ends with a terminator entry:
-- `filename == ""` (empty C string)
-- `type == 0` (commonly called `None`)
-
-### 4.2 Entry type values used by Swifty/Nimble
-Swifty/Nimble recognize the following `type` values (FourCC encoded in little-endian u32):
-
-| Symbol | FourCC bytes | u32 hex |
-|---|---:|---:|
-| `Vers` | `V e r s` | `0x56657273` |
-| `Cprs` | `C p r s` | `0x43707273` |
-| `Enco` | `E n c r` | `0x456e6372` |
-| `None` | `\0\0\0\0` | `0x00000000` |
-
-### 4.3 Extensions map following a `Vers` entry
-If an entry has `type == Vers`, then immediately after that entry record the file contains an **extensions map**:
-
-- repeated pairs of:
-  1) key: NUL-terminated string  
-  2) value: NUL-terminated string
-- terminated by an empty key string.
-
-Swifty/Nimble parse this map to advance the stream position correctly; they do not require any specific keys/values for hashing.
-
-### 4.4 `header_len` definition
-`header_len` is the file position (byte offset from start) **immediately after**:
-- the header entries table terminator entry, and
-- any extensions map associated with a `Vers` entry.
-
-Implementations should compute it as the stream position after parsing (as Nimble does).
+(Clients that require ranges must detect support and fail gracefully when the server ignores ranges.)
 
 ---
 
-## 5) Swifty-compatible part partitioning for PBO files
+## 4. Partitioning rules (how Parts are produced)
 
-When generating SRF/manifest parts for a `.pbo`, Swifty-compatible tools create parts as follows.
+### 4.1 Non-PBO files (SwiftyFile)
+Nimble-compatible partitioning for non-PBO files is fixed-size chunking:
 
-### Inputs
-- Parsed `header_len`
-- Parsed `entries[]` (in header order, including the `Vers` entry if present)
-- File length `file_len` (seek to end)
+- Iterate through the file from offset 0.
+- Emit consecutive parts of up to **5,000,000 bytes** each (last part may be smaller).
+- Each part checksum is MD5 over the raw bytes for that range.
+- Part labels (`Parts[].Path` in JSON SRF / `{label}` in legacy SRF) are informational; a common pattern is:
+  - `{filename}_{end_offset}` (e.g., `acre2_win64.dll_2242384`).
 
-### Algorithm (Swifty-compatible mode)
-1) **Header part**
-- Part #0:
-  - `Start = 0`
-  - `Length = header_len`
-  - `Checksum = MD5(bytes[0..header_len])`
-  - (optional) `Path = "$$HEADER$$"`
+The real `example_mod.srf` fixture contains only files smaller than 5,000,000 bytes, so all `SwiftyFile` entries have a single part there; however the chunk size remains normative for compatibility.
 
-2) **Skip the first entry**
-- The **first** header entry (index 0) is skipped when creating data parts.
-- Compatibility requirement: the skipped first entry MUST have `data_size == 0`. If it does not, the file is considered incompatible with Swifty layout.
+### 4.2 PBO files (SwiftyPboFile)
 
-3) **Data parts for remaining entries**
-- Maintain a running `offset`, initially `header_len`.
-- For each header entry `entries[i]` where `i >= 1`:
-  - Let `len = entries[i].data_size`.
-  - If `len == 0`, emit no part and do not advance `offset`.
-  - Else emit a part:
-    - `Start = offset`
-    - `Length = len`
-    - `Checksum = MD5(bytes[offset..offset+len])`
-    - (optional) `Path = entries[i].filename`
-  - Advance `offset += len`.
+PBO partitioning is **header + per-entry + tail**, derived from parsing the PBO header table.
 
-**Important:** Swifty-compatible tools do **not** use the stored `offset` field from the header records for partitioning; they treat the data region as a sequential stream starting at `header_len` and consume `data_size` bytes in header order.
+#### 4.2.1 Header parsing essentials
+A PBO begins with a sequence of entries. Each entry consists of:
+1. `filename`: NUL-terminated string
+2. 5x little-endian `u32`: `type`, `original_size`, `offset`, `timestamp`, `data_size`
 
-4) **End part**
-- After consuming all entry data sizes, let `remaining = file_len - offset`.
-- If `remaining > 0`, emit one final part:
-  - `Start = offset`
-  - `Length = remaining`
-  - `Checksum = MD5(bytes[offset..file_len])`
-  - (optional) `Path = "$$END$$"`
-- The emitted parts MUST cover the entire file length exactly.
+The header table terminates at an entry where:
+- `filename == ""` and `type == 0`.
 
-### Non-Swifty (spec) mode
-Some tools may choose to **not** skip the first entry when creating parts (include all entries in order). This is not the Swifty-compatible mode and should only be used if explicitly negotiated.
+If an entry has `type == 0x56657273` (`'Vers'`), it is followed by an extensions map:
+- repeating `{key}\0{value}\0`
+- terminated by empty key (`"\0"`)
+
+Define:
+- `header_len` = byte position immediately after finishing the terminating entry and any extensions maps encountered.
+
+In the real `example_pbo.pbo` fixture:
+- the first entry is a `Vers` entry with empty filename and `data_size == 0`,
+- and `header_len` is non-zero.
+
+#### 4.2.2 Swifty-compatible partition algorithm
+Given `header_len`, the parsed entries in order, and `file_len`:
+
+1. Emit header part:
+   - `Start = 0`
+   - `Length = header_len`
+   - label `$$HEADER$$` (informational)
+
+2. Set `offset = header_len`.
+
+3. For each entry **after the first header entry** (i.e., entries starting at index 1):
+   - Let `len = data_size`.
+   - If `len > 0`:
+     - Emit a part with:
+       - `Start = offset`
+       - `Length = len`
+       - label = entry `filename` (informational)
+   - Set `offset += len`.
+
+4. If `offset < file_len`:
+   - Emit a final tail part:
+     - `Start = offset`
+     - `Length = file_len - offset`
+     - label `$$END$$` (informational)
+
+Notes:
+- The `offset` field stored in each header entry is **not** used for partitioning in this mode; only the sequential accumulation is used.
+- Parts must cover the entire file exactly.
+
+#### 4.2.3 Label conventions (observed)
+For PBO parts in JSON SRF:
+- First part label: `$$HEADER$$`
+- Subsequent part labels: PBO entry filenames
+- Final part label: `$$END$$`
 
 ---
 
-## 6) Checksum algorithms
+## 5. Checksum algorithms (normative)
 
-### 6.1 Part checksum
-- For a part defined by `(Start, Length)`, the part checksum is:
-  - `MD5(file_bytes[Start .. Start+Length])`
-- Encoded as uppercase hex when serialized.
+All checksum concatenations below operate over the **ASCII bytes** of the hex strings (no separators).
 
-### 6.2 File checksum from parts
-Given a file’s `Parts[]` in order (by ascending `Start`):
+### 5.1 Part checksum
+For each part `(Start, Length)`:
+- `part_checksum = MD5(file_bytes[Start .. Start+Length])`
+- Serialize as 32 hex characters (uppercase recommended).
 
-1. For each part, take `part.Checksum` as an **uppercase** 32‑char hex string.
-2. Concatenate these strings with **no separators**.
-3. Compute `MD5( UTF-8 bytes of the concatenated string )`.
+### 5.2 File checksum from parts
+Given parts in ascending `Start` order:
+1. Convert each part checksum to its **uppercase** 32-hex string form.
+2. Concatenate these strings with no separators.
+3. `file_checksum = MD5(ASCII_bytes(concatenated_hex_strings))`
 
-That MD5 is the `Files[].Checksum`.
+For an empty file with zero parts, the concatenation is empty and the result is `MD5("")`.
 
-### 6.3 Mod checksum from files
+### 5.3 Mod checksum from files
 Given all files in a mod:
+1. For each file, compute `norm_path` = `Path` normalized (Section 0.3).
+2. Sort files by `norm_path` ascending.
+3. Build the hash input bytes by concatenating, for each file in sorted order:
+   - `file_checksum` as **uppercase** 32-hex string (ASCII bytes)
+   - `norm_path` as ASCII-lowercased UTF-8 bytes
+4. `mod_checksum = MD5(concatenated_bytes)`
 
-1. Normalize each file path:
-   - `norm_path = Path.replace("\\", "/")`
-2. Sort files by `norm_path` in **ASCII case-insensitive** order (equivalently: sort by `norm_path.to_ascii_lowercase()`).
-3. Build the checksum input by concatenating, for each file in sorted order:
-   - `Files[].Checksum` as uppercase hex string (32 chars)
-   - `norm_path.to_ascii_lowercase()` (ASCII lowercase)
-4. Compute `MD5( UTF-8 bytes of the concatenated sequence )`.
-
-That MD5 is the top-level `Checksum` in `manifest.json` / `mod.srf`.
-
----
-
-## 7) Validation checklist (recommended)
-
-A consumer/validator should reject a manifest/SRF if any of the following are true:
-
-- A file path is unsafe (absolute, contains `..`, contains NUL, or has a Windows drive prefix).
-- `Length` is inconsistent with the parts:
-  - parts sum != length (for non-empty files), or
-  - first part does not start at 0, or
-  - parts overlap, are unsorted, or contain gaps (for Swifty-compatible manifests).
-- Parts contain `Length == 0` entries and, after ignoring/dropping those entries, the remaining parts still violate the invariants above.
-- Any part range exceeds `Length` (`Start + Length > file.Length`).
-- For PBO Swifty layout generation: the skipped first entry does not have `data_size == 0`.
+### 5.4 Verification rules
+A consumer must reject an SRF if:
+- a file has `Length > 0` but zero parts, or parts do not cover the file exactly
+- derived `file_checksum` (from parts) does not equal the file’s declared checksum
+- derived `mod_checksum` (from files) does not equal the SRF top-level checksum
 
 ---
 
-## 8) Compatibility notes for implementers
+## 6. Implementation checklist
 
-- Treat `Type` and `Parts[].Path` as informational only; do not make correctness depend on them.
-- If a manifest contains any `Parts[].Length == 0`, treat those as no-ops and ignore/drop them before validating coverage/contiguity.
-- Always normalize path separators before:
-  - comparisons
-  - sorting
-  - checksum input that includes paths
-- Strip UTF‑8 BOMs before parsing JSON or legacy SRF text.
-- Ensure all checksum string concatenations use **uppercase hex digests** for the part/file checksums.
+- Strip UTF-8 BOM before JSON parsing and before SRF format detection.
+- Detect legacy SRF by `ADDON:` prefix.
+- Normalize paths for hashing (backslash→slash, lowercase).
+- Ignore unknown fields in JSON (`repo.json` and JSON SRF).
+- Treat non-MD5 checksum-like fields in `repo.json` as opaque strings.

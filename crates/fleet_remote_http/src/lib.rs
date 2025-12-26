@@ -50,6 +50,18 @@ struct State {
 impl HttpRemote {
     pub fn new(base_url: &str) -> Result<Self> {
         let mut base = Url::parse(base_url)?;
+
+        // Normalize common user input where the "base URL" is actually a direct `repo.json` URL.
+        base.set_fragment(None);
+        base.set_query(None);
+        let path = base.path().to_string();
+        let path_trimmed = path.trim_end_matches('/');
+        if path_trimmed.to_ascii_lowercase().ends_with("/repo.json") {
+            let new_path = path_trimmed[..path_trimmed.len().saturating_sub("/repo.json".len())]
+                .to_string();
+            base.set_path(if new_path.is_empty() { "/" } else { &new_path });
+        }
+
         // Normalize to ensure path ends with '/'
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path().trim_end_matches('/')));
@@ -160,13 +172,15 @@ impl RemoteRepo for HttpRemote {
     async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
-        let url = self.url_join(&format!("{}/mod_manifest.json", mod_id))?;
+
+        let url = self.url_join(&format!("{}/mod.srf", mod_id))?;
         let req = apply_basic_auth(self.client.get(url), &auth);
         let res = req.send().await?.error_for_status()?;
         let bytes = res.bytes().await?;
-        let wire = fleet_swifty_wire::parse_mod_manifest_json(&bytes)
+
+        let wire = fleet_swifty_wire::parse_mod_srf(&bytes)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        Ok(fleet_swifty_wire::ingest_mod_manifest(wire)?)
+        Ok(fleet_swifty_wire::ingest_mod_srf(wire)?)
     }
 
     async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> Result<RemoteStream> {

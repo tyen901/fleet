@@ -50,8 +50,21 @@ impl ProfilesDb {
 
 pub fn normalize_repo_url(url: &str) -> String {
     let mut s = url.trim().to_string();
+    if let Some(iq) = s.find('?') {
+        s.truncate(iq);
+    }
+    if let Some(ih) = s.find('#') {
+        s.truncate(ih);
+    }
     while s.ends_with('/') {
         s.pop();
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.ends_with("/repo.json") {
+        s.truncate(s.len().saturating_sub("/repo.json".len()));
+        while s.ends_with('/') {
+            s.pop();
+        }
     }
     s
 }

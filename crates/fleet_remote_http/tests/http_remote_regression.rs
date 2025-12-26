@@ -8,9 +8,8 @@ use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("test_files")
+        .join("tests")
+        .join("fixtures")
 }
 
 fn read_fixture(rel: &str) -> Vec<u8> {
@@ -56,7 +55,7 @@ fn minimal_repo_json(auth: Option<(&str, &str)>) -> String {
 }
 
 #[tokio::test]
-async fn fetch_mod_manifest_uses_mod_manifest_json() {
+async fn fetch_mod_manifest_uses_mod_srf() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -74,17 +73,15 @@ async fn fetch_mod_manifest_uses_mod_manifest_json() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/@ace_compat_cup_vehicles/mod_manifest.json"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string(
-                serde_json::json!({
-                    "name": "@ace_compat_cup_vehicles",
-                    "checksum": "D41D8CD98F00B204E9800998ECF8427E",
-                    "files": []
-                })
-                .to_string(),
-            ),
-        )
+        .and(path("/@ace_compat_cup_vehicles/mod.srf"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            serde_json::json!({
+                "Name": "@ace_compat_cup_vehicles",
+                "Checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                "Files": []
+            })
+            .to_string(),
+        ))
         .mount(&server)
         .await;
 
@@ -114,6 +111,78 @@ async fn fetch_mod_manifest_uses_mod_manifest_json() {
 }
 
 #[tokio::test]
+async fn fetch_mod_manifest_parses_mod_srf_json() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repo.json"))
+        .and(header("range", "bytes=0-0"))
+        .respond_with(ResponseTemplate::new(206))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repo.json"))
+        .and(HeaderAbsent("range"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(minimal_repo_json(None)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/@m/mod.srf"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                serde_json::json!({
+                    "name": "@m",
+                    "checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                    "files": []
+                })
+                .to_string(),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let remote = HttpRemote::new(&server.uri()).expect("create HttpRemote");
+    let mf = remote.fetch_mod_manifest("@m").await.expect("fetch_mod_manifest");
+    assert_eq!(mf.mod_id().as_str(), "@m");
+    assert!(mf.files().is_empty());
+}
+
+#[tokio::test]
+async fn fetch_mod_manifest_parses_mod_srf_legacy_text() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/repo.json"))
+        .and(header("range", "bytes=0-0"))
+        .respond_with(ResponseTemplate::new(206))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/repo.json"))
+        .and(HeaderAbsent("range"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(minimal_repo_json(None)))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/@m/mod.srf"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("ADDON:@m:0:D41D8CD98F00B204E9800998ECF8427E\r\n"),
+        )
+        .mount(&server)
+        .await;
+
+    let remote = HttpRemote::new(&server.uri()).expect("create HttpRemote");
+    let mf = remote.fetch_mod_manifest("@m").await.expect("fetch_mod_manifest");
+    assert_eq!(mf.mod_id().as_str(), "@m");
+    assert!(mf.files().is_empty());
+}
+
+#[tokio::test]
 async fn basic_auth_from_repo_json_is_applied_to_manifest_requests() {
     let server = MockServer::start().await;
 
@@ -138,14 +207,14 @@ async fn basic_auth_from_repo_json_is_applied_to_manifest_requests() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/@ace/mod_manifest.json"))
+        .and(path("/@ace/mod.srf"))
         .and(header("authorization", expected_auth.as_str()))
         .respond_with(
             ResponseTemplate::new(200).set_body_string(
                 serde_json::json!({
-                    "name": "@ace",
-                    "checksum": "D41D8CD98F00B204E9800998ECF8427E",
-                    "files": []
+                    "Name": "@ace",
+                    "Checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                    "Files": []
                 })
                 .to_string(),
             ),
@@ -221,9 +290,9 @@ async fn fetch_file_streams_exact_bytes_for_real_fixture_file() {
         .mount(&server)
         .await;
 
-    let file_bytes = read_fixture("@ace/addons/ace_advanced_ballistics.pbo");
+    let file_bytes = read_fixture("example_pbo.pbo");
     Mock::given(method("GET"))
-        .and(path("/@ace/addons/ace_advanced_ballistics.pbo"))
+        .and(path("/@ace/addons/example_pbo.pbo"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(file_bytes.clone()))
         .mount(&server)
         .await;
@@ -231,7 +300,7 @@ async fn fetch_file_streams_exact_bytes_for_real_fixture_file() {
     let base = server.uri().trim_end_matches('/').to_string();
     let remote = HttpRemote::new(&base).expect("create HttpRemote");
 
-    let rel_path = RelPath::new("addons/ace_advanced_ballistics.pbo").unwrap();
+    let rel_path = RelPath::new("addons/example_pbo.pbo").unwrap();
     let mut stream = remote
         .fetch_file("@ace", &rel_path)
         .await
