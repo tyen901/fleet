@@ -478,8 +478,8 @@ async fn apply_patch(
         .fold(0u64, |acc, r| acc.saturating_add(r.len));
     let done = Arc::new(AtomicU64::new(0));
 
-    let range_workers = tuning.range_concurrency.max(1);
     let ranges = op.target.ranges_to_fetch.clone();
+    let buf = std::cmp::min(ranges.len().max(1), 1024);
     let tmp_path = staged.tmp_path.clone();
     let mut tasks = stream::iter(ranges)
         .map(|range| {
@@ -545,7 +545,7 @@ async fn apply_patch(
                 Ok::<(), anyhow::Error>(())
             }
         })
-        .buffer_unordered(range_workers);
+        .buffer_unordered(buf);
 
     while let Some(res) = tasks.next().await {
         res?;
