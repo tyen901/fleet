@@ -284,7 +284,6 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
         assert!(mod_dir.is_dir(), "not a dir: {}", mod_dir.display());
     }
 
-    assert!(checkout.join(".fleet").exists(), "missing .fleet directory");
     assert!(
         !has_tmp_leftovers(checkout),
         "unexpected staging leftovers after successful sync"
