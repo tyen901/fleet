@@ -74,14 +74,16 @@ async fn fetch_mod_manifest_uses_mod_srf() {
 
     Mock::given(method("GET"))
         .and(path("/@ace_compat_cup_vehicles/mod.srf"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            serde_json::json!({
-                "Name": "@ace_compat_cup_vehicles",
-                "Checksum": "D41D8CD98F00B204E9800998ECF8427E",
-                "Files": []
-            })
-            .to_string(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                serde_json::json!({
+                    "Name": "@ace_compat_cup_vehicles",
+                    "Checksum": "D41D8CD98F00B204E9800998ECF8427E",
+                    "Files": []
+                })
+                .to_string(),
+            ),
+        )
         .mount(&server)
         .await;
 
@@ -144,7 +146,10 @@ async fn fetch_mod_manifest_parses_mod_srf_json() {
         .await;
 
     let remote = HttpRemote::new(&server.uri()).expect("create HttpRemote");
-    let mf = remote.fetch_mod_manifest("@m").await.expect("fetch_mod_manifest");
+    let mf = remote
+        .fetch_mod_manifest("@m")
+        .await
+        .expect("fetch_mod_manifest");
     assert_eq!(mf.mod_id().as_str(), "@m");
     assert!(mf.files().is_empty());
 }
@@ -177,7 +182,10 @@ async fn fetch_mod_manifest_parses_mod_srf_legacy_text() {
         .await;
 
     let remote = HttpRemote::new(&server.uri()).expect("create HttpRemote");
-    let mf = remote.fetch_mod_manifest("@m").await.expect("fetch_mod_manifest");
+    let mf = remote
+        .fetch_mod_manifest("@m")
+        .await
+        .expect("fetch_mod_manifest");
     assert_eq!(mf.mod_id().as_str(), "@m");
     assert!(mf.files().is_empty());
 }

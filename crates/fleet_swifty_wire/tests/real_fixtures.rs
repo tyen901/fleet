@@ -66,7 +66,8 @@ fn parses_and_ingests_real_example_mod_srf_fixture() {
             for p in parts {
                 assert_eq!(p.md5.bytes().len(), 16, "part md5 must be 16 bytes");
                 assert_eq!(
-                    p.offset, expected,
+                    p.offset,
+                    expected,
                     "parts must be contiguous for {}",
                     f.rel_path().as_str()
                 );
@@ -107,4 +108,3 @@ fn parses_and_ingests_real_legacy_text_srf_fixture() {
         }
     }
 }
-

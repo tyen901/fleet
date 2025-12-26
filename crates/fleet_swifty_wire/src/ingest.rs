@@ -146,7 +146,9 @@ fn ingest_wire_mod(
     let files = files_by_path.into_values().collect::<Vec<_>>();
     let derived_mod = mod_checksum_from_files(&files);
     if derived_mod != expected_mod {
-        return Err(ManifestError::InvalidManifest("mod checksum mismatch".into()));
+        return Err(ManifestError::InvalidManifest(
+            "mod checksum mismatch".into(),
+        ));
     }
 
     ModManifest::new(mod_id.as_str().to_string(), files)

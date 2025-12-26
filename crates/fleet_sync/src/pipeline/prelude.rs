@@ -14,7 +14,7 @@ pub(crate) struct Prelude {
 }
 
 pub(crate) async fn run_prelude(
-    checkout_root: &Path,
+    _checkout_root: &Path,
     enabled_mods: &[String],
     scan_concurrency: usize,
     remote: Arc<dyn RemoteRepo>,
@@ -25,10 +25,6 @@ pub(crate) async fn run_prelude(
     if cancel.is_cancelled() {
         return Err(crate::model::EngineError::Cancelled);
     }
-
-    tokio::fs::create_dir_all(checkout_root.join(".fleet"))
-        .await
-        .map_err(|e| crate::model::EngineError::Internal(e.into()))?;
 
     let desired = store
         .desired_state_get()

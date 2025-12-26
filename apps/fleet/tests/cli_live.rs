@@ -19,19 +19,6 @@ fn base_url() -> String {
 
 type RepoSpec = fleet_swifty_wire::model::RepoSpec;
 
-#[derive(Debug, Clone)]
-struct SimpleFile {
-    path: String,
-    length: u64,
-    checksum_hex_upper: String,
-}
-
-#[derive(Debug, Clone)]
-struct SimpleManifest {
-    name: String,
-    files: Vec<SimpleFile>,
-}
-
 fn fleet_bin() -> Command {
     Command::new(assert_cmd::cargo::cargo_bin!("fleet"))
 }
@@ -144,15 +131,6 @@ fn read_stream<R: std::io::Read>(r: R, prefix: Option<&'static str>) -> Vec<u8> 
 fn any_file_under(root: &Path, max_bytes: u64) -> Option<PathBuf> {
     for e in WalkDir::new(root).into_iter().filter_map(Result::ok) {
         if e.file_type().is_file() {
-            if let Ok(rel) = e.path().strip_prefix(root) {
-                if rel
-                    .components()
-                    .next()
-                    .is_some_and(|c| c.as_os_str() == ".fleet")
-                {
-                    continue;
-                }
-            }
             let meta = e.metadata().ok()?;
             if meta.len() <= max_bytes {
                 return Some(e.path().to_path_buf());
@@ -167,18 +145,6 @@ fn sha256_file(path: &Path) -> Vec<u8> {
     let mut h = Sha256::new();
     h.update(&bytes);
     h.finalize().to_vec()
-}
-
-fn has_tmp_leftovers(root: &Path) -> bool {
-    for e in WalkDir::new(root).into_iter().filter_map(Result::ok) {
-        if e.file_type().is_file() {
-            let name = e.file_name().to_string_lossy();
-            if name.starts_with(".fleet_tmp_") || name.starts_with(".fleet_stage_") {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 async fn fetch_repo_spec_strict(repo_url: &str) -> Option<RepoSpec> {
@@ -215,62 +181,6 @@ async fn fetch_repo_spec_strict(repo_url: &str) -> Option<RepoSpec> {
     }
 }
 
-async fn fetch_manifest_for(mod_name: &str) -> SimpleManifest {
-    let enc_mod = urlencoding::encode(mod_name);
-    let url_fallback = format!("{}{}/mod.srf", base_url(), enc_mod);
-    let client = reqwest::Client::builder()
-        .default_headers({
-            let mut h = reqwest::header::HeaderMap::new();
-            h.insert(
-                reqwest::header::ACCEPT_ENCODING,
-                reqwest::header::HeaderValue::from_static("identity"),
-            );
-            h
-        })
-        .no_gzip()
-        .no_brotli()
-        .no_zstd()
-        .build()
-        .unwrap();
-
-    let resp = client
-        .get(&url_fallback)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    let bytes = resp.bytes().await.unwrap();
-    let srf = fleet_swifty_wire::parse_mod_srf(&bytes).expect("parse mod.srf");
-
-    match srf {
-        fleet_swifty_wire::ModSrfWire::Json(srf) => SimpleManifest {
-            name: srf.name,
-            files: srf
-                .files
-                .into_iter()
-                .map(|f| SimpleFile {
-                    path: f.path.replace('\\', "/"),
-                    length: f.length,
-                    checksum_hex_upper: f.checksum.to_hex_upper(),
-                })
-                .collect(),
-        },
-        fleet_swifty_wire::ModSrfWire::LegacyText(srf) => SimpleManifest {
-            name: srf.name,
-            files: srf
-                .files
-                .into_iter()
-                .map(|f| SimpleFile {
-                    path: f.path,
-                    length: f.length,
-                    checksum_hex_upper: f.checksum.to_hex_upper(),
-                })
-                .collect(),
-        },
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
     if !live_enabled() {
@@ -294,11 +204,6 @@ async fn live_repo_smoke_test_syncs_and_creates_expected_dirs() {
         assert!(mod_dir.exists(), "missing mod dir: {}", mod_dir.display());
         assert!(mod_dir.is_dir(), "not a dir: {}", mod_dir.display());
     }
-
-    assert!(
-        !has_tmp_leftovers(checkout),
-        "unexpected staging leftovers after successful sync"
-    );
 
     if let Some(auth) = spec.repo_basic_authentication.as_ref() {
         let _ = (&auth.username, &auth.password);
@@ -339,10 +244,6 @@ async fn live_repo_repairs_deleted_mod_dir() {
 
     run_sync_assert_success(checkout);
     assert!(victim_dir.exists(), "victim mod dir not restored");
-    assert!(
-        !has_tmp_leftovers(checkout),
-        "staging leftovers after repair"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -377,78 +278,4 @@ async fn live_repo_repairs_corrupted_file() {
 
     let after = sha256_file(&file);
     assert_eq!(before, after, "file was not repaired: {}", file.display());
-    assert!(
-        !has_tmp_leftovers(checkout),
-        "staging leftovers after corruption repair"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_repo_resumes_partial_tmp_download() {
-    if !live_enabled() {
-        eprintln!("SKIP: set FLEET_LIVE_TESTS=1 to run live tests");
-        return;
-    }
-    let _guard = live_guard().await;
-    let repo_url = format!("{}repo.json", base_url());
-    let Some(spec) = fetch_repo_spec_strict(&repo_url).await else {
-        return;
-    };
-
-    let tmp = TempDir::new().unwrap();
-    let checkout = tmp.path();
-    run_sync_assert_success(checkout);
-
-    let mod_name = spec
-        .required_mods
-        .iter()
-        .find(|m| m.enabled)
-        .unwrap()
-        .mod_name
-        .clone();
-
-    let manifest = fetch_manifest_for(&mod_name).await;
-    let _ = &manifest.name;
-
-    let file = manifest
-        .files
-        .iter()
-        .find(|f| f.length > 0)
-        .expect("no non-empty file in manifest");
-
-    let rel_path = file.path.replace('\\', "/");
-    let final_path = checkout.join(&mod_name).join(&rel_path);
-    assert!(
-        final_path.exists(),
-        "expected file exists after initial sync"
-    );
-
-    let basename = Path::new(&rel_path)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-
-    let tmp_name = format!(".fleet_tmp_{}_{}.part", file.checksum_hex_upper, basename);
-    let tmp_path = final_path.parent().unwrap().join(tmp_name);
-
-    let full = fs::read(&final_path).unwrap();
-    let partial_len = std::cmp::min(64 * 1024usize, full.len().max(1) / 4).max(1);
-    fs::write(&tmp_path, &full[..partial_len]).unwrap();
-
-    fs::remove_file(&final_path).unwrap();
-    assert!(tmp_path.exists());
-
-    run_sync_assert_success(checkout);
-
-    assert!(final_path.exists(), "final file not restored");
-    assert!(
-        !tmp_path.exists(),
-        "legacy tmp file not cleaned up: {}",
-        tmp_path.display()
-    );
-    assert!(
-        !has_tmp_leftovers(checkout),
-        "staging leftovers after resume"
-    );
 }

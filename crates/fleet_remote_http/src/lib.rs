@@ -57,8 +57,8 @@ impl HttpRemote {
         let path = base.path().to_string();
         let path_trimmed = path.trim_end_matches('/');
         if path_trimmed.to_ascii_lowercase().ends_with("/repo.json") {
-            let new_path = path_trimmed[..path_trimmed.len().saturating_sub("/repo.json".len())]
-                .to_string();
+            let new_path =
+                path_trimmed[..path_trimmed.len().saturating_sub("/repo.json".len())].to_string();
             base.set_path(if new_path.is_empty() { "/" } else { &new_path });
         }
 
@@ -178,8 +178,8 @@ impl RemoteRepo for HttpRemote {
         let res = req.send().await?.error_for_status()?;
         let bytes = res.bytes().await?;
 
-        let wire = fleet_swifty_wire::parse_mod_srf(&bytes)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let wire =
+            fleet_swifty_wire::parse_mod_srf(&bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(fleet_swifty_wire::ingest_mod_srf(wire)?)
     }
 

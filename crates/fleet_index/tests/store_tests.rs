@@ -84,10 +84,7 @@ fn expected_replace_all_atomic_on_invalid() {
 fn open_or_recover_renames_sqlite_wal_shm() {
     let tmp = tempfile::tempdir().unwrap();
     let checkout_root = tmp.path();
-    let fleet_dir = checkout_root.join(".fleet");
-    fs::create_dir_all(&fleet_dir).unwrap();
-
-    let sqlite_path = fleet_dir.join("index.sqlite");
+    let sqlite_path = checkout_root.join("index.sqlite");
     {
         let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
         conn.execute_batch("CREATE TABLE t(x INTEGER);").unwrap();
@@ -100,13 +97,13 @@ fn open_or_recover_renames_sqlite_wal_shm() {
         f.write_all(b"not a sqlite db").unwrap();
         f.set_len(1).unwrap();
     }
-    fs::write(fleet_dir.join("index.sqlite-wal"), b"wal").unwrap();
-    fs::write(fleet_dir.join("index.sqlite-shm"), b"shm").unwrap();
+    fs::write(checkout_root.join("index.sqlite-wal"), b"wal").unwrap();
+    fs::write(checkout_root.join("index.sqlite-shm"), b"shm").unwrap();
 
     let _ = FleetIndex::open_or_recover_at_path(&sqlite_path).unwrap();
 
     let mut renamed = 0;
-    for entry in fs::read_dir(&fleet_dir).unwrap() {
+    for entry in fs::read_dir(checkout_root).unwrap() {
         let name = entry.unwrap().file_name();
         let name = name.to_string_lossy();
         if name.starts_with("index.sqlite.broken.")

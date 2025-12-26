@@ -111,8 +111,7 @@ fn scan_pbo_file(
 ///
 /// Notes:
 /// - Paths are normalized to forward slashes.
-/// - `.fleet/` and temporary fleet files are excluded.
-/// - `mod_manifest.json` is excluded.
+/// - `mod.srf` is excluded.
 /// - PBO partitioning follows your existing rules (header, skip-first-entry, tail).
 pub fn scan_mod(
     mod_root: &Utf8Path,
@@ -139,11 +138,7 @@ pub fn scan_mod(
         let rel_str = rel.to_string_lossy().replace('\\', "/");
         let file_name = entry.file_name().to_string_lossy();
 
-        if rel_str.starts_with(".fleet/")
-            || file_name.starts_with(".fleet_tmp_")
-            || file_name.starts_with(".fleet_stage_")
-            || file_name.eq_ignore_ascii_case("mod_manifest.json")
-        {
+        if file_name.eq_ignore_ascii_case("mod.srf") {
             continue;
         }
 

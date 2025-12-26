@@ -20,7 +20,7 @@ A useful way to frame it:
 
 ### Key terms (stable, not code-specific)
 
-- **Checkout root**: The folder containing enabled mod folders plus a hidden `.fleet/` area used by the system.
+- **Checkout root**: The folder containing enabled mod folders.
 - **Enabled mod**: A mod folder the user has chosen to sync (e.g., `@foo`).
 - **Remote state**: The remote’s description of which files exist for each enabled mod, plus their sizes and checksums (and possibly part information for large files).
 - **Desired state**: “Which remote repo are we using?” + “Which mods are enabled?” + “Which remote state identifier do those imply?”
@@ -238,7 +238,7 @@ When extending either crate, prefer changes that strengthen safety and keep corr
 
 ## Glossary
 
-- **Checkout root**: The parent folder containing enabled mods and the `.fleet/` area.
+- **Checkout root**: The parent folder containing enabled mods.
 - **Enabled mod**: A selected mod folder that participates in verify/repair.
 - **Relative path**: A normalized path within a mod (never absolute, never `..`).
 - **Desired state**: The target remote repo + enabled mods and their implied remote state identifier.
@@ -246,4 +246,3 @@ When extending either crate, prefer changes that strengthen safety and keep corr
 - **File-state cache**: Metadata used to conservatively infer “unchanged”.
 - **Verified state**: Marker that a full pass succeeded cleanly for the desired state.
 - **Quarantine**: Moving unexpected content aside (bounded and safety-checked).
-
