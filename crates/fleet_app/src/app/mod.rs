@@ -10,10 +10,11 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::launch::arma3;
-use crate::registry;
-use crate::registry::{normalize_repo_url, registry_path, Profile, Registry};
+use crate::paths;
+use crate::profiles;
+use crate::profiles::{normalize_repo_url, Profile, ProfilesDb};
 use crate::settings::{Arma3Config, LaunchSettings};
-use crate::storage::RegistryStore;
+use crate::store::json_store::JsonStore;
 use crate::sync;
 use crate::sync::adapters::{FleetIndexStore, Md5Checksummer};
 use crate::sync::{model::SyncModel, sync_model_sink::SyncModelSink};
@@ -83,82 +84,120 @@ impl SyncJob {
 
 #[derive(Clone)]
 pub struct FleetApp {
-    store: RegistryStore,
-    registry: Registry,
+    profiles_store: JsonStore<ProfilesDb>,
+    profiles: ProfilesDb,
+    settings_store: JsonStore<LaunchSettings>,
+    settings: LaunchSettings,
 }
 
 impl FleetApp {
     pub fn open_default() -> Result<Self, AppError> {
-        let path = registry_path()?;
-        let store = RegistryStore::new(path);
-        let registry = store.load()?;
-        Ok(Self { store, registry })
+        let profiles_path = paths::profiles_path()?;
+        let settings_path = paths::settings_path()?;
+        let profiles_store = JsonStore::new(profiles_path);
+        let settings_store = JsonStore::new(settings_path);
+        let profiles = profiles_store.load()?;
+        let settings = settings_store.load()?;
+        Ok(Self {
+            profiles_store,
+            profiles,
+            settings_store,
+            settings,
+        })
     }
 
     pub fn open_default_with_recovery() -> (Self, Option<String>) {
-        let mut warning = None;
-        let path = match registry_path() {
+        let mut warnings: Vec<String> = Vec::new();
+        let profiles_path = match paths::profiles_path() {
             Ok(path) => path,
             Err(e) => {
-                warning = Some(format!("Failed to resolve registry path: {e}"));
-                Utf8PathBuf::from("registry.json")
+                warnings.push(format!("Failed to resolve profiles path: {e}"));
+                Utf8PathBuf::from("profiles.json")
             }
         };
-
-        let store = RegistryStore::new(path);
-        let registry = match store.load() {
-            Ok(reg) => reg,
+        let settings_path = match paths::settings_path() {
+            Ok(path) => path,
             Err(e) => {
-                warning = Some(e.to_string());
-                Registry::default()
+                warnings.push(format!("Failed to resolve settings path: {e}"));
+                Utf8PathBuf::from("settings.json")
             }
         };
 
-        (Self { store, registry }, warning)
+        let profiles_store = JsonStore::new(profiles_path);
+        let settings_store = JsonStore::new(settings_path);
+
+        let profiles = match profiles_store.load() {
+            Ok(p) => p,
+            Err(e) => {
+                warnings.push(e.to_string());
+                ProfilesDb::default()
+            }
+        };
+        let settings = match settings_store.load() {
+            Ok(s) => s,
+            Err(e) => {
+                warnings.push(e.to_string());
+                LaunchSettings::default()
+            }
+        };
+
+        (
+            Self {
+                profiles_store,
+                profiles,
+                settings_store,
+                settings,
+            },
+            if warnings.is_empty() {
+                None
+            } else {
+                Some(warnings.join("\n"))
+            },
+        )
     }
 
-    pub fn registry_path(&self) -> &Utf8Path {
-        self.store.path()
+    pub fn profiles_path(&self) -> &Utf8Path {
+        self.profiles_store.path()
     }
 
-    pub fn refresh_registry(&mut self) -> Result<(), AppError> {
-        self.registry = self.store.load()?;
+    pub fn settings_path(&self) -> &Utf8Path {
+        self.settings_store.path()
+    }
+
+    pub fn refresh_storage(&mut self) -> Result<(), AppError> {
+        self.profiles = self.profiles_store.load()?;
+        self.settings = self.settings_store.load()?;
         Ok(())
     }
 
-    pub fn init_registry(&mut self) -> Result<(), AppError> {
-        // Create file if missing; save default under lock.
-        let store = self.store.clone();
-        store.update(|reg| {
-            // If this is a fresh file, it will be default already; still safe.
-            if reg.schema_version == 0 {
-                *reg = Registry::default();
-            }
-            Ok(())
-        })?;
-        self.refresh_registry()?;
+    pub fn init_storage(&mut self) -> Result<(), AppError> {
+        let profiles_store = self.profiles_store.clone();
+        profiles_store.update(|_db| Ok(()))?;
+        let settings_store = self.settings_store.clone();
+        settings_store.update(|_settings| Ok(()))?;
+        self.refresh_storage()?;
         Ok(())
     }
 
     pub fn launch_settings(&self) -> LaunchSettings {
-        self.registry.launch.clone()
+        self.settings.clone()
     }
 
     pub fn set_launch_settings(&mut self, settings: LaunchSettings) -> Result<(), AppError> {
         // REQUIRED: reject invalid Linux templates at the settings boundary
         crate::launch::arma3::validate_linux_template_strict(&settings.arma3.linux.template)?;
 
-        let store = self.store.clone();
-        store.update(|reg| {
-            reg.launch = settings;
+        let store = self.settings_store.clone();
+        store.update(|current| {
+            *current = settings;
             Ok(())
         })?;
-        self.refresh_registry()?;
+        self.refresh_storage()?;
         Ok(())
     }
 
     pub fn open_folder(&self, path: &std::path::Path) -> Result<(), AppError> {
-        crate::platform::open_path(self.registry.launch.open_mode.clone(), path)?;
+        crate::platform::open_path(self.settings.open_mode.clone(), path)?;
         Ok(())
     }
 
@@ -168,7 +207,7 @@ impl FleetApp {
         extra_args_override: Option<String>,
     ) -> Result<String, AppError> {
         let profile = self
-            .registry
+            .profiles
             .profiles
             .iter()
             .find(|p| p.id == id)
@@ -182,7 +221,7 @@ impl FleetApp {
             &base_path,
             &profile.arma3.enabled_mods,
             &extra,
-            &self.registry.launch,
+            &self.settings,
         )?;
 
         Ok(plan.preview)
@@ -195,7 +234,7 @@ impl FleetApp {
         settings_override: Option<LaunchSettings>,
     ) -> Result<crate::launch::arma3::LinuxTemplateValidation, AppError> {
         let profile = self
-            .registry
+            .profiles
             .profiles
             .iter()
             .find(|p| p.id == id)
@@ -209,14 +248,14 @@ impl FleetApp {
             &base_path,
             &profile.arma3.enabled_mods,
             &extra,
-            settings_override.as_ref().unwrap_or(&self.registry.launch),
+            settings_override.as_ref().unwrap_or(&self.settings),
         )?;
 
         Ok(report)
     }
 
     pub fn list_profiles(&self) -> Vec<ProfileSpec> {
-        self.registry
+        self.profiles
             .profiles
             .clone()
             .into_iter()
@@ -225,11 +264,11 @@ impl FleetApp {
     }
 
     pub fn selected_profile(&self) -> Option<ProfileSpec> {
-        self.registry.selected().cloned().map(ProfileSpec::from)
+        self.profiles.selected().cloned().map(ProfileSpec::from)
     }
 
     pub fn get_profile(&self, id: &str) -> Option<ProfileSpec> {
-        self.registry
+        self.profiles
             .profiles
             .iter()
             .find(|p| p.id == id)
@@ -238,10 +277,10 @@ impl FleetApp {
     }
 
     pub fn select_profile(&mut self, id: &str) -> Result<(), AppError> {
-        let store = self.store.clone();
-        store.update(|reg| {
-            if reg.profiles.iter().any(|p| p.id == id) {
-                reg.selected_profile = Some(id.to_string());
+        let store = self.profiles_store.clone();
+        store.update(|db| {
+            if db.profiles.iter().any(|p| p.id == id) {
+                db.selected_profile = Some(id.to_string());
                 Ok(())
             } else {
                 Err(std::io::Error::new(
@@ -250,7 +289,7 @@ impl FleetApp {
                 ))
             }
         })?;
-        self.refresh_registry()?;
+        self.refresh_storage()?;
         Ok(())
     }
 
@@ -263,11 +302,11 @@ impl FleetApp {
         let normalized_repo = normalize_repo_url(&create.repo_url);
         let checkout_path = Utf8PathBuf::from(&create.checkout_root);
 
-        registry::setup_checkout_root(&checkout_path)?;
+        profiles::setup_checkout_root(&checkout_path)?;
 
-        let created = registry::unix_now();
+        let created = profiles::unix_now();
 
-        let store = self.store.clone();
+        let store = self.profiles_store.clone();
         let added = store.update(|reg| {
             let prev_selected = reg.selected_profile.clone();
             let profile = Profile {
@@ -298,12 +337,12 @@ impl FleetApp {
             Ok(created)
         })?;
 
-        self.refresh_registry()?;
+        self.refresh_storage()?;
         Ok(ProfileSpec::from(added))
     }
 
     pub fn update_profile(&mut self, id: &str, update: ProfileUpdate) -> Result<(), AppError> {
-        let store = self.store.clone();
+        let store = self.profiles_store.clone();
         store.update(|reg| {
             let profile = reg
                 .profiles
@@ -324,7 +363,7 @@ impl FleetApp {
             }
             if let Some(checkout_root) = update.checkout_root {
                 let checkout_path = Utf8PathBuf::from(checkout_root);
-                registry::setup_checkout_root(&checkout_path)?;
+                profiles::setup_checkout_root(&checkout_path)?;
                 profile.checkout_root = checkout_path.to_string();
             }
             if let Some(extra) = update.arma3_extra_args {
@@ -340,15 +379,15 @@ impl FleetApp {
             }
             Ok(())
         })?;
-        self.refresh_registry()?;
+        self.refresh_storage()?;
         Ok(())
     }
 
     pub fn remove_profile(&mut self, id: &str) -> Result<(), AppError> {
-        let store = self.store.clone();
-        let removed = store.update(|reg| Ok(reg.remove_profile(id)))?;
+        let store = self.profiles_store.clone();
+        let removed = store.update(|reg| Ok(reg.remove(id)))?;
         if removed {
-            self.refresh_registry()?;
+            self.refresh_storage()?;
             Ok(())
         } else {
             Err(AppError::NotFound(format!("profile not found: {id}")))
@@ -383,11 +422,11 @@ impl FleetApp {
         model: Arc<RwLock<SyncModel>>,
     ) -> Result<SyncJob, AppError> {
         let repo_url = normalize_repo_url(repo_url);
-        registry::setup_checkout_root(checkout_root)?;
+        profiles::setup_checkout_root(checkout_root)?;
 
         let (done_tx, done_rx) = oneshot::channel::<Result<(), AppError>>();
         let checkout_root_buf = checkout_root.to_owned();
-        let store = self.store.clone();
+        let profiles_store = self.profiles_store.clone();
         let cancel = CancellationToken::new();
         let cancel_task = cancel.clone();
 
@@ -435,11 +474,9 @@ impl FleetApp {
                 let index_id = profile_id_to_update
                     .clone()
                     .unwrap_or_else(|| "default".to_string());
-                let idx_dir = registry::internal_index_dir()
-                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
-                let idx_path = idx_dir
-                    .as_std_path()
-                    .join(format!("{index_id}.sqlite"));
+                let idx_dir =
+                    paths::internal_index_dir().map_err(|e| AppError::SyncEngine(e.to_string()))?;
+                let idx_path = idx_dir.join(format!("{index_id}.sqlite"));
                 let mut idx = FleetIndex::open_or_recover_at_path(&idx_path)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
                 let desired = DesiredState {
@@ -448,7 +485,7 @@ impl FleetApp {
                     repo_revision,
                     enabled_mods_hash: enabled_hash,
                     state_id,
-                    updated_at_unix_s: registry::unix_now(),
+                    updated_at_unix_s: profiles::unix_now(),
                 };
                 idx.set_desired_state(desired)
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?;
@@ -457,10 +494,14 @@ impl FleetApp {
                 let engine =
                     fleet_sync::SyncEngine::new(gated_remote, store, Arc::new(Md5Checksummer));
 
-                let staging_root = registry::internal_staging_dir()
+                let staging_id = profile_id_to_update
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                let staging_root = paths::internal_staging_dir()
                     .map_err(|e| AppError::SyncEngine(e.to_string()))?
-                    .as_std_path()
-                    .to_path_buf();
+                    .join(staging_id);
+                std::fs::create_dir_all(&staging_root)
+                    .map_err(|e| AppError::SyncEngine(e.to_string()))?;
 
                 let outcome = match tuning.mode {
                     sync::SyncMode::Repair => {
@@ -543,10 +584,9 @@ impl FleetApp {
             if res.is_ok() {
                 if let Some(profile_id) = profile_id_to_update {
                     // Update last_sync_unix_s via locked update to avoid clobbering.
-                    let _ = store.update(|reg| {
-                        if let Some(profile) = reg.profiles.iter_mut().find(|p| p.id == profile_id)
-                        {
-                            profile.last_sync_unix_s = Some(registry::unix_now());
+                    let _ = profiles_store.update(|db| {
+                        if let Some(profile) = db.profiles.iter_mut().find(|p| p.id == profile_id) {
+                            profile.last_sync_unix_s = Some(profiles::unix_now());
                         }
                         Ok(())
                     });
@@ -569,7 +609,7 @@ impl FleetApp {
         extra_args_override: Option<String>,
     ) -> Result<(), AppError> {
         let profile = self
-            .registry
+            .profiles
             .profiles
             .iter()
             .find(|p| p.id == id)
@@ -583,10 +623,10 @@ impl FleetApp {
             &base_path,
             &profile.arma3.enabled_mods,
             &extra,
-            &self.registry.launch,
+            &self.settings,
         )?;
 
-        crate::platform::execute(self.registry.launch.open_mode.clone(), plan.action)?;
+        crate::platform::execute(self.settings.open_mode.clone(), plan.action)?;
         Ok(())
     }
 
@@ -595,17 +635,17 @@ impl FleetApp {
         base_path: &std::path::Path,
         extra_args: &str,
     ) -> Result<(), AppError> {
-        let plan = arma3::plan_launch(base_path, &[], extra_args, &self.registry.launch)?;
+        let plan = arma3::plan_launch(base_path, &[], extra_args, &self.settings)?;
 
-        crate::platform::execute(self.registry.launch.open_mode.clone(), plan.action)?;
+        crate::platform::execute(self.settings.open_mode.clone(), plan.action)?;
         Ok(())
     }
 
     pub fn clear_index(&self, profile_id: &str) -> Result<(), AppError> {
         let _profile = self.require_profile(profile_id)?;
-        let idx_dir = registry::internal_index_dir()
+        let idx_dir = paths::internal_index_dir()
             .map_err(|e| AppError::Maintenance(format!("clear index failed: {e}")))?;
-        let path = idx_dir.as_std_path().join(format!("{profile_id}.sqlite"));
+        let path = idx_dir.join(format!("{profile_id}.sqlite"));
         std::fs::remove_file(&path)
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -620,10 +660,9 @@ impl FleetApp {
 
     pub fn clear_cache(&self, profile_id: &str) -> Result<(), AppError> {
         let _profile = self.require_profile(profile_id)?;
-        let path = registry::internal_staging_dir()
+        let path = paths::internal_staging_dir()
             .map_err(|e| AppError::Maintenance(format!("clear cache failed: {e}")))?
-            .as_std_path()
-            .to_path_buf();
+            .join(profile_id);
         std::fs::remove_dir_all(&path)
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

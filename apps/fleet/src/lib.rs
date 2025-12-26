@@ -34,8 +34,9 @@ pub fn run(services: FleetServices) {
             commands::data_rebuild_index,
             commands::data_clear_cache,
             commands::data_clear_last_sync_outcome,
-            commands::data_init_registry,
-            commands::data_registry_path,
+            commands::data_init_storage,
+            commands::data_profiles_path,
+            commands::data_settings_path,
             // Sync
             commands::sync_snapshot,
             commands::sync_start,

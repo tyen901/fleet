@@ -12,4 +12,3 @@ pub fn slice_to_md5_16(s: &[u8]) -> Result<[u8; 16]> {
     out.copy_from_slice(s);
     Ok(out)
 }
-

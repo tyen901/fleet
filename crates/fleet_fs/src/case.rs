@@ -20,7 +20,10 @@ impl Default for CaseFixTuning {
     fn default() -> Self {
         Self {
             hard_delete_losers: false,
-            trash_dir: std::env::temp_dir().join("fleet").join("trash").join("casefix"),
+            trash_dir: std::env::temp_dir()
+                .join("fleet")
+                .join("trash")
+                .join("casefix"),
         }
     }
 }
@@ -247,11 +250,7 @@ fn file_entries_case_insensitive(parent: &Path, name: &str) -> io::Result<Vec<Pa
     Ok(out)
 }
 
-fn ensure_dir_named(
-    parent: &Path,
-    desired: &str,
-    tuning: &CaseFixTuning,
-) -> io::Result<PathBuf> {
+fn ensure_dir_named(parent: &Path, desired: &str, tuning: &CaseFixTuning) -> io::Result<PathBuf> {
     std::fs::create_dir_all(parent)?;
     let desired_path = parent.join(desired);
     let mut matches = dir_entries_case_insensitive(parent, desired)?;
@@ -328,11 +327,7 @@ fn trash_path(tuning: &CaseFixTuning, label: &str) -> io::Result<PathBuf> {
     Ok(root.join(format!("{label}_{}", rand_suffix())))
 }
 
-fn remove_or_trash(
-    path: &Path,
-    tuning: &CaseFixTuning,
-    label: &str,
-) -> io::Result<()> {
+fn remove_or_trash(path: &Path, tuning: &CaseFixTuning, label: &str) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }

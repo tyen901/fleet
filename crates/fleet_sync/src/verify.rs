@@ -26,9 +26,7 @@ pub(crate) fn first_mismatch(
             }
             Ok(None)
         }
-        Some(parts) => crate::verify_parts::first_part_mismatch(path, parts, checksummer).map(
-            |opt| opt.map(|(offset, len)| VerifyMismatch { offset, len }),
-        ),
+        Some(parts) => crate::verify_parts::first_part_mismatch(path, parts, checksummer)
+            .map(|opt| opt.map(|(offset, len)| VerifyMismatch { offset, len })),
     }
 }
-

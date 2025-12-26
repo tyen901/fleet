@@ -28,7 +28,7 @@ pub struct FleetServices {
     pub update: Arc<dyn update::UpdateService>,
 }
 
-/// Open the default registry and construct a full [`FleetServices`] bundle.
+/// Open default storage and construct a full [`FleetServices`] bundle.
 ///
 /// Uses `FleetApp::open_default_with_recovery`, wraps it in `Arc<RwLock<_>>`,
 /// then constructs concrete services. Concrete types are kept out of UI via

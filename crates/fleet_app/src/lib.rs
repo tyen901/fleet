@@ -7,8 +7,9 @@ pub mod app;
 pub mod constants;
 pub mod settings;
 
-mod registry;
-mod storage;
+pub mod paths;
+pub mod profiles;
+pub mod store;
 
 /// Services module exposes high‑level UI and CLI services built on top of
 /// `FleetApp`.

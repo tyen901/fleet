@@ -270,13 +270,12 @@ fn plan_one_file(
             let mut bad_bytes = 0u64;
             for (idx, part) in parts.iter().enumerate() {
                 let got = &hashes[idx];
-                let got = crate::md5::slice_to_md5_16(got.as_slice()).map_err(|e| {
-                    PlanError::Other {
+                let got =
+                    crate::md5::slice_to_md5_16(got.as_slice()).map_err(|e| PlanError::Other {
                         mod_id: ctx.mod_id.to_string(),
                         rel_path: file.rel_path().as_str().to_string(),
                         source: e,
-                    }
-                })?;
+                    })?;
                 if got != *part.md5.bytes() {
                     bad_bytes = bad_bytes.saturating_add(part.len);
                     bad_parts.push(part.clone());

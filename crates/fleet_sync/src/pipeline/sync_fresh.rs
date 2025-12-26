@@ -7,11 +7,13 @@ use crate::model::{
     AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
     UnexpectedPathPolicy, UnknownPathPolicy,
 };
-use crate::pipeline::repair::{apply_planned_ops, ApplyOptions, FileTarget, IndexUpdate, PlannedOp, RepairStrategy};
-use crate::unexpected::Cancelled;
-use crate::unexpected::{UnexpectedOpts};
+use crate::pipeline::repair::{
+    apply_planned_ops, ApplyOptions, FileTarget, IndexUpdate, PlannedOp, RepairStrategy,
+};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
+use crate::unexpected::Cancelled;
+use crate::unexpected::UnexpectedOpts;
 use crate::util::now_ns;
 use fleet_manifest::ModManifest;
 use tokio_util::sync::CancellationToken;

@@ -17,8 +17,8 @@ use crate::settings::LaunchSettings;
 
 /// User-facing application settings.
 ///
-/// Fleet persists launch settings in its registry. This typedef exists so that
-/// presenters do not depend directly on internal registry structures.
+/// Fleet persists launch settings in `settings.json`. This typedef exists so that
+/// presenters do not depend directly on internal storage structures.
 pub type AppSettings = LaunchSettings;
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,11 +112,14 @@ pub trait DataService: Send + Sync {
     /// Clear the last recorded sync outcome.
     fn clear_last_sync_outcome(&self);
 
-    /// Initialize the registry file (creating it if necessary) and reload services.
-    fn init_registry(&self) -> Result<(), AppError>;
+    /// Initialize profile/settings storage files (creating if necessary) and reload services.
+    fn init_storage(&self) -> Result<(), AppError>;
 
-    /// Return the resolved registry path for diagnostics and scripts.
-    fn registry_path(&self) -> Result<String, AppError>;
+    /// Return the resolved profiles.json path for diagnostics and scripts.
+    fn profiles_path(&self) -> Result<String, AppError>;
+
+    /// Return the resolved settings.json path for diagnostics and scripts.
+    fn settings_path(&self) -> Result<String, AppError>;
 }
 
 /// Concrete data service implementation backed by a [`FleetApp`].
@@ -163,7 +166,7 @@ impl FleetDataService {
 
     fn refresh_cached_profiles(&self, clear_preview: bool) -> Result<(), AppError> {
         let mut app = self.app.write().expect("lock poisoned");
-        app.refresh_registry()?;
+        app.refresh_storage()?;
 
         let profiles = app.list_profiles();
         let selected = app.selected_profile().map(|p| p.id.clone());
@@ -442,17 +445,22 @@ impl DataService for FleetDataService {
         });
     }
 
-    fn init_registry(&self) -> Result<(), AppError> {
+    fn init_storage(&self) -> Result<(), AppError> {
         {
             let mut app = self.app.write().expect("lock poisoned");
-            app.init_registry()?;
+            app.init_storage()?;
         }
         self.refresh_cached_profiles(true)
     }
 
-    fn registry_path(&self) -> Result<String, AppError> {
+    fn profiles_path(&self) -> Result<String, AppError> {
         let app = self.app.read().expect("lock poisoned");
-        Ok(app.registry_path().to_string())
+        Ok(app.profiles_path().to_string())
+    }
+
+    fn settings_path(&self) -> Result<String, AppError> {
+        let app = self.app.read().expect("lock poisoned");
+        Ok(app.settings_path().to_string())
     }
 }
 

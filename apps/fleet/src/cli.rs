@@ -20,7 +20,7 @@ pub enum Cmd {
     Sync(SyncArgs),
     Launch(LaunchArgs),
     Update(update::UpdateArgs),
-    RegistryPath,
+    StoragePaths,
 }
 
 #[derive(Subcommand, Debug)]
@@ -67,8 +67,8 @@ pub enum ProfileCmd {
     Select {
         id: String,
     },
-    Init,
-    Path,
+    InitStorage,
+    Paths,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -128,8 +128,9 @@ pub async fn run_cli(
             Ok(())
         }
 
-        Cmd::RegistryPath => {
-            println!("{}", data.registry_path()?);
+        Cmd::StoragePaths => {
+            println!("profiles: {}", data.profiles_path()?);
+            println!("settings: {}", data.settings_path()?);
             Ok(())
         }
 
@@ -224,13 +225,14 @@ pub async fn run_cli(
                 Ok(())
             }
 
-            ProfileCmd::Init => {
-                data.init_registry()?;
+            ProfileCmd::InitStorage => {
+                data.init_storage()?;
                 Ok(())
             }
 
-            ProfileCmd::Path => {
-                println!("{}", data.registry_path()?);
+            ProfileCmd::Paths => {
+                println!("profiles: {}", data.profiles_path()?);
+                println!("settings: {}", data.settings_path()?);
                 Ok(())
             }
         },

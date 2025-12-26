@@ -2,8 +2,9 @@ import { useMemo, useState } from "react";
 import {
   dataLaunchArma3,
   dataOpenCheckoutRoot,
-  dataRegistryPath,
-  dataInitRegistry,
+  dataProfilesPath,
+  dataSettingsPath,
+  dataInitStorage,
   dataRebuildIndex,
   dataClearCache,
   syncStart,
@@ -255,20 +256,21 @@ export default function App() {
     }
   };
 
-  const getRegistryPath = async () => {
+  const getStoragePaths = async () => {
     setUiError(null);
     try {
-      const p = await dataRegistryPath();
-      alert(p);
+      const profiles = await dataProfilesPath();
+      const settings = await dataSettingsPath();
+      alert(`profiles: ${profiles}\nsettings: ${settings}`);
     } catch (e: unknown) {
       setUiError(describeError(e));
     }
   };
 
-  const initRegistry = async () => {
+  const initStorage = async () => {
     setUiError(null);
     try {
-      await dataInitRegistry();
+      await dataInitStorage();
       await dm.refresh();
     } catch (e: unknown) {
       setUiError(describeError(e));
@@ -348,11 +350,11 @@ export default function App() {
 
           <div className="sidebar-actions">
             <button onClick={() => dm.refreshProfiles()}>Refresh</button>
-            <button onClick={initRegistry}>Init registry</button>
+            <button onClick={initStorage}>Init storage</button>
           </div>
 
           <div className="sidebar-actions">
-            <button onClick={getRegistryPath}>Registry path</button>
+            <button onClick={getStoragePaths}>Storage paths</button>
           </div>
         </aside>
 

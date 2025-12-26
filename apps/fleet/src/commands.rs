@@ -221,13 +221,18 @@ pub async fn data_clear_last_sync_outcome(state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn data_init_registry(state: State<'_, AppState>) -> Result<(), ApiError> {
-    state.services.data.init_registry().map_err(Into::into)
+pub async fn data_init_storage(state: State<'_, AppState>) -> Result<(), ApiError> {
+    state.services.data.init_storage().map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn data_registry_path(state: State<'_, AppState>) -> Result<String, ApiError> {
-    state.services.data.registry_path().map_err(Into::into)
+pub async fn data_profiles_path(state: State<'_, AppState>) -> Result<String, ApiError> {
+    state.services.data.profiles_path().map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn data_settings_path(state: State<'_, AppState>) -> Result<String, ApiError> {
+    state.services.data.settings_path().map_err(Into::into)
 }
 
 // -------------------- Sync --------------------

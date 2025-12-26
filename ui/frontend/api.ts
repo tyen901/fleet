@@ -316,11 +316,14 @@ export function dataClearCache(profile_id: string): Promise<void> {
 export function dataClearLastSyncOutcome(): Promise<void> {
   return invokeSafe("data_clear_last_sync_outcome");
 }
-export function dataInitRegistry(): Promise<void> {
-  return invokeSafe("data_init_registry");
+export function dataInitStorage(): Promise<void> {
+  return invokeSafe("data_init_storage");
 }
-export function dataRegistryPath(): Promise<string> {
-  return invokeSafe("data_registry_path");
+export function dataProfilesPath(): Promise<string> {
+  return invokeSafe("data_profiles_path");
+}
+export function dataSettingsPath(): Promise<string> {
+  return invokeSafe("data_settings_path");
 }
 
 // Sync

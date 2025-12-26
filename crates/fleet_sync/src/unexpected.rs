@@ -101,11 +101,7 @@ pub async fn handle_unexpected_paths_with_opts(
 
     let plan = tokio::task::spawn_blocking(move || {
         cleanup_internal_stage_files(&mod_root_clone);
-        build_unexpected_plan(
-            &mod_root_clone,
-            &expected_paths,
-            opts,
-        )
+        build_unexpected_plan(&mod_root_clone, &expected_paths, opts)
     })
     .await??;
 
