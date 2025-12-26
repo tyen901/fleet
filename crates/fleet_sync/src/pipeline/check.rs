@@ -296,48 +296,26 @@ fn verify_one_file(
         }
     }
 
-    match file.parts() {
-        None => {
-            let got = crate::md5::vec_to_md5_16(checksummer.hash_file(&abs_path)?)?;
-            if got != *file.file_md5().bytes() {
-                return Ok(VerifyOutcome {
-                    mod_id: mod_id.to_string(),
-                    rel_path: rel_path.to_string(),
-                    ok: false,
-                    size: file.size(),
-                    mtime_ns,
-                    checksum: expected_checksum,
-                    issue: Some(CheckIssueKind::PartMismatch {
-                        offset: 0,
-                        len: file.size(),
-                    }),
-                    unsafe_message: None,
-                });
-            }
-        }
-        Some(parts) => {
-            let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
-            let got_hashes = checksummer.hash_ranges(&abs_path, &ranges)?;
-            for (idx, got) in got_hashes.into_iter().enumerate() {
-                let got = crate::md5::vec_to_md5_16(got)?;
-                if got != *parts[idx].md5.bytes() {
-                    let p = &parts[idx];
-                    return Ok(VerifyOutcome {
-                        mod_id: mod_id.to_string(),
-                        rel_path: rel_path.to_string(),
-                        ok: false,
-                        size: file.size(),
-                        mtime_ns,
-                        checksum: expected_checksum,
-                        issue: Some(CheckIssueKind::PartMismatch {
-                            offset: p.offset,
-                            len: p.len,
-                        }),
-                        unsafe_message: None,
-                    });
-                }
-            }
-        }
+    if let Some(mismatch) = crate::verify::first_mismatch(
+        &abs_path,
+        file.size(),
+        file.file_md5().bytes(),
+        file.parts(),
+        checksummer,
+    )? {
+        return Ok(VerifyOutcome {
+            mod_id: mod_id.to_string(),
+            rel_path: rel_path.to_string(),
+            ok: false,
+            size: file.size(),
+            mtime_ns,
+            checksum: expected_checksum,
+            issue: Some(CheckIssueKind::PartMismatch {
+                offset: mismatch.offset,
+                len: mismatch.len,
+            }),
+            unsafe_message: None,
+        });
     }
 
     Ok(VerifyOutcome {

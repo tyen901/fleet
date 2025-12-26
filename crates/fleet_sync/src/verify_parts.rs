@@ -27,14 +27,3 @@ pub fn first_part_mismatch(
     }
     Ok(None)
 }
-
-pub fn verify_all_parts(
-    path: &std::path::Path,
-    parts: &[ManifestPart],
-    checksummer: &dyn Checksummer,
-) -> Result<()> {
-    if let Some((offset, len)) = first_part_mismatch(path, parts, checksummer)? {
-        anyhow::bail!("part mismatch at {}+{}", offset, len);
-    }
-    Ok(())
-}

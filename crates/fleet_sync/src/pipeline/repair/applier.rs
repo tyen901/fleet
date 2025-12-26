@@ -623,18 +623,15 @@ fn verify_target(
             target.size
         );
     }
-    let parts = match target.parts.as_deref() {
-        None => &[],
-        Some(p) => p,
-    };
-
-    if parts.is_empty() {
-        let got = crate::md5::vec_to_md5_16(checksummer.hash_file(path)?)?;
-        if got != *target.file_md5.bytes() {
-            anyhow::bail!("file checksum mismatch for full-file verification");
-        }
-        Ok(())
-    } else {
-        crate::verify_parts::verify_all_parts(path, parts, checksummer)
+    let mismatch = crate::verify::first_mismatch(
+        path,
+        target.size,
+        target.file_md5.bytes(),
+        target.parts.as_deref(),
+        checksummer,
+    )?;
+    if mismatch.is_some() {
+        anyhow::bail!("file checksum mismatch for full-file verification");
     }
+    Ok(())
 }
