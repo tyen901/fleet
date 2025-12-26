@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::fs::safe_join_mod_file;
 use crate::model::{
     AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
-    UnknownPathPolicy,
+    UnexpectedPathPolicy, UnknownPathPolicy,
 };
 use crate::pipeline::repair::{apply_full_download_ops, FullDownloadOp};
+use crate::unexpected::Cancelled;
+use crate::unexpected::{UnexpectedOpts};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::now_ns;
@@ -177,12 +178,20 @@ pub(crate) async fn run(
                 &expected_from_manifest,
             );
             for (mod_id, expected) in expected_union {
-                let stats = handle_unknown_paths(
+                let policy = match tuning.unknown_paths {
+                    UnknownPathPolicy::Keep => UnexpectedPathPolicy::Prompt,
+                    UnknownPathPolicy::Delete => UnexpectedPathPolicy::Delete,
+                };
+                let stats = crate::unexpected::handle_unexpected_paths_with_opts(
                     &req.checkout_root,
                     &mod_id,
                     &expected,
-                    tuning.unknown_paths,
-                    tuning.concurrency.max_unexpected_delete_bytes,
+                    UnexpectedOpts {
+                        policy,
+                        max_delete_bytes: tuning.concurrency.max_unexpected_delete_bytes,
+                        delete_empty_dirs: false,
+                        emit_action_required: false,
+                    },
                     sink,
                     cancel,
                 )
@@ -269,259 +278,4 @@ fn union_expected_sets(
             .extend(set.iter().cloned());
     }
     out
-}
-
-#[derive(Default, Clone)]
-struct UnknownStats {
-    found_files: u64,
-    found_dirs: u64,
-    found_bytes: u64,
-    cap_reached: bool,
-}
-
-#[derive(thiserror::Error, Debug)]
-#[error("cancelled")]
-struct Cancelled;
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_unknown_paths(
-    checkout_root: &Path,
-    mod_id: &str,
-    expected_paths: &HashSet<String>,
-    policy: UnknownPathPolicy,
-    cap_bytes: Option<u64>,
-    sink: &dyn EventSink,
-    cancel: &CancellationToken,
-) -> anyhow::Result<UnknownStats> {
-    if cancel.is_cancelled() {
-        return Err(Cancelled.into());
-    }
-    let mod_root = checkout_root.join(mod_id);
-    if tokio::fs::metadata(&mod_root).await.is_err() {
-        return Ok(UnknownStats::default());
-    }
-
-    let plan = tokio::task::spawn_blocking({
-        let mod_root = mod_root.clone();
-        let expected_paths = expected_paths.clone();
-        move || build_unknown_plan(&mod_root, &expected_paths)
-    })
-    .await??;
-
-    if plan.found_files + plan.found_dirs > 0 {
-        sink.push(SyncEvent::UnexpectedPathsFound {
-            mod_id: mod_id.to_string(),
-            files: plan.found_files,
-            dirs: plan.found_dirs,
-            bytes: plan.found_bytes,
-            sample: plan.sample.clone(),
-        });
-    }
-
-    if matches!(policy, UnknownPathPolicy::Keep) {
-        return Ok(UnknownStats {
-            found_files: plan.found_files,
-            found_dirs: plan.found_dirs,
-            found_bytes: plan.found_bytes,
-            cap_reached: plan.cap_reached,
-        });
-    }
-
-    let mut stats = UnknownStats {
-        found_files: plan.found_files,
-        found_dirs: plan.found_dirs,
-        found_bytes: plan.found_bytes,
-        cap_reached: plan.cap_reached,
-    };
-
-    let mut bytes_processed: u64 = 0;
-    for action in plan.actions {
-        if cancel.is_cancelled() {
-            return Err(Cancelled.into());
-        }
-        if let Some(cap) = cap_bytes {
-            if bytes_processed >= cap {
-                stats.cap_reached = true;
-                sink.push(SyncEvent::UnexpectedPathsCapReached {
-                    mod_id: mod_id.to_string(),
-                    message: "unexpected paths cap reached".to_string(),
-                });
-                break;
-            }
-        }
-        if action.is_dir {
-            match policy {
-                UnknownPathPolicy::Delete => {
-                    let _ = tokio::fs::remove_dir_all(&action.abs).await;
-                    sink.push(SyncEvent::UnexpectedPathDeleted {
-                        mod_id: mod_id.to_string(),
-                        path: action.rel.clone(),
-                        bytes: action.size,
-                        is_dir: true,
-                    });
-                }
-                UnknownPathPolicy::Keep => {}
-            }
-            bytes_processed = bytes_processed.saturating_add(action.size);
-        } else {
-            match policy {
-                UnknownPathPolicy::Delete => {
-                    let _ = tokio::fs::remove_file(&action.abs).await;
-                    sink.push(SyncEvent::UnexpectedPathDeleted {
-                        mod_id: mod_id.to_string(),
-                        path: action.rel.clone(),
-                        bytes: action.size,
-                        is_dir: false,
-                    });
-                }
-                UnknownPathPolicy::Keep => {}
-            }
-            bytes_processed = bytes_processed.saturating_add(action.size);
-        }
-    }
-
-    Ok(stats)
-}
-
-#[derive(Clone)]
-struct UnknownAction {
-    abs: PathBuf,
-    rel: String,
-    size: u64,
-    is_dir: bool,
-}
-
-struct UnknownPlan {
-    actions: Vec<UnknownAction>,
-    sample: Vec<String>,
-    found_files: u64,
-    found_dirs: u64,
-    found_bytes: u64,
-    cap_reached: bool,
-}
-
-fn build_unknown_plan(
-    mod_root: &Path,
-    expected_paths: &HashSet<String>,
-) -> anyhow::Result<UnknownPlan> {
-    let mut expected_prefixes: HashSet<String> = HashSet::new();
-    for path in expected_paths {
-        let mut cur = PathBuf::new();
-        // Only directories: "a/b/c.pbo" -> "a", "a/b"
-        let mut comps = path.split('/').peekable();
-        while let Some(comp) = comps.next() {
-            if comp.is_empty() {
-                continue;
-            }
-            if comps.peek().is_none() {
-                break;
-            }
-            cur.push(comp);
-            if let Some(s) = cur.to_str() {
-                expected_prefixes.insert(s.replace('\\', "/"));
-            }
-        }
-    }
-
-    let mut actions = Vec::new();
-    let mut sample = Vec::new();
-    let mut found_files = 0u64;
-    let mut found_dirs = 0u64;
-    let mut found_bytes = 0u64;
-
-    // Pass 1: unexpected files.
-    for entry in walkdir::WalkDir::new(mod_root)
-        .follow_links(false)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let md = match std::fs::symlink_metadata(entry.path()) {
-            Ok(md) => md,
-            Err(_) => continue,
-        };
-        if crate::fs::is_symlink_or_reparse(&md) {
-            continue;
-        }
-        if !md.is_file() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(mod_root)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if expected_paths.contains(&rel) {
-            continue;
-        }
-        let size = md.len();
-        found_files += 1;
-        found_bytes = found_bytes.saturating_add(size);
-        if sample.len() < 10 {
-            sample.push(rel.clone());
-        }
-        actions.push(UnknownAction {
-            abs: entry.path().to_path_buf(),
-            rel,
-            size,
-            is_dir: false,
-        });
-    }
-
-    // Pass 2: unexpected dirs (contents-first so children already handled).
-    for entry in walkdir::WalkDir::new(mod_root)
-        .follow_links(false)
-        .contents_first(true)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let md = match std::fs::symlink_metadata(entry.path()) {
-            Ok(md) => md,
-            Err(_) => continue,
-        };
-        if crate::fs::is_symlink_or_reparse(&md) {
-            continue;
-        }
-        if !md.is_dir() {
-            continue;
-        }
-        let rel = entry
-            .path()
-            .strip_prefix(mod_root)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if expected_prefixes.contains(&rel) {
-            continue;
-        }
-        found_dirs += 1;
-        if sample.len() < 10 {
-            sample.push(rel.clone());
-        }
-        actions.push(UnknownAction {
-            abs: entry.path().to_path_buf(),
-            rel,
-            size: 0,
-            is_dir: true,
-        });
-    }
-
-    actions.sort_by(|a, b| {
-        let a_depth = a.rel.matches('/').count();
-        let b_depth = b.rel.matches('/').count();
-        (a.is_dir, std::cmp::Reverse(a_depth), &a.rel).cmp(&(
-            b.is_dir,
-            std::cmp::Reverse(b_depth),
-            &b.rel,
-        ))
-    });
-
-    Ok(UnknownPlan {
-        actions,
-        sample,
-        found_files,
-        found_dirs,
-        found_bytes,
-        cap_reached: false,
-    })
 }

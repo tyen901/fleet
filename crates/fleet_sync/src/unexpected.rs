@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::fs::is_symlink_or_reparse;
 use crate::model::{RepairTuning, UnexpectedPathPolicy};
 use crate::ports::{EventSink, SyncEvent};
@@ -57,6 +55,38 @@ pub async fn handle_unexpected_paths(
     sink: &dyn EventSink,
     cancel: &CancellationToken,
 ) -> Result<UnexpectedStats> {
+    handle_unexpected_paths_with_opts(
+        checkout_root,
+        mod_id,
+        expected_paths,
+        UnexpectedOpts {
+            policy: tuning.unexpected_paths,
+            max_delete_bytes: tuning.max_unexpected_delete_bytes,
+            delete_empty_dirs: tuning.delete_empty_dirs,
+            emit_action_required: true,
+        },
+        sink,
+        cancel,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct UnexpectedOpts {
+    pub policy: UnexpectedPathPolicy,
+    pub max_delete_bytes: Option<u64>,
+    pub delete_empty_dirs: bool,
+    pub emit_action_required: bool,
+}
+
+pub async fn handle_unexpected_paths_with_opts(
+    checkout_root: &Path,
+    mod_id: &str,
+    expected_paths: &HashSet<String>,
+    opts: UnexpectedOpts,
+    sink: &dyn EventSink,
+    cancel: &CancellationToken,
+) -> Result<UnexpectedStats> {
     if cancel.is_cancelled() {
         return Err(Cancelled.into());
     }
@@ -65,15 +95,17 @@ pub async fn handle_unexpected_paths(
         return Ok(UnexpectedStats::default());
     }
 
-    let policy = tuning.unexpected_paths;
     let expected_paths = expected_paths.clone();
-    let plan_tuning = tuning.clone();
     let mod_root_clone = mod_root.clone();
     let mod_id_string = mod_id.to_string();
 
     let plan = tokio::task::spawn_blocking(move || {
         cleanup_internal_stage_files(&mod_root_clone);
-        build_unexpected_plan(&mod_root_clone, &expected_paths, &plan_tuning)
+        build_unexpected_plan(
+            &mod_root_clone,
+            &expected_paths,
+            opts,
+        )
     })
     .await??;
 
@@ -95,9 +127,9 @@ pub async fn handle_unexpected_paths(
         ..UnexpectedStats::default()
     };
 
-    match policy {
+    match opts.policy {
         UnexpectedPathPolicy::Prompt => {
-            if plan.found_files + plan.found_dirs > 0 {
+            if opts.emit_action_required && (plan.found_files + plan.found_dirs > 0) {
                 sink.push(SyncEvent::UnexpectedPathsActionRequired {
                     mod_id: mod_id_string,
                     message: "unexpected files/directories found; rerun with AutoDelete to remove"
@@ -211,7 +243,7 @@ fn is_internal_stage_filename(name: &str) -> bool {
 fn build_unexpected_plan(
     mod_root: &Path,
     expected_paths: &HashSet<String>,
-    tuning: &RepairTuning,
+    opts: UnexpectedOpts,
 ) -> Result<UnexpectedPlan> {
     let mut expected_prefixes: HashSet<String> = HashSet::new();
     for path in expected_paths {
@@ -239,7 +271,7 @@ fn build_unexpected_plan(
     let mut found_bytes = 0u64;
     let mut delete_bytes = 0u64;
     let mut cap_reached = false;
-    let cap = tuning.max_unexpected_delete_bytes;
+    let cap = opts.max_delete_bytes;
 
     for entry in walkdir::WalkDir::new(mod_root)
         .follow_links(false)
@@ -272,7 +304,7 @@ fn build_unexpected_plan(
             sample.push(rel.clone());
         }
 
-        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::Delete) && !cap_reached {
+        if matches!(opts.policy, UnexpectedPathPolicy::Delete) && !cap_reached {
             if let Some(max) = cap {
                 if delete_bytes.saturating_add(size) > max {
                     cap_reached = true;
@@ -325,7 +357,7 @@ fn build_unexpected_plan(
             sample.push(rel.clone());
         }
 
-        if matches!(tuning.unexpected_paths, UnexpectedPathPolicy::Delete) && !cap_reached {
+        if matches!(opts.policy, UnexpectedPathPolicy::Delete) && !cap_reached {
             if let Some(max) = cap {
                 if delete_bytes.saturating_add(size) > max {
                     cap_reached = true;
@@ -341,7 +373,7 @@ fn build_unexpected_plan(
         }
     }
 
-    if tuning.delete_empty_dirs {
+    if opts.delete_empty_dirs {
         for entry in walkdir::WalkDir::new(mod_root)
             .follow_links(false)
             .contents_first(true)
