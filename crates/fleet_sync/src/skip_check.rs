@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
-use crate::manifest::ValidatedModManifest;
 use crate::ports::StateStore;
 use crate::util::file_mtime_ns;
 use anyhow::Result;
+use fleet_manifest::ModManifest;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -84,7 +84,7 @@ fn push_issue(issues: &mut Vec<SkipCheckIssue>, max: usize, issue: SkipCheckIssu
 pub fn evaluate_skip(
     store: &dyn StateStore,
     checkout_root: &Path,
-    manifests: &[ValidatedModManifest],
+    manifests: &[ModManifest],
     policy: SkipCheckPolicy,
 ) -> Result<SkipCheckDecision> {
     let desired = match store.desired_state_get()? {
@@ -131,14 +131,17 @@ pub fn evaluate_skip(
 
     for manifest in manifests {
         let cache_snapshot =
-            store.file_state_get_all_for_mod(&desired.state_id, &manifest.mod_id)?;
-        cache_by_mod.insert(manifest.mod_id.clone(), cache_snapshot);
+            store.file_state_get_all_for_mod(&desired.state_id, manifest.mod_id().as_str())?;
+        cache_by_mod.insert(manifest.mod_id().as_str().to_string(), cache_snapshot);
 
-        for file in &manifest.files {
+        for file in manifest.files() {
             evidence.expected_files += 1;
 
-            let abs_path = match safe_join_mod_file(checkout_root, &manifest.mod_id, &file.rel_path)
-            {
+            let abs_path = match safe_join_mod_file(
+                checkout_root,
+                manifest.mod_id().as_str(),
+                file.rel_path().as_str(),
+            ) {
                 Ok(p) => p,
                 Err(_) => {
                     evidence.local_unsafe_path += 1;
@@ -146,8 +149,8 @@ pub fn evaluate_skip(
                         &mut evidence.issues,
                         policy.max_issues,
                         SkipCheckIssue {
-                            mod_id: manifest.mod_id.clone(),
-                            rel_path: file.rel_path.clone(),
+                            mod_id: manifest.mod_id().as_str().to_string(),
+                            rel_path: file.rel_path().as_str().to_string(),
                             kind: SkipCheckIssueKind::UnsafePath,
                         },
                     );
@@ -156,15 +159,15 @@ pub fn evaluate_skip(
             };
 
             if let Some(parent) = abs_path.parent() {
-                let mod_root = checkout_root.join(&manifest.mod_id);
+                let mod_root = checkout_root.join(manifest.mod_id().as_str());
                 if ensure_no_symlink_ancestors_blocking(&mod_root, parent).is_err() {
                     evidence.local_unsafe_path += 1;
                     push_issue(
                         &mut evidence.issues,
                         policy.max_issues,
                         SkipCheckIssue {
-                            mod_id: manifest.mod_id.clone(),
-                            rel_path: file.rel_path.clone(),
+                            mod_id: manifest.mod_id().as_str().to_string(),
+                            rel_path: file.rel_path().as_str().to_string(),
                             kind: SkipCheckIssueKind::UnsafePath,
                         },
                     );
@@ -180,8 +183,8 @@ pub fn evaluate_skip(
                         &mut evidence.issues,
                         policy.max_issues,
                         SkipCheckIssue {
-                            mod_id: manifest.mod_id.clone(),
-                            rel_path: file.rel_path.clone(),
+                            mod_id: manifest.mod_id().as_str().to_string(),
+                            rel_path: file.rel_path().as_str().to_string(),
                             kind: SkipCheckIssueKind::Missing,
                         },
                     );
@@ -197,8 +200,8 @@ pub fn evaluate_skip(
                     &mut evidence.issues,
                     policy.max_issues,
                     SkipCheckIssue {
-                        mod_id: manifest.mod_id.clone(),
-                        rel_path: file.rel_path.clone(),
+                        mod_id: manifest.mod_id().as_str().to_string(),
+                        rel_path: file.rel_path().as_str().to_string(),
                         kind: SkipCheckIssueKind::NotAFile,
                     },
                 );
@@ -206,16 +209,16 @@ pub fn evaluate_skip(
             }
 
             let got_size = md.len();
-            if got_size != file.size {
+            if got_size != file.size() {
                 evidence.local_wrong_size += 1;
                 push_issue(
                     &mut evidence.issues,
                     policy.max_issues,
                     SkipCheckIssue {
-                        mod_id: manifest.mod_id.clone(),
-                        rel_path: file.rel_path.clone(),
+                        mod_id: manifest.mod_id().as_str().to_string(),
+                        rel_path: file.rel_path().as_str().to_string(),
                         kind: SkipCheckIssueKind::WrongSize {
-                            expected: file.size,
+                            expected: file.size(),
                             got: got_size,
                         },
                     },
@@ -229,8 +232,8 @@ pub fn evaluate_skip(
             };
 
             let cached = cache_by_mod
-                .get(&manifest.mod_id)
-                .and_then(|m| m.get(&file.rel_path));
+                .get(manifest.mod_id().as_str())
+                .and_then(|m| m.get(file.rel_path().as_str()));
             let Some(cached) = cached else {
                 evidence.cache_missing += 1;
                 continue;
@@ -241,7 +244,7 @@ pub fn evaluate_skip(
                 continue;
             }
 
-            if cached.checksum != file.file_checksum {
+            if cached.checksum.as_slice() != file.file_md5().bytes() {
                 evidence.checksum_mismatch += 1;
             }
         }

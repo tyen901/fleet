@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use fleet_sync::ports::{
-    FileEntry, FilePart, ModManifest as FetchModManifest, RemoteCapabilities, RemoteRepo,
-    RemoteStream, RemoteStreamImpl,
-};
+use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_sync::ports::{RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl};
 use fleet_types::{ModManifest as MtModManifest, RepoSpec};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use reqwest::header::{HeaderValue, RANGE};
@@ -158,42 +156,21 @@ impl RemoteRepo for HttpRemote {
         Ok(self.state.lock().unwrap().caps.clone().unwrap_or_default())
     }
 
-    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<FetchModManifest> {
+    async fn fetch_mod_manifest(&self, mod_id: &str) -> Result<ModManifest> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
         let srf_url = self.url_join(&format!("{}/mod.srf", mod_id))?;
         let req = apply_basic_auth(self.client.get(srf_url), &auth);
         let res = req.send().await?.error_for_status()?;
         let bytes = res.bytes().await?;
-        let parsed = MtModManifest::from_bytes(&bytes)?;
-
-        Ok(FetchModManifest {
-            mod_id: parsed.name,
-            files: parsed
-                .files
-                .into_iter()
-                .map(|f| FileEntry {
-                    rel_path: f.path.as_str().to_string(),
-                    size: f.length,
-                    file_checksum: f.checksum.as_bytes().to_vec(),
-                    parts: f
-                        .parts
-                        .into_iter()
-                        .map(|p| FilePart {
-                            offset: p.start,
-                            len: p.length,
-                            checksum: p.checksum.as_bytes().to_vec(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        })
+        let swifty = MtModManifest::from_bytes(&bytes)?;
+        Ok(ingest_mod_manifest(swifty)?)
     }
 
-    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> Result<RemoteStream> {
+    async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> Result<RemoteStream> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
-        let url = self.url_join(&format!("{}/{}", mod_id, rel_path))?;
+        let url = self.url_join(&format!("{}/{}", mod_id, rel_path.as_str()))?;
 
         let req = apply_basic_auth(self.client.get(url), &auth);
         let resp = req.send().await?.error_for_status()?;
@@ -202,12 +179,11 @@ impl RemoteRepo for HttpRemote {
         })))
     }
 
-    async fn fetch_range(
+    async fn fetch_file_range(
         &self,
         mod_id: &str,
-        rel_path: &str,
-        offset: u64,
-        len: u64,
+        rel_path: &RelPath,
+        range: FetchRange,
     ) -> Result<RemoteStream> {
         self.ensure_repo_loaded().await?;
         let auth = self.state.lock().unwrap().basic_auth.clone();
@@ -215,12 +191,12 @@ impl RemoteRepo for HttpRemote {
         if !caps.supports_ranges {
             anyhow::bail!("remote does not support range requests");
         }
-        let url = self.url_join(&format!("{}/{}", mod_id, rel_path))?;
+        let url = self.url_join(&format!("{}/{}", mod_id, rel_path.as_str()))?;
 
-        let end = offset.saturating_add(len).saturating_sub(1);
+        let end = range.end_exclusive().saturating_sub(1);
         let req = self.client.get(url).header(
             RANGE,
-            HeaderValue::from_str(&format!("bytes={}-{}", offset, end))?,
+            HeaderValue::from_str(&format!("bytes={}-{}", range.offset, end))?,
         );
         let req = apply_basic_auth(req, &auth);
         let resp = req.send().await?;

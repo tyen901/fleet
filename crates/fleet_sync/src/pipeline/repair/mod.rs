@@ -11,6 +11,7 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::util::now_ns;
+use fleet_manifest::{ManifestPart, Md5, RelPath};
 use tokio_util::sync::CancellationToken;
 
 mod applier;
@@ -18,11 +19,11 @@ mod planner;
 
 pub(crate) struct FullDownloadOp {
     pub(crate) mod_id: String,
-    pub(crate) rel_path: String,
+    pub(crate) rel_path: RelPath,
     pub(crate) abs_path: std::path::PathBuf,
     pub(crate) size: u64,
-    pub(crate) file_checksum: Vec<u8>,
-    pub(crate) parts: Vec<crate::ports::FilePart>,
+    pub(crate) file_md5: Md5,
+    pub(crate) parts: Option<Vec<ManifestPart>>,
 }
 
 pub(crate) struct FullDownloadOutcome {
@@ -51,10 +52,10 @@ pub(crate) async fn apply_full_download_ops(
             abs_path: op.abs_path,
             target: planner::FileTarget {
                 size: op.size,
-                file_checksum: op.file_checksum,
+                file_md5: op.file_md5,
                 parts: op.parts,
                 strategy: planner::RepairStrategy::Full,
-                parts_to_fetch: Vec::new(),
+                ranges_to_fetch: Vec::new(),
             },
             estimated_bytes: op.size,
         })
@@ -126,11 +127,17 @@ pub(crate) async fn run(
         if req.tuning.auto_fix_case {
             for manifest in &fetch.manifests {
                 let checkout_root = req.checkout_root.clone();
-                let mod_id = manifest.mod_id.clone();
+                let mod_id = manifest.mod_id().as_str().to_string();
                 let expected: Vec<ExpectedTriplet> = manifest
-                    .files
+                    .files()
                     .iter()
-                    .map(|f| (f.rel_path.clone(), f.size, Some(f.file_checksum.clone())))
+                    .map(|f| {
+                        (
+                            f.rel_path().as_str().to_string(),
+                            f.size(),
+                            Some(f.file_md5().bytes().to_vec()),
+                        )
+                    })
                     .collect();
                 let checksummer = checksummer.clone();
                 let tuning = fleet_fs::CaseFixTuning::default();
@@ -204,7 +211,7 @@ pub(crate) async fn run(
                 return Err(crate::model::EngineError::Cancelled);
             }
             sink.push(SyncEvent::ModStarted {
-                mod_id: manifest.mod_id.clone(),
+                mod_id: manifest.mod_id().as_str().to_string(),
             });
 
             let cache = if req.tuning.use_index {
@@ -272,7 +279,7 @@ pub(crate) async fn run(
                 };
                 sink.push(SyncEvent::FileNeedsRepair {
                     mod_id: op.mod_id.clone(),
-                    path: op.rel_path.clone(),
+                    path: op.rel_path.as_str().to_string(),
                     strategy: strategy.to_string(),
                 });
             }
@@ -280,7 +287,7 @@ pub(crate) async fn run(
             for op in &skipped {
                 sink.push(SyncEvent::FileUpToDate {
                     mod_id: op.mod_id.clone(),
-                    path: op.rel_path.clone(),
+                    path: op.rel_path.as_str().to_string(),
                 });
             }
 
@@ -343,7 +350,7 @@ pub(crate) async fn run(
             }
 
             sink.push(SyncEvent::ModFinished {
-                mod_id: manifest.mod_id.clone(),
+                mod_id: manifest.mod_id().as_str().to_string(),
             });
         }
 
@@ -351,10 +358,10 @@ pub(crate) async fn run(
             let mut expected_by_mod: HashMap<String, HashSet<String>> = HashMap::new();
             for manifest in &fetch.manifests {
                 let mut set = HashSet::new();
-                for file in &manifest.files {
-                    set.insert(file.rel_path.clone());
+                for file in manifest.files() {
+                    set.insert(file.rel_path().as_str().to_string());
                 }
-                expected_by_mod.insert(manifest.mod_id.clone(), set);
+                expected_by_mod.insert(manifest.mod_id().as_str().to_string(), set);
             }
 
             for (mod_id, expected) in expected_by_mod {
@@ -463,23 +470,20 @@ mod tests {
     use super::{applier, planner};
     use crate::model::{Durability, RepairRequest, RepairTuning};
     use crate::ports::{
-        Checksummer, EventSink, ModManifest, RemoteCapabilities, RemoteRepo, RemoteStream,
-        RemoteStreamImpl,
+        Checksummer, EventSink, RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl,
     };
     use bytes::Bytes;
+    use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+    use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
+    use relative_path::RelativePathBuf;
     use std::collections::HashMap;
     use std::fs;
     use std::io::{Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
-    fn fnv1a64(data: &[u8]) -> [u8; 8] {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash.to_le_bytes()
+    fn md5_bytes(data: &[u8]) -> [u8; 16] {
+        md5::compute(data).0
     }
 
     #[derive(Clone)]
@@ -487,14 +491,14 @@ mod tests {
 
     impl Checksummer for TestChecksummer {
         fn algorithm_name(&self) -> &str {
-            "fnv1a64"
+            "md5"
         }
 
         fn hash_file(&self, path: &Path) -> anyhow::Result<Vec<u8>> {
             let mut f = fs::File::open(path)?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)?;
-            Ok(fnv1a64(&buf).to_vec())
+            Ok(md5_bytes(&buf).to_vec())
         }
 
         fn hash_range(&self, path: &Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
@@ -502,7 +506,7 @@ mod tests {
             f.seek(SeekFrom::Start(offset))?;
             let mut buf = vec![0u8; len as usize];
             f.read_exact(&mut buf)?;
-            Ok(fnv1a64(&buf).to_vec())
+            Ok(md5_bytes(&buf).to_vec())
         }
     }
 
@@ -588,12 +592,12 @@ mod tests {
             Ok(self.manifests.lock().unwrap().get(mod_id).cloned().unwrap())
         }
 
-        async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream> {
+        async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream> {
             let b = self
                 .files
                 .lock()
                 .unwrap()
-                .get(&(mod_id.to_string(), rel_path.to_string()))
+                .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
                 .cloned()
                 .unwrap();
             Ok(RemoteStream::new(Box::new(BytesStream {
@@ -603,28 +607,27 @@ mod tests {
             })))
         }
 
-        async fn fetch_range(
+        async fn fetch_file_range(
             &self,
             mod_id: &str,
-            rel_path: &str,
-            offset: u64,
-            len: u64,
+            rel_path: &RelPath,
+            range: FetchRange,
         ) -> anyhow::Result<RemoteStream> {
             self.range_calls.lock().unwrap().push((
                 mod_id.to_string(),
-                rel_path.to_string(),
-                offset,
-                len,
+                rel_path.as_str().to_string(),
+                range.offset,
+                range.len,
             ));
             let b = self
                 .files
                 .lock()
                 .unwrap()
-                .get(&(mod_id.to_string(), rel_path.to_string()))
+                .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
                 .cloned()
                 .unwrap();
-            let off = offset as usize;
-            let end = (offset + len) as usize;
+            let off = range.offset as usize;
+            let end = range.end_exclusive() as usize;
             let slice = b.slice(off..end.min(b.len()));
             Ok(RemoteStream::new(Box::new(BytesStream {
                 bytes: slice,
@@ -634,37 +637,36 @@ mod tests {
         }
     }
 
-    fn make_parts(bytes: &[u8], part_size: usize) -> Vec<crate::ports::FilePart> {
+    fn make_parts(bytes: &[u8], part_size: usize) -> Vec<sw::PartManifest> {
         let mut out = Vec::new();
         let mut offset: u64 = 0;
         while (offset as usize) < bytes.len() {
             let start = offset as usize;
             let end = (start + part_size).min(bytes.len());
-            out.push(crate::ports::FilePart {
-                offset,
-                len: (end - start) as u64,
-                checksum: fnv1a64(&bytes[start..end]).to_vec(),
+            out.push(sw::PartManifest {
+                start: offset,
+                length: (end - start) as u64,
+                checksum: fleet_types::Md5Digest::from_bytes(md5_bytes(&bytes[start..end])),
             });
             offset += (end - start) as u64;
         }
         out
     }
 
-    fn make_manifest(
-        mod_id: &str,
-        rel_path: &str,
-        bytes: &[u8],
-        part_size: usize,
-    ) -> crate::manifest::ValidatedModManifest {
-        crate::manifest::ValidatedModManifest {
-            mod_id: mod_id.to_string(),
-            files: vec![crate::manifest::ValidatedFileEntry {
-                rel_path: rel_path.to_string(),
-                size: bytes.len() as u64,
-                file_checksum: fnv1a64(bytes).to_vec(),
-                parts: make_parts(bytes, part_size),
-            }],
-        }
+    fn make_manifest(mod_id: &str, rel_path: &str, bytes: &[u8], part_size: usize) -> ModManifest {
+        let files = vec![sw::FileManifest {
+            path: RelativePathBuf::from(rel_path),
+            length: bytes.len() as u64,
+            checksum: fleet_types::Md5Digest::from_bytes(md5_bytes(bytes)),
+            parts: make_parts(bytes, part_size),
+        }];
+        let checksum = mod_checksum_from_files(&files);
+        let swifty = sw::ModManifest {
+            name: mod_id.to_string(),
+            checksum,
+            files,
+        };
+        ingest_mod_manifest(swifty).unwrap()
     }
 
     fn write_local_file(root: &Path, mod_id: &str, rel_path: &str, bytes: &[u8]) -> PathBuf {
@@ -713,7 +715,7 @@ mod tests {
 
         let op = plan.ops.into_iter().next().unwrap();
         assert!(matches!(op.target.strategy, planner::RepairStrategy::Patch));
-        assert_eq!(op.target.parts_to_fetch.len(), 1);
+        assert_eq!(op.target.ranges_to_fetch.len(), 1);
 
         let remote = Arc::new(MockRemoteRepo::new(1024).with_file(
             "m",
@@ -789,10 +791,9 @@ mod tests {
         .unwrap();
         let op = plan.ops.into_iter().next().unwrap();
         assert!(matches!(op.target.strategy, planner::RepairStrategy::Patch));
-        assert_eq!(op.target.parts_to_fetch.len(), 1);
-
-        assert_eq!(op.target.parts_to_fetch[0].offset, 3072);
-        assert_eq!(op.target.parts_to_fetch[0].len, 2048);
+        assert_eq!(op.target.ranges_to_fetch.len(), 1);
+        assert_eq!(op.target.ranges_to_fetch[0].offset, 3072);
+        assert_eq!(op.target.ranges_to_fetch[0].len, 2048);
 
         let remote = Arc::new(MockRemoteRepo::new(1024).with_file(
             "m",

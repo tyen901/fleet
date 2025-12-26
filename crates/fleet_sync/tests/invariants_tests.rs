@@ -5,16 +5,18 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
+use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
     StoreError, TimestampNs,
 };
 use fleet_sync::ports::SyncEvent;
-use fleet_sync::ports::{FileEntry, ModManifest};
 use fleet_sync::ports::{
     RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
 };
 use fleet_sync::SyncEngine;
+use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 
 struct VecStream {
@@ -58,11 +60,11 @@ impl RemoteRepo for CountingRemote {
         Ok(self.manifests.get(mod_id).unwrap().clone())
     }
 
-    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream> {
+    async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream> {
         self.fetch_file_calls.fetch_add(1, Ordering::Relaxed);
         let data = self
             .files
-            .get(&(mod_id.to_string(), rel_path.to_string()))
+            .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
             .unwrap();
         Ok(RemoteStream::new(Box::new(VecStream {
             data: data.clone(),
@@ -70,20 +72,19 @@ impl RemoteRepo for CountingRemote {
         })))
     }
 
-    async fn fetch_range(
+    async fn fetch_file_range(
         &self,
         mod_id: &str,
-        rel_path: &str,
-        offset: u64,
-        len: u64,
+        rel_path: &RelPath,
+        range: FetchRange,
     ) -> anyhow::Result<RemoteStream> {
         self.fetch_range_calls.fetch_add(1, Ordering::Relaxed);
         let data = self
             .files
-            .get(&(mod_id.to_string(), rel_path.to_string()))
+            .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
             .unwrap();
-        let start = offset as usize;
-        let end = (offset + len) as usize;
+        let start = range.offset as usize;
+        let end = range.end_exclusive() as usize;
         Ok(RemoteStream::new(Box::new(VecStream {
             data: data[start..end].to_vec(),
             pos: 0,
@@ -107,19 +108,19 @@ struct TestChecksummer;
 
 impl fleet_sync::Checksummer for TestChecksummer {
     fn algorithm_name(&self) -> &str {
-        "blake3"
+        "md5"
     }
 
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
         let data = std::fs::read(path)?;
-        Ok(blake3::hash(&data).as_bytes().to_vec())
+        Ok(md5::compute(&data).0.to_vec())
     }
 
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         let data = std::fs::read(path)?;
         let start = offset as usize;
         let end = (offset + len) as usize;
-        Ok(blake3::hash(&data[start..end]).as_bytes().to_vec())
+        Ok(md5::compute(&data[start..end]).0.to_vec())
     }
 }
 
@@ -307,15 +308,19 @@ impl StateStore for IndexStore {
 }
 
 fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8]) -> ModManifest {
-    ModManifest {
-        mod_id: mod_id.to_string(),
-        files: vec![FileEntry {
-            rel_path: rel_path.to_string(),
-            size: bytes.len() as u64,
-            file_checksum: blake3::hash(bytes).as_bytes().to_vec(),
-            parts: Vec::new(),
-        }],
-    }
+    let files = vec![sw::FileManifest {
+        path: RelativePathBuf::from(rel_path),
+        length: bytes.len() as u64,
+        checksum: fleet_types::Md5Digest::from_bytes(md5::compute(bytes).0),
+        parts: Vec::new(),
+    }];
+    let checksum = mod_checksum_from_files(&files);
+    let swifty = sw::ModManifest {
+        name: mod_id.to_string(),
+        checksum,
+        files,
+    };
+    ingest_mod_manifest(swifty).unwrap()
 }
 
 #[tokio::test]

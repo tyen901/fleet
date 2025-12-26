@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use fleet_manifest::{FetchRange, RelPath};
 use fleet_remote_http::HttpRemote;
 use fleet_sync::RemoteRepo;
 use std::path::PathBuf;
@@ -96,22 +97,24 @@ async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
 
     let parsed = fleet_types::ModManifest::from_bytes(&srf_bytes).expect("parse fixture SRF");
 
-    assert_eq!(mf.mod_id, parsed.name, "mod_id mismatch from SRF");
+    assert_eq!(mf.mod_id().as_str(), parsed.name, "mod_id mismatch from SRF");
     assert_eq!(
-        mf.files.len(),
+        mf.files().len(),
         parsed.files.len(),
         "file count mismatch from SRF"
     );
 
-    for f in &mf.files {
+    for f in mf.files() {
         assert_eq!(
-            f.file_checksum.len(),
+            f.file_md5().bytes().len(),
             16,
             "file_checksum should be 16 bytes for {}",
-            f.rel_path
+            f.rel_path().as_str()
         );
-        for p in &f.parts {
-            assert_eq!(p.checksum.len(), 16, "part checksum should be 16 bytes");
+        if let Some(parts) = f.parts() {
+            for p in parts {
+                assert_eq!(p.md5.bytes().len(), 16, "part checksum should be 16 bytes");
+            }
         }
     }
 }
@@ -159,8 +162,8 @@ async fn basic_auth_from_repo_json_is_applied_to_manifest_requests() {
         .fetch_mod_manifest("@ace")
         .await
         .expect("fetch_mod_manifest");
-    assert_eq!(mf.mod_id, "@ace");
-    assert!(mf.files.is_empty());
+    assert_eq!(mf.mod_id().as_str(), "@ace");
+    assert!(mf.files().is_empty());
 }
 
 #[tokio::test]
@@ -188,7 +191,11 @@ async fn fetch_range_requires_206_and_errors_on_200() {
         .await;
 
     let remote = HttpRemote::new(&server.uri()).expect("create HttpRemote");
-    let err = match remote.fetch_range("@ace", "addons/file.bin", 2, 4).await {
+    let rel_path = RelPath::new("addons/file.bin").unwrap();
+    let err = match remote
+        .fetch_file_range("@ace", &rel_path, FetchRange { offset: 2, len: 4 })
+        .await
+    {
         Ok(_) => panic!("expected fetch_range to fail on 200"),
         Err(err) => err,
     };
@@ -228,8 +235,9 @@ async fn fetch_file_streams_exact_bytes_for_real_fixture_file() {
     let base = server.uri().trim_end_matches('/').to_string();
     let remote = HttpRemote::new(&base).expect("create HttpRemote");
 
+    let rel_path = RelPath::new("addons/ace_advanced_ballistics.pbo").unwrap();
     let mut stream = remote
-        .fetch_file("@ace", "addons/ace_advanced_ballistics.pbo")
+        .fetch_file("@ace", &rel_path)
         .await
         .expect("fetch_file");
 

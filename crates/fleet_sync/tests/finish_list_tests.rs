@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
+use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
+use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, EngineError, FileStateDelete, FileStateUpsert, RepairRequest,
     RepairTuning, StoreError, SyncFreshRequest, SyncFreshTuning, TimestampNs, UnknownPathPolicy,
@@ -13,8 +15,8 @@ use fleet_sync::ports::{
     EventSink, RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
     SyncEvent,
 };
-use fleet_sync::ports::{FileEntry, FilePart, ModManifest};
 use fleet_sync::SyncEngine;
+use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -85,11 +87,11 @@ impl RemoteRepo for CountingRemote {
             .ok_or_else(|| anyhow::anyhow!("manifest not found"))
     }
 
-    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream> {
+    async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream> {
         self.fetch_file_calls.fetch_add(1, Ordering::Relaxed);
         let data = self
             .files
-            .get(&(mod_id.to_string(), rel_path.to_string()))
+            .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("file not found"))?;
         let chunk = Bytes::from(data);
@@ -100,21 +102,20 @@ impl RemoteRepo for CountingRemote {
         })))
     }
 
-    async fn fetch_range(
+    async fn fetch_file_range(
         &self,
         mod_id: &str,
-        rel_path: &str,
-        offset: u64,
-        len: u64,
+        rel_path: &RelPath,
+        range: FetchRange,
     ) -> anyhow::Result<RemoteStream> {
         self.fetch_range_calls.fetch_add(1, Ordering::Relaxed);
         let data = self
             .files
-            .get(&(mod_id.to_string(), rel_path.to_string()))
+            .get(&(mod_id.to_string(), rel_path.as_str().to_string()))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("file not found"))?;
-        let start = offset as usize;
-        let end = (offset + len) as usize;
+        let start = range.offset as usize;
+        let end = range.end_exclusive() as usize;
         let slice = data
             .get(start..end)
             .ok_or_else(|| anyhow::anyhow!("range OOB"))?;
@@ -130,39 +131,67 @@ impl RemoteRepo for CountingRemote {
 }
 
 #[derive(Clone)]
-struct Blake3Checksummer;
+struct Md5Checksummer;
 
-impl fleet_sync::ports::Checksummer for Blake3Checksummer {
+impl fleet_sync::ports::Checksummer for Md5Checksummer {
     fn algorithm_name(&self) -> &str {
-        "blake3"
+        "md5"
     }
 
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
         let bytes = std::fs::read(path)?;
-        Ok(blake3::hash(&bytes).as_bytes().to_vec())
+        Ok(md5::compute(&bytes).0.to_vec())
     }
 
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         let bytes = std::fs::read(path)?;
         let start = offset as usize;
         let end = (offset + len) as usize;
-        Ok(blake3::hash(&bytes[start..end]).as_bytes().to_vec())
+        Ok(md5::compute(&bytes[start..end]).0.to_vec())
     }
 }
 
-fn make_parts(bytes: &[u8], part_size: usize) -> Vec<FilePart> {
+fn make_parts(bytes: &[u8], part_size: usize) -> Vec<sw::PartManifest> {
     let mut out = Vec::new();
     let mut off = 0usize;
     while off < bytes.len() {
         let end = (off + part_size).min(bytes.len());
-        out.push(FilePart {
-            offset: off as u64,
-            len: (end - off) as u64,
-            checksum: blake3::hash(&bytes[off..end]).as_bytes().to_vec(),
+        out.push(sw::PartManifest {
+            length: (end - off) as u64,
+            start: off as u64,
+            checksum: fleet_types::Md5Digest::from_bytes(md5::compute(&bytes[off..end]).0),
         });
         off = end;
     }
     out
+}
+
+fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8], part_size: Option<usize>) -> ModManifest {
+    let parts = part_size.map(|sz| make_parts(bytes, sz)).unwrap_or_default();
+    let files = vec![sw::FileManifest {
+        path: RelativePathBuf::from(rel_path),
+        length: bytes.len() as u64,
+        checksum: fleet_types::Md5Digest::from_bytes(md5::compute(bytes).0),
+        parts,
+    }];
+    let checksum = mod_checksum_from_files(&files);
+    let swifty = sw::ModManifest {
+        name: mod_id.to_string(),
+        checksum,
+        files,
+    };
+    ingest_mod_manifest(swifty).unwrap()
+}
+
+fn build_empty_manifest(mod_id: &str) -> ModManifest {
+    let files: Vec<sw::FileManifest> = Vec::new();
+    let checksum = mod_checksum_from_files(&files);
+    let swifty = sw::ModManifest {
+        name: mod_id.to_string(),
+        checksum,
+        files,
+    };
+    ingest_mod_manifest(swifty).unwrap()
 }
 
 fn setup_index(enabled_mods: &[String]) -> FleetIndex {
@@ -358,15 +387,7 @@ async fn sync_fresh_does_not_quarantine_expected_directories() {
     let store = Arc::new(IndexStore::new(idx));
 
     let bytes = b"pbo-bytes".to_vec();
-    let manifest = ModManifest {
-        mod_id: "@mod".to_string(),
-        files: vec![FileEntry {
-            rel_path: "addons/a.pbo".to_string(),
-            size: bytes.len() as u64,
-            file_checksum: blake3::hash(&bytes).as_bytes().to_vec(),
-            parts: Vec::new(),
-        }],
-    };
+    let manifest = build_manifest("@mod", "addons/a.pbo", &bytes, None);
 
     // Create an unexpected file under expected directory prefix.
     let mod_root = root.join("@mod");
@@ -390,7 +411,7 @@ async fn sync_fresh_does_not_quarantine_expected_directories() {
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
     };
 
-    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Md5Checksummer));
     let sink = Arc::new(TestSink::default());
     let cancel = CancellationToken::new();
 
@@ -430,16 +451,7 @@ async fn cancellation_during_patch_does_not_commit_partial_results() {
     let mut local_bytes = remote_bytes.clone();
     local_bytes[3] ^= 0xFF;
 
-    let parts = make_parts(&remote_bytes, part_size);
-    let manifest = ModManifest {
-        mod_id: "@mod".to_string(),
-        files: vec![FileEntry {
-            rel_path: "addons/a.pbo".to_string(),
-            size: remote_bytes.len() as u64,
-            file_checksum: blake3::hash(&remote_bytes).as_bytes().to_vec(),
-            parts,
-        }],
-    };
+    let manifest = build_manifest("@mod", "addons/a.pbo", &remote_bytes, Some(part_size));
 
     let mod_root = root.join("@mod").join("addons");
     std::fs::create_dir_all(&mod_root).unwrap();
@@ -463,7 +475,7 @@ async fn cancellation_during_patch_does_not_commit_partial_results() {
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
     };
 
-    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Md5Checksummer));
     let sink = Arc::new(TestSink::default());
     let cancel = CancellationToken::new();
 
@@ -516,15 +528,7 @@ async fn staging_tmp_files_are_cleaned_up_on_failure() {
     let store = Arc::new(IndexStore::new(idx));
 
     let bytes = b"content".to_vec();
-    let manifest = ModManifest {
-        mod_id: "@mod".to_string(),
-        files: vec![FileEntry {
-            rel_path: "file.bin".to_string(),
-            size: bytes.len() as u64,
-            file_checksum: blake3::hash(&bytes).as_bytes().to_vec(),
-            parts: Vec::new(),
-        }],
-    };
+    let manifest = build_manifest("@mod", "file.bin", &bytes, None);
 
     // Remote has manifest but no file bytes -> stages then fails during download.
     let remote = CountingRemote {
@@ -539,7 +543,7 @@ async fn staging_tmp_files_are_cleaned_up_on_failure() {
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
     };
 
-    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Blake3Checksummer));
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(Md5Checksummer));
     let sink = Arc::new(TestSink::default());
     let cancel = CancellationToken::new();
 
@@ -586,13 +590,7 @@ async fn fetch_all_respects_cancellation_and_stops_scheduling() {
 
     let mut manifests = HashMap::new();
     for m in &enabled_mods {
-        manifests.insert(
-            m.clone(),
-            ModManifest {
-                mod_id: m.clone(),
-                files: vec![],
-            },
-        );
+        manifests.insert(m.clone(), build_empty_manifest(m));
     }
 
     let remote = CountingRemote {
@@ -605,7 +603,7 @@ async fn fetch_all_respects_cancellation_and_stops_scheduling() {
         fetch_range_calls: Arc::new(AtomicUsize::new(0)),
     };
 
-    let engine = SyncEngine::new(Arc::new(remote.clone()), store, Arc::new(Blake3Checksummer));
+    let engine = SyncEngine::new(Arc::new(remote.clone()), store, Arc::new(Md5Checksummer));
     let sink = Arc::new(TestSink::default());
     let cancel = CancellationToken::new();
 

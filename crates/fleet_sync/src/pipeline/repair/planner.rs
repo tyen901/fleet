@@ -1,8 +1,7 @@
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
-use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
-use crate::model::FileState;
-use crate::model::RepairTuning;
-use crate::ports::{Checksummer, FilePart};
+use crate::model::{FileState, RepairTuning};
+use crate::ports::Checksummer;
+use fleet_manifest::{FetchRange, FileEntry, ManifestPart, ModManifest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -17,7 +16,7 @@ pub(crate) struct Plan {
 #[derive(Clone, Debug)]
 pub(crate) struct PlannedOp {
     pub(crate) mod_id: String,
-    pub(crate) rel_path: String,
+    pub(crate) rel_path: fleet_manifest::RelPath,
     pub(crate) abs_path: PathBuf,
     pub(crate) target: FileTarget,
     #[allow(dead_code)]
@@ -27,10 +26,10 @@ pub(crate) struct PlannedOp {
 #[derive(Clone, Debug)]
 pub(crate) struct FileTarget {
     pub(crate) size: u64,
-    pub(crate) file_checksum: Vec<u8>,
-    pub(crate) parts: Vec<FilePart>,
+    pub(crate) file_md5: fleet_manifest::Md5,
+    pub(crate) parts: Option<Vec<ManifestPart>>,
     pub(crate) strategy: RepairStrategy,
-    pub(crate) parts_to_fetch: Vec<FilePart>,
+    pub(crate) ranges_to_fetch: Vec<FetchRange>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,19 +86,19 @@ struct PlanContext<'a> {
 
 pub(crate) fn plan_mod(
     checkout_root: &Path,
-    manifest: &ValidatedModManifest,
+    manifest: &ModManifest,
     cache_snapshot: &HashMap<String, FileState>,
     supports_ranges: bool,
     tuning: &RepairTuning,
     checksummer: &dyn Checksummer,
 ) -> PlanResult<(Plan, Vec<CacheHint>)> {
-    let mod_root = checkout_root.join(&manifest.mod_id);
+    let mod_root = checkout_root.join(manifest.mod_id().as_str());
     let mut ops = Vec::new();
     let mut total_bytes = 0u64;
     let mut cache_hints = Vec::new();
 
     let ctx = PlanContext {
-        mod_id: &manifest.mod_id,
+        mod_id: manifest.mod_id().as_str(),
         mod_root: &mod_root,
         cache_snapshot,
         supports_ranges,
@@ -107,38 +106,39 @@ pub(crate) fn plan_mod(
         checksummer,
     };
 
-    for file in &manifest.files {
-        let abs_path = safe_join_mod_file(checkout_root, &manifest.mod_id, &file.rel_path)
-            .map_err(|e| PlanError::UnsafePath {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
-                source: e,
-            })?;
+    for file in manifest.files() {
+        let abs_path =
+            safe_join_mod_file(checkout_root, manifest.mod_id().as_str(), file.rel_path().as_str())
+                .map_err(|e| PlanError::UnsafePath {
+                    mod_id: manifest.mod_id().as_str().to_string(),
+                    rel_path: file.rel_path().as_str().to_string(),
+                    source: e,
+                })?;
 
-        let (strategy, parts_to_fetch, estimated_bytes, cache_hint) =
+        let (strategy, ranges_to_fetch, estimated_bytes, cache_hint) =
             plan_one_file(&ctx, &abs_path, file)?;
 
         if let Some(hint) = cache_hint {
             cache_hints.push(CacheHint {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
+                mod_id: manifest.mod_id().as_str().to_string(),
+                rel_path: file.rel_path().as_str().to_string(),
                 size: hint.size,
                 mtime_ns: hint.mtime_ns,
-                checksum: file.file_checksum.clone(),
+                checksum: file.file_md5().bytes().to_vec(),
             });
         }
 
         let target = FileTarget {
-            size: file.size,
-            file_checksum: file.file_checksum.clone(),
-            parts: file.parts.clone(),
+            size: file.size(),
+            file_md5: *file.file_md5(),
+            parts: file.parts().map(|p| p.to_vec()),
             strategy,
-            parts_to_fetch: parts_to_fetch.clone(),
+            ranges_to_fetch: ranges_to_fetch.clone(),
         };
 
         ops.push(PlannedOp {
-            mod_id: manifest.mod_id.clone(),
-            rel_path: file.rel_path.clone(),
+            mod_id: manifest.mod_id().as_str().to_string(),
+            rel_path: file.rel_path().clone(),
             abs_path,
             target,
             estimated_bytes,
@@ -158,23 +158,23 @@ struct CacheMeta {
 fn plan_one_file(
     ctx: &PlanContext<'_>,
     abs_path: &Path,
-    file: &ValidatedFileEntry,
-) -> PlanResult<(RepairStrategy, Vec<FilePart>, u64, Option<CacheMeta>)> {
+    file: &FileEntry,
+) -> PlanResult<(RepairStrategy, Vec<FetchRange>, u64, Option<CacheMeta>)> {
     let metadata = match std::fs::symlink_metadata(abs_path) {
         Ok(md) => {
             let ft = md.file_type();
             if ft.is_symlink() || !ft.is_file() {
-                return Ok((RepairStrategy::Full, file.parts.clone(), file.size, None));
+                return Ok((RepairStrategy::Full, Vec::new(), file.size(), None));
             }
             md
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((RepairStrategy::Full, file.parts.clone(), file.size, None));
+            return Ok((RepairStrategy::Full, Vec::new(), file.size(), None));
         }
         Err(e) => {
             return Err(PlanError::Other {
                 mod_id: ctx.mod_id.to_string(),
-                rel_path: file.rel_path.clone(),
+                rel_path: file.rel_path().as_str().to_string(),
                 source: e.into(),
             })
         }
@@ -184,138 +184,139 @@ fn plan_one_file(
         ensure_no_symlink_ancestors_blocking(ctx.mod_root, parent).map_err(|e| {
             PlanError::UnsafeOnDisk {
                 mod_id: ctx.mod_id.to_string(),
-                rel_path: file.rel_path.clone(),
+                rel_path: file.rel_path().as_str().to_string(),
                 source: e,
             }
         })?;
     }
 
-    if metadata.len() != file.size {
-        return Ok((RepairStrategy::Full, file.parts.clone(), file.size, None));
+    if metadata.len() != file.size() {
+        return Ok((RepairStrategy::Full, Vec::new(), file.size(), None));
     }
 
     let mtime_ns = crate::util::file_mtime_ns(&metadata).unwrap_or(crate::model::TimestampNs(0));
 
-    if let Some(cached) = ctx.cache_snapshot.get(&file.rel_path) {
-        if cached.size == file.size
+    if let Some(cached) = ctx.cache_snapshot.get(file.rel_path().as_str()) {
+        if cached.size == file.size()
             && cached.mtime_ns == mtime_ns
-            && cached.checksum == file.file_checksum
+            && cached.checksum.as_slice() == file.file_md5().bytes()
         {
             return Ok((
                 RepairStrategy::Skip,
                 Vec::new(),
                 0,
                 Some(CacheMeta {
-                    size: file.size,
+                    size: file.size(),
                     mtime_ns,
                 }),
             ));
         }
     }
 
-    if file.parts.is_empty() {
-        let got = ctx
-            .checksummer
-            .hash_file(abs_path)
-            .map_err(|e| PlanError::Other {
-                mod_id: ctx.mod_id.to_string(),
-                rel_path: file.rel_path.clone(),
-                source: e,
-            })?;
-        if got == file.file_checksum {
-            return Ok((
-                RepairStrategy::Skip,
-                Vec::new(),
-                0,
-                Some(CacheMeta {
-                    size: file.size,
-                    mtime_ns,
-                }),
-            ));
+    match file.parts() {
+        None => {
+            let got = ctx
+                .checksummer
+                .hash_file(abs_path)
+                .map_err(|e| PlanError::Other {
+                    mod_id: ctx.mod_id.to_string(),
+                    rel_path: file.rel_path().as_str().to_string(),
+                    source: e,
+                })?;
+            if got.as_slice() == file.file_md5().bytes() {
+                return Ok((
+                    RepairStrategy::Skip,
+                    Vec::new(),
+                    0,
+                    Some(CacheMeta {
+                        size: file.size(),
+                        mtime_ns,
+                    }),
+                ));
+            }
+            Ok((RepairStrategy::Full, Vec::new(), file.size(), None))
         }
-        return Ok((RepairStrategy::Full, Vec::new(), file.size, None));
-    }
+        Some(parts) => {
+            let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
+            let hashes = ctx
+                .checksummer
+                .hash_ranges(abs_path, &ranges)
+                .map_err(|e| PlanError::Other {
+                    mod_id: ctx.mod_id.to_string(),
+                    rel_path: file.rel_path().as_str().to_string(),
+                    source: e,
+                })?;
 
-    let ranges: Vec<(u64, u64)> = file.parts.iter().map(|p| (p.offset, p.len)).collect();
-    let hashes = ctx
-        .checksummer
-        .hash_ranges(abs_path, &ranges)
-        .map_err(|e| PlanError::Other {
-            mod_id: ctx.mod_id.to_string(),
-            rel_path: file.rel_path.clone(),
-            source: e,
-        })?;
+            let mut bad_parts = Vec::new();
+            let mut bad_bytes = 0u64;
+            for (idx, part) in parts.iter().enumerate() {
+                let got = &hashes[idx];
+                if got.as_slice() != part.md5.bytes() {
+                    bad_bytes = bad_bytes.saturating_add(part.len);
+                    bad_parts.push(part.clone());
+                }
+            }
 
-    let mut bad_parts = Vec::new();
-    let mut bad_bytes = 0u64;
-    for (idx, part) in file.parts.iter().enumerate() {
-        let got = &hashes[idx];
-        if *got != part.checksum {
-            bad_bytes = bad_bytes.saturating_add(part.len);
-            bad_parts.push(part.clone());
+            if bad_parts.is_empty() {
+                return Ok((
+                    RepairStrategy::Skip,
+                    Vec::new(),
+                    0,
+                    Some(CacheMeta {
+                        size: file.size(),
+                        mtime_ns,
+                    }),
+                ));
+            }
+
+            let ratio = if file.size() == 0 {
+                1.0
+            } else {
+                bad_bytes as f32 / file.size() as f32
+            };
+
+            let parts_ok = ctx
+                .tuning
+                .patch_max_bad_parts
+                .map(|max| bad_parts.len() <= max)
+                .unwrap_or(true);
+
+            let coalesced = coalesce_patch_fetch_ranges(parts, &bad_parts, ctx.tuning);
+            let fetch_bytes: u64 = coalesced.iter().map(|r| r.len).sum();
+            let fetch_ratio = if file.size() == 0 {
+                1.0
+            } else {
+                fetch_bytes as f32 / file.size() as f32
+            };
+            let reqs_ok = ctx
+                .tuning
+                .patch_max_range_requests
+                .map(|max| coalesced.len() <= max)
+                .unwrap_or(true);
+
+            if ctx.supports_ranges
+                && ratio <= ctx.tuning.patch_max_bad_ratio
+                && parts_ok
+                && reqs_ok
+                && fetch_ratio <= ctx.tuning.patch_max_fetch_ratio
+            {
+                return Ok((RepairStrategy::Patch, coalesced, fetch_bytes, None));
+            }
+
+            Ok((RepairStrategy::Full, Vec::new(), file.size(), None))
         }
     }
-
-    if bad_parts.is_empty() {
-        return Ok((
-            RepairStrategy::Skip,
-            Vec::new(),
-            0,
-            Some(CacheMeta {
-                size: file.size,
-                mtime_ns,
-            }),
-        ));
-    }
-
-    let ratio = if file.size == 0 {
-        1.0
-    } else {
-        bad_bytes as f32 / file.size as f32
-    };
-
-    let parts_ok = ctx
-        .tuning
-        .patch_max_bad_parts
-        .map(|max| bad_parts.len() <= max)
-        .unwrap_or(true);
-
-    let coalesced = coalesce_patch_fetch_ranges(&file.parts, &bad_parts, ctx.tuning);
-    let fetch_bytes: u64 = coalesced.iter().map(|p| p.len).sum();
-    let fetch_ratio = if file.size == 0 {
-        1.0
-    } else {
-        fetch_bytes as f32 / file.size as f32
-    };
-    let reqs_ok = ctx
-        .tuning
-        .patch_max_range_requests
-        .map(|max| coalesced.len() <= max)
-        .unwrap_or(true);
-
-    if ctx.supports_ranges
-        && ratio <= ctx.tuning.patch_max_bad_ratio
-        && parts_ok
-        && reqs_ok
-        && fetch_ratio <= ctx.tuning.patch_max_fetch_ratio
-    {
-        return Ok((RepairStrategy::Patch, coalesced, fetch_bytes, None));
-    }
-
-    Ok((RepairStrategy::Full, file.parts.clone(), file.size, None))
 }
 
 fn coalesce_patch_fetch_ranges(
-    all_parts: &[FilePart],
-    bad_parts: &[FilePart],
+    all_parts: &[ManifestPart],
+    bad_parts: &[ManifestPart],
     tuning: &RepairTuning,
-) -> Vec<FilePart> {
+) -> Vec<FetchRange> {
     if bad_parts.is_empty() || all_parts.is_empty() {
         return Vec::new();
     }
 
-    // Map bad parts to indices in the full contiguous part list, so we can expand/merge on
-    // part boundaries (important for PBO layout correctness).
     let mut index_by_range = HashMap::with_capacity(all_parts.len());
     for (idx, part) in all_parts.iter().enumerate() {
         index_by_range.insert((part.offset, part.len), idx);
@@ -345,9 +346,8 @@ fn coalesce_patch_fetch_ranges(
         }
 
         let mut start = i;
-        let mut end = i; // inclusive index
+        let mut end = i;
 
-        // Merge forward across "small gaps" (gap bytes are just intervening parts).
         loop {
             let mut j = end + 1;
             while j < all_parts.len() && !is_bad[j] {
@@ -364,7 +364,6 @@ fn coalesce_patch_fetch_ranges(
             break;
         }
 
-        // Expand to meet minimum request size by including neighboring parts.
         let min_len = tuning.patch_min_range_bytes;
         let mut bytes = sum_len(start, end + 1);
         while bytes < min_len && (start > 0 || end + 1 < all_parts.len()) {
@@ -382,21 +381,16 @@ fn coalesce_patch_fetch_ranges(
         }
 
         let start_off = all_parts[start].offset;
-        let end_off = all_parts[end].offset.saturating_add(all_parts[end].len);
+        let end_off = all_parts[end].end_exclusive();
         let len = end_off.saturating_sub(start_off);
 
         if len > 0 {
-            out.push(FilePart {
-                offset: start_off,
-                len,
-                checksum: Vec::new(),
-            });
+            out.push(FetchRange { offset: start_off, len });
         }
 
         i = end + 1;
     }
 
-    // Output is naturally sorted and non-overlapping by construction.
     out
 }
 
@@ -412,7 +406,7 @@ pub(crate) enum PlannerError {
 
 pub(crate) async fn plan_mod_spawn_blocking(
     checkout_root: &std::path::Path,
-    manifest: ValidatedModManifest,
+    manifest: ModManifest,
     cache: HashMap<String, FileState>,
     supports_ranges: bool,
     tuning: RepairTuning,
@@ -455,3 +449,4 @@ pub(crate) async fn plan_mod_spawn_blocking(
 
     Ok(plan_res)
 }
+

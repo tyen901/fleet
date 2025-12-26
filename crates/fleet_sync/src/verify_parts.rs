@@ -1,10 +1,10 @@
 use crate::ports::Checksummer;
-use crate::ports::FilePart;
 use anyhow::Result;
+use fleet_manifest::ManifestPart;
 
 pub fn first_part_mismatch(
     path: &std::path::Path,
-    parts: &[FilePart],
+    parts: &[ManifestPart],
     checksummer: &dyn Checksummer,
 ) -> Result<Option<(u64, u64)>> {
     if parts.is_empty() {
@@ -20,7 +20,7 @@ pub fn first_part_mismatch(
         );
     }
     for (got, part) in hashes.iter().zip(parts.iter()) {
-        if *got != part.checksum {
+        if got.as_slice() != part.md5.bytes() {
             return Ok(Some((part.offset, part.len)));
         }
     }
@@ -29,7 +29,7 @@ pub fn first_part_mismatch(
 
 pub fn verify_all_parts(
     path: &std::path::Path,
-    parts: &[FilePart],
+    parts: &[ManifestPart],
     checksummer: &dyn Checksummer,
 ) -> Result<()> {
     if let Some((offset, len)) = first_part_mismatch(path, parts, checksummer)? {

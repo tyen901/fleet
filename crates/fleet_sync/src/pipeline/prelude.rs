@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::manifest::ValidatedModManifest;
 use crate::model::DesiredState;
 use crate::ports::{EventSink, RemoteRepo, StateStore, SyncEvent};
 use tokio_util::sync::CancellationToken;
+use fleet_manifest::ModManifest;
 
 use super::{baseline_digest_hex, fetch_all, validate_enabled_mods, FetchResult};
 
@@ -45,7 +45,7 @@ pub(crate) async fn run_prelude(
         supports_ranges: fetch.capabilities.supports_ranges,
     });
 
-    let baseline = build_baseline(&fetch.manifests);
+    let baseline = build_baseline(&fetch.manifests); // This line remains unchanged
     let baseline_digest = baseline_digest_hex(&baseline);
     store
         .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
@@ -54,14 +54,14 @@ pub(crate) async fn run_prelude(
     Ok(Prelude { desired, fetch })
 }
 
-fn build_baseline(manifests: &[ValidatedModManifest]) -> Vec<crate::model::ExpectedFile> {
+fn build_baseline(manifests: &[ModManifest]) -> Vec<crate::model::ExpectedFile> {
     let mut rows = Vec::new();
     for manifest in manifests {
-        for file in &manifest.files {
+        for file in manifest.files() {
             rows.push(crate::model::ExpectedFile {
-                mod_id: manifest.mod_id.clone(),
-                rel_path: file.rel_path.clone(),
-                size: file.size,
+                mod_id: manifest.mod_id().as_str().to_string(),
+                rel_path: file.rel_path().as_str().to_string(),
+                size: file.size(),
             });
         }
     }

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
-use crate::manifest::{ValidatedFileEntry, ValidatedModManifest};
 use crate::model::{
     CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileStateDelete, FileStateUpsert,
     TimestampNs,
@@ -11,6 +10,7 @@ use crate::model::{
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::{file_mtime_ns, now_ns};
+use fleet_manifest::{FileEntry, ModManifest};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -48,7 +48,7 @@ pub(crate) async fn run(
                 return Err(crate::model::EngineError::Cancelled);
             }
             sink.push(SyncEvent::ModStarted {
-                mod_id: manifest.mod_id.clone(),
+                mod_id: manifest.mod_id().as_str().to_string(),
             });
 
             let cache = if req.tuning.use_index {
@@ -80,7 +80,7 @@ pub(crate) async fn run(
             }
 
             sink.push(SyncEvent::ModFinished {
-                mod_id: manifest.mod_id.clone(),
+                mod_id: manifest.mod_id().as_str().to_string(),
             });
         }
 
@@ -115,7 +115,7 @@ async fn verify_mod(
     req: &CheckRequest,
     store: &dyn StateStore,
     state_id: &str,
-    manifest: &ValidatedModManifest,
+    manifest: &ModManifest,
     cache: &HashMap<String, crate::model::FileState>,
     report: &mut CheckReport,
     sink: &dyn EventSink,
@@ -129,14 +129,14 @@ async fn verify_mod(
 
     report.expected_files = report
         .expected_files
-        .saturating_add(manifest.files.len() as u64);
+        .saturating_add(manifest.files().len() as u64);
 
     let scan_concurrency = req.tuning.scan_concurrency.max(1);
-    let mut outcomes = futures::stream::iter(manifest.files.clone())
+    let mut outcomes = futures::stream::iter(manifest.files().to_vec())
         .map(|file| {
             let checkout_root = req.checkout_root.clone();
-            let mod_id = manifest.mod_id.clone();
-            let rel_path = file.rel_path.clone();
+            let mod_id = manifest.mod_id().as_str().to_string();
+            let rel_path = file.rel_path().as_str().to_string();
             let cached = cache.get(&rel_path).cloned();
             let checksummer = checksummer.clone();
             tokio::task::spawn_blocking(move || {
@@ -179,10 +179,12 @@ fn verify_one_file(
     checkout_root: &std::path::Path,
     mod_id: &str,
     rel_path: &str,
-    file: &ValidatedFileEntry,
+    file: &FileEntry,
     cached: Option<crate::model::FileState>,
     checksummer: &dyn Checksummer,
 ) -> anyhow::Result<VerifyOutcome> {
+    let expected_checksum = file.file_md5().bytes().to_vec();
+
     let abs_path = match safe_join_mod_file(checkout_root, mod_id, rel_path) {
         Ok(p) => p,
         Err(_) => {
@@ -190,12 +192,12 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size,
+                size: file.size(),
                 mtime_ns: TimestampNs(0),
-                checksum: file.file_checksum.clone(),
+                checksum: expected_checksum,
                 issue: Some(CheckIssueKind::UnsafePath),
                 unsafe_message: None,
-            })
+            });
         }
     };
 
@@ -206,9 +208,9 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size,
+                size: file.size(),
                 mtime_ns: TimestampNs(0),
-                checksum: file.file_checksum.clone(),
+                checksum: expected_checksum,
                 issue: Some(CheckIssueKind::UnsafeOnDisk),
                 unsafe_message: Some(err.to_string()),
             });
@@ -222,12 +224,12 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size,
+                size: file.size(),
                 mtime_ns: TimestampNs(0),
-                checksum: file.file_checksum.clone(),
+                checksum: expected_checksum,
                 issue: Some(CheckIssueKind::Missing),
                 unsafe_message: None,
-            })
+            });
         }
         Err(e) => return Err(e.into()),
     };
@@ -238,25 +240,25 @@ fn verify_one_file(
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size,
+            size: file.size(),
             mtime_ns: TimestampNs(0),
-            checksum: file.file_checksum.clone(),
+            checksum: expected_checksum,
             issue: Some(CheckIssueKind::NotAFile),
             unsafe_message: None,
         });
     }
 
     let got_size = md.len();
-    if got_size != file.size {
+    if got_size != file.size() {
         return Ok(VerifyOutcome {
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size,
+            size: file.size(),
             mtime_ns: TimestampNs(0),
-            checksum: file.file_checksum.clone(),
+            checksum: expected_checksum,
             issue: Some(CheckIssueKind::WrongSize {
-                expected: file.size,
+                expected: file.size(),
                 got: got_size,
             }),
             unsafe_message: None,
@@ -268,9 +270,9 @@ fn verify_one_file(
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size,
+            size: file.size(),
             mtime_ns: TimestampNs(0),
-            checksum: file.file_checksum.clone(),
+            checksum: expected_checksum,
             issue: Some(CheckIssueKind::PartMismatch { offset: 0, len: 0 }),
             unsafe_message: None,
         });
@@ -279,59 +281,60 @@ fn verify_one_file(
     if let Some(cached) = cached {
         if cached.size == got_size
             && cached.mtime_ns == mtime_ns
-            && cached.checksum == file.file_checksum
+            && cached.checksum.as_slice() == file.file_md5().bytes()
         {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: true,
-                size: file.size,
+                size: file.size(),
                 mtime_ns,
-                checksum: file.file_checksum.clone(),
+                checksum: expected_checksum,
                 issue: None,
                 unsafe_message: None,
             });
         }
     }
 
-    // Full hash if no parts are present.
-    if file.parts.is_empty() {
-        let got = checksummer.hash_file(&abs_path)?;
-        if got != file.file_checksum {
-            return Ok(VerifyOutcome {
-                mod_id: mod_id.to_string(),
-                rel_path: rel_path.to_string(),
-                ok: false,
-                size: file.size,
-                mtime_ns,
-                checksum: file.file_checksum.clone(),
-                issue: Some(CheckIssueKind::PartMismatch {
-                    offset: 0,
-                    len: file.size,
-                }),
-                unsafe_message: None,
-            });
-        }
-    } else {
-        // Part-based check: hash all parts and detect first mismatch.
-        let parts: Vec<(u64, u64)> = file.parts.iter().map(|p| (p.offset, p.len)).collect();
-        let got_hashes = checksummer.hash_ranges(&abs_path, &parts)?;
-        for (idx, got) in got_hashes.into_iter().enumerate() {
-            if got != file.parts[idx].checksum {
-                let p = &file.parts[idx];
+    match file.parts() {
+        None => {
+            let got = checksummer.hash_file(&abs_path)?;
+            if got.as_slice() != file.file_md5().bytes() {
                 return Ok(VerifyOutcome {
                     mod_id: mod_id.to_string(),
                     rel_path: rel_path.to_string(),
                     ok: false,
-                    size: file.size,
+                    size: file.size(),
                     mtime_ns,
-                    checksum: file.file_checksum.clone(),
+                    checksum: expected_checksum,
                     issue: Some(CheckIssueKind::PartMismatch {
-                        offset: p.offset,
-                        len: p.len,
+                        offset: 0,
+                        len: file.size(),
                     }),
                     unsafe_message: None,
                 });
+            }
+        }
+        Some(parts) => {
+            let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
+            let got_hashes = checksummer.hash_ranges(&abs_path, &ranges)?;
+            for (idx, got) in got_hashes.into_iter().enumerate() {
+                if got.as_slice() != parts[idx].md5.bytes() {
+                    let p = &parts[idx];
+                    return Ok(VerifyOutcome {
+                        mod_id: mod_id.to_string(),
+                        rel_path: rel_path.to_string(),
+                        ok: false,
+                        size: file.size(),
+                        mtime_ns,
+                        checksum: expected_checksum,
+                        issue: Some(CheckIssueKind::PartMismatch {
+                            offset: p.offset,
+                            len: p.len,
+                        }),
+                        unsafe_message: None,
+                    });
+                }
             }
         }
     }
@@ -340,9 +343,9 @@ fn verify_one_file(
         mod_id: mod_id.to_string(),
         rel_path: rel_path.to_string(),
         ok: true,
-        size: file.size,
+        size: file.size(),
         mtime_ns,
-        checksum: file.file_checksum.clone(),
+        checksum: expected_checksum,
         issue: None,
         unsafe_message: None,
     })

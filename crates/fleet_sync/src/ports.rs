@@ -1,20 +1,18 @@
 use std::collections::HashMap;
 
 use crate::model::{
-    DesiredState, ExpectedFile, FileState, FileStateDelete, FileStateUpsert, StoreError,
-    TimestampNs, VerifiedState,
+    DesiredState, ExpectedFile, FileState, FileStateDelete, FileStateUpsert, StoreError, TimestampNs,
+    VerifiedState,
 };
+use async_trait::async_trait;
+use fleet_manifest::{FetchRange, ModManifest, RelPath};
 
 pub trait Checksummer: Send + Sync {
     fn algorithm_name(&self) -> &str;
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>>;
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>>;
 
-    fn hash_ranges(
-        &self,
-        path: &std::path::Path,
-        ranges: &[(u64, u64)],
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
+    fn hash_ranges(&self, path: &std::path::Path, ranges: &[(u64, u64)]) -> anyhow::Result<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(ranges.len());
         for (off, len) in ranges {
             out.push(self.hash_range(path, *off, *len)?);
@@ -23,25 +21,23 @@ pub trait Checksummer: Send + Sync {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct FilePart {
-    pub offset: u64,
-    pub len: u64,
-    pub checksum: Vec<u8>,
+pub struct RemoteStream {
+    inner: Box<dyn RemoteStreamImpl>,
 }
 
-#[derive(Clone, Debug)]
-pub struct FileEntry {
-    pub rel_path: String,
-    pub size: u64,
-    pub file_checksum: Vec<u8>,
-    pub parts: Vec<FilePart>,
+impl RemoteStream {
+    pub fn new(inner: Box<dyn RemoteStreamImpl>) -> Self {
+        Self { inner }
+    }
+
+    pub async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>> {
+        self.inner.next_chunk().await
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct ModManifest {
-    pub mod_id: String,
-    pub files: Vec<FileEntry>,
+#[async_trait]
+pub trait RemoteStreamImpl: Send {
+    async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>>;
 }
 
 pub trait EventSink: Send + Sync {
@@ -156,37 +152,20 @@ pub struct RemoteCapabilities {
     pub supports_ranges: bool,
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 pub trait RemoteRepo: Send + Sync {
     async fn capabilities(&self) -> anyhow::Result<RemoteCapabilities> {
         Ok(RemoteCapabilities::default())
     }
+
     async fn fetch_mod_manifest(&self, mod_id: &str) -> anyhow::Result<ModManifest>;
-    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream>;
-    async fn fetch_range(
+    async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream>;
+    async fn fetch_file_range(
         &self,
         mod_id: &str,
-        rel_path: &str,
-        offset: u64,
-        len: u64,
+        rel_path: &RelPath,
+        range: FetchRange,
     ) -> anyhow::Result<RemoteStream>;
-}
-
-pub struct RemoteStream {
-    inner: Box<dyn RemoteStreamImpl>,
-}
-impl RemoteStream {
-    pub fn new(inner: Box<dyn RemoteStreamImpl>) -> Self {
-        Self { inner }
-    }
-    pub async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>> {
-        self.inner.next_chunk().await
-    }
-}
-
-#[async_trait::async_trait]
-pub trait RemoteStreamImpl: Send {
-    async fn next_chunk(&mut self) -> anyhow::Result<Option<bytes::Bytes>>;
 }
 
 pub trait StateStore: Send + Sync {

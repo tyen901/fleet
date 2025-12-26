@@ -157,7 +157,7 @@ fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> FileFailure {
     let aborting = error.is::<crate::fs::UnsafeOnDiskError>();
     FileFailure {
         mod_id: op.mod_id.clone(),
-        rel_path: op.rel_path.clone(),
+        rel_path: op.rel_path.as_str().to_string(),
         message: error.to_string(),
         aborting,
     }
@@ -178,7 +178,7 @@ async fn apply_one(
     if cancel.is_cancelled() {
         return Err(FileFailure {
             mod_id: op.mod_id.clone(),
-            rel_path: op.rel_path.clone(),
+            rel_path: op.rel_path.as_str().to_string(),
             message: "cancelled".to_string(),
             aborting: false,
         });
@@ -201,7 +201,7 @@ async fn apply_one(
                 });
                 return Err(FileFailure {
                     mod_id: op.mod_id.clone(),
-                    rel_path: op.rel_path.clone(),
+                    rel_path: op.rel_path.as_str().to_string(),
                     message: error.to_string(),
                     aborting: true,
                 });
@@ -213,7 +213,7 @@ async fn apply_one(
                 });
                 return Err(FileFailure {
                     mod_id: op.mod_id.clone(),
-                    rel_path: op.rel_path.clone(),
+                    rel_path: op.rel_path.as_str().to_string(),
                     message: error.to_string(),
                     aborting: true,
                 });
@@ -237,7 +237,7 @@ async fn apply_one(
         sink.push(SyncEvent::Warning {
             message: format!(
                 "remote lacks range support; falling back to full for {}",
-                op.rel_path
+                op.rel_path.as_str()
             ),
         });
         effective_strategy = RepairStrategy::Full;
@@ -250,7 +250,7 @@ async fn apply_one(
                 sink.push(SyncEvent::Warning {
                     message: format!(
                         "patch baseline missing for {}; falling back to full",
-                        op.rel_path
+                        op.rel_path.as_str()
                     ),
                 });
                 effective_strategy = RepairStrategy::Full;
@@ -272,15 +272,15 @@ async fn apply_one(
 
     let bytes_total = if matches!(effective_strategy, RepairStrategy::Patch) {
         op.target
-            .parts_to_fetch
+            .ranges_to_fetch
             .iter()
-            .fold(0u64, |acc, p| acc.saturating_add(p.len))
+            .fold(0u64, |acc, r| acc.saturating_add(r.len))
     } else {
         op.target.size
     };
     sink.push(SyncEvent::FileStarted {
         mod_id: op.mod_id.clone(),
-        path: op.rel_path.clone(),
+        path: op.rel_path.as_str().to_string(),
         bytes_total,
     });
 
@@ -327,10 +327,10 @@ async fn apply_one(
     let mtime_ns = file_mtime_ns(&md).unwrap_or(crate::model::TimestampNs(0));
     let index_updates = vec![IndexUpdate::UpsertFileState {
         mod_id: op.mod_id.clone(),
-        rel_path: op.rel_path.clone(),
+        rel_path: op.rel_path.as_str().to_string(),
         size: op.target.size,
         mtime_ns,
-        checksum: op.target.file_checksum.clone(),
+        checksum: op.target.file_md5.bytes().to_vec(),
     }];
 
     Ok(ApplyOneSuccess {
@@ -389,7 +389,7 @@ async fn apply_full(
         if tuning.emit_progress {
             sink.push(SyncEvent::FileProgress {
                 mod_id: op.mod_id.clone(),
-                path: op.rel_path.clone(),
+                path: op.rel_path.as_str().to_string(),
                 bytes_done: written,
                 bytes_total: op.target.size,
             });
@@ -430,7 +430,7 @@ async fn apply_full(
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
-        path: op.rel_path.clone(),
+        path: op.rel_path.as_str().to_string(),
     });
 
     report.files_downloaded += 1;
@@ -473,16 +473,16 @@ async fn apply_patch(
 
     let total_bytes = op
         .target
-        .parts_to_fetch
+        .ranges_to_fetch
         .iter()
-        .fold(0u64, |acc, p| acc.saturating_add(p.len));
+        .fold(0u64, |acc, r| acc.saturating_add(r.len));
     let done = Arc::new(AtomicU64::new(0));
 
     let range_workers = tuning.range_concurrency.max(1);
-    let parts = op.target.parts_to_fetch.clone();
+    let ranges = op.target.ranges_to_fetch.clone();
     let tmp_path = staged.tmp_path.clone();
-    let mut tasks = stream::iter(parts)
-        .map(|part| {
+    let mut tasks = stream::iter(ranges)
+        .map(|range| {
             let remote = remote.clone();
             let stage_path = tmp_path.clone();
             let tuning = tuning.clone();
@@ -500,7 +500,7 @@ async fn apply_patch(
                     return Err(Cancelled.into());
                 }
                 let mut stream = remote
-                    .fetch_range(&mod_id, &rel_path, part.offset, part.len)
+                    .fetch_file_range(&mod_id, &rel_path, range)
                     .await
                     .context("fetch range")?;
 
@@ -511,10 +511,10 @@ async fn apply_patch(
                     .await?;
 
                 stage_file
-                    .seek(std::io::SeekFrom::Start(part.offset))
+                    .seek(std::io::SeekFrom::Start(range.offset))
                     .await?;
 
-                let mut remaining = part.len;
+                let mut remaining = range.len;
                 while remaining > 0 {
                     if cancel.is_cancelled() {
                         return Err(Cancelled.into());
@@ -534,7 +534,7 @@ async fn apply_patch(
                     if tuning.emit_progress {
                         sink.push(SyncEvent::FileProgress {
                             mod_id: mod_id.clone(),
-                            path: rel_path.clone(),
+                            path: rel_path.as_str().to_string(),
                             bytes_done: next,
                             bytes_total: total_bytes,
                         });
@@ -585,7 +585,7 @@ async fn apply_patch(
     staged.commit(&op.abs_path, tuning.durability).await?;
     sink.push(SyncEvent::FileVerified {
         mod_id: op.mod_id.clone(),
-        path: op.rel_path.clone(),
+        path: op.rel_path.as_str().to_string(),
     });
 
     let mut report = RepairReport::default();
@@ -623,13 +623,18 @@ fn verify_target(
             target.size
         );
     }
-    if target.parts.is_empty() {
+    let parts = match target.parts.as_deref() {
+        None => &[],
+        Some(p) => p,
+    };
+
+    if parts.is_empty() {
         let got = checksummer.hash_file(path)?;
-        if got != target.file_checksum {
+        if got.as_slice() != target.file_md5.bytes() {
             anyhow::bail!("file checksum mismatch for full-file verification");
         }
         Ok(())
     } else {
-        crate::verify_parts::verify_all_parts(path, &target.parts, checksummer)
+        crate::verify_parts::verify_all_parts(path, parts, checksummer)
     }
 }

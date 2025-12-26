@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::fs::safe_join_mod_file;
-use crate::manifest::ValidatedModManifest;
 use crate::model::{
     AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
     UnknownPathPolicy,
@@ -13,6 +12,7 @@ use crate::pipeline::repair::{apply_full_download_ops, FullDownloadOp};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::now_ns;
+use fleet_manifest::ModManifest;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(
@@ -123,16 +123,20 @@ pub(crate) async fn run(
         // Force full download of all expected files.
         let mut ops: Vec<FullDownloadOp> = Vec::new();
         for manifest in &fetch.manifests {
-            for file in &manifest.files {
+            for file in manifest.files() {
                 let abs_path =
-                    safe_join_mod_file(&req.checkout_root, &manifest.mod_id, &file.rel_path)?;
+                    safe_join_mod_file(
+                        &req.checkout_root,
+                        manifest.mod_id().as_str(),
+                        file.rel_path().as_str(),
+                    )?;
                 ops.push(FullDownloadOp {
-                    mod_id: manifest.mod_id.clone(),
-                    rel_path: file.rel_path.clone(),
+                    mod_id: manifest.mod_id().as_str().to_string(),
+                    rel_path: file.rel_path().clone(),
                     abs_path,
-                    size: file.size,
-                    file_checksum: file.file_checksum.clone(),
-                    parts: file.parts.clone(),
+                    size: file.size(),
+                    file_md5: *file.file_md5(),
+                    parts: file.parts().map(|p| p.to_vec()),
                 });
             }
         }
@@ -232,13 +236,13 @@ pub(crate) async fn run(
 }
 
 fn expected_sets_from_manifests(
-    manifests: &[ValidatedModManifest],
+    manifests: &[ModManifest],
 ) -> HashMap<String, HashSet<String>> {
     let mut map: HashMap<String, HashSet<String>> = HashMap::new();
     for manifest in manifests {
-        let set = map.entry(manifest.mod_id.clone()).or_default();
-        for f in &manifest.files {
-            set.insert(f.rel_path.clone());
+        let set = map.entry(manifest.mod_id().as_str().to_string()).or_default();
+        for f in manifest.files() {
+            set.insert(f.rel_path().as_str().to_string());
         }
     }
     map

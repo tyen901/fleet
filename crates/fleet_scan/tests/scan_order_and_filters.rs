@@ -23,9 +23,9 @@ fn scan_mod_is_deterministic_and_orders_by_rel_path_and_excludes_mod_srf() {
     .expect("scan fixture");
 
     let paths: Vec<String> = manifest
-        .files
+        .files()
         .iter()
-        .map(|f| f.path.as_str().to_string())
+        .map(|f| f.rel_path().as_str().to_string())
         .collect();
     assert!(
         !paths.iter().any(|p| p.eq_ignore_ascii_case("mod.srf")),

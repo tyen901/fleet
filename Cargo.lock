@@ -1225,6 +1225,7 @@ dependencies = [
  "camino",
  "directories",
  "fleet_index",
+ "fleet_manifest",
  "fleet_remote_http",
  "fleet_sync",
  "fleet_types",
@@ -1263,12 +1264,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet_manifest"
+version = "0.1.0"
+dependencies = [
+ "fleet_types",
+ "relative-path",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "fleet_remote_http"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "fleet_manifest",
  "fleet_sync",
  "fleet_types",
  "percent-encoding",
@@ -1284,6 +1295,7 @@ name = "fleet_scan"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "fleet_manifest",
  "fleet_types",
  "md5",
  "relative-path",
@@ -1301,7 +1313,11 @@ dependencies = [
  "bytes",
  "fleet_fs",
  "fleet_index",
+ "fleet_manifest",
+ "fleet_types",
  "futures",
+ "md5",
+ "relative-path",
  "serde",
  "tempfile",
  "thiserror 2.0.17",

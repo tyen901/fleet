@@ -1,7 +1,7 @@
 use camino::Utf8Path;
+use fleet_manifest::ingest::ingest_mod_manifest;
 use fleet_types::{
-    file_checksum_from_parts, mod_checksum_from_files, FileManifest, Md5Digest, ModManifest,
-    PartManifest,
+    file_checksum_from_parts, mod_checksum_from_files, FileManifest, Md5Digest, PartManifest,
 };
 use relative_path::RelativePathBuf;
 use thiserror::Error;
@@ -19,6 +19,8 @@ pub enum ScanError {
     InvalidPbo(&'static str),
     #[error("invalid path: {0}")]
     InvalidPath(String),
+    #[error("invalid manifest: {0}")]
+    InvalidManifest(#[from] fleet_manifest::ManifestError),
 }
 
 fn hash_next_at(
@@ -123,7 +125,7 @@ fn scan_pbo_file(
     })
 }
 
-/// Scan a mod directory into the canonical manifest model (`fleet_types::ModManifest`).
+/// Scan a mod directory into the canonical manifest model (`fleet_manifest::ModManifest`).
 ///
 /// Notes:
 /// - Paths are normalized to forward slashes.
@@ -134,7 +136,7 @@ pub fn scan_mod(
     mod_root: &Utf8Path,
     mod_id: &str,
     _opts: ScanOptions,
-) -> Result<ModManifest, ScanError> {
+) -> Result<fleet_manifest::ModManifest, ScanError> {
     let mut files: Vec<FileManifest> = Vec::new();
 
     for entry in walkdir::WalkDir::new(mod_root)
@@ -182,9 +184,10 @@ pub fn scan_mod(
 
     let checksum = mod_checksum_from_files(&files);
 
-    Ok(ModManifest {
+    let swifty = fleet_types::swifty::model::ModManifest {
         name: mod_id.to_string(),
         checksum,
         files,
-    })
+    };
+    Ok(ingest_mod_manifest(swifty)?)
 }

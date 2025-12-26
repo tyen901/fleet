@@ -3,7 +3,6 @@ pub mod model;
 pub mod ports;
 
 pub(crate) mod fs;
-pub(crate) mod manifest;
 pub(crate) mod skip_check;
 pub(crate) mod unexpected;
 pub(crate) mod util;

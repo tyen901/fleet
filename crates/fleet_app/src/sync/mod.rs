@@ -3,7 +3,8 @@ pub mod model;
 pub mod sync_model_sink;
 
 use async_trait::async_trait;
-use fleet_sync::ports::{ModManifest, RemoteCapabilities, RemoteRepo, RemoteStream};
+use fleet_manifest::{FetchRange, ModManifest, RelPath};
+use fleet_sync::ports::{RemoteCapabilities, RemoteRepo, RemoteStream};
 use fleet_sync::{
     AbortReason, CheckReport, CheckTuning, RepairOutcome, RepairTuning, SyncFreshOutcome,
     SyncFreshTuning,
@@ -233,21 +234,20 @@ impl RemoteRepo for GatedRemote {
         self.inner.fetch_mod_manifest(mod_id).await
     }
 
-    async fn fetch_file(&self, mod_id: &str, rel_path: &str) -> anyhow::Result<RemoteStream> {
+    async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream> {
         self.inner.fetch_file(mod_id, rel_path).await
     }
 
-    async fn fetch_range(
+    async fn fetch_file_range(
         &self,
         mod_id: &str,
-        rel_path: &str,
-        offset: u64,
-        len: u64,
+        rel_path: &RelPath,
+        range: FetchRange,
     ) -> anyhow::Result<RemoteStream> {
         if !self.enable_patch_repair {
             anyhow::bail!("range requests disabled by app policy");
         }
-        self.inner.fetch_range(mod_id, rel_path, offset, len).await
+        self.inner.fetch_file_range(mod_id, rel_path, range).await
     }
 }
 

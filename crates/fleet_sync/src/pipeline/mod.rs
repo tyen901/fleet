@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::manifest::ValidatedModManifest;
 use crate::model::FileState;
 use crate::model::StoreError;
 use crate::ports::{RemoteCapabilities, RemoteRepo, StateStore};
+use fleet_manifest::ModManifest;
 use anyhow::Context;
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub(crate) mod sync_fresh;
 
 pub(crate) struct FetchResult {
     pub(crate) capabilities: RemoteCapabilities,
-    pub(crate) manifests: Vec<ValidatedModManifest>,
+    pub(crate) manifests: Vec<ModManifest>,
 }
 
 pub(crate) async fn fetch_all(
@@ -58,16 +58,14 @@ pub(crate) async fn fetch_all(
                     _ = cancel.cancelled() => return Err(crate::model::EngineError::Cancelled),
                     m = remote.fetch_mod_manifest(&mod_id) => m.map_err(crate::model::EngineError::Remote).with_context(|| format!("fetch manifest for {mod_id}"))?,
                 };
-                if manifest.mod_id != mod_id {
+                if manifest.mod_id().as_str() != mod_id {
                     return Err(crate::model::EngineError::Internal(anyhow::anyhow!(
                         "manifest mod_id mismatch (requested {}, got {})",
                         mod_id,
-                        manifest.mod_id
+                        manifest.mod_id().as_str()
                     )));
                 }
-                let validated = crate::manifest::validate_and_normalize_manifest(manifest)
-                    .map_err(crate::model::EngineError::Internal)?;
-                Ok::<ValidatedModManifest, crate::model::EngineError>(validated)
+                Ok::<ModManifest, crate::model::EngineError>(manifest)
             }
         })
         .buffer_unordered(max_concurrency.max(1));
@@ -82,7 +80,7 @@ pub(crate) async fn fetch_all(
         }
     }
 
-    manifests.sort_by(|a, b| a.mod_id.cmp(&b.mod_id));
+    manifests.sort_by(|a, b| a.mod_id().cmp(b.mod_id()));
 
     Ok(FetchResult {
         capabilities: caps,
@@ -93,13 +91,14 @@ pub(crate) async fn fetch_all(
 pub(crate) fn build_cache_snapshot(
     store: &dyn StateStore,
     state_id: &str,
-    manifest: &ValidatedModManifest,
+    manifest: &ModManifest,
 ) -> Result<HashMap<String, FileState>, StoreError> {
-    let all = store.file_state_get_all_for_mod(state_id, &manifest.mod_id)?;
+    let all = store.file_state_get_all_for_mod(state_id, manifest.mod_id().as_str())?;
     let mut map = HashMap::new();
-    for file in &manifest.files {
-        if let Some(state) = all.get(&file.rel_path) {
-            map.insert(file.rel_path.clone(), state.clone());
+    for file in manifest.files() {
+        let rel_path = file.rel_path().as_str();
+        if let Some(state) = all.get(rel_path) {
+            map.insert(rel_path.to_string(), state.clone());
         }
     }
     Ok(map)
