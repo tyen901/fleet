@@ -7,7 +7,7 @@ use crate::model::{
     AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
     UnexpectedPathPolicy, UnknownPathPolicy,
 };
-use crate::pipeline::repair::{apply_full_download_ops, FullDownloadOp};
+use crate::pipeline::repair::{apply_planned_ops, ApplyOptions, FileTarget, IndexUpdate, PlannedOp, RepairStrategy};
 use crate::unexpected::Cancelled;
 use crate::unexpected::{UnexpectedOpts};
 use crate::ports::SyncEvent;
@@ -122,7 +122,7 @@ pub(crate) async fn run(
         }
 
         // Force full download of all expected files.
-        let mut ops: Vec<FullDownloadOp> = Vec::new();
+        let mut ops: Vec<PlannedOp> = Vec::new();
         for manifest in &fetch.manifests {
             for file in manifest.files() {
                 let abs_path = safe_join_mod_file(
@@ -130,18 +130,24 @@ pub(crate) async fn run(
                     manifest.mod_id().as_str(),
                     file.rel_path().as_str(),
                 )?;
-                ops.push(FullDownloadOp {
+                let size = file.size();
+                ops.push(PlannedOp {
                     mod_id: manifest.mod_id().as_str().to_string(),
                     rel_path: file.rel_path().clone(),
                     abs_path,
-                    size: file.size(),
-                    file_md5: *file.file_md5(),
-                    parts: file.parts().map(|p| p.to_vec()),
+                    target: FileTarget {
+                        size,
+                        file_md5: *file.file_md5(),
+                        parts: file.parts().map(|p| p.to_vec()),
+                        strategy: RepairStrategy::Full,
+                        ranges_to_fetch: Vec::new(),
+                    },
+                    estimated_bytes: size,
                 });
             }
         }
 
-        let apply_outcome = apply_full_download_ops(
+        let apply_outcome = apply_planned_ops(
             ops,
             &req.checkout_root,
             remote.clone(),
@@ -149,7 +155,9 @@ pub(crate) async fn run(
             &tuning.concurrency,
             sink,
             cancel,
-            fetch.capabilities.supports_ranges,
+            ApplyOptions {
+                supports_ranges: fetch.capabilities.supports_ranges,
+            },
         )
         .await?;
 
@@ -158,14 +166,23 @@ pub(crate) async fn run(
         let mut aborted = apply_outcome.aborted;
 
         let mut upserts: Vec<FileStateUpsert> = Vec::new();
-        for (mod_id, rel_path, size, mtime_ns, checksum) in apply_outcome.index_updates {
-            upserts.push(FileStateUpsert {
-                mod_id,
-                rel_path,
-                size,
-                mtime_ns,
-                checksum,
-            });
+        for update in apply_outcome.index_updates {
+            match update {
+                IndexUpdate::UpsertFileState {
+                    mod_id,
+                    rel_path,
+                    size,
+                    mtime_ns,
+                    checksum,
+                } => upserts.push(FileStateUpsert {
+                    mod_id,
+                    rel_path,
+                    size,
+                    mtime_ns,
+                    checksum,
+                }),
+                IndexUpdate::DeleteFileState { .. } => {}
+            }
         }
         store
             .file_state_apply_batch(&desired.state_id, upserts, Vec::new())

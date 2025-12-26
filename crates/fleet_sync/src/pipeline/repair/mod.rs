@@ -11,88 +11,36 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::util::now_ns;
-use fleet_manifest::{FileMd5, ManifestPart, RelPath};
 use tokio_util::sync::CancellationToken;
 
 mod applier;
 mod planner;
 
-pub(crate) struct FullDownloadOp {
-    pub(crate) mod_id: String,
-    pub(crate) rel_path: RelPath,
-    pub(crate) abs_path: std::path::PathBuf,
-    pub(crate) size: u64,
-    pub(crate) file_md5: FileMd5,
-    pub(crate) parts: Option<Vec<ManifestPart>>,
-}
-
-pub(crate) struct FullDownloadOutcome {
-    pub(crate) report: crate::model::RepairReport,
-    pub(crate) failures: Vec<crate::model::FileFailure>,
-    pub(crate) aborted: Option<crate::model::AbortReason>,
-    pub(crate) index_updates: Vec<(String, String, u64, crate::model::TimestampNs, Vec<u8>)>,
-}
+pub(crate) use applier::{ApplyBatchOutcome, ApplyOptions, IndexUpdate};
+pub(crate) use planner::{FileTarget, PlannedOp, RepairStrategy};
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_full_download_ops(
-    ops: Vec<FullDownloadOp>,
+pub(crate) async fn apply_planned_ops(
+    ops: Vec<PlannedOp>,
     checkout_root: &std::path::Path,
     remote: Arc<dyn RemoteRepo>,
     checksummer: Arc<dyn Checksummer>,
     tuning: &crate::model::RepairTuning,
     sink: &dyn EventSink,
     cancel: &CancellationToken,
-    supports_ranges: bool,
-) -> Result<FullDownloadOutcome, crate::model::EngineError> {
-    let planned: Vec<planner::PlannedOp> = ops
-        .into_iter()
-        .map(|op| planner::PlannedOp {
-            mod_id: op.mod_id,
-            rel_path: op.rel_path,
-            abs_path: op.abs_path,
-            target: planner::FileTarget {
-                size: op.size,
-                file_md5: op.file_md5,
-                parts: op.parts,
-                strategy: planner::RepairStrategy::Full,
-                ranges_to_fetch: Vec::new(),
-            },
-            estimated_bytes: op.size,
-        })
-        .collect();
-
-    let outcome = applier::apply_ops(
-        planned,
+    opts: ApplyOptions,
+) -> Result<ApplyBatchOutcome, crate::model::EngineError> {
+    applier::apply_ops(
+        ops,
         checkout_root,
         remote,
         checksummer,
         tuning,
         sink,
         cancel,
-        applier::ApplyOptions { supports_ranges },
+        opts,
     )
-    .await?;
-
-    let mut index_updates = Vec::new();
-    for update in outcome.index_updates {
-        match update {
-            applier::IndexUpdate::UpsertFileState {
-                mod_id,
-                rel_path,
-                size,
-                mtime_ns,
-                checksum,
-            } => index_updates.push((mod_id, rel_path, size, mtime_ns, checksum)),
-            applier::IndexUpdate::DeleteFileState { .. } => {}
-        }
-    }
-
-    Ok(FullDownloadOutcome {
-        report: outcome.report,
-        failures: outcome.failures,
-        aborted: outcome.aborted,
-        index_updates,
-    })
+    .await
 }
 
 pub(crate) async fn run(
