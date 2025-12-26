@@ -13,14 +13,14 @@ pub struct CaseIndex {
 #[derive(Clone, Debug)]
 pub struct CaseFixTuning {
     pub hard_delete_losers: bool,
-    pub trash_rel: PathBuf,
+    pub trash_dir: PathBuf,
 }
 
 impl Default for CaseFixTuning {
     fn default() -> Self {
         Self {
             hard_delete_losers: false,
-            trash_rel: PathBuf::from(".fleet/trash/casefix"),
+            trash_dir: std::env::temp_dir().join("fleet").join("trash").join("casefix"),
         }
     }
 }
@@ -248,7 +248,6 @@ fn file_entries_case_insensitive(parent: &Path, name: &str) -> io::Result<Vec<Pa
 }
 
 fn ensure_dir_named(
-    checkout_root: &Path,
     parent: &Path,
     desired: &str,
     tuning: &CaseFixTuning,
@@ -271,7 +270,7 @@ fn ensure_dir_named(
     // Keep the first match; remove the rest silently.
     let keep = matches.remove(0);
     for loser in matches {
-        let _ = remove_or_trash(checkout_root, &loser, tuning, "dirloser");
+        let _ = remove_or_trash(&loser, tuning, "dirloser");
     }
 
     // Rename to desired casing (even if it already resolves via case-insensitive lookup).
@@ -280,7 +279,7 @@ fn ensure_dir_named(
 }
 
 fn ensure_path_dirs_cased(
-    checkout_root: &Path,
+    _checkout_root: &Path,
     canonical_root: &Path,
     rel_norm: &str,
     tuning: &CaseFixTuning,
@@ -294,7 +293,7 @@ fn ensure_path_dirs_cased(
         if dir.is_empty() {
             continue;
         }
-        cur = ensure_dir_named(checkout_root, &cur, dir, tuning)?;
+        cur = ensure_dir_named(&cur, dir, tuning)?;
     }
     Ok(cur)
 }
@@ -323,16 +322,13 @@ fn remove_any(path: &Path) -> io::Result<()> {
     }
 }
 
-fn trash_path(checkout_root: &Path, tuning: &CaseFixTuning, label: &str) -> io::Result<PathBuf> {
-    let root = checkout_root
-        .join(&tuning.trash_rel)
-        .join(format!("{}", now_unix_s()));
+fn trash_path(tuning: &CaseFixTuning, label: &str) -> io::Result<PathBuf> {
+    let root = tuning.trash_dir.join(format!("{}", now_unix_s()));
     std::fs::create_dir_all(&root)?;
     Ok(root.join(format!("{label}_{}", rand_suffix())))
 }
 
 fn remove_or_trash(
-    checkout_root: &Path,
     path: &Path,
     tuning: &CaseFixTuning,
     label: &str,
@@ -344,14 +340,46 @@ fn remove_or_trash(
         let _ = remove_any(path);
         return Ok(());
     }
-    let dst = trash_path(checkout_root, tuning, label)?;
-    match std::fs::rename(path, &dst) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = remove_any(path);
-            Ok(())
+    let dst = trash_path(tuning, label)?;
+
+    let md = std::fs::symlink_metadata(path)?;
+    if md.is_dir() {
+        match std::fs::rename(path, &dst) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Rare path: copy+delete into external trash.
+                ensure_parent_dir(&dst)?;
+                copy_dir_recursive(path, &dst)?;
+                let _ = std::fs::remove_dir_all(path);
+                Ok(())
+            }
+        }
+    } else {
+        let _ = move_file(path, &dst);
+        Ok(())
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in walkdir::WalkDir::new(src)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let rel = entry.path().strip_prefix(src).unwrap();
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let out = dst.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&out)?;
+        } else if entry.file_type().is_file() {
+            ensure_parent_dir(&out)?;
+            std::fs::copy(entry.path(), &out)?;
         }
     }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -379,7 +407,7 @@ pub fn case_sweep_and_fix(
 ) -> io::Result<CaseFixStats> {
     let mut stats = CaseFixStats::default();
 
-    let canonical_root = ensure_dir_named(checkout_root, checkout_root, mod_id, tuning)?;
+    let canonical_root = ensure_dir_named(checkout_root, mod_id, tuning)?;
     let canonical_real = std::fs::canonicalize(&canonical_root).unwrap_or(canonical_root.clone());
 
     let roots_raw: Vec<PathBuf> = resolve_mod_dir(checkout_root, mod_id)?
@@ -459,7 +487,7 @@ pub fn case_sweep_and_fix(
             && !same_fs_entry(&cands[best_idx].full, &dst)
         {
             stats.collision_losers_removed += 1;
-            remove_or_trash(checkout_root, &dst, tuning, "dst")?;
+            remove_or_trash(&dst, tuning, "dst")?;
         }
 
         if cands[best_idx].full != dst && !same_fs_entry(&cands[best_idx].full, &dst) {
@@ -483,7 +511,7 @@ pub fn case_sweep_and_fix(
                 continue;
             }
             stats.collision_losers_removed += 1;
-            let _ = remove_or_trash(checkout_root, &c.full, tuning, "loser");
+            let _ = remove_or_trash(&c.full, tuning, "loser");
         }
     }
 
@@ -493,7 +521,7 @@ pub fn case_sweep_and_fix(
         }
         if display.exists() {
             stats.mod_roots_merged += 1;
-            let _ = remove_or_trash(checkout_root, &display, tuning, "modroot");
+            let _ = remove_or_trash(&display, tuning, "modroot");
         }
     }
 
