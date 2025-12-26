@@ -3,12 +3,16 @@ use std::collections::BTreeMap;
 use crate::{
     errors::ManifestError,
     model::{FileEntry, ManifestPart, ModManifest},
-    types::{Md5, ModId, RelPath},
+    types::{FileMd5, ModId, PartMd5, RelPath},
 };
 use fleet_types::swifty::model as sw;
 
-fn md5_from_swifty(d: &fleet_types::Md5Digest) -> Md5 {
-    Md5::new(*d.as_bytes())
+fn file_md5_from_swifty(d: &fleet_types::Md5Digest) -> FileMd5 {
+    FileMd5::new(*d.as_bytes())
+}
+
+fn part_md5_from_swifty(d: &fleet_types::Md5Digest) -> PartMd5 {
+    PartMd5::new(*d.as_bytes())
 }
 
 pub fn ingest_mod_manifest(swifty: sw::ModManifest) -> Result<ModManifest, ManifestError> {
@@ -19,7 +23,7 @@ pub fn ingest_mod_manifest(swifty: sw::ModManifest) -> Result<ModManifest, Manif
     for f in swifty.files {
         let rel_path = RelPath::new(f.path.as_str())?;
         let size = f.length;
-        let file_md5 = md5_from_swifty(&f.checksum);
+        let file_md5 = file_md5_from_swifty(&f.checksum);
 
         let parts = if f.parts.is_empty() {
             None
@@ -37,7 +41,7 @@ pub fn ingest_mod_manifest(swifty: sw::ModManifest) -> Result<ModManifest, Manif
                 out.push(ManifestPart {
                     offset,
                     len,
-                    md5: md5_from_swifty(&part.checksum),
+                    md5: part_md5_from_swifty(&part.checksum),
                 });
             }
             out.sort_by_key(|p| p.offset);

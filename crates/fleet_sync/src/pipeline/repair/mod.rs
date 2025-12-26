@@ -11,7 +11,7 @@ use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
 use crate::unexpected::{handle_unexpected_paths, UnexpectedStats};
 use crate::util::now_ns;
-use fleet_manifest::{ManifestPart, Md5, RelPath};
+use fleet_manifest::{FileMd5, ManifestPart, RelPath};
 use tokio_util::sync::CancellationToken;
 
 mod applier;
@@ -22,7 +22,7 @@ pub(crate) struct FullDownloadOp {
     pub(crate) rel_path: RelPath,
     pub(crate) abs_path: std::path::PathBuf,
     pub(crate) size: u64,
-    pub(crate) file_md5: Md5,
+    pub(crate) file_md5: FileMd5,
     pub(crate) parts: Option<Vec<ManifestPart>>,
 }
 
@@ -592,7 +592,11 @@ mod tests {
             Ok(self.manifests.lock().unwrap().get(mod_id).cloned().unwrap())
         }
 
-        async fn fetch_file(&self, mod_id: &str, rel_path: &RelPath) -> anyhow::Result<RemoteStream> {
+        async fn fetch_file(
+            &self,
+            mod_id: &str,
+            rel_path: &RelPath,
+        ) -> anyhow::Result<RemoteStream> {
             let b = self
                 .files
                 .lock()

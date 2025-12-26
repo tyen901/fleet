@@ -1,7 +1,7 @@
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::model::{FileState, RepairTuning};
 use crate::ports::Checksummer;
-use fleet_manifest::{FetchRange, FileEntry, ManifestPart, ModManifest};
+use fleet_manifest::{FetchRange, FileEntry, FileMd5, ManifestPart, ModManifest};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,7 @@ pub(crate) struct PlannedOp {
 #[derive(Clone, Debug)]
 pub(crate) struct FileTarget {
     pub(crate) size: u64,
-    pub(crate) file_md5: fleet_manifest::Md5,
+    pub(crate) file_md5: FileMd5,
     pub(crate) parts: Option<Vec<ManifestPart>>,
     pub(crate) strategy: RepairStrategy,
     pub(crate) ranges_to_fetch: Vec<FetchRange>,
@@ -107,13 +107,16 @@ pub(crate) fn plan_mod(
     };
 
     for file in manifest.files() {
-        let abs_path =
-            safe_join_mod_file(checkout_root, manifest.mod_id().as_str(), file.rel_path().as_str())
-                .map_err(|e| PlanError::UnsafePath {
-                    mod_id: manifest.mod_id().as_str().to_string(),
-                    rel_path: file.rel_path().as_str().to_string(),
-                    source: e,
-                })?;
+        let abs_path = safe_join_mod_file(
+            checkout_root,
+            manifest.mod_id().as_str(),
+            file.rel_path().as_str(),
+        )
+        .map_err(|e| PlanError::UnsafePath {
+            mod_id: manifest.mod_id().as_str().to_string(),
+            rel_path: file.rel_path().as_str().to_string(),
+            source: e,
+        })?;
 
         let (strategy, ranges_to_fetch, estimated_bytes, cache_hint) =
             plan_one_file(&ctx, &abs_path, file)?;
@@ -385,7 +388,10 @@ fn coalesce_patch_fetch_ranges(
         let len = end_off.saturating_sub(start_off);
 
         if len > 0 {
-            out.push(FetchRange { offset: start_off, len });
+            out.push(FetchRange {
+                offset: start_off,
+                len,
+            });
         }
 
         i = end + 1;
@@ -449,4 +455,3 @@ pub(crate) async fn plan_mod_spawn_blocking(
 
     Ok(plan_res)
 }
-

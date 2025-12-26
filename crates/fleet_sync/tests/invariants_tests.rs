@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
 use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
-use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, FileStateDelete, FileStateUpsert, RepairRequest, RepairTuning,
     StoreError, TimestampNs,
@@ -16,6 +15,7 @@ use fleet_sync::ports::{
     RemoteCapabilities, RemoteRepo, RemoteStream, RemoteStreamImpl, StateStore,
 };
 use fleet_sync::SyncEngine;
+use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 

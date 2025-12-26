@@ -124,12 +124,11 @@ pub(crate) async fn run(
         let mut ops: Vec<FullDownloadOp> = Vec::new();
         for manifest in &fetch.manifests {
             for file in manifest.files() {
-                let abs_path =
-                    safe_join_mod_file(
-                        &req.checkout_root,
-                        manifest.mod_id().as_str(),
-                        file.rel_path().as_str(),
-                    )?;
+                let abs_path = safe_join_mod_file(
+                    &req.checkout_root,
+                    manifest.mod_id().as_str(),
+                    file.rel_path().as_str(),
+                )?;
                 ops.push(FullDownloadOp {
                     mod_id: manifest.mod_id().as_str().to_string(),
                     rel_path: file.rel_path().clone(),
@@ -235,12 +234,12 @@ pub(crate) async fn run(
     result
 }
 
-fn expected_sets_from_manifests(
-    manifests: &[ModManifest],
-) -> HashMap<String, HashSet<String>> {
+fn expected_sets_from_manifests(manifests: &[ModManifest]) -> HashMap<String, HashSet<String>> {
     let mut map: HashMap<String, HashSet<String>> = HashMap::new();
     for manifest in manifests {
-        let set = map.entry(manifest.mod_id().as_str().to_string()).or_default();
+        let set = map
+            .entry(manifest.mod_id().as_str().to_string())
+            .or_default();
         for f in manifest.files() {
             set.insert(f.rel_path().as_str().to_string());
         }

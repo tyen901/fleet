@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use fleet_index::{DesiredState, FleetIndex};
 use fleet_manifest::{ingest::ingest_mod_manifest, FetchRange, ModManifest, RelPath};
-use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use fleet_sync::model::{
     CheckRequest, CheckTuning, EngineError, FileStateDelete, FileStateUpsert, RepairRequest,
     RepairTuning, StoreError, SyncFreshRequest, SyncFreshTuning, TimestampNs, UnknownPathPolicy,
@@ -16,6 +15,7 @@ use fleet_sync::ports::{
     SyncEvent,
 };
 use fleet_sync::SyncEngine;
+use fleet_types::swifty::{checksums::mod_checksum_from_files, model as sw};
 use relative_path::RelativePathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -166,8 +166,15 @@ fn make_parts(bytes: &[u8], part_size: usize) -> Vec<sw::PartManifest> {
     out
 }
 
-fn build_manifest(mod_id: &str, rel_path: &str, bytes: &[u8], part_size: Option<usize>) -> ModManifest {
-    let parts = part_size.map(|sz| make_parts(bytes, sz)).unwrap_or_default();
+fn build_manifest(
+    mod_id: &str,
+    rel_path: &str,
+    bytes: &[u8],
+    part_size: Option<usize>,
+) -> ModManifest {
+    let parts = part_size
+        .map(|sz| make_parts(bytes, sz))
+        .unwrap_or_default();
     let files = vec![sw::FileManifest {
         path: RelativePathBuf::from(rel_path),
         length: bytes.len() as u64,

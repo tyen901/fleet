@@ -97,7 +97,11 @@ async fn fetch_mod_manifest_falls_back_to_mod_srf_when_manifest_json_404() {
 
     let parsed = fleet_types::ModManifest::from_bytes(&srf_bytes).expect("parse fixture SRF");
 
-    assert_eq!(mf.mod_id().as_str(), parsed.name, "mod_id mismatch from SRF");
+    assert_eq!(
+        mf.mod_id().as_str(),
+        parsed.name,
+        "mod_id mismatch from SRF"
+    );
     assert_eq!(
         mf.files().len(),
         parsed.files.len(),

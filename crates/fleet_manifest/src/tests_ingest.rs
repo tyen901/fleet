@@ -1,8 +1,8 @@
 #[cfg(feature = "swifty")]
 #[cfg(test)]
 mod tests {
-    use crate::ingest::ingest_mod_manifest;
     use crate::errors::ManifestError;
+    use crate::ingest::ingest_mod_manifest;
     use fleet_types::swifty::model as sw;
     use fleet_types::Md5Digest;
     use relative_path::RelativePathBuf;

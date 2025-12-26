@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::model::{
-    DesiredState, ExpectedFile, FileState, FileStateDelete, FileStateUpsert, StoreError, TimestampNs,
-    VerifiedState,
+    DesiredState, ExpectedFile, FileState, FileStateDelete, FileStateUpsert, StoreError,
+    TimestampNs, VerifiedState,
 };
 use async_trait::async_trait;
 use fleet_manifest::{FetchRange, ModManifest, RelPath};
@@ -12,7 +12,11 @@ pub trait Checksummer: Send + Sync {
     fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>>;
     fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>>;
 
-    fn hash_ranges(&self, path: &std::path::Path, ranges: &[(u64, u64)]) -> anyhow::Result<Vec<Vec<u8>>> {
+    fn hash_ranges(
+        &self,
+        path: &std::path::Path,
+        ranges: &[(u64, u64)],
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(ranges.len());
         for (off, len) in ranges {
             out.push(self.hash_range(path, *off, *len)?);

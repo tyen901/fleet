@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::marker::PhantomData;
 use std::path::{Component, Path};
 
 use crate::errors::ManifestError;
@@ -93,17 +94,31 @@ impl fmt::Display for RelPath {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Md5([u8; 16]);
+pub struct Digest16<Tag> {
+    bytes: [u8; 16],
+    _tag: PhantomData<Tag>,
+}
 
-impl Md5 {
-    pub fn bytes(&self) -> &[u8; 16] {
-        &self.0
+impl<Tag> Digest16<Tag> {
+    pub fn new(bytes: [u8; 16]) -> Self {
+        Self {
+            bytes,
+            _tag: PhantomData,
+        }
     }
 
-    pub fn new(bytes: [u8; 16]) -> Self {
-        Self(bytes)
+    pub fn bytes(&self) -> &[u8; 16] {
+        &self.bytes
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileDigestTag {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PartDigestTag {}
+
+pub type FileMd5 = Digest16<FileDigestTag>;
+pub type PartMd5 = Digest16<PartDigestTag>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FetchRange {

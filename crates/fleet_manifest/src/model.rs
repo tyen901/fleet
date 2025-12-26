@@ -1,4 +1,4 @@
-use crate::types::{Md5, ModId, RelPath};
+use crate::types::{FileMd5, ModId, PartMd5, RelPath};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModManifest {
@@ -24,7 +24,7 @@ impl ModManifest {
 pub struct FileEntry {
     rel_path: RelPath,
     size: u64,
-    file_md5: Md5,
+    file_md5: FileMd5,
     parts: Option<Vec<ManifestPart>>,
 }
 
@@ -37,7 +37,7 @@ impl FileEntry {
         self.size
     }
 
-    pub fn file_md5(&self) -> &Md5 {
+    pub fn file_md5(&self) -> &FileMd5 {
         &self.file_md5
     }
 
@@ -48,7 +48,7 @@ impl FileEntry {
     pub(crate) fn new_unchecked(
         rel_path: RelPath,
         size: u64,
-        file_md5: Md5,
+        file_md5: FileMd5,
         parts: Option<Vec<ManifestPart>>,
     ) -> Self {
         Self {
@@ -64,7 +64,7 @@ impl FileEntry {
 pub struct ManifestPart {
     pub offset: u64,
     pub len: u64,
-    pub md5: Md5,
+    pub md5: PartMd5,
 }
 
 impl ManifestPart {
