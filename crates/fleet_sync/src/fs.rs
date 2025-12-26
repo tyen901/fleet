@@ -110,17 +110,10 @@ impl Drop for StagedFile {
 }
 
 impl StagedFile {
-    pub(crate) async fn create_next_to(final_path: &Path) -> anyhow::Result<StagedFile> {
-        let parent = final_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("final_path has no parent"))?;
-        tokio::fs::create_dir_all(parent).await?;
+    pub(crate) async fn create_in_dir(staging_root: &Path) -> anyhow::Result<StagedFile> {
+        tokio::fs::create_dir_all(staging_root).await?;
 
-        let name = final_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
-        let tmp_path = parent.join(format!(".{name}.fleet.tmp.{}", rand_suffix()));
+        let tmp_path = staging_root.join(uuid::Uuid::new_v4().to_string());
 
         let _f = tokio::fs::OpenOptions::new()
             .create_new(true)
@@ -138,6 +131,11 @@ impl StagedFile {
         final_path: &Path,
         durability: Durability,
     ) -> anyhow::Result<()> {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("final_path has no parent"))?;
+        tokio::fs::create_dir_all(parent).await?;
+
         if let Ok(md) = tokio::fs::symlink_metadata(final_path).await {
             if md.is_dir() {
                 anyhow::bail!(
@@ -149,15 +147,17 @@ impl StagedFile {
             }
         }
 
-        tokio::fs::rename(&self.tmp_path, final_path)
+        tokio::fs::copy(&self.tmp_path, final_path)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "rename {} -> {}: {e}",
+                    "copy {} -> {}: {e}",
                     self.tmp_path.display(),
                     final_path.display()
                 )
             })?;
+
+        let _ = tokio::fs::remove_file(&self.tmp_path).await;
 
         if matches!(durability, Durability::Strict) {
             fsync_parent_dir(final_path).await;
@@ -165,15 +165,6 @@ impl StagedFile {
 
         Ok(())
     }
-}
-
-fn rand_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{n}")
 }
 
 async fn fsync_parent_dir(final_path: &Path) {

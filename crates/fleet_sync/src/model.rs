@@ -84,6 +84,7 @@ pub struct CheckRequest {
 pub struct RepairRequest {
     pub repo_name: String,
     pub checkout_root: PathBuf,
+    pub staging_root: PathBuf,
     pub enabled_mods: Vec<String>,
     pub tuning: RepairTuning,
 }
@@ -292,6 +293,7 @@ impl RepairOutcome {
 pub struct SyncFreshRequest {
     pub repo_name: String,
     pub checkout_root: PathBuf,
+    pub staging_root: PathBuf,
     pub enabled_mods: Vec<String>,
     pub tuning: SyncFreshTuning,
 }

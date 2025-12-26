@@ -23,6 +23,7 @@ pub(crate) use planner::{FileTarget, PlannedOp, RepairStrategy};
 pub(crate) async fn apply_planned_ops(
     ops: Vec<PlannedOp>,
     checkout_root: &std::path::Path,
+    staging_root: &std::path::Path,
     remote: Arc<dyn RemoteRepo>,
     checksummer: Arc<dyn Checksummer>,
     tuning: &crate::model::RepairTuning,
@@ -33,6 +34,7 @@ pub(crate) async fn apply_planned_ops(
     applier::apply_ops(
         ops,
         checkout_root,
+        staging_root,
         remote,
         checksummer,
         tuning,
@@ -242,6 +244,7 @@ pub(crate) async fn run(
             let apply_outcome = applier::apply_ops(
                 to_apply,
                 &req.checkout_root,
+                &req.staging_root,
                 remote.clone(),
                 checksummer.clone(),
                 &req.tuning,
@@ -678,6 +681,7 @@ mod tests {
         let req = RepairRequest {
             repo_name: "r".to_string(),
             checkout_root: tmp.path().to_path_buf(),
+            staging_root: tmp.path().join("_staging"),
             enabled_mods: vec!["m".to_string()],
             tuning,
         };
@@ -686,6 +690,7 @@ mod tests {
         applier::apply_ops(
             vec![op],
             &req.checkout_root,
+            &req.staging_root,
             remote.clone(),
             checksummer.clone(),
             &req.tuning,
@@ -755,6 +760,7 @@ mod tests {
         let req = RepairRequest {
             repo_name: "r".to_string(),
             checkout_root: tmp.path().to_path_buf(),
+            staging_root: tmp.path().join("_staging"),
             enabled_mods: vec!["m".to_string()],
             tuning,
         };
@@ -763,6 +769,7 @@ mod tests {
         applier::apply_ops(
             vec![op],
             &req.checkout_root,
+            &req.staging_root,
             remote.clone(),
             checksummer.clone(),
             &req.tuning,

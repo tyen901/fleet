@@ -362,6 +362,7 @@ async fn safety_abort_does_not_fetch_remote_file_bytes() {
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
+        staging_root: PathBuf::from(root).join("_staging"),
         enabled_mods,
         tuning: RepairTuning::default(),
     };
@@ -420,6 +421,7 @@ async fn skip_logic_does_not_fetch_remote_file_bytes() {
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
+        staging_root: PathBuf::from(root).join("_staging"),
         enabled_mods,
         tuning: RepairTuning::default(),
     };

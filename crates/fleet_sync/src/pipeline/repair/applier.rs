@@ -50,6 +50,7 @@ pub(crate) struct ApplyBatchOutcome {
 pub(crate) async fn apply_ops(
     ops: Vec<PlannedOp>,
     checkout_root: &Path,
+    staging_root: &Path,
     remote: Arc<dyn RemoteRepo>,
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
@@ -90,6 +91,7 @@ pub(crate) async fn apply_ops(
                 apply_one(
                     op,
                     checkout_root,
+                    staging_root,
                     remote,
                     checksummer,
                     tuning,
@@ -167,6 +169,7 @@ fn classify_apply_error(op: &PlannedOp, error: anyhow::Error) -> FileFailure {
 async fn apply_one(
     op: PlannedOp,
     checkout_root: &Path,
+    staging_root: &Path,
     remote: Arc<dyn RemoteRepo>,
     checksummer: Arc<dyn Checksummer>,
     tuning: &RepairTuning,
@@ -259,7 +262,7 @@ async fn apply_one(
         }
     }
 
-    let staged = match StagedFile::create_next_to(&op.abs_path).await {
+    let staged = match StagedFile::create_in_dir(staging_root).await {
         Ok(s) => s,
         Err(err) => return Err(classify_apply_error(&op, err)),
     };

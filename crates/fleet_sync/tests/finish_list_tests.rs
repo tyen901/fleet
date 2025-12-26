@@ -425,6 +425,7 @@ async fn sync_fresh_does_not_quarantine_expected_directories() {
     let req = SyncFreshRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
+        staging_root: PathBuf::from(root).join("_staging"),
         enabled_mods: enabled_mods.clone(),
         tuning: SyncFreshTuning {
             unknown_paths: UnknownPathPolicy::Delete,
@@ -497,6 +498,7 @@ async fn cancellation_during_patch_does_not_commit_partial_results() {
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
+        staging_root: PathBuf::from(root).join("_staging"),
         enabled_mods,
         tuning,
     };
@@ -557,6 +559,7 @@ async fn staging_tmp_files_are_cleaned_up_on_failure() {
     let req = RepairRequest {
         repo_name: "repo".to_string(),
         checkout_root: PathBuf::from(root),
+        staging_root: PathBuf::from(root).join("_staging"),
         enabled_mods,
         tuning: RepairTuning {
             patch_max_bad_ratio: 0.0,

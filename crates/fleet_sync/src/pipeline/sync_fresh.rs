@@ -150,6 +150,7 @@ pub(crate) async fn run(
         let apply_outcome = apply_planned_ops(
             ops,
             &req.checkout_root,
+            &req.staging_root,
             remote.clone(),
             checksummer.clone(),
             &tuning.concurrency,
