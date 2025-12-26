@@ -1,29 +1,32 @@
-import { useState, useEffect, useRef } from "react";
-import { subscribeSyncState, type SyncReadModel } from "../../api";
+import { useEffect, useState } from "react";
+import {
+  subscribeSyncState,
+  syncSnapshot,
+  type SyncReadModel,
+} from "../../api";
 
 export function useSyncJob() {
   const [snapshot, setSnapshot] = useState<SyncReadModel | null>(null);
-  const latestRef = useRef<SyncReadModel | null>(null);
 
   useEffect(() => {
-    let rafId: number;
+    let dispose: (() => void) | null = null;
 
-    const loop = () => {
-      if (latestRef.current) {
-        setSnapshot(latestRef.current);
+    void (async () => {
+      try {
+        const initial = await syncSnapshot();
+        setSnapshot(initial);
+      } catch {
+        // ignore; subscription may still deliver
       }
-      rafId = requestAnimationFrame(loop);
-    };
 
-    rafId = requestAnimationFrame(loop);
-
-    const subscription = subscribeSyncState((next) => {
-      latestRef.current = next;
-    });
+      const d = await subscribeSyncState((next) => {
+        setSnapshot(next);
+      });
+      dispose = d;
+    })();
 
     return () => {
-      cancelAnimationFrame(rafId);
-      void subscription.then((dispose) => dispose());
+      dispose?.();
     };
   }, []);
 

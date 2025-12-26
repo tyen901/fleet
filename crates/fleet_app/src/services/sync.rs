@@ -244,7 +244,10 @@ impl SyncService for FleetSyncService {
             }
         }
         let next_cursor = entries.last().map(|e| e.seq).unwrap_or(cursor);
-        LogPage { entries, next_cursor }
+        LogPage {
+            entries,
+            next_cursor,
+        }
     }
 
     fn start(&self, mode: SyncMode, mut tuning: SyncTuning) -> Result<(), AppError> {
@@ -295,7 +298,12 @@ impl SyncService for FleetSyncService {
         self.tokio.spawn(async move {
             match done_rx.await {
                 Ok(Ok(())) => {
-                    FleetSyncService::push_log_shared(&logs, &log_seq, "info", "Sync job completed".into());
+                    FleetSyncService::push_log_shared(
+                        &logs,
+                        &log_seq,
+                        "info",
+                        "Sync job completed".into(),
+                    );
                     let _ = data.refresh_profiles();
                 }
                 Ok(Err(err)) => {

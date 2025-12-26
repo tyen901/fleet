@@ -111,7 +111,10 @@ pub struct LaunchArgs {
     extra_args: String,
 }
 
-pub async fn run_cli(args: Args, services: FleetServices) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_cli(
+    args: Args,
+    services: FleetServices,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cmd = match args.cmd {
         Some(c) => c,
         None => return Ok(()), // Should be handled by main to launch GUI
@@ -130,94 +133,107 @@ pub async fn run_cli(args: Args, services: FleetServices) -> Result<(), Box<dyn 
             Ok(())
         }
 
-        Cmd::Profile { cmd } => {
-            match cmd {
-                ProfileCmd::List { json } => {
-                    let snap = data.snapshot();
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&snap.profiles)?);
-                    } else {
-                        for p in &snap.profiles {
-                            println!("{}  {}  {}  {}", p.id, p.name, p.repo_url, p.checkout_root);
-                        }
+        Cmd::Profile { cmd } => match cmd {
+            ProfileCmd::List { json } => {
+                let snap = data.snapshot();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&snap.profiles)?);
+                } else {
+                    for p in &snap.profiles {
+                        println!("{}  {}  {}  {}", p.id, p.name, p.repo_url, p.checkout_root);
                     }
-                    Ok(())
                 }
-
-                ProfileCmd::Show { id, json } => {
-                    let snap = data.snapshot();
-                    let prof = if let Some(id) = id {
-                        snap.profiles.iter().find(|p| p.id == id).cloned()
-                    } else if let Some(sel) = &snap.selected_id {
-                        snap.profiles.iter().find(|p| &p.id == sel).cloned()
-                    } else {
-                        None
-                    };
-
-                    let Some(profile) = prof else {
-                        return Err("no such profile".into());
-                    };
-
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&profile)?);
-                    } else {
-                        println!("id: {}", profile.id);
-                        println!("name: {}", profile.name);
-                        println!("repo: {}", profile.repo_url);
-                        println!("path: {}", profile.checkout_root);
-                        println!("last_sync_unix_s: {:?}", profile.last_sync_unix_s);
-                    }
-                    Ok(())
-                }
-
-                ProfileCmd::Add { name, repo_url, path, select, arma3_extra_args } => {
-                    let created_id = data.create_profile(fleet_app::ProfileCreate {
-                        name,
-                        repo_url,
-                        checkout_root: path,
-                        select,
-                        arma3_extra_args,
-                        arma3_enabled_mods: Vec::new(),
-                    })?;
-                    println!("{created_id}");
-                    Ok(())
-                }
-
-                ProfileCmd::Edit { id, name, repo_url, path, select, arma3_extra_args } => {
-                    let update = fleet_app::ProfileUpdate {
-                        name,
-                        repo_url,
-                        checkout_root: path,
-                        select: if select { Some(true) } else { None },
-                        arma3_extra_args,
-                        arma3_enabled_mods: None,
-                    };
-                    data.update_profile(&id, update)?;
-                    Ok(())
-                }
-
-                ProfileCmd::Remove { id, yes } => {
-                    if !yes { return Err("refusing to remove without --yes".into()); }
-                    data.delete_profile(&id)?;
-                    Ok(())
-                }
-
-                ProfileCmd::Select { id } => {
-                    data.select_profile(&id)?;
-                    Ok(())
-                }
-
-                ProfileCmd::Init => {
-                    data.init_registry()?;
-                    Ok(())
-                }
-
-                ProfileCmd::Path => {
-                    println!("{}", data.registry_path()?);
-                    Ok(())
-                }
+                Ok(())
             }
-        }
+
+            ProfileCmd::Show { id, json } => {
+                let snap = data.snapshot();
+                let prof = if let Some(id) = id {
+                    snap.profiles.iter().find(|p| p.id == id).cloned()
+                } else if let Some(sel) = &snap.selected_id {
+                    snap.profiles.iter().find(|p| &p.id == sel).cloned()
+                } else {
+                    None
+                };
+
+                let Some(profile) = prof else {
+                    return Err("no such profile".into());
+                };
+
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&profile)?);
+                } else {
+                    println!("id: {}", profile.id);
+                    println!("name: {}", profile.name);
+                    println!("repo: {}", profile.repo_url);
+                    println!("path: {}", profile.checkout_root);
+                    println!("last_sync_unix_s: {:?}", profile.last_sync_unix_s);
+                }
+                Ok(())
+            }
+
+            ProfileCmd::Add {
+                name,
+                repo_url,
+                path,
+                select,
+                arma3_extra_args,
+            } => {
+                let created_id = data.create_profile(fleet_app::ProfileCreate {
+                    name,
+                    repo_url,
+                    checkout_root: path,
+                    select,
+                    arma3_extra_args,
+                    arma3_enabled_mods: Vec::new(),
+                })?;
+                println!("{created_id}");
+                Ok(())
+            }
+
+            ProfileCmd::Edit {
+                id,
+                name,
+                repo_url,
+                path,
+                select,
+                arma3_extra_args,
+            } => {
+                let update = fleet_app::ProfileUpdate {
+                    name,
+                    repo_url,
+                    checkout_root: path,
+                    select: if select { Some(true) } else { None },
+                    arma3_extra_args,
+                    arma3_enabled_mods: None,
+                };
+                data.update_profile(&id, update)?;
+                Ok(())
+            }
+
+            ProfileCmd::Remove { id, yes } => {
+                if !yes {
+                    return Err("refusing to remove without --yes".into());
+                }
+                data.delete_profile(&id)?;
+                Ok(())
+            }
+
+            ProfileCmd::Select { id } => {
+                data.select_profile(&id)?;
+                Ok(())
+            }
+
+            ProfileCmd::Init => {
+                data.init_registry()?;
+                Ok(())
+            }
+
+            ProfileCmd::Path => {
+                println!("{}", data.registry_path()?);
+                Ok(())
+            }
+        },
 
         Cmd::Sync(sa) => {
             let sync = services.sync;

@@ -7,8 +7,8 @@
 //! downloading, idle, failed) are written directly into the model.  No
 //! update progress events are delivered to the UI via streams or logs.
 
-use std::sync::{Arc, RwLock};
 use serde::Serialize;
+use std::sync::{Arc, RwLock};
 
 use crate::app::AppError;
 
