@@ -5,13 +5,10 @@ edition = "2021"
 
 [dependencies]
 camino = { workspace = true }
-fleet_types = { workspace = true }
-relative-path = { workspace = true }
 md5 = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
-fleet_manifest = { workspace = true, features = ["swifty"] }
+fleet_manifest = { workspace = true }
 
 [dev-dependencies]
 camino = { workspace = true }
-fleet_types = { workspace = true }

@@ -1,9 +1,5 @@
 use camino::Utf8Path;
-use fleet_manifest::ingest::ingest_mod_manifest;
-use fleet_types::{
-    file_checksum_from_parts, mod_checksum_from_files, FileManifest, Md5Digest, PartManifest,
-};
-use relative_path::RelativePathBuf;
+use fleet_manifest::{FileEntry, FileMd5, ManifestPart, ModManifest, PartMd5, RelPath};
 use thiserror::Error;
 
 const FILE_PART_LEN: u64 = 5_000_000;
@@ -23,11 +19,29 @@ pub enum ScanError {
     InvalidManifest(#[from] fleet_manifest::ManifestError),
 }
 
+fn hex_upper_16(bytes: &[u8; 16]) -> [u8; 32] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = [0u8; 32];
+    for (i, b) in bytes.iter().copied().enumerate() {
+        out[i * 2] = HEX[(b >> 4) as usize];
+        out[i * 2 + 1] = HEX[(b & 0x0F) as usize];
+    }
+    out
+}
+
+fn file_md5_from_parts(parts: &[ManifestPart]) -> FileMd5 {
+    let mut ctx = md5::Context::new();
+    for p in parts {
+        ctx.consume(hex_upper_16(p.md5.bytes()));
+    }
+    FileMd5::new(ctx.compute().0)
+}
+
 fn hash_next_at(
     reader: &mut std::io::BufReader<std::fs::File>,
     start: u64,
     len: u64,
-) -> Result<Md5Digest, ScanError> {
+) -> Result<PartMd5, ScanError> {
     use std::io::{Read, Seek};
 
     reader.seek(std::io::SeekFrom::Start(start))?;
@@ -45,84 +59,67 @@ fn hash_next_at(
         remaining -= n as u64;
     }
 
-    Ok(Md5Digest::from_bytes(ctx.compute().0))
+    Ok(PartMd5::new(ctx.compute().0))
 }
 
 fn scan_regular_file(
     path: &std::path::Path,
     rel_str: String,
     size: u64,
-) -> Result<FileManifest, ScanError> {
-    let rel = RelativePathBuf::from(rel_str);
+) -> Result<FileEntry, ScanError> {
+    let rel = RelPath::new(&rel_str)?;
 
     if size == 0 {
-        let parts: Vec<PartManifest> = Vec::new();
-        let checksum = file_checksum_from_parts(&parts);
-        return Ok(FileManifest {
-            path: rel,
-            length: size,
-            checksum,
-            parts,
-        });
+        let file_md5 = file_md5_from_parts(&[]);
+        return Ok(FileEntry::new(rel, size, file_md5, None)?);
     }
 
     let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-    let mut parts: Vec<PartManifest> = Vec::new();
+    let mut parts: Vec<ManifestPart> = Vec::new();
 
     let mut offset = 0u64;
     while offset < size {
         let len = (size - offset).min(FILE_PART_LEN);
-        parts.push(PartManifest {
-            start: offset,
-            length: len,
-            checksum: hash_next_at(&mut reader, offset, len)?,
+        parts.push(ManifestPart {
+            offset,
+            len,
+            md5: hash_next_at(&mut reader, offset, len)?,
         });
         offset += len;
     }
 
-    let checksum = file_checksum_from_parts(&parts);
-    Ok(FileManifest {
-        path: rel,
-        length: size,
-        checksum,
-        parts,
-    })
+    let file_md5 = file_md5_from_parts(&parts);
+    Ok(FileEntry::new(rel, size, file_md5, Some(parts))?)
 }
 
 fn scan_pbo_file(
     path: &std::path::Path,
     rel_str: String,
     _size: u64,
-) -> Result<FileManifest, ScanError> {
+) -> Result<FileEntry, ScanError> {
     use std::io::Seek;
 
-    let rel = RelativePathBuf::from(rel_str);
+    let rel = RelPath::new(&rel_str)?;
 
     let f = std::fs::File::open(path)?;
     let file_len = f.metadata()?.len();
     let mut reader = std::io::BufReader::new(f);
-    let ranges = fleet_types::arma::pbo::partition_pbo(&mut reader, file_len)
+    let ranges = fleet_manifest::arma::pbo::partition_pbo(&mut reader, file_len)
         .map_err(|_| ScanError::InvalidPbo("failed to partition pbo"))?;
 
     reader.seek(std::io::SeekFrom::Start(0))?;
 
-    let mut parts: Vec<PartManifest> = Vec::new();
+    let mut parts: Vec<ManifestPart> = Vec::new();
     for (start, length) in ranges {
-        parts.push(PartManifest {
-            start,
-            length,
-            checksum: hash_next_at(&mut reader, start, length)?,
+        parts.push(ManifestPart {
+            offset: start,
+            len: length,
+            md5: hash_next_at(&mut reader, start, length)?,
         });
     }
 
-    let checksum = file_checksum_from_parts(&parts);
-
-    Ok(FileManifest {
-        path: rel,
-        length: file_len,
-        checksum,
-        parts,
-    })
+    let file_md5 = file_md5_from_parts(&parts);
+    Ok(FileEntry::new(rel, file_len, file_md5, Some(parts))?)
 }
 
 /// Scan a mod directory into the canonical manifest model (`fleet_manifest::ModManifest`).
@@ -136,8 +133,8 @@ pub fn scan_mod(
     mod_root: &Utf8Path,
     mod_id: &str,
     _opts: ScanOptions,
-) -> Result<fleet_manifest::ModManifest, ScanError> {
-    let mut files: Vec<FileManifest> = Vec::new();
+) -> Result<ModManifest, ScanError> {
+    let mut files: Vec<FileEntry> = Vec::new();
 
     for entry in walkdir::WalkDir::new(mod_root)
         .follow_links(false)
@@ -180,14 +177,7 @@ pub fn scan_mod(
         }
     }
 
-    files.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+    files.sort_by(|a, b| a.rel_path().as_str().cmp(b.rel_path().as_str()));
 
-    let checksum = mod_checksum_from_files(&files);
-
-    let swifty = fleet_types::swifty::model::ModManifest {
-        name: mod_id.to_string(),
-        checksum,
-        files,
-    };
-    Ok(ingest_mod_manifest(swifty)?)
+    Ok(ModManifest::new(mod_id.to_string(), files)?)
 }

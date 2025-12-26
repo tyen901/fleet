@@ -1296,9 +1296,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "fleet_manifest",
- "fleet_types",
  "md5",
- "relative-path",
  "thiserror 2.0.17",
  "walkdir",
 ]

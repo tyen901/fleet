@@ -1,3 +1,4 @@
+pub mod arma;
 pub mod errors;
 pub mod model;
 pub mod types;
