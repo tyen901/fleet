@@ -3,10 +3,9 @@ use std::sync::Arc;
 
 use crate::model::DesiredState;
 use crate::ports::{EventSink, RemoteRepo, StateStore, SyncEvent};
-use fleet_manifest_domain::ModManifest;
 use tokio_util::sync::CancellationToken;
 
-use super::{baseline_digest_hex, fetch_all, validate_enabled_mods, FetchResult};
+use super::{fetch_all, validate_enabled_mods, FetchResult};
 
 pub(crate) struct Prelude {
     pub(crate) desired: DesiredState,
@@ -41,25 +40,45 @@ pub(crate) async fn run_prelude(
         supports_ranges: fetch.capabilities.supports_ranges,
     });
 
-    let baseline = build_baseline(&fetch.manifests); // This line remains unchanged
-    let baseline_digest = baseline_digest_hex(&baseline);
-    store
-        .expected_replace_all_if_digest_changed(&desired.state_id, baseline, &baseline_digest)
-        .map_err(crate::model::EngineError::Store)?;
-
-    Ok(Prelude { desired, fetch })
-}
-
-fn build_baseline(manifests: &[ModManifest]) -> Vec<crate::model::ExpectedFile> {
-    let mut rows = Vec::new();
-    for manifest in manifests {
+    let mut expected_files = Vec::new();
+    let mut expected_parts = Vec::new();
+    for manifest in &fetch.manifests {
         for file in manifest.files() {
-            rows.push(crate::model::ExpectedFile {
+            expected_files.push(fleet_index::ExpectedFileRow {
                 mod_id: manifest.mod_id().as_str().to_string(),
                 rel_path: file.rel_path().as_str().to_string(),
                 size: file.size(),
+                file_md5: *file.file_md5().bytes(),
             });
+            if let Some(parts) = file.parts() {
+                for (idx, part) in parts.iter().enumerate() {
+                    expected_parts.push(fleet_index::ExpectedPartRow {
+                        mod_id: manifest.mod_id().as_str().to_string(),
+                        rel_path: file.rel_path().as_str().to_string(),
+                        idx: u32::try_from(idx).unwrap(),
+                        offset: part.offset,
+                        len: part.len,
+                        part_md5: *part.md5.bytes(),
+                    });
+                }
+            }
         }
     }
-    rows
+
+    store
+        .expected_tmp_replace_all(expected_files.clone(), expected_parts.clone())
+        .map_err(crate::model::EngineError::Store)?;
+
+    let expected_files = store
+        .expected_tmp_load_files()
+        .map_err(crate::model::EngineError::Store)?;
+    let expected_parts = store
+        .expected_tmp_load_parts()
+        .map_err(crate::model::EngineError::Store)?;
+
+    store
+        .expected_replace_all_v2(&desired.state_id, expected_files.clone(), expected_parts.clone())
+        .map_err(crate::model::EngineError::Store)?;
+
+    Ok(Prelude { desired, fetch })
 }

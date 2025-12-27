@@ -52,6 +52,73 @@ impl fleet_sync::StateStore for FleetIndexStore {
             .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
     }
 
+    fn expected_tmp_replace_all(
+        &self,
+        files: Vec<fleet_index::ExpectedFileRow>,
+        parts: Vec<fleet_index::ExpectedPartRow>,
+    ) -> Result<(), fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_replace_all(files, parts)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_tmp_load_files(
+        &self,
+    ) -> Result<Vec<fleet_index::ExpectedFileRow>, fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_load_files()
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_tmp_load_parts(
+        &self,
+    ) -> Result<Vec<fleet_index::ExpectedPartRow>, fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_load_parts()
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_replace_all_v2(
+        &self,
+        state_id: &str,
+        files: Vec<fleet_index::ExpectedFileRow>,
+        parts: Vec<fleet_index::ExpectedPartRow>,
+    ) -> Result<(), fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_replace_all_v2(state_id, files, parts)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_load_v2(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<fleet_index::ExpectedFileRow>, fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_load_v2(state_id)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn expected_parts_load_v1(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<fleet_index::ExpectedPartRow>, fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_parts_load_v1(state_id)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
     fn baseline_exists(&self, state_id: &str) -> Result<bool, fleet_sync::StoreError> {
         self.inner
             .lock()
@@ -134,6 +201,56 @@ impl fleet_sync::StateStore for FleetIndexStore {
             .lock()
             .unwrap()
             .file_state_delete(state_id, mod_id, rel_path)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn observed_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<fleet_index::ObservedRow>,
+    ) -> Result<(), fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_upsert_batch(state_id, &rows)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn observed_parts_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<fleet_index::ObservedPartRow>,
+    ) -> Result<(), fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_parts_upsert_batch(state_id, &rows)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn observed_get_all_for_mod_v2(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<std::collections::HashMap<String, fleet_index::ObservedRow>, fleet_sync::StoreError>
+    {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_get_all_for_mod_v2(state_id, mod_id)
+            .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
+    }
+
+    fn observed_parts_get_all_for_file_v1(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<fleet_index::ObservedPartRow>, fleet_sync::StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_parts_get_all_for_file_v1(state_id, mod_id, rel_path)
             .map_err(|e| fleet_sync::StoreError::Other(e.to_string()))
     }
 

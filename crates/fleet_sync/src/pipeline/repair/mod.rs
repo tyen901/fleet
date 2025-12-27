@@ -2,10 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::model::{
-    AbortReason, FileFailure, FileStateDelete, FileStateUpsert, RepairOutcome, RepairReport,
-    RepairRequest, TimestampNs,
-};
+use crate::model::{AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, TimestampNs};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
@@ -113,10 +110,9 @@ pub(crate) async fn run(
 
         let skip = tokio::task::spawn_blocking({
             let checkout_root = req.checkout_root.clone();
-            let manifests = fetch.manifests.clone();
             let policy = skip_check::SkipCheckPolicy::default();
             let store = store.clone();
-            move || skip_check::evaluate_skip(store.as_ref(), &checkout_root, &manifests, policy)
+            move || skip_check::evaluate_skip(store.as_ref(), &checkout_root, policy)
         })
         .await
         .map_err(|e| crate::model::EngineError::Internal(anyhow::anyhow!(e.to_string())))?
@@ -192,9 +188,19 @@ pub(crate) async fn run(
                     sink.push(SyncEvent::Error {
                         message: message.clone(),
                     });
-                    store
-                        .file_state_delete(&desired.state_id, &mod_id, &rel_path)
-                        .map_err(crate::model::EngineError::Store)?;
+                    let _ = store.observed_upsert_batch(
+                        &desired.state_id,
+                        vec![fleet_index::ObservedRow {
+                            mod_id: mod_id.clone(),
+                            rel_path: rel_path.clone(),
+                            exists: false,
+                            size: 0,
+                            mtime_ns: 0,
+                            inode: None,
+                            file_md5: None,
+                            observed_at_ns: now_ns(),
+                        }],
+                    );
                     failures.push(FileFailure {
                         mod_id: mod_id.clone(),
                         rel_path: rel_path.clone(),
@@ -258,8 +264,8 @@ pub(crate) async fn run(
 
             report += &apply_outcome.report;
 
-            let mut upserts: Vec<FileStateUpsert> = Vec::new();
-            let mut deletes: Vec<FileStateDelete> = Vec::new();
+            let mut observed: Vec<fleet_index::ObservedRow> = Vec::new();
+            let observed_at_ns = now_ns();
             for update in apply_outcome.index_updates {
                 match update {
                     applier::IndexUpdate::UpsertFileState {
@@ -268,29 +274,47 @@ pub(crate) async fn run(
                         size,
                         mtime_ns,
                         checksum,
-                    } => upserts.push(FileStateUpsert {
-                        mod_id,
-                        rel_path,
-                        size,
-                        mtime_ns,
-                        checksum,
-                    }),
-                    applier::IndexUpdate::DeleteFileState { mod_id, rel_path } => {
-                        deletes.push(FileStateDelete { mod_id, rel_path })
+                    } => {
+                        let file_md5: Option<[u8; 16]> = checksum.try_into().ok();
+                        observed.push(fleet_index::ObservedRow {
+                            mod_id,
+                            rel_path,
+                            exists: true,
+                            size,
+                            mtime_ns: mtime_ns.0,
+                            inode: None,
+                            file_md5,
+                            observed_at_ns,
+                        });
                     }
+                    applier::IndexUpdate::DeleteFileState { mod_id, rel_path } => observed
+                        .push(fleet_index::ObservedRow {
+                            mod_id,
+                            rel_path,
+                            exists: false,
+                            size: 0,
+                            mtime_ns: 0,
+                            inode: None,
+                            file_md5: None,
+                            observed_at_ns,
+                        }),
                 }
             }
             for hint in cache_hints {
-                upserts.push(FileStateUpsert {
+                let file_md5: Option<[u8; 16]> = hint.checksum.try_into().ok();
+                observed.push(fleet_index::ObservedRow {
                     mod_id: hint.mod_id,
                     rel_path: hint.rel_path,
+                    exists: true,
                     size: hint.size,
-                    mtime_ns: hint.mtime_ns,
-                    checksum: hint.checksum,
+                    mtime_ns: hint.mtime_ns.0,
+                    inode: None,
+                    file_md5,
+                    observed_at_ns,
                 });
             }
             store
-                .file_state_apply_batch(&desired.state_id, upserts, deletes)
+                .observed_upsert_batch(&desired.state_id, observed)
                 .map_err(crate::model::EngineError::Store)?;
 
             failures.extend(apply_outcome.failures);

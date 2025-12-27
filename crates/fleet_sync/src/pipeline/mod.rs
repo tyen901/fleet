@@ -26,6 +26,8 @@ pub(crate) async fn fetch_all(
     max_concurrency: usize,
     cancel: &CancellationToken,
 ) -> Result<FetchResult, crate::model::EngineError> {
+    // Wire manifests are fetched only via the remote layer; the checkout is never treated as a
+    // source of manifests.
     if cancel.is_cancelled() {
         return Err(crate::model::EngineError::Cancelled);
     }
@@ -93,30 +95,26 @@ pub(crate) fn build_cache_snapshot(
     state_id: &str,
     manifest: &ModManifest,
 ) -> Result<HashMap<String, FileState>, StoreError> {
-    let all = store.file_state_get_all_for_mod(state_id, manifest.mod_id().as_str())?;
+    let all = store.observed_get_all_for_mod_v2(state_id, manifest.mod_id().as_str())?;
     let mut map = HashMap::new();
     for file in manifest.files() {
         let rel_path = file.rel_path().as_str();
         if let Some(state) = all.get(rel_path) {
-            map.insert(rel_path.to_string(), state.clone());
+            if state.exists {
+                if let Some(md5) = state.file_md5 {
+                    map.insert(
+                        rel_path.to_string(),
+                        FileState {
+                            size: state.size,
+                            mtime_ns: crate::model::TimestampNs(state.mtime_ns),
+                            checksum: md5.to_vec(),
+                        },
+                    );
+                }
+            }
         }
     }
     Ok(map)
-}
-
-pub(crate) fn baseline_digest_hex(rows: &[crate::model::ExpectedFile]) -> String {
-    let mut rows = rows.to_vec();
-    rows.sort_by(|a, b| (&a.mod_id, &a.rel_path, a.size).cmp(&(&b.mod_id, &b.rel_path, b.size)));
-    let mut hasher = blake3::Hasher::new();
-    for r in rows {
-        hasher.update(r.mod_id.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(r.rel_path.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(&r.size.to_le_bytes());
-        hasher.update(b"\0");
-    }
-    hasher.finalize().to_hex().to_string()
 }
 
 pub(crate) fn validate_enabled_mods(

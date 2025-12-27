@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::fs::safe_join_mod_file;
 use crate::model::{
-    AbortReason, FileStateUpsert, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
+    AbortReason, SafeWipePolicy, SyncFreshOutcome, SyncFreshRequest, TimestampNs,
     UnexpectedPathPolicy, UnknownPathPolicy,
 };
 use crate::pipeline::repair::{
@@ -168,7 +168,8 @@ pub(crate) async fn run(
         let failures = apply_outcome.failures;
         let mut aborted = apply_outcome.aborted;
 
-        let mut upserts: Vec<FileStateUpsert> = Vec::new();
+        let mut observed: Vec<fleet_index::ObservedRow> = Vec::new();
+        let observed_at_ns = now_ns();
         for update in apply_outcome.index_updates {
             match update {
                 IndexUpdate::UpsertFileState {
@@ -177,18 +178,24 @@ pub(crate) async fn run(
                     size,
                     mtime_ns,
                     checksum,
-                } => upserts.push(FileStateUpsert {
-                    mod_id,
-                    rel_path,
-                    size,
-                    mtime_ns,
-                    checksum,
-                }),
+                } => {
+                    let file_md5: Option<[u8; 16]> = checksum.try_into().ok();
+                    observed.push(fleet_index::ObservedRow {
+                        mod_id,
+                        rel_path,
+                        exists: true,
+                        size,
+                        mtime_ns: mtime_ns.0,
+                        inode: None,
+                        file_md5,
+                        observed_at_ns,
+                    });
+                }
                 IndexUpdate::DeleteFileState { .. } => {}
             }
         }
         store
-            .file_state_apply_batch(&desired.state_id, upserts, Vec::new())
+            .observed_upsert_batch(&desired.state_id, observed)
             .map_err(crate::model::EngineError::Store)?;
 
         if aborted.is_none() {
@@ -281,7 +288,7 @@ fn expected_sets_from_store(
     state_id: &str,
 ) -> Result<HashMap<String, HashSet<String>>, crate::model::StoreError> {
     let mut map: HashMap<String, HashSet<String>> = HashMap::new();
-    for row in store.expected_get_all(state_id)? {
+    for row in store.expected_load_v2(state_id)? {
         map.entry(row.mod_id).or_default().insert(row.rel_path);
     }
     Ok(map)

@@ -124,6 +124,32 @@ impl fleet_sync::Checksummer for TestChecksummer {
     }
 }
 
+#[derive(Clone)]
+struct CountingChecksummer {
+    file_calls: Arc<AtomicUsize>,
+    range_calls: Arc<AtomicUsize>,
+}
+
+impl fleet_sync::Checksummer for CountingChecksummer {
+    fn algorithm_name(&self) -> &str {
+        "md5"
+    }
+
+    fn hash_file(&self, path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+        self.file_calls.fetch_add(1, Ordering::Relaxed);
+        let data = std::fs::read(path)?;
+        Ok(md5::compute(&data).0.to_vec())
+    }
+
+    fn hash_range(&self, path: &std::path::Path, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        self.range_calls.fetch_add(1, Ordering::Relaxed);
+        let data = std::fs::read(path)?;
+        let start = offset as usize;
+        let end = (offset + len) as usize;
+        Ok(md5::compute(&data[start..end]).0.to_vec())
+    }
+}
+
 fn setup_index(enabled_mods: &[String]) -> FleetIndex {
     let mut enabled_sorted = enabled_mods.to_vec();
     enabled_sorted.sort();
@@ -190,6 +216,69 @@ impl StateStore for IndexStore {
             .unwrap()
             .expected_replace_all_if_digest_changed(state_id, rows, digest_hex)
             .map(|_| ())
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_tmp_replace_all(
+        &self,
+        files: Vec<fleet_index::ExpectedFileRow>,
+        parts: Vec<fleet_index::ExpectedPartRow>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_replace_all(files, parts)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_tmp_load_files(&self) -> Result<Vec<fleet_index::ExpectedFileRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_load_files()
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_tmp_load_parts(&self) -> Result<Vec<fleet_index::ExpectedPartRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_tmp_load_parts()
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_replace_all_v2(
+        &self,
+        state_id: &str,
+        files: Vec<fleet_index::ExpectedFileRow>,
+        parts: Vec<fleet_index::ExpectedPartRow>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_replace_all_v2(state_id, files, parts)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_load_v2(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<fleet_index::ExpectedFileRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_load_v2(state_id)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn expected_parts_load_v1(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<fleet_index::ExpectedPartRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .expected_parts_load_v1(state_id)
             .map_err(|e| StoreError::Other(e.to_string()))
     }
 
@@ -274,6 +363,55 @@ impl StateStore for IndexStore {
             .lock()
             .unwrap()
             .file_state_delete(state_id, mod_id, rel_path)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn observed_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<fleet_index::ObservedRow>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_upsert_batch(state_id, &rows)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn observed_parts_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<fleet_index::ObservedPartRow>,
+    ) -> Result<(), StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_parts_upsert_batch(state_id, &rows)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn observed_get_all_for_mod_v2(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<std::collections::HashMap<String, fleet_index::ObservedRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_get_all_for_mod_v2(state_id, mod_id)
+            .map_err(|e| StoreError::Other(e.to_string()))
+    }
+
+    fn observed_parts_get_all_for_file_v1(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<fleet_index::ObservedPartRow>, StoreError> {
+        self.inner
+            .lock()
+            .unwrap()
+            .observed_parts_get_all_for_file_v1(state_id, mod_id, rel_path)
             .map_err(|e| StoreError::Other(e.to_string()))
     }
 
@@ -426,4 +564,77 @@ async fn skip_logic_does_not_fetch_remote_file_bytes() {
     assert!(outcome.report.skipped);
     assert_eq!(remote.fetch_file_calls.load(Ordering::Relaxed), 0);
     assert_eq!(remote.fetch_range_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn no_op_check_skips_hashing_when_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mod_root = root.join("@mod");
+    std::fs::create_dir_all(&mod_root).unwrap();
+
+    let bytes = b"content".to_vec();
+    std::fs::write(mod_root.join("file.bin"), &bytes).unwrap();
+
+    let manifest = build_manifest("@mod", "file.bin", &bytes);
+
+    let remote = CountingRemote {
+        supports_ranges: true,
+        manifests: vec![("@mod".to_string(), manifest)].into_iter().collect(),
+        files: vec![(("@mod".to_string(), "file.bin".to_string()), bytes)]
+            .into_iter()
+            .collect(),
+        fetch_manifest_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_file_calls: Arc::new(AtomicUsize::new(0)),
+        fetch_range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let enabled_mods = vec!["@mod".to_string()];
+    let idx = setup_index(&enabled_mods);
+    let store = Arc::new(IndexStore::new(idx));
+
+    let checksummer = CountingChecksummer {
+        file_calls: Arc::new(AtomicUsize::new(0)),
+        range_calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let file_calls = Arc::clone(&checksummer.file_calls);
+    let range_calls = Arc::clone(&checksummer.range_calls);
+
+    let engine = SyncEngine::new(Arc::new(remote), store, Arc::new(checksummer));
+    let sink = Arc::new(TestSink::default());
+    let cancel = CancellationToken::new();
+
+    let check_req = CheckRequest {
+        repo_name: "repo".to_string(),
+        checkout_root: PathBuf::from(root),
+        enabled_mods: enabled_mods.clone(),
+        tuning: CheckTuning::default(),
+    };
+
+    let report1 = engine
+        .check(check_req.clone(), sink.as_ref(), &cancel)
+        .await
+        .unwrap();
+    assert!(report1.ok);
+
+    let after_first = (
+        file_calls.load(Ordering::Relaxed),
+        range_calls.load(Ordering::Relaxed),
+    );
+    assert!(
+        after_first.0 + after_first.1 > 0,
+        "expected first check to hash at least once"
+    );
+
+    let report2 = engine.check(check_req, sink.as_ref(), &cancel).await.unwrap();
+    assert!(report2.ok);
+
+    let after_second = (
+        file_calls.load(Ordering::Relaxed),
+        range_calls.load(Ordering::Relaxed),
+    );
+    assert_eq!(
+        after_first, after_second,
+        "expected second check to do no hashing when unchanged"
+    );
 }

@@ -4,8 +4,6 @@ use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::ports::StateStore;
 use crate::util::file_mtime_ns;
 use anyhow::Result;
-use fleet_manifest_domain::ModManifest;
-use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone, Debug)]
@@ -84,7 +82,6 @@ fn push_issue(issues: &mut Vec<SkipCheckIssue>, max: usize, issue: SkipCheckIssu
 pub fn evaluate_skip(
     store: &dyn StateStore,
     checkout_root: &Path,
-    manifests: &[ModManifest],
     policy: SkipCheckPolicy,
 ) -> Result<SkipCheckDecision> {
     let desired = match store.desired_state_get()? {
@@ -126,127 +123,130 @@ pub fn evaluate_skip(
         });
     }
 
-    let mut cache_by_mod: HashMap<String, HashMap<String, crate::model::FileState>> =
-        HashMap::new();
+    let expected = store.expected_load_v2(&desired.state_id)?;
 
-    for manifest in manifests {
-        let cache_snapshot =
-            store.file_state_get_all_for_mod(&desired.state_id, manifest.mod_id().as_str())?;
-        cache_by_mod.insert(manifest.mod_id().as_str().to_string(), cache_snapshot);
+    let mut observed_by_mod: std::collections::HashMap<String, std::collections::HashMap<String, fleet_index::ObservedRow>> =
+        std::collections::HashMap::new();
+    for f in &expected {
+        if observed_by_mod.contains_key(&f.mod_id) {
+            continue;
+        }
+        let rows = store.observed_get_all_for_mod_v2(&desired.state_id, &f.mod_id)?;
+        observed_by_mod.insert(f.mod_id.clone(), rows);
+    }
 
-        for file in manifest.files() {
-            evidence.expected_files += 1;
+    for f in expected {
+        evidence.expected_files += 1;
 
-            let abs_path = match safe_join_mod_file(
-                checkout_root,
-                manifest.mod_id().as_str(),
-                file.rel_path().as_str(),
-            ) {
-                Ok(p) => p,
-                Err(_) => {
-                    evidence.local_unsafe_path += 1;
-                    push_issue(
-                        &mut evidence.issues,
-                        policy.max_issues,
-                        SkipCheckIssue {
-                            mod_id: manifest.mod_id().as_str().to_string(),
-                            rel_path: file.rel_path().as_str().to_string(),
-                            kind: SkipCheckIssueKind::UnsafePath,
-                        },
-                    );
-                    continue;
-                }
-            };
-
-            if let Some(parent) = abs_path.parent() {
-                let mod_root = checkout_root.join(manifest.mod_id().as_str());
-                if ensure_no_symlink_ancestors_blocking(&mod_root, parent).is_err() {
-                    evidence.local_unsafe_path += 1;
-                    push_issue(
-                        &mut evidence.issues,
-                        policy.max_issues,
-                        SkipCheckIssue {
-                            mod_id: manifest.mod_id().as_str().to_string(),
-                            rel_path: file.rel_path().as_str().to_string(),
-                            kind: SkipCheckIssueKind::UnsafePath,
-                        },
-                    );
-                    continue;
-                }
-            }
-
-            let md = match std::fs::symlink_metadata(&abs_path) {
-                Ok(md) => md,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    evidence.local_missing += 1;
-                    push_issue(
-                        &mut evidence.issues,
-                        policy.max_issues,
-                        SkipCheckIssue {
-                            mod_id: manifest.mod_id().as_str().to_string(),
-                            rel_path: file.rel_path().as_str().to_string(),
-                            kind: SkipCheckIssueKind::Missing,
-                        },
-                    );
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-            let ft = md.file_type();
-            if ft.is_symlink() || !ft.is_file() {
-                evidence.local_not_a_file += 1;
+        let abs_path = match safe_join_mod_file(checkout_root, &f.mod_id, &f.rel_path) {
+            Ok(p) => p,
+            Err(_) => {
+                evidence.local_unsafe_path += 1;
                 push_issue(
                     &mut evidence.issues,
                     policy.max_issues,
                     SkipCheckIssue {
-                        mod_id: manifest.mod_id().as_str().to_string(),
-                        rel_path: file.rel_path().as_str().to_string(),
-                        kind: SkipCheckIssueKind::NotAFile,
+                        mod_id: f.mod_id,
+                        rel_path: f.rel_path,
+                        kind: SkipCheckIssueKind::UnsafePath,
                     },
                 );
                 continue;
             }
+        };
 
-            let got_size = md.len();
-            if got_size != file.size() {
-                evidence.local_wrong_size += 1;
+        if let Some(parent) = abs_path.parent() {
+            let mod_root = checkout_root.join(&f.mod_id);
+            if ensure_no_symlink_ancestors_blocking(&mod_root, parent).is_err() {
+                evidence.local_unsafe_path += 1;
                 push_issue(
                     &mut evidence.issues,
                     policy.max_issues,
                     SkipCheckIssue {
-                        mod_id: manifest.mod_id().as_str().to_string(),
-                        rel_path: file.rel_path().as_str().to_string(),
-                        kind: SkipCheckIssueKind::WrongSize {
-                            expected: file.size(),
-                            got: got_size,
-                        },
+                        mod_id: f.mod_id,
+                        rel_path: f.rel_path,
+                        kind: SkipCheckIssueKind::UnsafePath,
                     },
                 );
                 continue;
             }
+        }
 
-            let Some(actual_mtime_ns) = file_mtime_ns(&md) else {
-                evidence.mtime_mismatch += 1;
-                continue;
-            };
-
-            let cached = cache_by_mod
-                .get(manifest.mod_id().as_str())
-                .and_then(|m| m.get(file.rel_path().as_str()));
-            let Some(cached) = cached else {
-                evidence.cache_missing += 1;
-                continue;
-            };
-
-            if cached.mtime_ns != actual_mtime_ns || cached.size != got_size {
-                evidence.mtime_mismatch += 1;
+        let md = match std::fs::symlink_metadata(&abs_path) {
+            Ok(md) => md,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                evidence.local_missing += 1;
+                push_issue(
+                    &mut evidence.issues,
+                    policy.max_issues,
+                    SkipCheckIssue {
+                        mod_id: f.mod_id,
+                        rel_path: f.rel_path,
+                        kind: SkipCheckIssueKind::Missing,
+                    },
+                );
                 continue;
             }
+            Err(e) => return Err(e.into()),
+        };
 
-            if cached.checksum.as_slice() != file.file_md5().bytes() {
-                evidence.checksum_mismatch += 1;
-            }
+        let ft = md.file_type();
+        if ft.is_symlink() || !ft.is_file() {
+            evidence.local_not_a_file += 1;
+            push_issue(
+                &mut evidence.issues,
+                policy.max_issues,
+                SkipCheckIssue {
+                    mod_id: f.mod_id,
+                    rel_path: f.rel_path,
+                    kind: SkipCheckIssueKind::NotAFile,
+                },
+            );
+            continue;
+        }
+
+        let got_size = md.len();
+        if got_size != f.size {
+            evidence.local_wrong_size += 1;
+            push_issue(
+                &mut evidence.issues,
+                policy.max_issues,
+                SkipCheckIssue {
+                    mod_id: f.mod_id.clone(),
+                    rel_path: f.rel_path.clone(),
+                    kind: SkipCheckIssueKind::WrongSize {
+                        expected: f.size,
+                        got: got_size,
+                    },
+                },
+            );
+            continue;
+        }
+
+        let Some(actual_mtime_ns) = file_mtime_ns(&md) else {
+            evidence.mtime_mismatch += 1;
+            continue;
+        };
+
+        let observed_map = observed_by_mod.get(&f.mod_id).expect("observed map inserted");
+        let cached = observed_map.get(&f.rel_path);
+        let Some(cached) = cached else {
+            evidence.cache_missing += 1;
+            continue;
+        };
+
+        if cached.mtime_ns != actual_mtime_ns.0 || cached.size != got_size {
+            evidence.mtime_mismatch += 1;
+            continue;
+        }
+
+        let Some(file_md5) = cached.file_md5 else {
+            evidence.cache_missing += 1;
+            continue;
+        };
+
+        if file_md5 != f.file_md5 {
+            evidence.checksum_mismatch += 1;
         }
     }
 

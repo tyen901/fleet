@@ -116,3 +116,61 @@ fn open_or_recover_renames_sqlite_wal_shm() {
 
     assert!(renamed >= 3);
 }
+
+#[test]
+fn expected_replace_all_v2_round_trips_and_is_replace_all() {
+    let mut idx = FleetIndex::open_in_memory().unwrap();
+
+    idx.expected_replace_all_v2(
+        "s1",
+        vec![fleet_index::ExpectedFileRow {
+            mod_id: "@m".to_string(),
+            rel_path: "addons/a.pbo".to_string(),
+            size: 10,
+            file_md5: [1u8; 16],
+        }],
+        vec![
+            fleet_index::ExpectedPartRow {
+                mod_id: "@m".to_string(),
+                rel_path: "addons/a.pbo".to_string(),
+                idx: 0,
+                offset: 0,
+                len: 10,
+                part_md5: [2u8; 16],
+            },
+            fleet_index::ExpectedPartRow {
+                mod_id: "@m".to_string(),
+                rel_path: "addons/a.pbo".to_string(),
+                idx: 1,
+                offset: 10,
+                len: 0,
+                part_md5: [3u8; 16],
+            },
+        ],
+    )
+    .unwrap();
+
+    assert!(idx.baseline_exists("s1").unwrap());
+
+    let files = idx.expected_load_v2("s1").unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].mod_id, "@m");
+    assert_eq!(files[0].rel_path, "addons/a.pbo");
+    assert_eq!(files[0].size, 10);
+    assert_eq!(files[0].file_md5, [1u8; 16]);
+
+    let parts = idx.expected_parts_load_v1("s1").unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].idx, 0);
+    assert_eq!(parts[0].offset, 0);
+    assert_eq!(parts[0].len, 10);
+    assert_eq!(parts[1].idx, 1);
+    assert_eq!(parts[1].offset, 10);
+    assert_eq!(parts[1].len, 0);
+
+    idx.expected_replace_all_v2("s1", std::iter::empty(), std::iter::empty())
+        .unwrap();
+    assert!(idx.baseline_exists("s1").unwrap());
+    assert!(idx.expected_load_v2("s1").unwrap().is_empty());
+    assert!(idx.expected_parts_load_v1("s1").unwrap().is_empty());
+}

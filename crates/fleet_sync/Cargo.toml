@@ -16,10 +16,10 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 fleet_fs = { workspace = true }
 fleet_manifest_domain = { workspace = true }
+fleet_index = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-fleet_index = { workspace = true }
 md5 = { workspace = true }
 fleet_swifty_wire = { workspace = true }

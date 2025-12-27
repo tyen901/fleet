@@ -4,8 +4,7 @@ use std::time::Instant;
 
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
 use crate::model::{
-    CheckIssue, CheckIssueKind, CheckReport, CheckRequest, FileStateDelete, FileStateUpsert,
-    TimestampNs,
+    CheckIssue, CheckIssueKind, CheckReport, CheckRequest, TimestampNs,
 };
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
@@ -152,15 +151,16 @@ async fn verify_mod(
         })
         .buffer_unordered(scan_concurrency);
 
-    let mut upserts: Vec<FileStateUpsert> = Vec::new();
-    let mut deletes: Vec<FileStateDelete> = Vec::new();
+    let mut observed: Vec<fleet_index::ObservedRow> = Vec::new();
+    let mut observed_parts: Vec<fleet_index::ObservedPartRow> = Vec::new();
 
     while let Some(res) = outcomes.next().await {
         let outcome = res??;
-        apply_verify_outcome(req, report, outcome, sink, &mut upserts, &mut deletes)?;
+        apply_verify_outcome(req, report, outcome, sink, &mut observed, &mut observed_parts)?;
     }
 
-    store.file_state_apply_batch(state_id, upserts, deletes)?;
+    store.observed_upsert_batch(state_id, observed)?;
+    store.observed_parts_upsert_batch(state_id, observed_parts)?;
     Ok(())
 }
 
@@ -168,9 +168,8 @@ struct VerifyOutcome {
     mod_id: String,
     rel_path: String,
     ok: bool,
-    size: u64,
-    mtime_ns: TimestampNs,
-    checksum: Vec<u8>,
+    observed: Option<fleet_index::ObservedRow>,
+    observed_parts: Vec<fleet_index::ObservedPartRow>,
     issue: Option<CheckIssueKind>,
     unsafe_message: Option<String>,
 }
@@ -183,7 +182,8 @@ fn verify_one_file(
     cached: Option<crate::model::FileState>,
     checksummer: &dyn Checksummer,
 ) -> anyhow::Result<VerifyOutcome> {
-    let expected_checksum = file.file_md5().bytes().to_vec();
+    let expected_checksum = *file.file_md5().bytes();
+    let observed_at_ns = crate::util::now_ns();
 
     let abs_path = match safe_join_mod_file(checkout_root, mod_id, rel_path) {
         Ok(p) => p,
@@ -192,9 +192,8 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size(),
-                mtime_ns: TimestampNs(0),
-                checksum: expected_checksum,
+                observed: None,
+                observed_parts: Vec::new(),
                 issue: Some(CheckIssueKind::UnsafePath),
                 unsafe_message: None,
             });
@@ -208,9 +207,8 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size(),
-                mtime_ns: TimestampNs(0),
-                checksum: expected_checksum,
+                observed: None,
+                observed_parts: Vec::new(),
                 issue: Some(CheckIssueKind::UnsafeOnDisk),
                 unsafe_message: Some(err.to_string()),
             });
@@ -224,9 +222,17 @@ fn verify_one_file(
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: false,
-                size: file.size(),
-                mtime_ns: TimestampNs(0),
-                checksum: expected_checksum,
+                observed: Some(fleet_index::ObservedRow {
+                    mod_id: mod_id.to_string(),
+                    rel_path: rel_path.to_string(),
+                    exists: false,
+                    size: 0,
+                    mtime_ns: 0,
+                    inode: None,
+                    file_md5: None,
+                    observed_at_ns,
+                }),
+                observed_parts: Vec::new(),
                 issue: Some(CheckIssueKind::Missing),
                 unsafe_message: None,
             });
@@ -240,9 +246,17 @@ fn verify_one_file(
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size(),
-            mtime_ns: TimestampNs(0),
-            checksum: expected_checksum,
+            observed: Some(fleet_index::ObservedRow {
+                mod_id: mod_id.to_string(),
+                rel_path: rel_path.to_string(),
+                exists: true,
+                size: md.len(),
+                mtime_ns: 0,
+                inode: None,
+                file_md5: None,
+                observed_at_ns,
+            }),
+            observed_parts: Vec::new(),
             issue: Some(CheckIssueKind::NotAFile),
             unsafe_message: None,
         });
@@ -254,9 +268,17 @@ fn verify_one_file(
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size(),
-            mtime_ns: TimestampNs(0),
-            checksum: expected_checksum,
+            observed: Some(fleet_index::ObservedRow {
+                mod_id: mod_id.to_string(),
+                rel_path: rel_path.to_string(),
+                exists: true,
+                size: got_size,
+                mtime_ns: 0,
+                inode: None,
+                file_md5: None,
+                observed_at_ns,
+            }),
+            observed_parts: Vec::new(),
             issue: Some(CheckIssueKind::WrongSize {
                 expected: file.size(),
                 got: got_size,
@@ -270,9 +292,17 @@ fn verify_one_file(
             mod_id: mod_id.to_string(),
             rel_path: rel_path.to_string(),
             ok: false,
-            size: file.size(),
-            mtime_ns: TimestampNs(0),
-            checksum: expected_checksum,
+            observed: Some(fleet_index::ObservedRow {
+                mod_id: mod_id.to_string(),
+                rel_path: rel_path.to_string(),
+                exists: true,
+                size: file.size(),
+                mtime_ns: 0,
+                inode: None,
+                file_md5: None,
+                observed_at_ns,
+            }),
+            observed_parts: Vec::new(),
             issue: Some(CheckIssueKind::PartMismatch { offset: 0, len: 0 }),
             unsafe_message: None,
         });
@@ -281,50 +311,109 @@ fn verify_one_file(
     if let Some(cached) = cached {
         if cached.size == got_size
             && cached.mtime_ns == mtime_ns
-            && cached.checksum.as_slice() == file.file_md5().bytes()
+            && cached.checksum.as_slice() == expected_checksum.as_slice()
         {
             return Ok(VerifyOutcome {
                 mod_id: mod_id.to_string(),
                 rel_path: rel_path.to_string(),
                 ok: true,
-                size: file.size(),
-                mtime_ns,
-                checksum: expected_checksum,
+                observed: Some(fleet_index::ObservedRow {
+                    mod_id: mod_id.to_string(),
+                    rel_path: rel_path.to_string(),
+                    exists: true,
+                    size: file.size(),
+                    mtime_ns: mtime_ns.0,
+                    inode: None,
+                    file_md5: Some(expected_checksum),
+                    observed_at_ns,
+                }),
+                observed_parts: Vec::new(),
                 issue: None,
                 unsafe_message: None,
             });
         }
     }
 
-    if let Some(mismatch) = crate::verify::first_mismatch(
-        &abs_path,
-        file.size(),
-        file.file_md5().bytes(),
-        file.parts(),
-        checksummer,
-    )? {
-        return Ok(VerifyOutcome {
-            mod_id: mod_id.to_string(),
-            rel_path: rel_path.to_string(),
-            ok: false,
-            size: file.size(),
-            mtime_ns,
-            checksum: expected_checksum,
-            issue: Some(CheckIssueKind::PartMismatch {
-                offset: mismatch.offset,
-                len: mismatch.len,
-            }),
-            unsafe_message: None,
-        });
+    let mut observed_parts = Vec::new();
+    if let Some(parts) = file.parts() {
+        if !parts.is_empty() {
+            let ranges: Vec<(u64, u64)> = parts.iter().map(|p| (p.offset, p.len)).collect();
+            let hashes = checksummer.hash_ranges(&abs_path, &ranges)?;
+            for (idx, (got, part)) in hashes.iter().zip(parts.iter()).enumerate() {
+                let got_md5 = crate::md5::slice_to_md5_16(got.as_slice())?;
+                if got_md5 != *part.md5.bytes() {
+                    return Ok(VerifyOutcome {
+                        mod_id: mod_id.to_string(),
+                        rel_path: rel_path.to_string(),
+                        ok: false,
+                        observed: Some(fleet_index::ObservedRow {
+                            mod_id: mod_id.to_string(),
+                            rel_path: rel_path.to_string(),
+                            exists: true,
+                            size: file.size(),
+                            mtime_ns: mtime_ns.0,
+                            inode: None,
+                            file_md5: None,
+                            observed_at_ns,
+                        }),
+                        observed_parts: Vec::new(),
+                        issue: Some(CheckIssueKind::PartMismatch {
+                            offset: part.offset,
+                            len: part.len,
+                        }),
+                        unsafe_message: None,
+                    });
+                }
+                observed_parts.push(fleet_index::ObservedPartRow {
+                    mod_id: mod_id.to_string(),
+                    rel_path: rel_path.to_string(),
+                    idx: u32::try_from(idx).unwrap(),
+                    part_md5: got_md5,
+                });
+            }
+        }
+    } else {
+        let got = crate::md5::vec_to_md5_16(checksummer.hash_file(&abs_path)?)?;
+        if got != expected_checksum {
+            return Ok(VerifyOutcome {
+                mod_id: mod_id.to_string(),
+                rel_path: rel_path.to_string(),
+                ok: false,
+                observed: Some(fleet_index::ObservedRow {
+                    mod_id: mod_id.to_string(),
+                    rel_path: rel_path.to_string(),
+                    exists: true,
+                    size: file.size(),
+                    mtime_ns: mtime_ns.0,
+                    inode: None,
+                    file_md5: None,
+                    observed_at_ns,
+                }),
+                observed_parts: Vec::new(),
+                issue: Some(CheckIssueKind::PartMismatch {
+                    offset: 0,
+                    len: file.size(),
+                }),
+                unsafe_message: None,
+            });
+        }
     }
 
     Ok(VerifyOutcome {
         mod_id: mod_id.to_string(),
         rel_path: rel_path.to_string(),
         ok: true,
-        size: file.size(),
-        mtime_ns,
-        checksum: expected_checksum,
+        observed: Some(fleet_index::ObservedRow {
+            mod_id: mod_id.to_string(),
+            rel_path: rel_path.to_string(),
+            exists: true,
+            size: file.size(),
+            mtime_ns: mtime_ns.0,
+            inode: None,
+            file_md5: Some(expected_checksum),
+            observed_at_ns,
+        }),
+        observed_parts,
         issue: None,
         unsafe_message: None,
     })
@@ -335,18 +424,16 @@ fn apply_verify_outcome(
     report: &mut CheckReport,
     outcome: VerifyOutcome,
     sink: &dyn EventSink,
-    upserts: &mut Vec<FileStateUpsert>,
-    deletes: &mut Vec<FileStateDelete>,
+    observed: &mut Vec<fleet_index::ObservedRow>,
+    observed_parts: &mut Vec<fleet_index::ObservedPartRow>,
 ) -> anyhow::Result<()> {
+    if let Some(row) = outcome.observed.clone() {
+        observed.push(row);
+    }
+    observed_parts.extend(outcome.observed_parts.clone());
+
     if outcome.ok {
         report.verified_ok += 1;
-        upserts.push(FileStateUpsert {
-            mod_id: outcome.mod_id.clone(),
-            rel_path: outcome.rel_path.clone(),
-            size: outcome.size,
-            mtime_ns: outcome.mtime_ns,
-            checksum: outcome.checksum.clone(),
-        });
         sink.push(SyncEvent::FileVerified {
             mod_id: outcome.mod_id,
             path: outcome.rel_path,
@@ -380,10 +467,5 @@ fn apply_verify_outcome(
                 .unwrap_or_else(|| "unsafe path (symlink ancestor)".to_string()),
         });
     }
-
-    deletes.push(FileStateDelete {
-        mod_id: outcome.mod_id,
-        rel_path: outcome.rel_path,
-    });
     Ok(())
 }

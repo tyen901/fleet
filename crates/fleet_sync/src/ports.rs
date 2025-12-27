@@ -5,6 +5,7 @@ use crate::model::{
     TimestampNs, VerifiedState,
 };
 use async_trait::async_trait;
+use fleet_index::{ExpectedFileRow, ExpectedPartRow, ObservedPartRow, ObservedRow};
 use fleet_manifest_domain::{FetchRange, ModManifest, RelPath};
 
 pub trait Checksummer: Send + Sync {
@@ -175,6 +176,24 @@ pub trait RemoteRepo: Send + Sync {
 pub trait StateStore: Send + Sync {
     fn desired_state_get(&self) -> Result<Option<DesiredState>, StoreError>;
 
+    fn expected_tmp_replace_all(
+        &self,
+        files: Vec<ExpectedFileRow>,
+        parts: Vec<ExpectedPartRow>,
+    ) -> Result<(), StoreError>;
+    fn expected_tmp_load_files(&self) -> Result<Vec<ExpectedFileRow>, StoreError>;
+    fn expected_tmp_load_parts(&self) -> Result<Vec<ExpectedPartRow>, StoreError>;
+
+    fn expected_replace_all_v2(
+        &self,
+        state_id: &str,
+        files: Vec<ExpectedFileRow>,
+        parts: Vec<ExpectedPartRow>,
+    ) -> Result<(), StoreError>;
+
+    fn expected_load_v2(&self, state_id: &str) -> Result<Vec<ExpectedFileRow>, StoreError>;
+    fn expected_parts_load_v1(&self, state_id: &str) -> Result<Vec<ExpectedPartRow>, StoreError>;
+
     fn expected_replace_all_if_digest_changed(
         &self,
         state_id: &str,
@@ -205,6 +224,27 @@ pub trait StateStore: Send + Sync {
         mod_id: &str,
         rel_path: &str,
     ) -> Result<(), StoreError>;
+
+    fn observed_upsert_batch(&self, state_id: &str, rows: Vec<ObservedRow>)
+        -> Result<(), StoreError>;
+    fn observed_parts_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<ObservedPartRow>,
+    ) -> Result<(), StoreError>;
+
+    fn observed_get_all_for_mod_v2(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<HashMap<String, ObservedRow>, StoreError>;
+
+    fn observed_parts_get_all_for_file_v1(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<ObservedPartRow>, StoreError>;
 
     fn verified_get(&self) -> Result<Option<VerifiedState>, StoreError>;
     fn verified_set(&self, state_id: &str, verified_at: TimestampNs) -> Result<(), StoreError>;

@@ -121,20 +121,16 @@ fn ingest_wire_mod(
             )));
         }
 
-        let parts_for_entry = parts_for_checksum
-            .into_iter()
-            .filter(|p| p.len > 0)
-            .collect::<Vec<_>>();
-        if size > 0 && parts_for_entry.is_empty() {
+        if size > 0 && parts_for_checksum.is_empty() {
             return Err(ManifestError::InvalidParts {
                 rel_path: rel_path.as_str().to_string(),
                 msg: "missing parts for non-zero length file".into(),
             });
         }
-        let parts_opt = if parts_for_entry.is_empty() {
+        let parts_opt = if parts_for_checksum.is_empty() {
             None
         } else {
-            Some(parts_for_entry)
+            Some(parts_for_checksum)
         };
 
         let entry = FileEntry::new(rel_path.clone(), size, expected_file, parts_opt)?;

@@ -1,5 +1,8 @@
 use crate::schema;
-use crate::types::{DesiredState, ExpectedFile, FileState, IndexError, VerifiedState};
+use crate::types::{
+    DesiredState, ExpectedFile, ExpectedFileRow, ExpectedPartRow, FileState, IndexError,
+    ObservedPartRow, ObservedRow, VerifiedState,
+};
 use fleet_fs::{normalize_rel_path, validate_mod_id, validate_rel_path};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
@@ -251,6 +254,420 @@ impl FleetIndex {
         Ok(())
     }
 
+    pub fn expected_replace_all_v2(
+        &mut self,
+        state_id: &str,
+        files: impl IntoIterator<Item = ExpectedFileRow>,
+        parts: impl IntoIterator<Item = ExpectedPartRow>,
+    ) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+
+        tx.execute(
+            "DELETE FROM expected_part_v1 WHERE state_id = ?1",
+            params![state_id],
+        )?;
+        tx.execute(
+            "DELETE FROM expected_file_v2 WHERE state_id = ?1",
+            params![state_id],
+        )?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO expected_file_v2(state_id, mod_id, rel_path, size, file_md5) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            for row in files {
+                validate_mod_id(&row.mod_id)?;
+                let rel = normalize_rel_path(&row.rel_path);
+                validate_rel_path(&rel)?;
+                let size_i64 = i64::try_from(row.size)
+                    .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+                stmt.execute(params![
+                    state_id,
+                    row.mod_id,
+                    rel,
+                    size_i64,
+                    row.file_md5.to_vec()
+                ])?;
+            }
+        }
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO expected_part_v1(state_id, mod_id, rel_path, idx, offset, len, part_md5) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for row in parts {
+                validate_mod_id(&row.mod_id)?;
+                let rel = normalize_rel_path(&row.rel_path);
+                validate_rel_path(&rel)?;
+                let idx_i64 = i64::from(row.idx);
+                let offset_i64 = i64::try_from(row.offset)
+                    .map_err(|_| IndexError::Corrupt("offset overflow".to_string()))?;
+                let len_i64 = i64::try_from(row.len)
+                    .map_err(|_| IndexError::Corrupt("len overflow".to_string()))?;
+                stmt.execute(params![
+                    state_id,
+                    row.mod_id,
+                    rel,
+                    idx_i64,
+                    offset_i64,
+                    len_i64,
+                    row.part_md5.to_vec()
+                ])?;
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)\
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![META_BASELINE_STATE_KEY, state_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn expected_load_v2(&self, state_id: &str) -> Result<Vec<ExpectedFileRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, rel_path, size, file_md5 \
+             FROM expected_file_v2 WHERE state_id = ?1 ORDER BY mod_id, rel_path",
+        )?;
+        let mut rows = stmt.query(params![state_id])?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let size_i64: i64 = row.get(2)?;
+            let size = u64::try_from(size_i64)
+                .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+            let md5: Vec<u8> = row.get(3)?;
+            let md5: [u8; 16] = md5
+                .try_into()
+                .map_err(|_| IndexError::Corrupt("file_md5 must be 16 bytes".to_string()))?;
+            out.push(ExpectedFileRow {
+                mod_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                size,
+                file_md5: md5,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn expected_parts_load_v1(
+        &self,
+        state_id: &str,
+    ) -> Result<Vec<ExpectedPartRow>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, rel_path, idx, offset, len, part_md5 \
+             FROM expected_part_v1 WHERE state_id = ?1 ORDER BY mod_id, rel_path, idx",
+        )?;
+        let mut rows = stmt.query(params![state_id])?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let idx_i64: i64 = row.get(2)?;
+            let idx = u32::try_from(idx_i64)
+                .map_err(|_| IndexError::Corrupt("idx overflow".to_string()))?;
+            let offset_i64: i64 = row.get(3)?;
+            let offset = u64::try_from(offset_i64)
+                .map_err(|_| IndexError::Corrupt("offset overflow".to_string()))?;
+            let len_i64: i64 = row.get(4)?;
+            let len = u64::try_from(len_i64)
+                .map_err(|_| IndexError::Corrupt("len overflow".to_string()))?;
+            let md5: Vec<u8> = row.get(5)?;
+            let md5: [u8; 16] = md5
+                .try_into()
+                .map_err(|_| IndexError::Corrupt("part_md5 must be 16 bytes".to_string()))?;
+
+            out.push(ExpectedPartRow {
+                mod_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                idx,
+                offset,
+                len,
+                part_md5: md5,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn expected_tmp_replace_all(
+        &mut self,
+        files: impl IntoIterator<Item = ExpectedFileRow>,
+        parts: impl IntoIterator<Item = ExpectedPartRow>,
+    ) -> Result<(), IndexError> {
+        self.expected_tmp_init()?;
+
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM expected_file_tmp", [])?;
+        tx.execute("DELETE FROM expected_part_tmp", [])?;
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO expected_file_tmp(mod_id, rel_path, size, file_md5) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for row in files {
+                validate_mod_id(&row.mod_id)?;
+                let rel = normalize_rel_path(&row.rel_path);
+                validate_rel_path(&rel)?;
+                let size_i64 = i64::try_from(row.size)
+                    .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+                stmt.execute(params![row.mod_id, rel, size_i64, row.file_md5.to_vec()])?;
+            }
+        }
+
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO expected_part_tmp(mod_id, rel_path, idx, offset, len, part_md5) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for row in parts {
+                validate_mod_id(&row.mod_id)?;
+                let rel = normalize_rel_path(&row.rel_path);
+                validate_rel_path(&rel)?;
+                let idx_i64 = i64::from(row.idx);
+                let offset_i64 = i64::try_from(row.offset)
+                    .map_err(|_| IndexError::Corrupt("offset overflow".to_string()))?;
+                let len_i64 = i64::try_from(row.len)
+                    .map_err(|_| IndexError::Corrupt("len overflow".to_string()))?;
+                stmt.execute(params![
+                    row.mod_id,
+                    rel,
+                    idx_i64,
+                    offset_i64,
+                    len_i64,
+                    row.part_md5.to_vec()
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn expected_tmp_load_files(&self) -> Result<Vec<ExpectedFileRow>, IndexError> {
+        self.expected_tmp_init()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, rel_path, size, file_md5 FROM expected_file_tmp ORDER BY mod_id, rel_path",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let size_i64: i64 = row.get(2)?;
+            let size = u64::try_from(size_i64)
+                .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+            let md5: Vec<u8> = row.get(3)?;
+            let md5: [u8; 16] = md5
+                .try_into()
+                .map_err(|_| IndexError::Corrupt("file_md5 must be 16 bytes".to_string()))?;
+            out.push(ExpectedFileRow {
+                mod_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                size,
+                file_md5: md5,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn expected_tmp_load_parts(&self) -> Result<Vec<ExpectedPartRow>, IndexError> {
+        self.expected_tmp_init()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT mod_id, rel_path, idx, offset, len, part_md5 \
+             FROM expected_part_tmp ORDER BY mod_id, rel_path, idx",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let idx_i64: i64 = row.get(2)?;
+            let idx = u32::try_from(idx_i64)
+                .map_err(|_| IndexError::Corrupt("idx overflow".to_string()))?;
+            let offset_i64: i64 = row.get(3)?;
+            let offset = u64::try_from(offset_i64)
+                .map_err(|_| IndexError::Corrupt("offset overflow".to_string()))?;
+            let len_i64: i64 = row.get(4)?;
+            let len = u64::try_from(len_i64)
+                .map_err(|_| IndexError::Corrupt("len overflow".to_string()))?;
+            let md5: Vec<u8> = row.get(5)?;
+            let md5: [u8; 16] = md5
+                .try_into()
+                .map_err(|_| IndexError::Corrupt("part_md5 must be 16 bytes".to_string()))?;
+            out.push(ExpectedPartRow {
+                mod_id: row.get(0)?,
+                rel_path: row.get(1)?,
+                idx,
+                offset,
+                len,
+                part_md5: md5,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn observed_upsert_batch(
+        &mut self,
+        state_id: &str,
+        rows: &[ObservedRow],
+    ) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO file_observed_v2(state_id, mod_id, rel_path, \"exists\", size, mtime_ns, inode, file_md5, observed_at_ns) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(state_id, mod_id, rel_path) DO UPDATE SET \
+              \"exists\"=excluded.\"exists\", \
+              size=excluded.size, \
+              mtime_ns=excluded.mtime_ns, \
+              inode=excluded.inode, \
+              file_md5=excluded.file_md5, \
+              observed_at_ns=excluded.observed_at_ns",
+        )?;
+
+        for row in rows {
+            validate_mod_id(&row.mod_id)?;
+            let rel = normalize_rel_path(&row.rel_path);
+            validate_rel_path(&rel)?;
+            let exists_i64 = if row.exists { 1i64 } else { 0i64 };
+            let size_i64 = i64::try_from(row.size)
+                .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+            let inode_i64 = match row.inode {
+                None => None,
+                Some(v) => Some(
+                    i64::try_from(v)
+                        .map_err(|_| IndexError::Corrupt("inode overflow".to_string()))?,
+                ),
+            };
+            let file_md5: Option<&[u8]> = row.file_md5.as_ref().map(|b| b.as_slice());
+            stmt.execute(params![
+                state_id,
+                row.mod_id,
+                rel,
+                exists_i64,
+                size_i64,
+                row.mtime_ns,
+                inode_i64,
+                file_md5,
+                row.observed_at_ns
+            ])?;
+        }
+
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn observed_parts_upsert_batch(
+        &mut self,
+        state_id: &str,
+        rows: &[ObservedPartRow],
+    ) -> Result<(), IndexError> {
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO part_observed_v1(state_id, mod_id, rel_path, idx, part_md5) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(state_id, mod_id, rel_path, idx) DO UPDATE SET part_md5=excluded.part_md5",
+        )?;
+        for row in rows {
+            validate_mod_id(&row.mod_id)?;
+            let rel = normalize_rel_path(&row.rel_path);
+            validate_rel_path(&rel)?;
+            let idx_i64 = i64::from(row.idx);
+            stmt.execute(params![state_id, row.mod_id, rel, idx_i64, row.part_md5.to_vec()])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn observed_get_all_for_mod_v2(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+    ) -> Result<HashMap<String, ObservedRow>, IndexError> {
+        validate_mod_id(mod_id)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT rel_path, \"exists\", size, mtime_ns, inode, file_md5, observed_at_ns \
+             FROM file_observed_v2 WHERE state_id = ?1 AND mod_id = ?2",
+        )?;
+        let mut rows = stmt.query(params![state_id, mod_id])?;
+
+        let mut out = HashMap::new();
+        while let Some(row) = rows.next()? {
+            let rel_path: String = row.get(0)?;
+            let exists_i64: i64 = row.get(1)?;
+            let size_i64: i64 = row.get(2)?;
+            let size = u64::try_from(size_i64)
+                .map_err(|_| IndexError::Corrupt("size overflow".to_string()))?;
+            let mtime_ns: i64 = row.get(3)?;
+            let inode_i64: Option<i64> = row.get(4)?;
+            let inode = match inode_i64 {
+                None => None,
+                Some(v) => Some(
+                    u64::try_from(v)
+                        .map_err(|_| IndexError::Corrupt("inode overflow".to_string()))?,
+                ),
+            };
+            let md5: Option<Vec<u8>> = row.get(5)?;
+            let file_md5 = match md5 {
+                None => None,
+                Some(v) => Some(
+                    v.try_into().map_err(|_| {
+                        IndexError::Corrupt("file_md5 must be 16 bytes".to_string())
+                    })?,
+                ),
+            };
+            let observed_at_ns: i64 = row.get(6)?;
+            out.insert(
+                rel_path.clone(),
+                ObservedRow {
+                    mod_id: mod_id.to_string(),
+                    rel_path,
+                    exists: exists_i64 != 0,
+                    size,
+                    mtime_ns,
+                    inode,
+                    file_md5,
+                    observed_at_ns,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn observed_parts_get_all_for_file_v1(
+        &self,
+        state_id: &str,
+        mod_id: &str,
+        rel_path: &str,
+    ) -> Result<Vec<ObservedPartRow>, IndexError> {
+        validate_mod_id(mod_id)?;
+        let rel = normalize_rel_path(rel_path);
+        validate_rel_path(&rel)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT idx, part_md5 FROM part_observed_v1 \
+             WHERE state_id = ?1 AND mod_id = ?2 AND rel_path = ?3 ORDER BY idx",
+        )?;
+        let mut rows = stmt.query(params![state_id, mod_id, rel])?;
+
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let idx_i64: i64 = row.get(0)?;
+            let idx = u32::try_from(idx_i64)
+                .map_err(|_| IndexError::Corrupt("idx overflow".to_string()))?;
+            let md5: Vec<u8> = row.get(1)?;
+            let md5: [u8; 16] = md5
+                .try_into()
+                .map_err(|_| IndexError::Corrupt("part_md5 must be 16 bytes".to_string()))?;
+            out.push(ObservedPartRow {
+                mod_id: mod_id.to_string(),
+                rel_path: rel.clone(),
+                idx,
+                part_md5: md5,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn file_state_get(
         &self,
         state_id: &str,
@@ -426,7 +843,7 @@ impl FleetIndex {
 
     pub fn baseline_exists(&self, state_id: &str) -> Result<bool, IndexError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM expected_file WHERE state_id = ?1",
+            "SELECT COUNT(*) FROM expected_file_v2 WHERE state_id = ?1",
             params![state_id],
             |r| r.get(0),
         )?;
@@ -460,6 +877,33 @@ impl FleetIndex {
         validate_sqlite(&conn)?;
         schema::init(&conn)?;
         Ok(Self { conn })
+    }
+}
+
+impl FleetIndex {
+    fn expected_tmp_init(&self) -> Result<(), IndexError> {
+        self.conn.execute_batch(
+            r#"
+            CREATE TEMP TABLE IF NOT EXISTS expected_file_tmp (
+              mod_id   TEXT NOT NULL,
+              rel_path TEXT NOT NULL,
+              size     INTEGER NOT NULL,
+              file_md5 BLOB NOT NULL,
+              PRIMARY KEY(mod_id, rel_path)
+            );
+
+            CREATE TEMP TABLE IF NOT EXISTS expected_part_tmp (
+              mod_id   TEXT NOT NULL,
+              rel_path TEXT NOT NULL,
+              idx      INTEGER NOT NULL,
+              offset   INTEGER NOT NULL,
+              len      INTEGER NOT NULL,
+              part_md5 BLOB NOT NULL,
+              PRIMARY KEY(mod_id, rel_path, idx)
+            );
+            "#,
+        )?;
+        Ok(())
     }
 }
 
