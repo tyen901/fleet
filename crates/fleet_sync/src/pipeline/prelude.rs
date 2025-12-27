@@ -77,7 +77,11 @@ pub(crate) async fn run_prelude(
         .map_err(crate::model::EngineError::Store)?;
 
     store
-        .expected_replace_all_v2(&desired.state_id, expected_files.clone(), expected_parts.clone())
+        .expected_replace_all_v2(
+            &desired.state_id,
+            expected_files.clone(),
+            expected_parts.clone(),
+        )
         .map_err(crate::model::EngineError::Store)?;
 
     Ok(Prelude { desired, fetch })

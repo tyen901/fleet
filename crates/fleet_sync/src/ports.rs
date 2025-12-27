@@ -225,8 +225,11 @@ pub trait StateStore: Send + Sync {
         rel_path: &str,
     ) -> Result<(), StoreError>;
 
-    fn observed_upsert_batch(&self, state_id: &str, rows: Vec<ObservedRow>)
-        -> Result<(), StoreError>;
+    fn observed_upsert_batch(
+        &self,
+        state_id: &str,
+        rows: Vec<ObservedRow>,
+    ) -> Result<(), StoreError>;
     fn observed_parts_upsert_batch(
         &self,
         state_id: &str,

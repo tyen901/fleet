@@ -572,7 +572,13 @@ impl FleetIndex {
             let rel = normalize_rel_path(&row.rel_path);
             validate_rel_path(&rel)?;
             let idx_i64 = i64::from(row.idx);
-            stmt.execute(params![state_id, row.mod_id, rel, idx_i64, row.part_md5.to_vec()])?;
+            stmt.execute(params![
+                state_id,
+                row.mod_id,
+                rel,
+                idx_i64,
+                row.part_md5.to_vec()
+            ])?;
         }
         drop(stmt);
         tx.commit()?;
@@ -608,14 +614,13 @@ impl FleetIndex {
                 ),
             };
             let md5: Option<Vec<u8>> = row.get(5)?;
-            let file_md5 = match md5 {
-                None => None,
-                Some(v) => Some(
-                    v.try_into().map_err(|_| {
+            let file_md5 =
+                match md5 {
+                    None => None,
+                    Some(v) => Some(v.try_into().map_err(|_| {
                         IndexError::Corrupt("file_md5 must be 16 bytes".to_string())
-                    })?,
-                ),
-            };
+                    })?),
+                };
             let observed_at_ns: i64 = row.get(6)?;
             out.insert(
                 rel_path.clone(),

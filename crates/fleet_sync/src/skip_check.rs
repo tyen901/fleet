@@ -125,8 +125,10 @@ pub fn evaluate_skip(
 
     let expected = store.expected_load_v2(&desired.state_id)?;
 
-    let mut observed_by_mod: std::collections::HashMap<String, std::collections::HashMap<String, fleet_index::ObservedRow>> =
-        std::collections::HashMap::new();
+    let mut observed_by_mod: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, fleet_index::ObservedRow>,
+    > = std::collections::HashMap::new();
     for f in &expected {
         if observed_by_mod.contains_key(&f.mod_id) {
             continue;
@@ -228,7 +230,9 @@ pub fn evaluate_skip(
             continue;
         };
 
-        let observed_map = observed_by_mod.get(&f.mod_id).expect("observed map inserted");
+        let observed_map = observed_by_mod
+            .get(&f.mod_id)
+            .expect("observed map inserted");
         let cached = observed_map.get(&f.rel_path);
         let Some(cached) = cached else {
             evidence.cache_missing += 1;

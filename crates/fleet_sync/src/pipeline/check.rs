@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::fs::{ensure_no_symlink_ancestors_blocking, safe_join_mod_file};
-use crate::model::{
-    CheckIssue, CheckIssueKind, CheckReport, CheckRequest, TimestampNs,
-};
+use crate::model::{CheckIssue, CheckIssueKind, CheckReport, CheckRequest, TimestampNs};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::util::{file_mtime_ns, now_ns};
@@ -156,7 +154,14 @@ async fn verify_mod(
 
     while let Some(res) = outcomes.next().await {
         let outcome = res??;
-        apply_verify_outcome(req, report, outcome, sink, &mut observed, &mut observed_parts)?;
+        apply_verify_outcome(
+            req,
+            report,
+            outcome,
+            sink,
+            &mut observed,
+            &mut observed_parts,
+        )?;
     }
 
     store.observed_upsert_batch(state_id, observed)?;

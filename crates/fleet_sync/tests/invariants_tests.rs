@@ -626,7 +626,10 @@ async fn no_op_check_skips_hashing_when_unchanged() {
         "expected first check to hash at least once"
     );
 
-    let report2 = engine.check(check_req, sink.as_ref(), &cancel).await.unwrap();
+    let report2 = engine
+        .check(check_req, sink.as_ref(), &cancel)
+        .await
+        .unwrap();
     assert!(report2.ok);
 
     let after_second = (

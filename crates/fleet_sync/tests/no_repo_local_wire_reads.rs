@@ -35,4 +35,3 @@ fn sync_pipeline_never_mentions_repo_local_wire_files() {
         "repo-local wire filenames referenced in fleet_sync source: {bad:?}"
     );
 }
-

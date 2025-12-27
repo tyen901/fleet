@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::model::{AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, TimestampNs};
+use crate::model::{
+    AbortReason, FileFailure, RepairOutcome, RepairReport, RepairRequest, TimestampNs,
+};
 use crate::ports::SyncEvent;
 use crate::ports::{Checksummer, EventSink, RemoteRepo, StateStore};
 use crate::skip_check;
@@ -287,8 +289,8 @@ pub(crate) async fn run(
                             observed_at_ns,
                         });
                     }
-                    applier::IndexUpdate::DeleteFileState { mod_id, rel_path } => observed
-                        .push(fleet_index::ObservedRow {
+                    applier::IndexUpdate::DeleteFileState { mod_id, rel_path } => {
+                        observed.push(fleet_index::ObservedRow {
                             mod_id,
                             rel_path,
                             exists: false,
@@ -297,7 +299,8 @@ pub(crate) async fn run(
                             inode: None,
                             file_md5: None,
                             observed_at_ns,
-                        }),
+                        })
+                    }
                 }
             }
             for hint in cache_hints {
