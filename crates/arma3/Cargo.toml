@@ -1,0 +1,14 @@
+[package]
+name = "fleet-arma3"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0"
+description = "Wrapper crate around HEMTT/hemtt_common for discovering and launching Arma 3 via Steam."
+publish = false
+
+[dependencies]
+hemtt_common = { git = "https://github.com/BrettMayson/HEMTT.git", package = "hemtt-common", tag = "v1.18.1" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

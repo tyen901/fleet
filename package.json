@@ -1,0 +1,11 @@
+{
+  "name": "fleet-workspace",
+  "private": true,
+  "devDependencies": {
+    "prettier": "^3.2.5"
+  },
+  "scripts": {
+    "fmt:css": "prettier --write \"apps/fleet/assets/css/**/*.css\"",
+    "lint:css": "prettier --check \"apps/fleet/assets/css/**/*.css\""
+  }
+}
