@@ -1,0 +1,78 @@
+/* Layout */
+.app-root {
+  height: 100vh;
+  width: 100vw;
+  display: flex;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 64px;
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 0;
+  gap: 10px;
+}
+
+.sidebar__top {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+
+.sidebar__bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.page {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.page--scroll {
+  overflow: auto;
+}
+
+.page__inner {
+  max-width: 920px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+.page__inner--wide {
+  max-width: 1080px;
+}
+
+.page__head {
+  margin-bottom: 14px;
+}
+
+.page__title {
+  font-size: 30px;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
+  margin: 0;
+  font-weight: 800;
+}
+
+.page__muted {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}

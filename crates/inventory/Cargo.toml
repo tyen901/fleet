@@ -1,0 +1,26 @@
+[package]
+name = "inventory"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "inventory"
+
+[features]
+default = []
+serde = []
+
+[dependencies]
+thiserror = { workspace = true }
+walkdir = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+rusqlite = { workspace = true, features = ["bundled"] }
+crossbeam-channel = { workspace = true }
+
+# workspace dep used by the scanner
+swifty_artifacts = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,25 @@
+/* Onboarding */
+.onboard {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  overflow: auto;
+}
+
+.onboard__card {
+  width: min(640px, 100%);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.onboard__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.onboard__actions--split {
+  justify-content: space-between;
+}

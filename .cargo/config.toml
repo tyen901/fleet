@@ -1,2 +1,8 @@
+
 [build]
-rustflags = ["-A", "dead_code", "-A", "unused_assignments", "-A", "unused_variables", "-A", "unused_imports"]
+rustflags = [
+    "-D", "unsafe_code",
+]
+
+[net]
+git-fetch-with-cli = true

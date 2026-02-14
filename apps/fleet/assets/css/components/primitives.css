@@ -1,0 +1,38 @@
+.surface {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-3);
+  box-shadow: var(--shadow);
+}
+
+.surface--muted {
+  background: color-mix(in oklab, var(--surface) 92%, var(--bg));
+}
+
+.stack-md > * + * {
+  margin-top: 12px;
+}
+
+.stack-lg > * + * {
+  margin-top: 16px;
+}
+
+.cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.grid-main {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 980px) {
+  .grid-main {
+    grid-template-columns: minmax(320px, 1fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}

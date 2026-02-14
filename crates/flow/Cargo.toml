@@ -1,0 +1,26 @@
+[package]
+name = "fleet-flow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+directories = { workspace = true }
+fs2 = { workspace = true }
+
+# Workspace toolkits
+fleet-domain = { workspace = true }
+fleet-download = { workspace = true }
+fleet-manifest = { workspace = true }
+fleet-flux = { workspace = true }
+inventory = { workspace = true }
+swifty-repo = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axum = { workspace = true }

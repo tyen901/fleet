@@ -1,0 +1,19 @@
+[package]
+name = "swifty-repo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+fleet-download = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+specta = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+swifty_artifacts = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
