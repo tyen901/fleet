@@ -1,0 +1,306 @@
+/* Sidebar controls */
+.profile-chip {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-2);
+  border: 1px solid transparent;
+  background: color-mix(in oklab, var(--surface-2) 70%, transparent);
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  position: relative;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.profile-chip--image {
+  padding: 0;
+  background: transparent;
+}
+
+.profile-chip__image-frame {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+}
+
+.profile-chip:hover {
+  border-color: var(--border-2);
+  color: var(--fg);
+}
+
+.profile-chip:focus-visible {
+  outline: none;
+  border-color: var(--border-2);
+  color: var(--fg);
+}
+
+.profile-chip--muted {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.profile-chip--active,
+.profile-chip--active:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: color-mix(in oklab, var(--accent) 72%, var(--border));
+}
+
+.profile-chip--hint {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--border));
+  animation: profile-chip-hint-pulse 1.6s ease-in-out infinite;
+}
+
+.profile-chip__letter {
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-size: 14px;
+}
+
+.profile-chip__icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.profile-chip__popup {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) scale(0.98);
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  box-shadow: var(--overlay-shadow);
+  transition:
+    max-width 170ms ease,
+    opacity 170ms ease,
+    transform 170ms ease;
+}
+
+.profile-chip:hover .profile-chip__popup,
+.profile-chip:focus-visible .profile-chip__popup {
+  opacity: 1;
+  max-width: 220px;
+  transform: translateY(-50%) scale(1);
+}
+
+.icon-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-2);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.icon-btn:hover,
+.icon-btn--active {
+  background: var(--surface-2);
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.ico {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.ico--sm {
+  width: 14px;
+  height: 14px;
+}
+
+.ico--spin {
+  animation: spin 4s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes profile-chip-hint-pulse {
+  0% {
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--accent) 28%, transparent),
+      0 0 0 0 color-mix(in oklab, var(--accent) 16%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 52%, var(--border));
+  }
+
+  50% {
+    box-shadow:
+      0 0 0 4px color-mix(in oklab, var(--accent) 18%, transparent),
+      0 0 0 8px color-mix(in oklab, var(--accent) 10%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 70%, var(--border));
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--accent) 0%, transparent),
+      0 0 0 0 color-mix(in oklab, var(--accent) 0%, transparent);
+    border-color: color-mix(in oklab, var(--accent) 52%, var(--border));
+  }
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: var(--radius-2);
+  border: 1px solid transparent;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+  user-select: none;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn--loading,
+.btn--loading:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+.btn--loading .btn__label {
+  opacity: 0.9;
+}
+
+.btn--sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.btn--md {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.btn--lg {
+  height: 36px;
+  padding: 0 14px;
+  font-size: 12px;
+}
+
+.btn--xl {
+  height: 44px;
+  padding: 0 16px;
+  font-size: 13px;
+  border-radius: var(--radius-3);
+}
+
+.btn--primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: color-mix(in oklab, var(--accent) 75%, transparent);
+}
+
+.btn--primary:hover {
+  background: var(--accent-hover);
+}
+
+.btn--secondary {
+  background: color-mix(in oklab, var(--surface) 86%, var(--bg));
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.btn--secondary:hover {
+  border-color: var(--border-2);
+}
+
+.btn--outline {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+}
+
+.btn--outline:hover {
+  border-color: var(--border-2);
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn--ghost:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.btn--danger {
+  background: transparent;
+  border-color: transparent;
+  color: var(--danger);
+}
+
+.btn--danger:hover {
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+}
+
+.btn__icon {
+  display: grid;
+  place-items: center;
+}
+
+.btn__label {
+  line-height: 1;
+}
+
+.btn__spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-pill);
+  border: 2px solid color-mix(in oklab, var(--muted) 40%, transparent);
+  border-top-color: currentColor;
+  box-shadow: 0 0 0 1px color-mix(in oklab, currentColor 16%, transparent);
+  animation: spin 0.9s linear infinite;
+}

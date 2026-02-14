@@ -1,0 +1,17 @@
+[application]
+name = "fleet"
+asset_dir = "assets"
+sub_package = "fleet"
+
+[web.app]
+title = "fleet"
+
+[web.watcher]
+reload_html = true
+index_on_404 = true
+watch_path = ["src", "assets", "Dioxus.toml"]
+
+[bundle]
+identifier = "com.fleet.app"
+publisher = "Fleet"
+icon = ["assets/icon.png"]

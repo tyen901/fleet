@@ -1,0 +1,33 @@
+[package]
+name = "fleet-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+fleet-download = { workspace = true }
+fleet-domain = { workspace = true }
+fleet-flow = { workspace = true }
+inventory = { workspace = true }
+swifty-repo = { workspace = true }
+directories = { workspace = true }
+fleet-arma3 = { workspace = true }
+shell-words = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+specta = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tempfile = { workspace = true }
+sentry = { workspace = true, features = ["logs", "tracing"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+regex = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }

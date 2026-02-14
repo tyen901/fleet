@@ -1,2 +1,10 @@
 target/
-assets/icon.ico
+packdir/
+Releases/
+apps/fleet/assets/icon.ico
+.DS_Store
+node_modules/
+dist/
+.env
+*.log
+.github/scripts/__pycache__/
