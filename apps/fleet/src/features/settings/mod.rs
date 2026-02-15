@@ -554,9 +554,12 @@ where
 fn support_section<FToggleTelemetry, FOpenLogs, FRestartSetup, FResetSettings, FFactoryReset>(
     telemetry_checked: bool,
     is_telemetry_non_default: bool,
+    auto_cleanup_unexpected_checked: bool,
+    is_auto_cleanup_unexpected_non_default: bool,
     reset_all_label: &'static str,
     factory_reset_label: &'static str,
     on_toggle_telemetry: FToggleTelemetry,
+    on_toggle_auto_cleanup_unexpected: impl Fn(bool) + Clone + 'static,
     on_open_logs: FOpenLogs,
     on_restart_setup: FRestartSetup,
     mut on_reset_settings: FResetSettings,
@@ -596,6 +599,28 @@ where
                         SettingFieldResetButton {
                             field: SettingsField::TelemetryConsent,
                             show: is_telemetry_non_default,
+                        }
+                    }
+                }
+
+                div { class: "settings-item settings-item--split",
+                    SettingItemText {
+                        title: "Automatically Clean Unexpected Files".to_string(),
+                        desc: "When enabled, Fleet automatically deletes unexpected local files during desktop check/sync workflows. Warning visibility is unchanged.".to_string(),
+                    }
+                    SettingControlRow {
+                        input {
+                            r#type: "checkbox",
+                            class: "check",
+                            checked: auto_cleanup_unexpected_checked,
+                            onchange: move |evt| {
+                                let next = evt.value() == "true" || evt.value() == "on" || evt.value() == "1";
+                                on_toggle_auto_cleanup_unexpected(next);
+                            },
+                        }
+                        SettingFieldResetButton {
+                            field: SettingsField::AutoCleanupUnexpectedFiles,
+                            show: is_auto_cleanup_unexpected_non_default,
                         }
                     }
                 }
@@ -821,6 +846,8 @@ pub fn Settings() -> Element {
         snap.settings.arma3_custom_launch_template != defaults.arma3_custom_launch_template;
     let is_arma3_default_args_non_default =
         snap.settings.arma3_default_args != defaults.arma3_default_args;
+    let is_auto_cleanup_unexpected_non_default =
+        snap.settings.auto_cleanup_unexpected_files != defaults.auto_cleanup_unexpected_files;
     let is_telemetry_non_default = snap.settings.telemetry_consent != defaults.telemetry_consent;
     let default_inventory_ignore = defaults.inventory_ignore_rules.clone();
 
@@ -945,6 +972,16 @@ pub fn Settings() -> Element {
         });
     };
 
+    let bridge_for_auto_cleanup_unexpected = bridge.clone();
+    let on_toggle_auto_cleanup_unexpected = move |next: bool| {
+        spawn_settings_update(
+            bridge_for_auto_cleanup_unexpected.clone(),
+            move |settings| {
+                settings.auto_cleanup_unexpected_files = next;
+            },
+        );
+    };
+
     let mut confirm_reset_settings_sig = confirm_reset_settings;
     let on_reset_all_settings = move || {
         if !confirm_reset_settings_sig() {
@@ -1041,9 +1078,12 @@ pub fn Settings() -> Element {
                 {support_section(
                     snap.settings.telemetry_consent.unwrap_or(true),
                     is_telemetry_non_default,
+                    snap.settings.auto_cleanup_unexpected_files,
+                    is_auto_cleanup_unexpected_non_default,
                     reset_all_label,
                     factory_reset_label,
                     on_toggle_telemetry,
+                    on_toggle_auto_cleanup_unexpected,
                     open_logs,
                     restart_onboarding,
                     on_reset_all_settings,

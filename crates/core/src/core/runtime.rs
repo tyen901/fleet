@@ -222,6 +222,10 @@ fn should_enqueue_remote_pass(state: &AppState, profile_id: &str, result: &FlowR
         .is_some_and(|profile| profile.validated_source_kind().is_ok())
 }
 
+fn display_rel_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
 fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
     match &ev.kind {
         FlowEventKind::Started => match ev.flow {
@@ -346,6 +350,8 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                         FlowRequest::ConfirmDeletes { paths } => {
                             sync.delete_pending = !paths.is_empty();
                             sync.delete_paths_count = paths.len() as u64;
+                            sync.delete_paths =
+                                paths.iter().map(|path| display_rel_path(path)).collect();
                             sync.updated_at_unix_ms = now;
                         }
                     }
@@ -364,6 +370,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     sync.phase = SyncPhase::Done;
                     sync.delete_pending = false;
                     sync.delete_paths_count = 0;
+                    sync.delete_paths.clear();
                     sync.updated_at_unix_ms = now;
                     sync.summary = Some(summary.clone());
                     sync.error = None;
@@ -399,6 +406,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     sync.phase = SyncPhase::Done;
                     sync.delete_pending = false;
                     sync.delete_paths_count = 0;
+                    sync.delete_paths.clear();
                     sync.updated_at_unix_ms = now;
                     sync.error = None;
                 }
@@ -416,6 +424,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     .entry(ev.profile_id.clone())
                     .or_insert_with(|| ProfileState::new(ev.profile_id.clone(), now));
                 v.assessment = Some(report.clone());
+                v.assessment_delete_pending_paths = report.unexpected_delete_paths.clone();
                 v.last_checked_ms = report.checked_at_unix_ms;
                 v.active_operation = None;
                 v.error = None;
@@ -433,6 +442,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     sync.phase = SyncPhase::Done;
                     sync.delete_pending = false;
                     sync.delete_paths_count = 0;
+                    sync.delete_paths.clear();
                     sync.error = Some(ApiError::new("pipeline_error", error.clone()));
                     sync.updated_at_unix_ms = now;
                 }
@@ -458,6 +468,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     .profile_states
                     .entry(ev.profile_id.clone())
                     .or_insert_with(|| ProfileState::new(ev.profile_id.clone(), now));
+                v.assessment_delete_pending_paths.clear();
                 v.active_operation = None;
                 v.error = Some(ApiError::new("check_failed", error.clone()));
             }
@@ -474,6 +485,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     sync.phase = SyncPhase::Done;
                     sync.delete_pending = false;
                     sync.delete_paths_count = 0;
+                    sync.delete_paths.clear();
                     sync.updated_at_unix_ms = now;
                 }
                 let last_message = state.sync.as_ref().and_then(|s| s.message.clone());
@@ -498,6 +510,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     .profile_states
                     .entry(ev.profile_id.clone())
                     .or_insert_with(|| ProfileState::new(ev.profile_id.clone(), now));
+                v.assessment_delete_pending_paths.clear();
                 v.active_operation = None;
             }
         },
@@ -678,6 +691,149 @@ mod tests {
     }
 
     #[test]
+    fn apply_event_tracks_and_clears_pending_delete_paths() {
+        let mut state = AppState::default();
+        let profile_id = "p1".to_string();
+
+        let ev_started = FlowSessionEvent::new(
+            11,
+            profile_id.clone(),
+            FlowKind::Sync,
+            FlowEventKind::Started,
+        );
+        apply_event(&mut state, &ev_started, 1_000);
+
+        let ev_input = FlowSessionEvent::new(
+            11,
+            profile_id.clone(),
+            FlowKind::Sync,
+            FlowEventKind::InputRequired {
+                prompt: "Delete 2 files?".to_string(),
+                request: FlowRequest::ConfirmDeletes {
+                    paths: vec![
+                        std::path::PathBuf::from("extra.txt"),
+                        std::path::PathBuf::from("mods/a.pbo"),
+                    ],
+                },
+            },
+        );
+        apply_event(&mut state, &ev_input, 1_100);
+
+        let sync = state.sync.as_ref().expect("sync view");
+        assert!(sync.delete_pending);
+        assert_eq!(sync.delete_paths_count, 2);
+        assert_eq!(
+            sync.delete_paths,
+            vec!["extra.txt".to_string(), "mods/a.pbo".to_string()]
+        );
+
+        let ev_finished = FlowSessionEvent::new(
+            11,
+            profile_id,
+            FlowKind::Sync,
+            FlowEventKind::Finished {
+                result: FlowResult::Sync(SyncSummary {
+                    profile_id: "p1".to_string(),
+                    destination: "/tmp/dest".to_string(),
+                    manifest_source: "http://example.com/repo.json".to_string(),
+                    duration_ms: 1,
+                    bytes_reused: 0,
+                    bytes_downloaded: 0,
+                    files_finalized: 0,
+                }),
+            },
+        );
+        apply_event(&mut state, &ev_finished, 1_200);
+
+        let sync = state.sync.as_ref().expect("sync view");
+        assert!(!sync.delete_pending);
+        assert_eq!(sync.delete_paths_count, 0);
+        assert!(sync.delete_paths.is_empty());
+    }
+
+    #[test]
+    fn apply_event_check_repopulates_pending_delete_paths_after_dismiss() {
+        let mut state = AppState::default();
+        let profile_id = "p1".to_string();
+
+        let ev_started = FlowSessionEvent::new(
+            12,
+            profile_id.clone(),
+            FlowKind::Check,
+            FlowEventKind::Started,
+        );
+        apply_event(&mut state, &ev_started, 1_000);
+
+        let report = fleet_domain::health::ProfileAssessmentReport {
+            profile_id: profile_id.clone(),
+            local_health: LocalHealthState::LocalDrift,
+            remote_freshness: fleet_domain::health::RemoteFreshnessState::Unknown,
+            checked_at_unix_ms: 1_100,
+            unexpected_delete_paths: vec!["extra.txt".to_string()],
+        };
+        let ev_finished = FlowSessionEvent::new(
+            12,
+            profile_id.clone(),
+            FlowKind::Check,
+            FlowEventKind::Finished {
+                result: FlowResult::Check(report.clone()),
+            },
+        );
+        apply_event(&mut state, &ev_finished, 1_100);
+
+        let profile_state = state
+            .profile_states
+            .get(&profile_id)
+            .expect("profile state");
+        assert_eq!(
+            profile_state.assessment_delete_pending_paths,
+            vec!["extra.txt".to_string()]
+        );
+
+        state
+            .profile_states
+            .get_mut(&profile_id)
+            .expect("profile state")
+            .assessment_delete_pending_paths
+            .clear();
+        assert!(state
+            .profile_states
+            .get(&profile_id)
+            .expect("profile state")
+            .assessment_delete_pending_paths
+            .is_empty());
+
+        apply_event(&mut state, &ev_finished, 1_200);
+        let profile_state = state
+            .profile_states
+            .get(&profile_id)
+            .expect("profile state");
+        assert_eq!(
+            profile_state.assessment_delete_pending_paths,
+            vec!["extra.txt".to_string()]
+        );
+
+        apply_event(&mut state, &ev_finished, 1_300);
+
+        let profile_state = state
+            .profile_states
+            .get(&profile_id)
+            .expect("profile state");
+        assert_eq!(
+            profile_state
+                .assessment
+                .as_ref()
+                .expect("assessment")
+                .unexpected_delete_paths,
+            vec!["extra.txt".to_string()]
+        );
+        assert_eq!(
+            profile_state.assessment_delete_pending_paths,
+            vec!["extra.txt".to_string()]
+        );
+    }
+
+    #[test]
     fn auto_check_coalescer_collapses_duplicate_enqueues() {
         let mut coalescer = AutoCheckCoalescer::default();
         coalescer.enqueue("p1".to_string(), AutoCheckPhase::LocalPass);
@@ -754,6 +910,7 @@ mod tests {
             local_health: LocalHealthState::Ready,
             remote_freshness: fleet_domain::health::RemoteFreshnessState::NotRelevant,
             checked_at_unix_ms: 1,
+            unexpected_delete_paths: Vec::new(),
         };
         let not_ready_report = fleet_domain::health::ProfileAssessmentReport {
             profile_id: "p1".to_string(),
@@ -779,6 +936,7 @@ mod tests {
                 local_health: LocalHealthState::Ready,
                 remote_freshness: fleet_domain::health::RemoteFreshnessState::NotRelevant,
                 checked_at_unix_ms: 1,
+                unexpected_delete_paths: Vec::new(),
             })
         ));
     }
@@ -809,6 +967,7 @@ mod tests {
                     local_health: LocalHealthState::Ready,
                     remote_freshness: fleet_domain::health::RemoteFreshnessState::NotRelevant,
                     checked_at_unix_ms: 1,
+                    unexpected_delete_paths: Vec::new(),
                 }),
             },
         );
@@ -838,6 +997,7 @@ mod tests {
                     local_health: LocalHealthState::Ready,
                     remote_freshness: fleet_domain::health::RemoteFreshnessState::NotRelevant,
                     checked_at_unix_ms: 1,
+                    unexpected_delete_paths: Vec::new(),
                 }),
             },
         );

@@ -15,6 +15,18 @@ use tokio_util::sync::CancellationToken;
 
 const TEST_PROFILE_ID: &str = "test-profile";
 
+#[derive(Clone, Copy)]
+enum DeleteFlow {
+    Sync,
+    Repair,
+}
+
+struct DeleteFlowOutcome {
+    _temp_dir: TempDir,
+    dest: PathBuf,
+    summary: Option<fleet_domain::health::RepairSummary>,
+}
+
 fn workspace_tempdir() -> TempDir {
     let root = std::env::current_dir()
         .expect("cwd")
@@ -298,6 +310,10 @@ async fn assess_local_drift_reports_local_drift() {
 
     assert_eq!(report.local_health, LocalHealthState::LocalDrift);
     assert_eq!(report.remote_freshness, RemoteFreshnessState::Unknown);
+    assert_eq!(
+        report.unexpected_delete_paths,
+        vec!["extra.txt".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -372,11 +388,10 @@ async fn sync_flow_fails_when_inventory_lock_is_held() {
         .contains("inventory lock is currently held by another running operation"));
 }
 
-#[tokio::test]
-async fn repair_flow_skip_delete_counts_skipped_files() {
+async fn run_delete_flow_with_decision(flow: DeleteFlow, confirm: bool) -> DeleteFlowOutcome {
     let td = workspace_tempdir();
     let dest = td.path().join("dest");
-    tokio::fs::create_dir_all(&dest).await.expect("mkdir");
+    tokio::fs::create_dir_all(&dest).await.expect("mkdir dest");
 
     let (addr, _body, _server) = spawn_repo_server(MIN_REPO_JSON)
         .await
@@ -397,63 +412,52 @@ async fn repair_flow_skip_delete_counts_skipped_files() {
     let feeder = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             if matches!(event, FlowEventKind::InputRequired { .. }) {
-                let _ = input_tx
-                    .send(FlowInput::ConfirmDeletes { confirm: false })
-                    .await;
+                let _ = input_tx.send(FlowInput::ConfirmDeletes { confirm }).await;
                 break;
             }
         }
     });
-
-    let summary = run_repair_flow(cfg, profile, cancel, input_rx, sink)
-        .await
-        .expect("repair");
+    let summary = match flow {
+        DeleteFlow::Sync => {
+            run_sync_flow(cfg, profile, cancel, input_rx, sink)
+                .await
+                .expect("sync");
+            None
+        }
+        DeleteFlow::Repair => Some(
+            run_repair_flow(cfg, profile, cancel, input_rx, sink)
+                .await
+                .expect("repair"),
+        ),
+    };
     feeder.await.expect("feeder task");
+    DeleteFlowOutcome {
+        _temp_dir: td,
+        dest,
+        summary,
+    }
+}
 
-    assert_eq!(summary.files_deleted, 0);
-    assert!(summary.files_skipped_delete > 0);
+#[tokio::test]
+async fn delete_flow_skip_keeps_loose_files_for_sync_and_repair() {
+    let sync = run_delete_flow_with_decision(DeleteFlow::Sync, false).await;
+    assert!(sync.dest.join("extra.txt").exists());
+
+    let repair = run_delete_flow_with_decision(DeleteFlow::Repair, false).await;
+    assert!(repair.dest.join("extra.txt").exists());
+    let repair_summary = repair.summary.expect("repair summary");
+    assert_eq!(repair_summary.files_deleted, 0);
+    assert!(repair_summary.files_skipped_delete > 0);
 }
 
 #[tokio::test]
 async fn repair_flow_confirm_delete_counts_deleted_files() {
-    let td = workspace_tempdir();
-    let dest = td.path().join("dest");
-    tokio::fs::create_dir_all(&dest).await.expect("mkdir");
-
-    let (addr, _body, _server) = spawn_repo_server(MIN_REPO_JSON)
-        .await
-        .expect("spawn repo server");
-    let repo_url = format!("http://{addr}/repo.json");
-
-    let cfg = test_flow_config(td.path());
-    let cancel = CancellationToken::new();
-    ensure_baseline(&cfg, TEST_PROFILE_ID, dest.clone(), cancel.clone()).await;
-
-    tokio::fs::write(dest.join("extra.txt"), b"extra")
-        .await
-        .expect("write extra");
-
-    let profile = profile_with_source(&dest, &repo_url);
-    let (sink, mut event_rx) = channel_sink();
-    let (input_tx, input_rx) = mpsc::channel(4);
-    let feeder = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            if matches!(event, FlowEventKind::InputRequired { .. }) {
-                let _ = input_tx
-                    .send(FlowInput::ConfirmDeletes { confirm: true })
-                    .await;
-                break;
-            }
-        }
-    });
-
-    let summary = run_repair_flow(cfg, profile, cancel, input_rx, sink)
-        .await
-        .expect("repair");
-    feeder.await.expect("feeder task");
+    let repair = run_delete_flow_with_decision(DeleteFlow::Repair, true).await;
+    let summary = repair.summary.expect("repair summary");
 
     assert!(summary.files_deleted > 0);
     assert_eq!(summary.files_skipped_delete, 0);
+    assert!(!repair.dest.join("extra.txt").exists());
 }
 
 #[tokio::test]

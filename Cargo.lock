@@ -1897,6 +1897,7 @@ dependencies = [
  "fleet-domain",
  "fleet-download",
  "fleet-flow",
+ "fleet-flux",
  "futures",
  "inventory",
  "rand 0.8.5",

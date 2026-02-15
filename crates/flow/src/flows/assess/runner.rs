@@ -1,9 +1,10 @@
 use crate::inventory_access::open_inventory_root;
 use crate::locking::{check_lock_state, InventoryLockState};
+use crate::prune_policy;
 use crate::FlowConfig;
 use fleet_domain::health::{LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState};
 use fleet_domain::{FleetPaths, Profile, ProfileSourceKind};
-use inventory::InventoryState;
+use inventory::{DirtyKind, InventoryState};
 use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -23,7 +24,8 @@ pub async fn run_assess_flow(
     );
     check_canceled(&cancel)?;
 
-    let local_health = evaluate_local_health(&cfg, &profile, &cancel).await;
+    let local_assessment = evaluate_local_health(&cfg, &profile, &cancel).await;
+    let local_health = local_assessment.local_health;
     let remote_freshness = if !include_remote {
         RemoteFreshnessState::NotRelevant
     } else if local_health != LocalHealthState::Ready {
@@ -37,6 +39,7 @@ pub async fn run_assess_flow(
         local_health,
         remote_freshness,
         checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        unexpected_delete_paths: local_assessment.unexpected_delete_paths,
     };
     info!(
         flow_kind = "check",
@@ -49,11 +52,27 @@ pub async fn run_assess_flow(
     Ok(report)
 }
 
+struct LocalAssessmentResult {
+    local_health: LocalHealthState,
+    unexpected_delete_paths: Vec<String>,
+}
+
+fn local_assessment(local_health: LocalHealthState) -> LocalAssessmentResult {
+    LocalAssessmentResult {
+        local_health,
+        unexpected_delete_paths: Vec::new(),
+    }
+}
+
+fn local_error() -> LocalAssessmentResult {
+    local_assessment(LocalHealthState::Error)
+}
+
 async fn evaluate_local_health(
     cfg: &FlowConfig,
     profile: &Profile,
     cancel: &CancellationToken,
-) -> LocalHealthState {
+) -> LocalAssessmentResult {
     if check_canceled(cancel).is_err() {
         warn!(
             flow_kind = "check",
@@ -62,7 +81,7 @@ async fn evaluate_local_health(
             outcome = "canceled",
             "local health evaluation canceled"
         );
-        return LocalHealthState::Error;
+        return local_error();
     }
 
     if profile.dest_path().is_err() || profile.validated_source_kind().is_err() {
@@ -74,16 +93,16 @@ async fn evaluate_local_health(
             reason = "invalid_profile_context",
             "local health evaluation failed profile validation"
         );
-        return LocalHealthState::Error;
+        return local_error();
     }
     let dest_path = match profile.dest_path() {
         Ok(path) => path,
-        Err(_) => return LocalHealthState::Error,
+        Err(_) => return local_error(),
     };
 
     let dest_exists = fs::try_exists(&dest_path).await;
     if check_canceled(cancel).is_err() {
-        return LocalHealthState::Error;
+        return local_error();
     }
     match dest_exists {
         Ok(true) => {}
@@ -95,7 +114,7 @@ async fn evaluate_local_health(
                 outcome = "missing_destination",
                 "local health detected missing destination"
             );
-            return LocalHealthState::MissingDestination;
+            return local_assessment(LocalHealthState::MissingDestination);
         }
         Err(_) => {
             error!(
@@ -106,18 +125,18 @@ async fn evaluate_local_health(
                 reason = "destination_probe_failed",
                 "local health failed while probing destination"
             );
-            return LocalHealthState::Error;
+            return local_error();
         }
     }
 
     let layout = FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
     let state_dir_exists = fs::try_exists(&layout.state_dir).await;
     if check_canceled(cancel).is_err() {
-        return LocalHealthState::Error;
+        return local_error();
     }
     let db_exists = fs::try_exists(&layout.inventory_db).await;
     if check_canceled(cancel).is_err() {
-        return LocalHealthState::Error;
+        return local_error();
     }
     match (state_dir_exists, db_exists) {
         (Ok(true), Ok(true)) => {}
@@ -129,7 +148,7 @@ async fn evaluate_local_health(
                 outcome = "missing_local_state",
                 "local health detected missing local state"
             );
-            return LocalHealthState::LocalStateMissing;
+            return local_assessment(LocalHealthState::LocalStateMissing);
         }
         _ => {
             error!(
@@ -140,7 +159,7 @@ async fn evaluate_local_health(
                 reason = "state_probe_failed",
                 "local health failed while probing state files"
             );
-            return LocalHealthState::Error;
+            return local_error();
         }
     }
 
@@ -155,7 +174,7 @@ async fn evaluate_local_health(
                 reason = "inventory_lock_held",
                 "local health found active inventory lock"
             );
-            return LocalHealthState::Error;
+            return local_error();
         }
         Err(_) => {
             error!(
@@ -166,34 +185,54 @@ async fn evaluate_local_health(
                 reason = "inventory_lock_probe_failed",
                 "local health failed while checking lock state"
             );
-            return LocalHealthState::Error;
+            return local_error();
         }
     }
     if check_canceled(cancel).is_err() {
-        return LocalHealthState::Error;
+        return local_error();
     }
 
     let policy = cfg.scanner_config.policy.clone();
     let profile_id = profile.id.clone();
     let cfg_cloned = cfg.clone();
-    let local_state = tokio::task::spawn_blocking(move || -> anyhow::Result<LocalHealthState> {
-        let root = open_inventory_root(&cfg_cloned, &layout.inventory_db, &profile_id, &dest_path)?;
-        if root.metrics()?.last_stamp.is_none() {
-            return Ok(LocalHealthState::LocalStateMissing);
-        }
+    let local_state =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<LocalAssessmentResult> {
+            let root =
+                open_inventory_root(&cfg_cloned, &layout.inventory_db, &profile_id, &dest_path)?;
+            if root.metrics()?.last_stamp.is_none() {
+                return Ok(local_assessment(LocalHealthState::LocalStateMissing));
+            }
 
-        let state = root.state(&policy)?;
-        let local_health = match state {
-            InventoryState::Clean { .. } => LocalHealthState::Ready,
-            InventoryState::Dirty { .. } => LocalHealthState::LocalDrift,
-            InventoryState::MissingRoot { .. } => LocalHealthState::MissingDestination,
-        };
-        Ok(local_health)
-    })
-    .await;
+            let state = root.state(&policy)?;
+            let (local_health, unexpected_delete_paths) = match state {
+                InventoryState::Clean { .. } => (LocalHealthState::Ready, Vec::new()),
+                InventoryState::Dirty { .. } => {
+                    let mut paths = root
+                        .dirty_files(&policy)?
+                        .into_iter()
+                        .filter(|dirty| dirty.kind == DirtyKind::Added)
+                        .map(|dirty| std::path::PathBuf::from(dirty.rel_path))
+                        .filter(|rel| !prune_policy::is_protected_root_entry(&dest_path, rel))
+                        .map(|rel| rel.to_string_lossy().to_string())
+                        .collect::<Vec<_>>();
+                    paths.sort();
+                    paths.dedup();
+                    (LocalHealthState::LocalDrift, paths)
+                }
+                InventoryState::MissingRoot { .. } => {
+                    (LocalHealthState::MissingDestination, Vec::new())
+                }
+            };
+
+            Ok(LocalAssessmentResult {
+                local_health,
+                unexpected_delete_paths,
+            })
+        })
+        .await;
 
     if check_canceled(cancel).is_err() {
-        return LocalHealthState::Error;
+        return local_error();
     }
 
     match local_state {
@@ -224,7 +263,7 @@ async fn evaluate_local_health(
                 error = %err,
                 "local health inventory state error details"
             );
-            LocalHealthState::Error
+            local_error()
         }
         Err(err) => {
             error!(
@@ -242,7 +281,7 @@ async fn evaluate_local_health(
                 error = %err,
                 "local health blocking task error details"
             );
-            LocalHealthState::Error
+            local_error()
         }
     }
 }
