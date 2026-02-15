@@ -48,7 +48,7 @@ pub fn NewProfile() -> Element {
                 destination,
                 arma3_server: None,
                 launch_template: String::new(),
-                launch_params: fleet_core::DEFAULT_ARMA3_ARGS.to_string(),
+                launch_params: default_new_profile_launch_params(),
             };
 
             match bridge.core().profile_save(profile).await {
@@ -123,5 +123,19 @@ pub fn NewProfile() -> Element {
                 }
             }
         }
+    }
+}
+
+fn default_new_profile_launch_params() -> String {
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_new_profile_launch_params;
+
+    #[test]
+    fn new_profiles_default_to_settings_launch_args_mode() {
+        assert_eq!(default_new_profile_launch_params(), "");
     }
 }
