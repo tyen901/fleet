@@ -461,6 +461,7 @@ fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64
         .entry(profile_id.to_string())
         .or_insert_with(|| crate::state::ProfileState::new(profile_id.to_string(), now_ms));
     v.assessment = None;
+    v.assessment_delete_pending_paths.clear();
     v.error = None;
     v.active_operation = None;
     v.last_checked_ms = now_ms;
@@ -545,7 +546,9 @@ mod tests {
                     local_health: LocalHealthState::Error,
                     remote_freshness: RemoteFreshnessState::Unknown,
                     checked_at_unix_ms: 10,
+                    unexpected_delete_paths: Vec::new(),
                 }),
+                assessment_delete_pending_paths: vec!["extra.txt".to_string()],
                 last_checked_ms: 10,
                 active_operation: Some(OperationKind::Checking),
                 error: Some(ApiError::new("check_failed", "symlink path rejected")),
@@ -559,6 +562,7 @@ mod tests {
             .get(&profile_id)
             .expect("profile state");
         assert!(updated.assessment.is_none());
+        assert!(updated.assessment_delete_pending_paths.is_empty());
         assert!(updated.error.is_none());
         assert!(updated.active_operation.is_none());
         assert_eq!(updated.last_checked_ms, 42);

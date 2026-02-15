@@ -5,7 +5,6 @@ use std::io::{self, IsTerminal, Write};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeletePolicy {
     Prompt,
-    AlwaysConfirm,
     AlwaysReject,
 }
 
@@ -75,14 +74,6 @@ pub(crate) async fn run_flow_session(
                                 .await;
                             skip_forward = true;
                         }
-                        DeletePolicy::AlwaysConfirm => {
-                            let _ = core_for_input
-                                .send_flow_input(
-                                    session_id,
-                                    FlowInput::ConfirmDeletes { confirm: true },
-                                )
-                                .await;
-                        }
                         DeletePolicy::Prompt => {
                             if interactive {
                                 let confirm =
@@ -127,11 +118,16 @@ pub(crate) async fn run_flow_session(
     result
 }
 
-async fn prompt_delete_confirmation(prompt: &str) -> anyhow::Result<bool> {
+pub(crate) async fn prompt_delete_confirmation(prompt: &str) -> anyhow::Result<bool> {
     let prompt = prompt.to_string();
     tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
         loop {
-            print!("{prompt} [y/n]: ");
+            if prompt.contains('\n') {
+                println!("{prompt}");
+                print!("Proceed with delete? [y/n]: ");
+            } else {
+                print!("{prompt} [y/n]: ");
+            }
             io::stdout().flush()?;
 
             let mut line = String::new();
@@ -148,7 +144,7 @@ async fn prompt_delete_confirmation(prompt: &str) -> anyhow::Result<bool> {
     .map_err(anyhow::Error::new)?
 }
 
-fn parse_delete_confirmation(input: &str) -> Option<bool> {
+pub(crate) fn parse_delete_confirmation(input: &str) -> Option<bool> {
     let normalized = input.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "y" | "yes" => Some(true),

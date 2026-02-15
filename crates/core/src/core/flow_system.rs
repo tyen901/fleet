@@ -467,6 +467,7 @@ mod tests {
                             remote_freshness:
                                 fleet_domain::health::RemoteFreshnessState::NotRelevant,
                             checked_at_unix_ms: 0,
+                            unexpected_delete_paths: Vec::new(),
                         },
                     ))
                 },
@@ -487,6 +488,7 @@ mod tests {
                             remote_freshness:
                                 fleet_domain::health::RemoteFreshnessState::NotRelevant,
                             checked_at_unix_ms: 0,
+                            unexpected_delete_paths: Vec::new(),
                         },
                     ))
                 },

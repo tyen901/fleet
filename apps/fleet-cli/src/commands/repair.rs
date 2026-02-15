@@ -15,7 +15,7 @@ pub async fn run(core: &Core, profile_id: &str) -> anyhow::Result<()> {
         core,
         session_id,
         FlowRunOptions {
-            delete_policy: DeletePolicy::AlwaysConfirm,
+            delete_policy: DeletePolicy::Prompt,
             output: FlowOutput::Quiet,
         },
     )

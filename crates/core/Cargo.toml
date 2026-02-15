@@ -8,6 +8,7 @@ anyhow = { workspace = true }
 fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
 fleet-flow = { workspace = true }
+fleet-flux = { workspace = true }
 inventory = { workspace = true }
 swifty-repo = { workspace = true }
 directories = { workspace = true }

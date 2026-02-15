@@ -39,6 +39,8 @@ pub struct ProfileAssessmentReport {
     pub local_health: LocalHealthState,
     pub remote_freshness: RemoteFreshnessState,
     pub checked_at_unix_ms: u64,
+    #[serde(default)]
+    pub unexpected_delete_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
@@ -69,11 +71,13 @@ mod tests {
             local_health: LocalHealthState::Ready,
             remote_freshness: RemoteFreshnessState::UpToDate,
             checked_at_unix_ms: 1,
+            unexpected_delete_paths: Vec::new(),
         };
         let json = serde_json::to_string(&report).expect("serialize");
         let decoded: ProfileAssessmentReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.profile_id, "p1");
         assert_eq!(decoded.local_health, LocalHealthState::Ready);
         assert_eq!(decoded.remote_freshness, RemoteFreshnessState::UpToDate);
+        assert!(decoded.unexpected_delete_paths.is_empty());
     }
 }
