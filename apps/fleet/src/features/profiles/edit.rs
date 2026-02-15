@@ -108,11 +108,6 @@ pub fn EditProfile(id: String) -> Element {
     let folder_ok = !folder().trim().is_empty()
         && is_destination_unique(&(store.state)(), &folder(), Some(profile.id.as_str()));
 
-    let profile_launch_params = if profile.launch_params.trim().is_empty() {
-        settings_default_args.clone()
-    } else {
-        profile.launch_params.clone()
-    };
     let current_launch_params = if use_default_args() {
         settings_default_args.clone()
     } else {
@@ -124,11 +119,14 @@ pub fn EditProfile(id: String) -> Element {
     let server_selection_dirty = !repo_servers_loading()
         && !repo_servers().is_empty()
         && selected_server_value != current_profile_server_value;
-    let dirty = name() != profile.name
-        || repo() != profile.source
-        || folder() != profile.destination
-        || current_launch_params != profile_launch_params
-        || server_selection_dirty;
+    let profile_fields_dirty = profile_fields_dirty(&profile, &name(), &repo(), &folder());
+    let launch_args_dirty = launch_args_dirty(
+        &profile.launch_params,
+        use_default_args(),
+        &current_launch_params,
+        &settings_default_args,
+    );
+    let dirty = profile_fields_dirty || launch_args_dirty || server_selection_dirty;
     let can_save = name_ok && repo_ok && folder_ok && dirty;
 
     let on_save = move |_| {
@@ -343,4 +341,96 @@ fn profile_server_value(server: &fleet_domain::types::ProfileServerInfo) -> Stri
         server.port,
         server.password.trim()
     )
+}
+
+fn profile_fields_dirty(
+    profile: &fleet_core::Profile,
+    name: &str,
+    repo: &str,
+    folder: &str,
+) -> bool {
+    name != profile.name || repo != profile.source || folder != profile.destination
+}
+
+fn launch_args_dirty(
+    original_launch_params: &str,
+    use_default_args: bool,
+    current_launch_params: &str,
+    settings_default_args: &str,
+) -> bool {
+    let original_uses_default = original_launch_params.trim().is_empty();
+    let launch_mode_dirty = use_default_args != original_uses_default;
+    let original_effective = if original_uses_default {
+        settings_default_args
+    } else {
+        original_launch_params
+    };
+    let current_effective = if use_default_args {
+        settings_default_args
+    } else {
+        current_launch_params
+    };
+
+    launch_mode_dirty || current_effective != original_effective
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{launch_args_dirty, profile_fields_dirty};
+
+    fn base_profile() -> fleet_core::Profile {
+        fleet_core::Profile {
+            id: "p1".to_string(),
+            name: "Alpha".to_string(),
+            source: "https://example.com/repo.json".to_string(),
+            destination: "/tmp/alpha".to_string(),
+            arma3_server: None,
+            launch_template: String::new(),
+            launch_params: String::new(),
+        }
+    }
+
+    #[test]
+    fn launch_args_dirty_is_false_when_toggle_and_values_are_unchanged() {
+        let settings_default_args = "-noPause -noSplash";
+        assert!(!launch_args_dirty(
+            "",
+            true,
+            settings_default_args,
+            settings_default_args
+        ));
+    }
+
+    #[test]
+    fn launch_args_dirty_is_true_when_toggle_changes_default_to_custom_with_same_text() {
+        let settings_default_args = "-noPause -noSplash";
+        assert!(launch_args_dirty(
+            "",
+            false,
+            settings_default_args,
+            settings_default_args
+        ));
+    }
+
+    #[test]
+    fn launch_args_dirty_is_true_when_toggle_changes_custom_to_default() {
+        let settings_default_args = "-noPause -noSplash";
+        assert!(launch_args_dirty(
+            "-foo -bar",
+            true,
+            "-foo -bar",
+            settings_default_args
+        ));
+    }
+
+    #[test]
+    fn profile_fields_dirty_is_true_when_name_changes() {
+        let profile = base_profile();
+        assert!(profile_fields_dirty(
+            &profile,
+            "Bravo",
+            &profile.source,
+            &profile.destination
+        ));
+    }
 }
