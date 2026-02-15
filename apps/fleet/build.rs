@@ -2,7 +2,34 @@ fn main() {
     // Stamp the build with tag/hash/date so shipped binaries can report exactly what they are.
     // This is best-effort and falls back to "unknown" when git isn't available.
     stamp_build_info();
+    embed_windows_icon();
 }
+
+#[cfg(windows)]
+fn embed_windows_icon() {
+    let icon_path = std::path::Path::new("assets").join("icon.ico");
+    println!("cargo:rerun-if-changed={}", icon_path.display());
+
+    if !icon_path.is_file() {
+        panic!(
+            "missing Windows icon at {}. Generate it from assets/icon.png before building.",
+            icon_path.display()
+        );
+    }
+
+    let icon = icon_path.to_string_lossy().to_string();
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(&icon);
+    if let Err(err) = res.compile() {
+        panic!(
+            "failed to compile Windows resources with icon {}: {err}",
+            icon
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_icon() {}
 
 fn stamp_build_info() {
     use std::env;
