@@ -61,6 +61,14 @@ runs:
       with:
         python-version: "3.x"
 
+    - name: Prepare Windows app icon
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade --quiet pillow
+        python .github/scripts/make_windows_ico.py apps/fleet/assets/icon.png apps/fleet/assets/icon.ico
+
     - name: Linux dependencies
       if: runner.os == 'Linux'
       shell: bash
@@ -116,15 +124,6 @@ runs:
         if find packdir -maxdepth 1 -type f -name 'fleet-cli*' | grep -q .; then
           echo "fleet-cli binary found in packdir; release packaging must include only the Fleet app."
           exit 1
-        fi
-
-    - name: Prepare packaging icon
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ "${{ runner.os }}" = "Windows" ]; then
-          python -m pip install --upgrade --quiet pillow
-          python .github/scripts/make_windows_ico.py apps/fleet/assets/icon.png apps/fleet/assets/icon.ico
         fi
 
     - name: Install .NET 8
