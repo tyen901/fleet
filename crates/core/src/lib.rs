@@ -10,6 +10,7 @@ pub use core::Core;
 pub use features::arma3::{ArmaLaunchResult, ArmaPreviewResult, DEFAULT_ARMA3_ARGS};
 pub use features::profiles::{
     apply_profile_save_to_state, is_destination_unique, validate_profile_name, validate_repo_url,
+    ProfileSaveAndReassessResult,
 };
 pub use features::settings::{effective_settings_defaults, SettingsField};
 pub use state::*;

@@ -4,6 +4,7 @@ use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::profile_store::ProfileStore;
+use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant, Input};
 use fleet_core::{
     apply_profile_save_to_state, is_destination_unique, validate_profile_name, validate_repo_url,
@@ -15,6 +16,7 @@ pub fn EditProfile(id: String) -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
     let profile_store = use_context::<ProfileStore>();
+    let toast_store = use_context::<ToastStore>();
     let nav = dioxus_router::use_navigator();
 
     let snapshot = (store.state)();
@@ -137,6 +139,7 @@ pub fn EditProfile(id: String) -> Element {
         let bridge = bridge.clone();
         let mut store = store.clone();
         let mut profile_store = profile_store.clone();
+        let toast_store = toast_store.clone();
         let nav = nav;
         let mut next = profile.clone();
         next.name = name().trim().to_string();
@@ -160,8 +163,9 @@ pub fn EditProfile(id: String) -> Element {
         };
 
         spawn(async move {
-            match bridge.core().profile_save(next).await {
-                Ok(saved) => {
+            match bridge.core().profile_save_and_reassess(next).await {
+                Ok(result) => {
+                    let saved = result.profile;
                     let (next_state, next_active) = apply_profile_save_to_state(
                         &(store.state)(),
                         (profile_store.active_id)(),
@@ -169,6 +173,13 @@ pub fn EditProfile(id: String) -> Element {
                     );
                     store.state.set(next_state);
                     profile_store.active_id.set(next_active);
+                    if result.reassess_warning.is_some() {
+                        toast_store.push(Toast::new(
+                            ToastKind::Info,
+                            "Profile saved",
+                            "Health re-check could not start. Use Retry Check.",
+                        ));
+                    }
                     let _ = nav.push(Route::Dashboard {});
                 }
                 Err(_) => {
