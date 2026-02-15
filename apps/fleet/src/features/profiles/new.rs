@@ -9,6 +9,7 @@ use crate::ui::components::{Button, ButtonSize, ButtonVariant, Input};
 use fleet_core::{
     apply_profile_save_to_state, is_destination_unique, validate_profile_name, validate_repo_url,
 };
+use tracing::{error, info};
 
 #[component]
 pub fn NewProfile() -> Element {
@@ -44,6 +45,7 @@ pub fn NewProfile() -> Element {
         let destination = folder().trim().to_string();
 
         spawn(async move {
+            info!(op = "ui_profile_create", "profile create requested");
             let profile = fleet_core::Profile {
                 id: String::new(),
                 name: title,
@@ -56,6 +58,12 @@ pub fn NewProfile() -> Element {
 
             match bridge.core().profile_save_and_reassess(profile).await {
                 Ok(result) => {
+                    info!(
+                        op = "ui_profile_create",
+                        profile_id = %result.profile.id,
+                        outcome = "ok",
+                        "profile create succeeded"
+                    );
                     let saved = result.profile;
                     let (next_state, next_active) = apply_profile_save_to_state(
                         &(store.state)(),
@@ -73,7 +81,15 @@ pub fn NewProfile() -> Element {
                     }
                     let _ = nav.push(Route::Dashboard {});
                 }
-                Err(_) => {
+                Err(err) => {
+                    error!(
+                        op = "ui_profile_create",
+                        profile_id = "new",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "profile_save_failed",
+                        "profile create failed"
+                    );
                     // Keep user on page if save fails.
                 }
             }

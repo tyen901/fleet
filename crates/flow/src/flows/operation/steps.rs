@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedProfile {
@@ -32,11 +33,26 @@ pub(crate) fn resolve_profile(
     cfg: &FlowConfig,
     profile: &Profile,
 ) -> anyhow::Result<ResolvedProfile> {
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "resolve_profile",
+        phase = "validating",
+        "resolving profile context"
+    );
     let dest_path = profile.dest_path()?;
     profile.validated_source_kind()?;
     let paths =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
 
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "resolve_profile",
+        phase = "validating",
+        outcome = "ok",
+        "profile context resolved"
+    );
     Ok(ResolvedProfile { dest_path, paths })
 }
 
@@ -47,12 +63,27 @@ pub(crate) async fn scan_inventory(
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<InventoryScanSummary> {
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "scan_inventory",
+        phase = "scan",
+        "inventory scan step started"
+    );
     ensure_not_canceled(cancel)?;
 
     if !tokio::fs::try_exists(&resolved.dest_path).await? {
         sink.emit(FlowEventKind::InventoryStatus {
             status: fleet_domain::InventoryStatus::Missing,
         });
+        warn!(
+            flow_kind = "operation",
+            profile_id = %profile.id,
+            op = "scan_inventory",
+            outcome = "failed",
+            reason = "missing_destination",
+            "inventory scan destination missing"
+        );
         anyhow::bail!("destination path does not exist");
     }
 
@@ -155,7 +186,7 @@ pub(crate) async fn scan_inventory(
         inventory::SyncMode::DeltaSync => fleet_domain::inventory::InventoryScanMode::DeltaSync,
     };
 
-    Ok(InventoryScanSummary {
+    let summary = InventoryScanSummary {
         profile_id: profile.id.clone(),
         root_path: resolved.dest_path.to_string_lossy().to_string(),
         db_path: resolved.paths.inventory_db.to_string_lossy().to_string(),
@@ -163,7 +194,17 @@ pub(crate) async fn scan_inventory(
         files_seen: sync_result.files_seen,
         files_scanned: sync_result.files_scanned,
         bytes_scanned: sync_result.bytes_scanned,
-    })
+    };
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "scan_inventory",
+        phase = "scan",
+        outcome = "ok",
+        count = summary.files_scanned,
+        "inventory scan step finished"
+    );
+    Ok(summary)
 }
 
 pub(crate) async fn load_manifest(
@@ -173,16 +214,34 @@ pub(crate) async fn load_manifest(
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<fleet_manifest::DesiredManifest> {
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "load_manifest",
+        phase = "manifest",
+        "manifest load step started"
+    );
     ensure_not_canceled(cancel)?;
 
     let ProfileSourceKind::Http(repo_url) = profile.validated_source_kind()?;
-    fleet_manifest::load_desired_manifest(
+    let manifest = fleet_manifest::load_desired_manifest(
         repo_url,
         &resolved.paths.repo_cache,
         &cfg.downloads,
         download_event_sink(sink),
     )
-    .await
+    .await?;
+    let stats = fleet_manifest::manifest_stats(&manifest);
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "load_manifest",
+        phase = "manifest",
+        outcome = "ok",
+        count = stats.total_download_bytes,
+        "manifest load step finished"
+    );
+    Ok(manifest)
 }
 
 pub(crate) async fn run_flux_sync(
@@ -193,6 +252,13 @@ pub(crate) async fn run_flux_sync(
     sink: Arc<dyn EventSink>,
     enable_delete_plan: bool,
 ) -> anyhow::Result<fleet_flux::FluxSyncReport> {
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile.id,
+        op = "run_flux_sync",
+        phase = "syncing",
+        "flux sync step started"
+    );
     ensure_not_canceled(cancel)?;
 
     let flux_opts = fleet_flux::FluxSyncOptions {
@@ -224,7 +290,20 @@ pub(crate) async fn run_flux_sync(
         _ = cancel.cancelled() => {
             anyhow::bail!("canceled");
         }
-        result = &mut flux_fut => result,
+        result = &mut flux_fut => {
+            if let Ok(report) = &result {
+                info!(
+                    flow_kind = "operation",
+                    profile_id = %profile.id,
+                    op = "run_flux_sync",
+                    phase = "syncing",
+                    outcome = "ok",
+                    count = report.files_finalized,
+                    "flux sync step finished"
+                );
+            }
+            result
+        },
     }
 }
 
@@ -294,21 +373,45 @@ pub(crate) async fn apply_deletes(
     _sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<()> {
     if delete_paths.is_empty() {
+        debug!(
+            flow_kind = "operation",
+            profile_id = %profile_id,
+            op = "apply_deletes",
+            outcome = "noop",
+            "delete apply skipped because plan is empty"
+        );
         return Ok(());
     }
+    info!(
+        flow_kind = "operation",
+        profile_id = %profile_id,
+        op = "apply_deletes",
+        count = delete_paths.len(),
+        "delete apply step started"
+    );
 
     let dest_path = resolved.dest_path.clone();
     let flux_cache = resolved.paths.flux_cache.clone();
     let db_path = resolved.paths.inventory_db.clone();
-    let profile_id = profile_id.to_string();
+    let profile_id_for_log = profile_id.to_string();
+    let profile_id_for_prune = profile_id_for_log.clone();
     let prune_result = tokio::task::spawn_blocking(move || {
         let engine = fleet_flux::FluxEngine::new(flux_cache);
-        engine.prune_only(&dest_path, &db_path, &profile_id, delete_paths)
+        engine.prune_only(&dest_path, &db_path, &profile_id_for_prune, delete_paths)
     })
     .await;
 
     match prune_result {
-        Ok(Ok(())) => Ok(()),
+        Ok(Ok(())) => {
+            info!(
+                flow_kind = "operation",
+                profile_id = %profile_id_for_log,
+                op = "apply_deletes",
+                outcome = "ok",
+                "delete apply step finished"
+            );
+            Ok(())
+        }
         Ok(Err(e)) => Err(e),
         Err(join_err) => Err(anyhow::Error::new(join_err)),
     }
