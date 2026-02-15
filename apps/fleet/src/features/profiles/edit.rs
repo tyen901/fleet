@@ -10,6 +10,7 @@ use fleet_core::{
     apply_profile_save_to_state, is_destination_unique, validate_profile_name, validate_repo_url,
 };
 use icondata::{BsArrowLeft, BsChevronDown};
+use tracing::{error, info};
 
 #[component]
 pub fn EditProfile(id: String) -> Element {
@@ -88,6 +89,11 @@ pub fn EditProfile(id: String) -> Element {
             let pid = profile_id.clone();
             let saved_server_for_spawn = saved_server.clone();
             spawn(async move {
+                info!(
+                    op = "ui_profile_repo_servers",
+                    profile_id = %pid,
+                    "loading cached repo servers"
+                );
                 let servers = bridge
                     .core()
                     .profile_repo_servers(&pid)
@@ -163,8 +169,20 @@ pub fn EditProfile(id: String) -> Element {
         };
 
         spawn(async move {
+            let profile_id_for_log = next.id.clone();
+            info!(
+                op = "ui_profile_edit_save",
+                profile_id = %profile_id_for_log,
+                "profile edit save requested"
+            );
             match bridge.core().profile_save_and_reassess(next).await {
                 Ok(result) => {
+                    info!(
+                        op = "ui_profile_edit_save",
+                        profile_id = %result.profile.id,
+                        outcome = "ok",
+                        "profile edit save succeeded"
+                    );
                     let saved = result.profile;
                     let (next_state, next_active) = apply_profile_save_to_state(
                         &(store.state)(),
@@ -182,7 +200,15 @@ pub fn EditProfile(id: String) -> Element {
                     }
                     let _ = nav.push(Route::Dashboard {});
                 }
-                Err(_) => {
+                Err(err) => {
+                    error!(
+                        op = "ui_profile_edit_save",
+                        profile_id = %profile_id_for_log,
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "profile_save_failed",
+                        "profile edit save failed"
+                    );
                     // Keep user on page if save fails.
                 }
             }

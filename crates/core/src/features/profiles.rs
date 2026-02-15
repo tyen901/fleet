@@ -6,6 +6,7 @@ use fleet_domain::{Profile, ProfileId, ProfileSourceKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::PathBuf;
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ProfileSaveAndReassessResult {
@@ -16,23 +17,45 @@ pub struct ProfileSaveAndReassessResult {
 
 impl Core {
     pub async fn list_profiles(&self) -> anyhow::Result<ProfilesConfig> {
+        info!(op = "list_profiles", "profiles list requested");
         run_config_blocking(self.config_repo(), |c| c.load_profiles()).await
     }
 
     pub async fn load_profile(&self, profile_id: &ProfileId) -> anyhow::Result<Profile> {
+        info!(op = "load_profile", profile_id = %profile_id, "profile load requested");
         let pid = profile_id.clone();
-        run_config_blocking(self.config_repo(), move |c| {
+        let res = run_config_blocking(self.config_repo(), move |c| {
             let cfg = c.load_profiles()?;
             cfg.profiles
                 .into_iter()
                 .find(|p| p.id == pid)
                 .ok_or_else(|| anyhow::anyhow!("unknown profile id: {pid}"))
         })
-        .await
+        .await;
+        if res.is_err() {
+            warn!(
+                op = "load_profile",
+                profile_id = %profile_id,
+                outcome = "failed",
+                reason = "unknown_profile_id",
+                "profile load failed"
+            );
+        }
+        res
     }
 
     pub async fn save_profile(&self, profile: Profile) -> anyhow::Result<Profile> {
         let mut profile = profile;
+        let requested_profile_id = profile.id.trim().to_string();
+        info!(
+            op = "save_profile",
+            profile_id = if requested_profile_id.is_empty() {
+                "new"
+            } else {
+                requested_profile_id.as_str()
+            },
+            "profile save requested"
+        );
         profile.id = profile.id.trim().to_string();
         if profile.id.is_empty() {
             const ATTEMPTS: usize = 8;
@@ -62,16 +85,45 @@ impl Core {
 
             if let Some(id) = generated {
                 profile.id = id;
+                debug!(
+                    op = "save_profile",
+                    profile_id = %profile.id,
+                    outcome = "generated_id",
+                    "generated profile id"
+                );
             } else {
+                error!(
+                    op = "save_profile",
+                    profile_id = "new",
+                    outcome = "failed",
+                    reason = "id_generation_failed",
+                    "profile save failed while generating id"
+                );
                 anyhow::bail!("failed to generate unique profile id");
             }
         }
 
         profile.destination = profile.destination.trim().to_string();
         profile.source = profile.source.trim().to_string();
-        profile.validated_source_kind()?;
+        if let Err(err) = profile.validated_source_kind() {
+            error!(
+                op = "save_profile",
+                profile_id = %profile.id,
+                outcome = "failed",
+                reason = "invalid_repo_source",
+                "profile save validation failed"
+            );
+            debug!(
+                op = "save_profile",
+                profile_id = %profile.id,
+                error = %err,
+                "profile source validation details"
+            );
+            return Err(err);
+        }
 
-        let profile = run_config_blocking(self.config_repo(), move |config| {
+        let profile_id_for_log = profile.id.clone();
+        let res = run_config_blocking(self.config_repo(), move |config| {
             let mut cfg = config.load_profiles()?;
 
             let normalize_path = |path: &str| {
@@ -85,6 +137,13 @@ impl Core {
                     if existing.id != profile.id
                         && normalize_path(&existing.destination) == destination
                     {
+                        warn!(
+                            op = "save_profile",
+                            profile_id = %profile.id,
+                            outcome = "rejected",
+                            reason = "destination_in_use",
+                            "profile save rejected due to destination conflict"
+                        );
                         anyhow::bail!(
                             "destination_in_use: destination already used by profile {}",
                             existing.id
@@ -101,20 +160,68 @@ impl Core {
             config.save_profiles(&cfg)?;
             Ok::<_, anyhow::Error>(profile)
         })
-        .await?;
+        .await;
 
-        Ok(profile)
+        match res {
+            Ok(saved) => {
+                info!(
+                    op = "save_profile",
+                    profile_id = %saved.id,
+                    outcome = "ok",
+                    "profile save succeeded"
+                );
+                Ok(saved)
+            }
+            Err(err) => {
+                error!(
+                    op = "save_profile",
+                    profile_id = %profile_id_for_log,
+                    outcome = "failed",
+                    reason = "config_write_failed",
+                    "profile save failed"
+                );
+                debug!(
+                    op = "save_profile",
+                    profile_id = %profile_id_for_log,
+                    error = %err,
+                    "profile save error details"
+                );
+                Err(err)
+            }
+        }
     }
 
     pub async fn delete_profile(&self, profile_id: &ProfileId) -> anyhow::Result<()> {
+        info!(
+            op = "delete_profile",
+            profile_id = %profile_id,
+            "profile delete requested"
+        );
         let pid = profile_id.clone();
-        run_config_blocking(self.config_repo(), move |config| {
+        let res = run_config_blocking(self.config_repo(), move |config| {
             let mut cfg = config.load_profiles()?;
             cfg.profiles.retain(|p| p.id != pid);
             config.save_profiles(&cfg)?;
             Ok::<_, anyhow::Error>(())
         })
-        .await
+        .await;
+        if res.is_ok() {
+            info!(
+                op = "delete_profile",
+                profile_id = %profile_id,
+                outcome = "ok",
+                "profile delete succeeded"
+            );
+        } else {
+            error!(
+                op = "delete_profile",
+                profile_id = %profile_id,
+                outcome = "failed",
+                reason = "config_write_failed",
+                "profile delete failed"
+            );
+        }
+        res
     }
 
     pub async fn reset_profiles(&self) -> anyhow::Result<()> {
@@ -133,13 +240,24 @@ impl Core {
     }
 
     pub async fn profile_save(&self, profile: Profile) -> Result<Profile, crate::ApiError> {
+        let requested_profile_id = profile.id.clone();
         let saved = self.save_profile(profile.clone()).await.map_err(|e| {
-            let msg = e.to_string();
-            if let Some(rest) = msg.strip_prefix("destination_in_use:") {
-                crate::ApiError::new("destination_in_use", rest.trim().to_string())
-            } else {
-                crate::ApiError::new("error", msg)
-            }
+            let api_err = map_profile_save_error(&e);
+            error!(
+                op = "profile_save",
+                profile_id = if requested_profile_id.trim().is_empty() { "new" } else { requested_profile_id.as_str() },
+                outcome = "failed",
+                code = %api_err.code,
+                reason = "save_profile_failed",
+                "profile save API failed"
+            );
+            debug!(
+                op = "profile_save",
+                profile_id = if requested_profile_id.trim().is_empty() { "new" } else { requested_profile_id.as_str() },
+                error = %e,
+                "profile save API error details"
+            );
+            api_err
         })?;
 
         self.update_state(|state| {
@@ -149,6 +267,12 @@ impl Core {
                 crate::state::ProfileState::new(pid, fleet_domain::time::now_unix_ms())
             });
         });
+        info!(
+            op = "profile_save",
+            profile_id = %saved.id,
+            outcome = "ok",
+            "profile saved and state updated"
+        );
 
         Ok(saved)
     }
@@ -193,6 +317,11 @@ impl Core {
     }
 
     pub async fn profile_delete(&self, profile_id: ProfileId) -> Result<(), crate::ApiError> {
+        info!(
+            op = "profile_delete",
+            profile_id = %profile_id,
+            "profile delete API requested"
+        );
         self.delete_profile(&profile_id)
             .await
             .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
@@ -206,6 +335,12 @@ impl Core {
                 }
             }
         });
+        info!(
+            op = "profile_delete",
+            profile_id = %profile_id,
+            outcome = "ok",
+            "profile deleted and state updated"
+        );
 
         Ok(())
     }
@@ -331,10 +466,20 @@ fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64
     v.last_checked_ms = now_ms;
 }
 
+fn map_profile_save_error(err: &anyhow::Error) -> crate::ApiError {
+    let msg = err.to_string();
+    if let Some(rest) = msg.strip_prefix("destination_in_use:") {
+        crate::ApiError::new("destination_in_use", rest.trim().to_string())
+    } else {
+        crate::ApiError::new("error", msg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_profile_check_state, normalize_destination_for_compare, profile_path_context_changed,
+        clear_profile_check_state, map_profile_save_error, normalize_destination_for_compare,
+        profile_path_context_changed,
     };
     use crate::state::AppState;
     use fleet_domain::health::{
@@ -417,5 +562,13 @@ mod tests {
         assert!(updated.error.is_none());
         assert!(updated.active_operation.is_none());
         assert_eq!(updated.last_checked_ms, 42);
+    }
+
+    #[test]
+    fn map_profile_save_error_maps_destination_conflict_code() {
+        let err = anyhow::anyhow!("destination_in_use: destination already used by profile p2");
+        let api = map_profile_save_error(&err);
+        assert_eq!(api.code, "destination_in_use");
+        assert_eq!(api.message, "destination already used by profile p2");
     }
 }
