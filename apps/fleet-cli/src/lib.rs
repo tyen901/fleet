@@ -26,6 +26,9 @@ pub enum Commands {
     /// Repair local state and reconcile drift
     Repair { profile_id: String },
 
+    /// Check for unexpected files and optionally delete them
+    Clean { profile_id: String },
+
     /// Run a sync oneshot and print live progress
     Sync {
         profile_id: String,

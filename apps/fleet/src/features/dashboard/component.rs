@@ -13,7 +13,14 @@ use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use super::logic::{build_dashboard_model, server_join_args, DashboardActionId};
 use super::view::{DashboardHeader, StatusCard};
 
-fn run_action(action: DashboardActionId, bridge: FleetBridge, nav: Navigator, profile_id: String) {
+fn run_action(
+    action: DashboardActionId,
+    bridge: FleetBridge,
+    nav: Navigator,
+    profile_id: String,
+    sync_delete_pending: bool,
+    assessment_delete_pending: bool,
+) {
     match action {
         DashboardActionId::FixFolder => {
             info!(op = "dashboard_action", profile_id = %profile_id, action = "fix_folder", "dashboard action requested");
@@ -54,11 +61,20 @@ fn run_action(action: DashboardActionId, bridge: FleetBridge, nav: Navigator, pr
         DashboardActionId::ConfirmDelete => {
             info!(op = "dashboard_action", profile_id = %profile_id, action = "confirm_delete", "dashboard action requested");
             spawn(async move {
-                if let Err(err) = bridge
-                    .core()
-                    .sync_execute_pending_delete(profile_id.clone())
-                    .await
-                {
+                let result = if sync_delete_pending {
+                    bridge
+                        .core()
+                        .sync_execute_pending_delete(profile_id.clone())
+                        .await
+                } else if assessment_delete_pending {
+                    bridge
+                        .core()
+                        .assessment_delete_extra_files(profile_id.clone())
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
                     error!(
                         op = "dashboard_action",
                         profile_id = %profile_id,
@@ -74,11 +90,20 @@ fn run_action(action: DashboardActionId, bridge: FleetBridge, nav: Navigator, pr
         DashboardActionId::SkipDelete => {
             info!(op = "dashboard_action", profile_id = %profile_id, action = "skip_delete", "dashboard action requested");
             spawn(async move {
-                if let Err(err) = bridge
-                    .core()
-                    .sync_dismiss_pending_delete(profile_id.clone())
-                    .await
-                {
+                let result = if sync_delete_pending {
+                    bridge
+                        .core()
+                        .sync_dismiss_pending_delete(profile_id.clone())
+                        .await
+                } else if assessment_delete_pending {
+                    bridge
+                        .core()
+                        .assessment_dismiss_extra_files(profile_id.clone())
+                        .await
+                } else {
+                    Ok(())
+                };
+                if let Err(err) = result {
                     error!(
                         op = "dashboard_action",
                         profile_id = %profile_id,
@@ -145,8 +170,17 @@ pub fn Dashboard() -> Element {
 
     let launch_waiting = use_signal(|| false);
     let join_waiting = use_signal(|| false);
+    let mut show_cleanup_modal = use_signal(|| false);
+    let mut auto_sync_cleanup_signature = use_signal(|| None::<String>);
+    let mut auto_assessment_cleanup_signature = use_signal(|| None::<String>);
 
     let model = build_dashboard_model(&snapshot, &profile);
+    let auto_cleanup_unexpected_files = snapshot.settings.auto_cleanup_unexpected_files;
+    let sync_session_id = snapshot
+        .sync
+        .as_ref()
+        .filter(|s| s.profile_id == profile_id)
+        .map(|s| s.session_id);
 
     let nav_for_edit = nav;
     let edit_id = profile_id.clone();
@@ -159,14 +193,91 @@ pub fn Dashboard() -> Element {
     let bridge_for_action = bridge.clone();
     let nav_for_action = nav;
     let action_profile_id = profile_id.clone();
+    let sync_delete_pending_for_action = model.sync_delete_pending;
+    let assessment_delete_pending_for_action = model.assessment_delete_pending;
     let on_action = move |action: DashboardActionId| {
         run_action(
             action,
             bridge_for_action.clone(),
             nav_for_action,
             action_profile_id.clone(),
+            sync_delete_pending_for_action,
+            assessment_delete_pending_for_action,
         );
     };
+
+    let bridge_for_cleanup_modal = bridge.clone();
+    let cleanup_profile_id = profile_id.clone();
+    let on_cleanup_delete = move |_| {
+        show_cleanup_modal.set(false);
+        let bridge = bridge_for_cleanup_modal.clone();
+        let profile_id = cleanup_profile_id.clone();
+        spawn(async move {
+            if let Err(err) = bridge
+                .core()
+                .assessment_delete_extra_files(profile_id.clone())
+                .await
+            {
+                error!(
+                    op = "dashboard_action",
+                    profile_id = %profile_id,
+                    action = "cleanup_unexpected",
+                    outcome = "failed",
+                    code = %err.code,
+                    reason = "assessment_cleanup_failed",
+                    "dashboard cleanup unexpected action failed"
+                );
+            }
+        });
+    };
+
+    if auto_cleanup_unexpected_files {
+        if model.sync_delete_pending {
+            let signature = format!(
+                "sync:{}:{}",
+                sync_session_id.unwrap_or_default(),
+                model.pending_delete_paths.join("\n")
+            );
+            if auto_sync_cleanup_signature() != Some(signature.clone()) {
+                auto_sync_cleanup_signature.set(Some(signature));
+                let bridge = bridge.clone();
+                let profile_id = profile_id.clone();
+                spawn(async move {
+                    let _ = bridge.core().sync_execute_pending_delete(profile_id).await;
+                });
+            }
+        } else if auto_sync_cleanup_signature().is_some() {
+            auto_sync_cleanup_signature.set(None);
+        }
+
+        if !model.sync_delete_pending
+            && !model.operation_active
+            && !model.unexpected_delete_paths.is_empty()
+        {
+            let signature = model.unexpected_delete_paths.join("\n");
+            if auto_assessment_cleanup_signature() != Some(signature.clone()) {
+                auto_assessment_cleanup_signature.set(Some(signature));
+                show_cleanup_modal.set(false);
+                let bridge = bridge.clone();
+                let profile_id = profile_id.clone();
+                spawn(async move {
+                    let _ = bridge
+                        .core()
+                        .assessment_delete_extra_files(profile_id)
+                        .await;
+                });
+            }
+        } else if auto_assessment_cleanup_signature().is_some() {
+            auto_assessment_cleanup_signature.set(None);
+        }
+    } else {
+        if auto_sync_cleanup_signature().is_some() {
+            auto_sync_cleanup_signature.set(None);
+        }
+        if auto_assessment_cleanup_signature().is_some() {
+            auto_assessment_cleanup_signature.set(None);
+        }
+    }
 
     let bridge_for_launch = bridge.clone();
     let toast_for_launch = toast_store.clone();
@@ -267,10 +378,16 @@ pub fn Dashboard() -> Element {
                         checking: model.checking,
                         progress: model.progress,
                         issue_messages: model.issue_messages,
+                        pending_delete_paths: model.pending_delete_paths,
+                        unexpected_delete_paths: model.unexpected_delete_paths,
+                        show_cleanup_modal: show_cleanup_modal(),
                         missing_destination_hint,
                         needs_baseline_hint,
                         action_set: model.action_set,
                         on_action,
+                        on_open_cleanup: move |_| show_cleanup_modal.set(true),
+                        on_close_cleanup: move |_| show_cleanup_modal.set(false),
+                        on_cleanup_delete,
                     }
                 }
             }

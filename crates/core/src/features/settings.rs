@@ -10,6 +10,7 @@ pub enum SettingsField {
     Arma3LaunchMethod,
     Arma3CustomLaunchTemplate,
     Arma3DefaultArgs,
+    AutoCleanupUnexpectedFiles,
     TelemetryConsent,
 }
 
@@ -148,6 +149,9 @@ fn apply_field_default(settings: &mut AppSettings, defaults: &AppSettings, field
         SettingsField::Arma3DefaultArgs => {
             settings.arma3_default_args = defaults.arma3_default_args.clone();
         }
+        SettingsField::AutoCleanupUnexpectedFiles => {
+            settings.auto_cleanup_unexpected_files = defaults.auto_cleanup_unexpected_files;
+        }
         SettingsField::TelemetryConsent => {
             settings.telemetry_consent = defaults.telemetry_consent;
         }
@@ -199,6 +203,7 @@ mod tests {
             arma3_launch_method: Arma3LaunchMethod::Custom,
             arma3_custom_launch_template: "custom-run $ARGS $MODS".to_string(),
             arma3_default_args: "-window".to_string(),
+            auto_cleanup_unexpected_files: true,
             telemetry_consent: Some(false),
             ..normalize_settings(AppSettings::default())
         }
@@ -277,6 +282,21 @@ mod tests {
         let mut settings = non_default_settings();
         apply_field_default(&mut settings, &defaults, SettingsField::TelemetryConsent);
         assert_eq!(settings.telemetry_consent, defaults.telemetry_consent);
+    }
+
+    #[test]
+    fn reset_auto_cleanup_unexpected_files_field_restores_default() {
+        let defaults = effective_settings_defaults();
+        let mut settings = non_default_settings();
+        apply_field_default(
+            &mut settings,
+            &defaults,
+            SettingsField::AutoCleanupUnexpectedFiles,
+        );
+        assert_eq!(
+            settings.auto_cleanup_unexpected_files,
+            defaults.auto_cleanup_unexpected_files
+        );
     }
 
     #[test]

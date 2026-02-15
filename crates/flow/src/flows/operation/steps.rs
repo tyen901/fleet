@@ -346,8 +346,9 @@ pub(crate) async fn await_delete_confirmation(
     sink: Arc<dyn EventSink>,
     paths: Vec<PathBuf>,
 ) -> anyhow::Result<bool> {
+    let prompt = format_delete_confirmation_prompt(&paths);
     sink.emit(FlowEventKind::InputRequired {
-        prompt: format!("Delete {} files?", paths.len()),
+        prompt,
         request: FlowRequest::ConfirmDeletes { paths },
     });
 
@@ -364,6 +365,21 @@ pub(crate) async fn await_delete_confirmation(
     };
 
     Ok(confirm)
+}
+
+fn format_delete_confirmation_prompt(paths: &[PathBuf]) -> String {
+    let mut prompt = format!("Delete {} files?", paths.len());
+    if paths.is_empty() {
+        return prompt;
+    }
+
+    for path in paths {
+        prompt.push('\n');
+        prompt.push_str("- ");
+        prompt.push_str(path.to_string_lossy().as_ref());
+    }
+
+    prompt
 }
 
 pub(crate) async fn apply_deletes(

@@ -31,6 +31,8 @@ pub struct ProfileState {
     pub profile_id: ProfileId,
     #[serde(default)]
     pub assessment: Option<ProfileAssessmentReport>,
+    #[serde(default)]
+    pub assessment_delete_pending_paths: Vec<String>,
     pub last_checked_ms: u64,
     #[serde(default)]
     pub active_operation: Option<OperationKind>,
@@ -42,6 +44,7 @@ impl ProfileState {
         Self {
             profile_id,
             assessment: None,
+            assessment_delete_pending_paths: Vec::new(),
             last_checked_ms: now_ms,
             active_operation: None,
             error: None,
@@ -77,6 +80,9 @@ pub struct SyncView {
     /// Count of planned delete paths (for UI display).
     #[serde(default)]
     pub delete_paths_count: u64,
+    /// Planned delete paths (for UI display/confirmation).
+    #[serde(default)]
+    pub delete_paths: Vec<String>,
 
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
@@ -97,6 +103,7 @@ impl SyncView {
             inventory_stage: None,
             delete_pending: false,
             delete_paths_count: 0,
+            delete_paths: Vec::new(),
             started_at_unix_ms: now_ms,
             updated_at_unix_ms: now_ms,
             summary: None,

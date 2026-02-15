@@ -276,10 +276,10 @@ pub struct AppSettings {
     pub arma3_launch_method: Arma3LaunchMethod,
     #[serde(default = "default_arma3_custom_launch_template")]
     pub arma3_custom_launch_template: String,
-    /// If true, Fleet prompts to confirm pruning files after sync completes.
-    /// If false, Fleet prunes automatically (when pruning is enabled).
-    #[serde(default = "default_true")]
-    pub confirm_prune_after_sync: bool,
+    /// If true, Desktop auto-cleans unexpected files detected during checks/sync flows.
+    /// If false, Desktop prompts before cleanup.
+    #[serde(default)]
+    pub auto_cleanup_unexpected_files: bool,
     /// If true, the UI shows profile `icon.png` images in the sidebar/dashboard.
     /// If false, the UI falls back to text.
     #[serde(default = "default_true")]
@@ -321,7 +321,7 @@ impl Default for AppSettings {
             arma3_game_dir: String::new(),
             arma3_launch_method: default_arma3_launch_method(),
             arma3_custom_launch_template: default_arma3_custom_launch_template(),
-            confirm_prune_after_sync: true,
+            auto_cleanup_unexpected_files: false,
             show_profile_icons: true,
             telemetry_consent: Some(true),
             debug_log_to_disk: false,

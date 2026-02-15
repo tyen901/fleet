@@ -85,6 +85,10 @@ pub(crate) struct DashboardModel {
     pub can_launch: bool,
     pub sync_update_status: Option<String>,
     pub issue_messages: Vec<String>,
+    pub sync_delete_pending: bool,
+    pub assessment_delete_pending: bool,
+    pub pending_delete_paths: Vec<String>,
+    pub unexpected_delete_paths: Vec<String>,
     pub action_set: ActionSet,
     pub progress: SyncProgressModel,
 }
@@ -160,8 +164,31 @@ pub(crate) fn build_dashboard_model(snapshot: &AppState, profile: &Profile) -> D
     );
     let speed_text = format_progress_speed(bytes_per_sec);
 
-    let delete_pending = sync_for_profile.map(|s| s.delete_pending).unwrap_or(false);
-    let delete_paths_count = sync_for_profile.map(|s| s.delete_paths_count).unwrap_or(0);
+    let sync_delete_pending = sync_for_profile.map(|s| s.delete_pending).unwrap_or(false);
+    let sync_delete_paths_count = sync_for_profile.map(|s| s.delete_paths_count).unwrap_or(0);
+    let sync_pending_delete_paths = sync_for_profile
+        .map(|s| s.delete_paths.clone())
+        .unwrap_or_default();
+    let assessment_pending_delete_paths = profile_state
+        .map(|s| s.assessment_delete_pending_paths.clone())
+        .unwrap_or_default();
+    let unexpected_delete_paths = assessment
+        .as_ref()
+        .map(|a| a.unexpected_delete_paths.clone())
+        .unwrap_or_default();
+    let assessment_delete_pending =
+        !sync_delete_pending && !assessment_pending_delete_paths.is_empty();
+    let delete_pending = sync_delete_pending || assessment_delete_pending;
+    let delete_paths_count = if sync_delete_pending {
+        sync_delete_paths_count
+    } else {
+        assessment_pending_delete_paths.len() as u64
+    };
+    let pending_delete_paths = if sync_delete_pending {
+        sync_pending_delete_paths
+    } else {
+        assessment_pending_delete_paths
+    };
 
     let can_launch = can_launch_for_health(&local_health);
     let sync_update_status = sync_update_status_label(&remote_freshness);
@@ -192,6 +219,10 @@ pub(crate) fn build_dashboard_model(snapshot: &AppState, profile: &Profile) -> D
         can_launch,
         sync_update_status,
         issue_messages,
+        sync_delete_pending,
+        assessment_delete_pending,
+        pending_delete_paths,
+        unexpected_delete_paths,
         action_set,
         progress: SyncProgressModel {
             percent: progress_percent,
@@ -502,6 +533,10 @@ pub(crate) fn inventory_issue_messages(
                 RemoteFreshnessState::NotRelevant | RemoteFreshnessState::UpToDate => {}
             },
         }
+
+        if !report.unexpected_delete_paths.is_empty() {
+            issues.push("Unexpected files: cleanup recommended.".to_string());
+        }
     }
 
     if let Some(err) = profile_error {
@@ -528,12 +563,13 @@ pub(crate) fn can_launch_for_health(local_health: &LocalHealthState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_launch_for_health, derive_action_set, derive_transfer_progress,
+        build_dashboard_model, can_launch_for_health, derive_action_set, derive_transfer_progress,
         format_hash_files_label, format_progress_count, format_progress_speed,
         inventory_issue_messages, sync_update_status_label, DashboardActionId, ProgressDisplayMode,
     };
     use fleet_core::{
-        InventoryScanStage, LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState,
+        AppState, InventoryScanStage, LocalHealthState, Profile, ProfileAssessmentReport,
+        RemoteFreshnessState,
     };
 
     #[test]
@@ -543,10 +579,27 @@ mod tests {
             local_health: LocalHealthState::LocalStateMissing,
             remote_freshness: RemoteFreshnessState::Unknown,
             checked_at_unix_ms: 1,
+            unexpected_delete_paths: Vec::new(),
         };
 
         let issues = inventory_issue_messages(Some(&report), None, None, false);
         assert_eq!(issues, vec!["Local state is missing. Run Repair."]);
+    }
+
+    #[test]
+    fn issue_messages_include_unexpected_files_warning() {
+        let report = ProfileAssessmentReport {
+            profile_id: "p1".to_string(),
+            local_health: LocalHealthState::LocalDrift,
+            remote_freshness: RemoteFreshnessState::Unknown,
+            checked_at_unix_ms: 1,
+            unexpected_delete_paths: vec!["extra.txt".to_string()],
+        };
+
+        let issues = inventory_issue_messages(Some(&report), None, None, false);
+        assert!(issues
+            .iter()
+            .any(|issue| issue == "Unexpected files: cleanup recommended."));
     }
 
     #[test]
@@ -711,5 +764,89 @@ mod tests {
         );
         assert_eq!(format_progress_speed(0), "--");
         assert_eq!(format_progress_speed(2048), "2.00 KB/s");
+    }
+
+    #[test]
+    fn build_dashboard_model_delete_prompt_priority_prefers_sync_over_assessment() {
+        let profile = Profile {
+            id: "p1".to_string(),
+            name: "Profile".to_string(),
+            source: "https://example.com/repo.json".to_string(),
+            destination: "/tmp/dest".to_string(),
+            ..Default::default()
+        };
+        let mut state = AppState::default();
+        state.profiles.insert(profile.id.clone(), profile.clone());
+        state
+            .profile_states
+            .entry(profile.id.clone())
+            .or_insert_with(|| fleet_core::ProfileState::new(profile.id.clone(), 1));
+        let profile_state = state
+            .profile_states
+            .get_mut(&profile.id)
+            .expect("profile state");
+        profile_state.assessment = Some(ProfileAssessmentReport {
+            profile_id: profile.id.clone(),
+            local_health: LocalHealthState::LocalDrift,
+            remote_freshness: RemoteFreshnessState::Unknown,
+            checked_at_unix_ms: 1,
+            unexpected_delete_paths: vec!["extra.txt".to_string()],
+        });
+        profile_state.assessment_delete_pending_paths = vec!["extra.txt".to_string()];
+
+        let model = build_dashboard_model(&state, &profile);
+        assert!(model.assessment_delete_pending);
+        assert!(!model.sync_delete_pending);
+        assert_eq!(model.pending_delete_paths, vec!["extra.txt".to_string()]);
+        assert_eq!(model.unexpected_delete_paths, vec!["extra.txt".to_string()]);
+        assert_eq!(
+            model.action_set.primary.expect("primary").id,
+            DashboardActionId::ConfirmDelete
+        );
+
+        state
+            .profile_states
+            .entry(profile.id.clone())
+            .or_insert_with(|| fleet_core::ProfileState::new(profile.id.clone(), 1));
+        let profile_state = state
+            .profile_states
+            .get_mut(&profile.id)
+            .expect("profile state");
+        profile_state.assessment = Some(ProfileAssessmentReport {
+            profile_id: profile.id.clone(),
+            local_health: LocalHealthState::LocalDrift,
+            remote_freshness: RemoteFreshnessState::Unknown,
+            checked_at_unix_ms: 1,
+            unexpected_delete_paths: vec!["from-assess.txt".to_string()],
+        });
+        profile_state.assessment_delete_pending_paths = vec!["from-assess.txt".to_string()];
+        state.sync = Some(fleet_core::SyncView {
+            session_id: 1,
+            profile_id: profile.id.clone(),
+            status: fleet_core::SyncStatus::Running,
+            phase: fleet_core::SyncPhase::AwaitingDeleteDecision,
+            progress: Default::default(),
+            message: None,
+            inventory_stage: None,
+            delete_pending: true,
+            delete_paths_count: 1,
+            delete_paths: vec!["from-sync.txt".to_string()],
+            started_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            summary: None,
+            error: None,
+        });
+
+        let model = build_dashboard_model(&state, &profile);
+        assert!(model.sync_delete_pending);
+        assert!(!model.assessment_delete_pending);
+        assert_eq!(
+            model.pending_delete_paths,
+            vec!["from-sync.txt".to_string()]
+        );
+        assert_eq!(
+            model.unexpected_delete_paths,
+            vec!["from-assess.txt".to_string()]
+        );
     }
 }

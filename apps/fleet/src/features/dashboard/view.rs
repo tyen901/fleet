@@ -69,15 +69,27 @@ pub(crate) struct StatusCardProps {
     pub checking: bool,
     pub progress: SyncProgressModel,
     pub issue_messages: Vec<String>,
+    pub pending_delete_paths: Vec<String>,
+    pub unexpected_delete_paths: Vec<String>,
+    pub show_cleanup_modal: bool,
     pub missing_destination_hint: bool,
     pub needs_baseline_hint: bool,
     pub action_set: ActionSet,
     pub on_action: EventHandler<DashboardActionId>,
+    pub on_open_cleanup: EventHandler<MouseEvent>,
+    pub on_close_cleanup: EventHandler<MouseEvent>,
+    pub on_cleanup_delete: EventHandler<MouseEvent>,
 }
 
 #[component]
 pub(crate) fn StatusCard(props: StatusCardProps) -> Element {
     let on_action = props.on_action;
+    let cleanup_count = props.unexpected_delete_paths.len() as u64;
+    let cleanup_delete_label = if cleanup_count == 1 {
+        "Delete 1 file".to_string()
+    } else {
+        format!("Delete {cleanup_count} files")
+    };
 
     rsx! {
         div { class: "status-card",
@@ -115,6 +127,26 @@ pub(crate) fn StatusCard(props: StatusCardProps) -> Element {
                     }
                 }
             }
+            if !props.pending_delete_paths.is_empty() {
+                div { class: "status-delete-list",
+                    div { class: "status-delete-list__title", "Files queued for delete" }
+                    ul { class: "status-delete-list__items",
+                        for path in props.pending_delete_paths.iter() {
+                            li { "{path}" }
+                        }
+                    }
+                }
+            }
+            if !props.unexpected_delete_paths.is_empty() {
+                div { class: "status-unexpected-actions",
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        size: ButtonSize::Sm,
+                        onclick: move |evt| props.on_open_cleanup.call(evt),
+                        "Review Unexpected Files"
+                    }
+                }
+            }
             if props.missing_destination_hint {
                 div { class: "status-card__hint",
                     "Destination folder not found. Edit the profile to choose a valid folder."
@@ -149,6 +181,42 @@ pub(crate) fn StatusCard(props: StatusCardProps) -> Element {
                         disabled: action.is_disabled(),
                         onclick: move |_| props.on_action.call(action.id),
                         "{action.label}"
+                    }
+                }
+            }
+            if props.show_cleanup_modal {
+                div { class: "cleanup-modal",
+                    button {
+                        class: "cleanup-modal__backdrop",
+                        aria_label: "Close cleanup dialog",
+                        onclick: move |evt| props.on_close_cleanup.call(evt),
+                    }
+                    div { class: "cleanup-modal__panel",
+                        h3 { class: "cleanup-modal__title", "Delete Unexpected Files" }
+                        p { class: "cleanup-modal__subtitle",
+                            "These files are not expected by the current profile inventory."
+                        }
+                        div { class: "cleanup-modal__list",
+                            ul {
+                                for path in props.unexpected_delete_paths.iter() {
+                                    li { "{path}" }
+                                }
+                            }
+                        }
+                        div { class: "cleanup-modal__actions",
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Lg,
+                                onclick: move |evt| props.on_close_cleanup.call(evt),
+                                "Cancel"
+                            }
+                            Button {
+                                variant: ButtonVariant::Outline,
+                                size: ButtonSize::Lg,
+                                onclick: move |evt| props.on_cleanup_delete.call(evt),
+                                "{cleanup_delete_label}"
+                            }
+                        }
                     }
                 }
             }
