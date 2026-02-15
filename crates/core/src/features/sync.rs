@@ -5,20 +5,64 @@ use fleet_flow::FlowInput;
 
 impl Core {
     pub async fn start_sync(&self, profile_id: ProfileId) -> Result<u64, ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            profile_id = %profile_id,
+            op = "start_sync",
+            "sync requested"
+        );
         let (_, session_id) = self
             .start_flow_session(&profile_id, FlowStart::Sync)
             .await?;
+        tracing::info!(
+            flow_kind = "sync",
+            profile_id = %profile_id,
+            session_id = session_id,
+            op = "start_sync",
+            outcome = "ok",
+            "sync session started"
+        );
         Ok(session_id)
     }
 
     pub async fn send_flow_input(&self, session_id: u64, input: FlowInput) -> Result<(), ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            session_id = session_id,
+            op = "send_flow_input",
+            "sync flow input requested"
+        );
         self.flow()
             .send_input(session_id, input)
             .await
-            .map_err(|e| ApiError::new("pipeline_error", e.to_string()))
+            .map_err(|e| {
+                tracing::error!(
+                    flow_kind = "sync",
+                    session_id = session_id,
+                    op = "send_flow_input",
+                    outcome = "failed",
+                    code = "pipeline_error",
+                    reason = "input_send_failed",
+                    "sync flow input failed"
+                );
+                tracing::debug!(
+                    flow_kind = "sync",
+                    session_id = session_id,
+                    op = "send_flow_input",
+                    error = %e,
+                    "sync flow input error details"
+                );
+                ApiError::new("pipeline_error", e.to_string())
+            })
     }
 
     pub async fn sync_execute_pending_delete(&self, profile_id: ProfileId) -> Result<(), ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            profile_id = %profile_id,
+            op = "confirm_delete",
+            "confirm delete requested"
+        );
         let session_id = self
             .read_state(|state| {
                 state
@@ -32,7 +76,27 @@ impl Core {
         self.flow()
             .send_input(session_id, FlowInput::ConfirmDeletes { confirm: true })
             .await
-            .map_err(|e| ApiError::new("pipeline_error", e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    flow_kind = "sync",
+                    profile_id = %profile_id,
+                    session_id = session_id,
+                    op = "confirm_delete",
+                    outcome = "failed",
+                    code = "pipeline_error",
+                    reason = "confirm_send_failed",
+                    "confirm delete failed"
+                );
+                tracing::debug!(
+                    flow_kind = "sync",
+                    profile_id = %profile_id,
+                    session_id = session_id,
+                    op = "confirm_delete",
+                    error = %e,
+                    "confirm delete error details"
+                );
+                ApiError::new("pipeline_error", e.to_string())
+            })?;
 
         self.update_state(|state| {
             if let Some(sync) = state.sync.as_mut() {
@@ -48,6 +112,12 @@ impl Core {
     }
 
     pub async fn sync_dismiss_pending_delete(&self, profile_id: ProfileId) -> Result<(), ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            profile_id = %profile_id,
+            op = "skip_delete",
+            "skip delete requested"
+        );
         let session_id = self.read_state(|state| {
             state
                 .sync
@@ -95,6 +165,13 @@ impl Core {
     }
 
     pub async fn sync_cancel(&self, profile_id: ProfileId) -> Result<(), ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            profile_id = %profile_id,
+            op = "cancel",
+            outcome = "requested",
+            "sync cancel requested"
+        );
         let session_id = self.read_state(|state| {
             state
                 .sync
@@ -122,6 +199,13 @@ impl Core {
     }
 
     pub fn cancel_session(&self, session_id: u64) -> Result<(), ApiError> {
+        tracing::info!(
+            flow_kind = "sync",
+            session_id = session_id,
+            op = "cancel",
+            outcome = "requested",
+            "session cancel requested"
+        );
         self.flow().cancel_session(session_id);
         Ok(())
     }

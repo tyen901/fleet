@@ -16,31 +16,95 @@ use super::view::{DashboardHeader, StatusCard};
 fn run_action(action: DashboardActionId, bridge: FleetBridge, nav: Navigator, profile_id: String) {
     match action {
         DashboardActionId::FixFolder => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "fix_folder", "dashboard action requested");
             let _ = nav.push(Route::EditProfile { id: profile_id });
         }
         DashboardActionId::Sync => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "sync", "dashboard action requested");
             spawn(async move {
-                let _ = bridge.core().start_sync(profile_id).await;
+                if let Err(err) = bridge.core().start_sync(profile_id.clone()).await {
+                    error!(
+                        op = "dashboard_action",
+                        profile_id = %profile_id,
+                        action = "sync",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "start_sync_failed",
+                        "dashboard sync action failed"
+                    );
+                }
             });
         }
         DashboardActionId::Repair => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "repair", "dashboard action requested");
             spawn(async move {
-                let _ = bridge.core().start_repair(profile_id).await;
+                if let Err(err) = bridge.core().start_repair(profile_id.clone()).await {
+                    error!(
+                        op = "dashboard_action",
+                        profile_id = %profile_id,
+                        action = "repair",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "start_repair_failed",
+                        "dashboard repair action failed"
+                    );
+                }
             });
         }
         DashboardActionId::ConfirmDelete => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "confirm_delete", "dashboard action requested");
             spawn(async move {
-                let _ = bridge.core().sync_execute_pending_delete(profile_id).await;
+                if let Err(err) = bridge
+                    .core()
+                    .sync_execute_pending_delete(profile_id.clone())
+                    .await
+                {
+                    error!(
+                        op = "dashboard_action",
+                        profile_id = %profile_id,
+                        action = "confirm_delete",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "confirm_delete_failed",
+                        "dashboard confirm delete action failed"
+                    );
+                }
             });
         }
         DashboardActionId::SkipDelete => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "skip_delete", "dashboard action requested");
             spawn(async move {
-                let _ = bridge.core().sync_dismiss_pending_delete(profile_id).await;
+                if let Err(err) = bridge
+                    .core()
+                    .sync_dismiss_pending_delete(profile_id.clone())
+                    .await
+                {
+                    error!(
+                        op = "dashboard_action",
+                        profile_id = %profile_id,
+                        action = "skip_delete",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "skip_delete_failed",
+                        "dashboard skip delete action failed"
+                    );
+                }
             });
         }
         DashboardActionId::RetryCheck | DashboardActionId::CheckUpdates => {
+            info!(op = "dashboard_action", profile_id = %profile_id, action = "check", "dashboard action requested");
             spawn(async move {
-                let _ = bridge.core().start_check(profile_id).await;
+                if let Err(err) = bridge.core().start_check(profile_id.clone()).await {
+                    error!(
+                        op = "dashboard_action",
+                        profile_id = %profile_id,
+                        action = "check",
+                        outcome = "failed",
+                        code = %err.code,
+                        reason = "start_check_failed",
+                        "dashboard check action failed"
+                    );
+                }
             });
         }
     }

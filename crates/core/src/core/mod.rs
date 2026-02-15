@@ -1,4 +1,5 @@
 mod await_session;
+pub(crate) mod flow_logging;
 mod flow_system;
 mod runtime;
 
