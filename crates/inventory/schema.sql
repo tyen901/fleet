@@ -34,7 +34,6 @@ CREATE TABLE IF NOT EXISTS files (
   rel_path    TEXT NOT NULL,
   length      INTEGER NOT NULL,
   checksum    TEXT,
-  file_type   TEXT,
   PRIMARY KEY(root_id, rel_path),
   FOREIGN KEY(root_id) REFERENCES roots(id) ON DELETE CASCADE
 );

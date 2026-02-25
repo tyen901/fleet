@@ -1,39 +1,37 @@
-use fleet_core::{Core, FlowResult, SyncSummary};
+use fleet_core::{Core, OperationKind};
 
-use super::flow_run::{run_flow_session, DeletePolicy, FlowOutput, FlowRunOptions};
+use super::flow_run::{run_sync_session, FlowOutput, FlowRunOptions};
 use super::load_profile;
 
-pub async fn run(
-    core: &Core,
-    profile_id: &str,
-    no_progress: bool,
-    no_delete: bool,
-) -> anyhow::Result<()> {
+pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Result<()> {
     let profile = load_profile(core, profile_id).await?;
-    let session_id = core
-        .start_sync(profile.id.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
+    let mut session_id = None;
+    for _ in 0..10 {
+        match core
+            .start_operation(profile.id.clone(), OperationKind::Sync)
+            .await
+        {
+            Ok(id) => {
+                session_id = Some(id);
+                break;
+            }
+            Err(e) if e.message.contains("already running for this profile") => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(anyhow::anyhow!("{}: {}", e.code, e.message)),
+        }
+    }
+    let session_id = session_id
+        .ok_or_else(|| anyhow::anyhow!("pipeline_error: timed out waiting to start sync"))?;
 
-    let sum: SyncSummary = match run_flow_session(
+    let sum = run_sync_session(
         core,
         session_id,
         FlowRunOptions {
-            delete_policy: if no_delete {
-                DeletePolicy::AlwaysReject
-            } else {
-                DeletePolicy::Prompt
-            },
             output: FlowOutput::Progress { no_progress },
         },
     )
-    .await?
-    {
-        FlowResult::Sync(summary) => summary,
-        FlowResult::Repair(_) | FlowResult::Check(_) => {
-            return Err(anyhow::anyhow!("unexpected flow result"));
-        }
-    };
+    .await?;
 
     println!("---");
     println!("done");

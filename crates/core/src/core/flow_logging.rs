@@ -1,31 +1,38 @@
+use fleet_domain::health::OperationKind;
 use fleet_domain::ProfileId;
-use fleet_flow::FlowKind;
 
-pub(crate) fn flow_kind_label(kind: FlowKind) -> &'static str {
+pub(crate) fn operation_kind_label(kind: OperationKind) -> &'static str {
     match kind {
-        FlowKind::Sync => "sync",
-        FlowKind::Repair => "repair",
-        FlowKind::Check => "check",
+        OperationKind::Sync => "sync",
+        OperationKind::Repair => "repair",
+        OperationKind::CheckLocal => "check_local",
+        OperationKind::RebuildInventory => "rebuild_inventory",
+        OperationKind::CheckRemote => "check_remote",
+        OperationKind::Clean => "clean",
     }
 }
 
-pub(crate) fn log_flow_start_request(profile_id: &str, flow_kind: FlowKind, op: &str) {
+pub(crate) fn log_operation_start_request(
+    profile_id: &str,
+    operation_kind: OperationKind,
+    op: &str,
+) {
     tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         op = op,
         "flow start requested"
     );
 }
 
-pub(crate) fn log_flow_spawn_success(
+pub(crate) fn log_operation_spawn_success(
     profile_id: &str,
-    flow_kind: FlowKind,
+    operation_kind: OperationKind,
     session_id: u64,
     op: &str,
 ) {
     tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         session_id = session_id,
         op = op,
@@ -34,15 +41,15 @@ pub(crate) fn log_flow_spawn_success(
     );
 }
 
-pub(crate) fn log_flow_spawn_failure(
+pub(crate) fn log_operation_spawn_failure(
     profile_id: &str,
-    flow_kind: FlowKind,
+    operation_kind: OperationKind,
     op: &str,
     code: &str,
     reason: &str,
 ) {
     tracing::error!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         op = op,
         outcome = "failed",
@@ -52,13 +59,13 @@ pub(crate) fn log_flow_spawn_failure(
     );
 }
 
-pub(crate) fn log_session_spawn_requested(
+pub(crate) fn log_operation_spawn_requested(
     profile_id: &ProfileId,
-    flow_kind: FlowKind,
+    operation_kind: OperationKind,
     session_id: u64,
 ) {
     tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         session_id = session_id,
         op = "spawn",
@@ -66,9 +73,12 @@ pub(crate) fn log_session_spawn_requested(
     );
 }
 
-pub(crate) fn log_session_rejected_duplicate(profile_id: &ProfileId, flow_kind: FlowKind) {
+pub(crate) fn log_operation_rejected_duplicate(
+    profile_id: &ProfileId,
+    operation_kind: OperationKind,
+) {
     tracing::warn!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         op = "spawn",
         outcome = "rejected",
@@ -77,9 +87,13 @@ pub(crate) fn log_session_rejected_duplicate(profile_id: &ProfileId, flow_kind: 
     );
 }
 
-pub(crate) fn log_session_started(profile_id: &ProfileId, flow_kind: FlowKind, session_id: u64) {
+pub(crate) fn log_operation_started(
+    profile_id: &ProfileId,
+    operation_kind: OperationKind,
+    session_id: u64,
+) {
     tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         session_id = session_id,
         op = "start",
@@ -88,40 +102,13 @@ pub(crate) fn log_session_started(profile_id: &ProfileId, flow_kind: FlowKind, s
     );
 }
 
-pub(crate) fn log_session_input_routed(
+pub(crate) fn log_operation_cancel_requested(
     profile_id: &ProfileId,
-    flow_kind: FlowKind,
-    session_id: u64,
-    op: &str,
-) {
-    tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
-        profile_id = %profile_id,
-        session_id = session_id,
-        op = op,
-        outcome = "ok",
-        "flow input routed"
-    );
-}
-
-pub(crate) fn log_session_input_rejected(session_id: u64, op: &str, reason: &str) {
-    tracing::warn!(
-        flow_kind = "unknown",
-        session_id = session_id,
-        op = op,
-        outcome = "rejected",
-        reason = reason,
-        "flow input rejected"
-    );
-}
-
-pub(crate) fn log_session_cancel_requested(
-    profile_id: &ProfileId,
-    flow_kind: FlowKind,
+    operation_kind: OperationKind,
     session_id: u64,
 ) {
     tracing::info!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         session_id = session_id,
         op = "cancel",
@@ -130,7 +117,7 @@ pub(crate) fn log_session_cancel_requested(
     );
 }
 
-pub(crate) fn log_session_cancel_unknown(session_id: u64) {
+pub(crate) fn log_operation_cancel_unknown(session_id: u64) {
     tracing::warn!(
         flow_kind = "unknown",
         session_id = session_id,
@@ -143,14 +130,14 @@ pub(crate) fn log_session_cancel_unknown(session_id: u64) {
 
 pub(crate) fn log_terminal_result(
     profile_id: &ProfileId,
-    flow_kind: FlowKind,
+    operation_kind: OperationKind,
     session_id: u64,
     outcome: &'static str,
     reason: Option<&str>,
 ) {
     match outcome {
         "failed" => tracing::error!(
-            flow_kind = flow_kind_label(flow_kind),
+            flow_kind = operation_kind_label(operation_kind),
             profile_id = %profile_id,
             session_id = session_id,
             op = "terminal",
@@ -159,7 +146,7 @@ pub(crate) fn log_terminal_result(
             "flow session terminated"
         ),
         _ => tracing::info!(
-            flow_kind = flow_kind_label(flow_kind),
+            flow_kind = operation_kind_label(operation_kind),
             profile_id = %profile_id,
             session_id = session_id,
             op = "terminal",
@@ -170,9 +157,13 @@ pub(crate) fn log_terminal_result(
     }
 }
 
-pub(crate) fn log_session_cleanup(profile_id: &ProfileId, flow_kind: FlowKind, session_id: u64) {
+pub(crate) fn log_operation_cleanup(
+    profile_id: &ProfileId,
+    operation_kind: OperationKind,
+    session_id: u64,
+) {
     tracing::debug!(
-        flow_kind = flow_kind_label(flow_kind),
+        flow_kind = operation_kind_label(operation_kind),
         profile_id = %profile_id,
         session_id = session_id,
         op = "cleanup",

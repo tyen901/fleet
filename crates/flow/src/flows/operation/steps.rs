@@ -1,14 +1,14 @@
-use crate::events::{EventSink, FlowEventKind, FlowInput, FlowRequest, LogLevel};
+use crate::events::{EventSink, FlowEventKind, LogLevel};
 use crate::inventory_access::open_inventory_root;
 use crate::prune_policy;
 use crate::FlowConfig;
 use anyhow::Context;
 use fleet_domain::{
-    inventory::InventoryScanStage, inventory::InventoryScanSummary, Profile, ProfileSourceKind,
-    ThroughputEstimator,
+    inventory::InventoryScanStage, Profile, ProfileSourceKind, ThroughputEstimator,
 };
+use flux_manifest::ManifestEntry;
 use inventory::{DirtyKind, ScannerConfig};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -62,7 +62,7 @@ pub(crate) async fn scan_inventory(
     resolved: &ResolvedProfile,
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<InventoryScanSummary> {
+) -> anyhow::Result<()> {
     info!(
         flow_kind = "operation",
         profile_id = %profile.id,
@@ -121,12 +121,12 @@ pub(crate) async fn scan_inventory(
     let mut last_stage: Option<InventoryScanStage> = None;
     let mut last_bytes_scanned: u64 = 0;
     let mut throughput = ThroughputEstimator::new(Instant::now());
+    let mut cancel_requested = false;
 
     let sync_result: inventory::SyncResult = loop {
         tokio::select! {
-            _ = cancel.cancelled() => {
-                scanner_handle.abort();
-                anyhow::bail!("canceled");
+            _ = cancel.cancelled(), if !cancel_requested => {
+                cancel_requested = true;
             }
             progress_opt = rx.recv() => {
                 if let Some(p) = progress_opt {
@@ -179,32 +179,16 @@ pub(crate) async fn scan_inventory(
         status: fleet_domain::InventoryStatus::Clean,
     });
 
-    let mode = match sync_result.mode {
-        inventory::SyncMode::SkippedClean => {
-            fleet_domain::inventory::InventoryScanMode::SkippedClean
-        }
-        inventory::SyncMode::DeltaSync => fleet_domain::inventory::InventoryScanMode::DeltaSync,
-    };
-
-    let summary = InventoryScanSummary {
-        profile_id: profile.id.clone(),
-        root_path: resolved.dest_path.to_string_lossy().to_string(),
-        db_path: resolved.paths.inventory_db.to_string_lossy().to_string(),
-        mode,
-        files_seen: sync_result.files_seen,
-        files_scanned: sync_result.files_scanned,
-        bytes_scanned: sync_result.bytes_scanned,
-    };
     info!(
         flow_kind = "operation",
         profile_id = %profile.id,
         op = "scan_inventory",
         phase = "scan",
         outcome = "ok",
-        count = summary.files_scanned,
+        count = sync_result.files_scanned,
         "inventory scan step finished"
     );
-    Ok(summary)
+    Ok(())
 }
 
 pub(crate) async fn load_manifest(
@@ -325,7 +309,7 @@ pub(crate) fn collect_unexpected_deletes(
         &profile.id,
         &resolved.dest_path,
     )?;
-    let mut out = Vec::new();
+    let mut out = BTreeSet::new();
     for dirty in root.dirty_files(&cfg.scanner_config.policy)? {
         if dirty.kind != DirtyKind::Added {
             continue;
@@ -334,52 +318,60 @@ pub(crate) fn collect_unexpected_deletes(
         if prune_policy::is_protected_root_entry(&resolved.dest_path, &rel) {
             continue;
         }
-        out.push(rel);
+        out.insert(rel);
     }
 
-    Ok(out)
-}
-
-pub(crate) async fn await_delete_confirmation(
-    cancel: &CancellationToken,
-    input_rx: &mut mpsc::Receiver<FlowInput>,
-    sink: Arc<dyn EventSink>,
-    paths: Vec<PathBuf>,
-) -> anyhow::Result<bool> {
-    let prompt = format_delete_confirmation_prompt(&paths);
-    sink.emit(FlowEventKind::InputRequired {
-        prompt,
-        request: FlowRequest::ConfirmDeletes { paths },
-    });
-
-    let confirm = tokio::select! {
-        _ = cancel.cancelled() => {
-            anyhow::bail!("canceled");
-        }
-        input_opt = input_rx.recv() => {
-            match input_opt {
-                Some(FlowInput::ConfirmDeletes { confirm }) => confirm,
-                None => false,
+    if let Some(expected_paths) = cached_expected_paths(profile, &resolved.paths.repo_cache) {
+        let mut filtered_out = BTreeSet::new();
+        for rel in out {
+            let rel_norm = fleet_domain::normalize_rel_slashes(rel.to_string_lossy().as_ref());
+            if !expected_paths.contains(&rel_norm) {
+                filtered_out.insert(PathBuf::from(rel_norm));
             }
         }
-    };
+        out = filtered_out;
 
-    Ok(confirm)
+        let inventory_snapshot = root.snapshot()?;
+        for file in inventory_snapshot.files {
+            let rel_norm = fleet_domain::normalize_rel_slashes(&file.file.rel_path);
+            if expected_paths.contains(&rel_norm) {
+                continue;
+            }
+            let rel = PathBuf::from(rel_norm);
+            if prune_policy::is_protected_root_entry(&resolved.dest_path, &rel) {
+                continue;
+            }
+            out.insert(rel);
+        }
+    }
+
+    Ok(out.into_iter().collect())
 }
 
-fn format_delete_confirmation_prompt(paths: &[PathBuf]) -> String {
-    let mut prompt = format!("Delete {} files?", paths.len());
-    if paths.is_empty() {
-        return prompt;
-    }
+fn manifest_expected_file_paths(manifest: &fleet_manifest::DesiredManifest) -> BTreeSet<String> {
+    manifest
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ManifestEntry::File(file) => {
+                let rel = file.rel_path.to_string_lossy();
+                Some(fleet_domain::normalize_rel_slashes(rel.as_ref()))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
-    for path in paths {
-        prompt.push('\n');
-        prompt.push_str("- ");
-        prompt.push_str(path.to_string_lossy().as_ref());
-    }
+fn cached_expected_paths(profile: &Profile, repo_cache_dir: &Path) -> Option<BTreeSet<String>> {
+    let repo_url = match profile.validated_source_kind() {
+        Ok(ProfileSourceKind::Http(url)) => url.to_string(),
+        Err(_) => return None,
+    };
 
-    prompt
+    match fleet_manifest::load_cached_desired_manifest(&repo_url, repo_cache_dir) {
+        Ok(Some(manifest)) => Some(manifest_expected_file_paths(&manifest)),
+        _ => None,
+    }
 }
 
 pub(crate) async fn apply_deletes(
@@ -387,6 +379,7 @@ pub(crate) async fn apply_deletes(
     profile_id: &str,
     delete_paths: Vec<PathBuf>,
     _sink: Arc<dyn EventSink>,
+    remove_empty_parent_dirs: bool,
 ) -> anyhow::Result<()> {
     if delete_paths.is_empty() {
         debug!(
@@ -411,19 +404,30 @@ pub(crate) async fn apply_deletes(
     let db_path = resolved.paths.inventory_db.clone();
     let profile_id_for_log = profile_id.to_string();
     let profile_id_for_prune = profile_id_for_log.clone();
-    let prune_result = tokio::task::spawn_blocking(move || {
+    let prune_result = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
         let engine = fleet_flux::FluxEngine::new(flux_cache);
-        engine.prune_only(&dest_path, &db_path, &profile_id_for_prune, delete_paths)
+        engine.prune_only(
+            &dest_path,
+            &db_path,
+            &profile_id_for_prune,
+            delete_paths.clone(),
+        )?;
+        if remove_empty_parent_dirs {
+            fleet_domain::filesystem::remove_empty_parent_dirs(&dest_path, &delete_paths)
+        } else {
+            Ok(0)
+        }
     })
     .await;
 
     match prune_result {
-        Ok(Ok(())) => {
+        Ok(Ok(empty_dirs_removed)) => {
             info!(
                 flow_kind = "operation",
                 profile_id = %profile_id_for_log,
                 op = "apply_deletes",
                 outcome = "ok",
+                empty_dirs_removed = empty_dirs_removed,
                 "delete apply step finished"
             );
             Ok(())

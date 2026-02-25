@@ -49,13 +49,13 @@ fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
             progress.bytes_scanned,
             rate_bps.unwrap_or(0.0) as u64
         )),
+        FlowEventKind::CheckPhaseChanged { phase } => Some(format!("Check phase: {phase:?}")),
         FlowEventKind::Message { text, .. } => Some(text.clone()),
         FlowEventKind::InventoryStatus { status } => Some(format!("Inventory: {status:?}")),
-        FlowEventKind::InputRequired { prompt, .. } => Some(format!("input required: {prompt}")),
         FlowEventKind::Finished { .. } => Some("finished".to_string()),
         FlowEventKind::Failed { error } => Some(format!("failed: {error}")),
         FlowEventKind::Canceled => Some("canceled".to_string()),
-        FlowEventKind::Started => Some(format!("started: {:?}", ev.flow)),
+        FlowEventKind::Started => Some(format!("started: {:?}", ev.operation)),
     }
 }
 
@@ -104,9 +104,6 @@ pub fn spawn_flow_printer(
                 FlowEventKind::InventoryStatus { status } => {
                     let _ = mp.println(format!("Inventory: {status:?}"));
                 }
-                FlowEventKind::InputRequired { prompt, .. } => {
-                    let _ = mp.println(format!("input required: {prompt}"));
-                }
                 FlowEventKind::SyncProgress { .. } => {
                     if let Some((mode, done, total)) = sync_progress_counts(&ev.kind) {
                         if sync_bar_mode != mode {
@@ -144,6 +141,9 @@ pub fn spawn_flow_printer(
                 FlowEventKind::InventoryStageChanged { stage } => {
                     phase_pb.set_message(format!("Inventory stage: {stage:?}"));
                 }
+                FlowEventKind::CheckPhaseChanged { phase } => {
+                    phase_pb.set_message(format!("Check phase: {phase:?}"));
+                }
                 FlowEventKind::Finished { .. } => {
                     phase_pb.finish_with_message("Phase: done");
                 }
@@ -154,7 +154,7 @@ pub fn spawn_flow_printer(
                     let _ = mp.println("canceled");
                 }
                 FlowEventKind::Started => {
-                    let _ = mp.println(format!("started: {:?}", ev.flow));
+                    let _ = mp.println(format!("started: {:?}", ev.operation));
                 }
             }
         }

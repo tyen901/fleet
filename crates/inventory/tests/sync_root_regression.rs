@@ -1,6 +1,7 @@
 use inventory::{InventoryDb, Scanner, ScannerConfig, SqliteStore, SyncRequest};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -314,6 +315,68 @@ fn sync_root_empty_root_does_not_hang() {
 #[test]
 fn sync_root_delta_no_scan_jobs_does_not_hang() {
     run_child("delta-no-scan-jobs");
+}
+
+#[test]
+fn sync_root_cancel_during_scanning_stops_and_rolls_back() {
+    let root = tempfile::tempdir().expect("tempdir root");
+    let db_dir = tempfile::tempdir().expect("tempdir db");
+    let db_path = db_dir.path().join("inv.sqlite");
+
+    let expected_files = 512u64;
+    for i in 0..expected_files {
+        let path = root.path().join(format!("file_{i:04}.bin"));
+        std::fs::write(path, vec![0xAB; 32 * 1024]).expect("write file");
+    }
+
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+    let cancel_for_progress = Arc::clone(&cancel_requested);
+    let cancel_for_cfg = Arc::clone(&cancel_requested);
+    let cancel_cfg = ScannerConfig {
+        workers: 2,
+        queue_capacity: 8,
+        delta: true,
+        delta_index_cache: true,
+        progress: Some(Arc::new(move |p| {
+            if p.stage == inventory::ScanStage::Scanning && p.files_total > 0 {
+                cancel_for_progress.store(true, Ordering::Relaxed);
+            }
+        })),
+        cancel: Some(Arc::new(move || cancel_for_cfg.load(Ordering::Relaxed))),
+        ..Default::default()
+    };
+
+    let cancel_scanner = make_scanner(&db_path, cancel_cfg);
+    let canceled = cancel_scanner.sync_root(SyncRequest {
+        inventory_name: "test".to_string(),
+        root_path: root.path().to_path_buf(),
+    });
+    assert!(
+        matches!(canceled, Err(inventory::Error::Cancelled)),
+        "expected scan cancellation, got: {canceled:?}"
+    );
+
+    let full_scanner = make_scanner(
+        &db_path,
+        ScannerConfig {
+            workers: 2,
+            queue_capacity: 8,
+            delta: true,
+            delta_index_cache: true,
+            ..Default::default()
+        },
+    );
+    let res = full_scanner
+        .sync_root(SyncRequest {
+            inventory_name: "test".to_string(),
+            root_path: root.path().to_path_buf(),
+        })
+        .expect("full sync after cancel");
+    assert_eq!(res.files_seen, expected_files);
+    assert_eq!(
+        res.files_scanned, expected_files,
+        "cancelled scan must not commit partial DB state"
+    );
 }
 
 #[test]

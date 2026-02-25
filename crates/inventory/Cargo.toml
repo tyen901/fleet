@@ -21,6 +21,7 @@ crossbeam-channel = { workspace = true }
 
 # workspace dep used by the scanner
 swifty_artifacts = { workspace = true }
+fleet-domain = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

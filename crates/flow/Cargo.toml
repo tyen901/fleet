@@ -20,6 +20,7 @@ fleet-manifest = { workspace = true }
 fleet-flux = { workspace = true }
 inventory = { workspace = true }
 swifty-repo = { workspace = true }
+flux-manifest = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

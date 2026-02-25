@@ -63,4 +63,12 @@ impl ToastStore {
             list.retain(|t| t.expires_at_ms.map(|e| e > now).unwrap_or(true));
         });
     }
+
+    pub fn push_api_error(&self, title: &'static str, err: &fleet_core::ApiError) {
+        self.push(Toast::new(
+            ToastKind::Error,
+            title,
+            format!("{}: {}", err.code, err.message),
+        ));
+    }
 }

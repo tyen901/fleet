@@ -1,3 +1,4 @@
+use crate::hash::{hash_file_record, mix64};
 use crate::{Error, FolderStamp, Result, ScanPolicy};
 use std::path::Path;
 use walkdir::WalkDir;
@@ -75,30 +76,4 @@ fn stamp_filter_entry(policy: &ScanPolicy, e: &walkdir::DirEntry) -> bool {
     }
 
     true
-}
-
-fn hash_file_record(rel: &str, len: u64) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
-
-    let mut h = OFFSET;
-    for &b in rel.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h ^= 0xFF;
-    h = h.wrapping_mul(PRIME);
-
-    for &b in len.to_le_bytes().as_slice() {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
-}
-
-fn mix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E3779B97F4A7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-    x ^ (x >> 31)
 }

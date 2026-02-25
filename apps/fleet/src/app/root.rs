@@ -1,11 +1,10 @@
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
-use crate::stores::profile_store::ProfileStore;
 use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use crate::ui::components::ToastLayer;
 use dioxus::prelude::*;
-use fleet_core::LastSyncStatus;
+use fleet_core::{OperationKind, OperationTerminalStatus};
 use tracing::{error, warn};
 
 #[component]
@@ -13,12 +12,10 @@ pub fn AppRoot() -> Element {
     let bridge = use_context::<FleetBridge>();
 
     let mut app_state = use_signal(|| bridge.get_snapshot());
-    let profile_active = use_signal(|| None::<String>);
 
-    provide_context(AppStore { state: app_state });
-    provide_context(ProfileStore {
-        active_id: profile_active,
-    });
+    let app_store = AppStore { state: app_state };
+    provide_context(app_store.clone());
+
     let toasts = use_signal(Vec::new);
     provide_context(ToastStore { toasts });
     let last_sync_toast_at = use_signal(|| 0_u64);
@@ -39,8 +36,14 @@ pub fn AppRoot() -> Element {
         let mut last_sync_toast_at = last_sync_toast_at;
         use_effect(move || {
             let snapshot = (app_state)();
-            let mut latest: Option<(&String, &fleet_core::LastSyncInfo)> = None;
-            for (profile_id, info) in snapshot.last_sync_by_profile.iter() {
+            let mut latest: Option<(&String, &fleet_core::OperationOutcomeState)> = None;
+            for (profile_id, runtime) in snapshot.profile_runtime_by_id.iter() {
+                let Some(info) = runtime.last_operation.as_ref() else {
+                    continue;
+                };
+                if info.operation != OperationKind::Sync {
+                    continue;
+                }
                 if latest
                     .map(|(_, cur)| info.updated_at_unix_ms > cur.updated_at_unix_ms)
                     .unwrap_or(true)
@@ -57,14 +60,14 @@ pub fn AppRoot() -> Element {
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| "Profile".to_string());
                     match info.status {
-                        LastSyncStatus::Succeeded => {
+                        OperationTerminalStatus::Succeeded => {
                             toast_store.push(Toast::new(
                                 ToastKind::Success,
                                 "Sync complete",
                                 format!("{name} is up to date."),
                             ));
                         }
-                        LastSyncStatus::Failed => {
+                        OperationTerminalStatus::Failed => {
                             let msg = info
                                 .error
                                 .as_ref()
@@ -82,7 +85,7 @@ pub fn AppRoot() -> Element {
                                 format!("{name}: {msg}"),
                             ));
                         }
-                        LastSyncStatus::Canceled => {
+                        OperationTerminalStatus::Canceled => {
                             warn!(profile_id = %profile_id, profile_name = %name, "sync canceled");
                             toast_store.push(Toast::new(
                                 ToastKind::Info,
@@ -90,7 +93,6 @@ pub fn AppRoot() -> Element {
                                 format!("{name} sync was canceled."),
                             ));
                         }
-                        LastSyncStatus::Idle => {}
                     }
                     last_sync_toast_at.set(info.updated_at_unix_ms);
                 }
@@ -98,9 +100,12 @@ pub fn AppRoot() -> Element {
         });
     }
 
-    rsx! {
-        dioxus_router::Router::<Route> {}
-        ToastLayer {}
+    let theme_mode = (app_state)().settings.appearance.theme_mode.as_str();
 
+    rsx! {
+        div { class: "app-root", "data-theme": theme_mode,
+            dioxus_router::Router::<Route> {}
+            ToastLayer {}
+        }
     }
 }

@@ -1,5 +1,5 @@
 use directories::ProjectDirs;
-use fleet_domain::{AppSettings, Profile, ProfileId};
+use fleet_domain::{AppSettings, Profile};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -33,8 +33,6 @@ pub fn profile_state_root_dir() -> anyhow::Result<PathBuf> {
 pub struct ProfilesConfig {
     #[serde(default)]
     pub profiles: Vec<Profile>,
-    #[serde(default)]
-    pub selected_profile_id: Option<ProfileId>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,5 +109,33 @@ impl ConfigRepo {
         let _ = fs::remove_file(&path);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProfilesConfig;
+
+    #[test]
+    fn profiles_config_deserializes_with_legacy_selected_profile_id_field() {
+        let json = r#"
+        {
+          "profiles": [
+            {
+              "id": "p1",
+              "name": "Profile",
+              "source": "https://example.com/repo.json",
+              "destination": "/tmp/mods",
+              "arma3_server": null,
+              "launch_params": ""
+            }
+          ],
+          "selected_profile_id": "p1"
+        }
+        "#;
+
+        let cfg: ProfilesConfig = serde_json::from_str(json).expect("parse profiles config");
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].id, "p1");
     }
 }

@@ -5,8 +5,6 @@ pub enum ButtonVariant {
     Primary,
     Secondary,
     Danger,
-    Ghost,
-    Outline,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -14,7 +12,6 @@ pub enum ButtonSize {
     Sm,
     Md,
     Lg,
-    Xl,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -27,6 +24,8 @@ pub struct ButtonProps {
     pub loading: bool,
     #[props(default = false)]
     pub disabled: bool,
+    #[props(default)]
+    pub id: Option<String>,
     #[props(default)]
     pub icon: Option<Element>,
     #[props(default)]
@@ -49,6 +48,7 @@ pub fn Button(props: ButtonProps) -> Element {
 
     rsx! {
         button {
+            id: props.id.clone(),
             class: "{cls}",
             disabled,
             onclick: move |evt| {
@@ -76,8 +76,6 @@ fn button_variant_class(variant: ButtonVariant) -> &'static str {
         ButtonVariant::Primary => "btn--primary",
         ButtonVariant::Secondary => "btn--secondary",
         ButtonVariant::Danger => "btn--danger",
-        ButtonVariant::Ghost => "btn--ghost",
-        ButtonVariant::Outline => "btn--outline",
     }
 }
 
@@ -86,6 +84,5 @@ fn button_size_class(size: ButtonSize) -> &'static str {
         ButtonSize::Sm => "btn--sm",
         ButtonSize::Md => "btn--md",
         ButtonSize::Lg => "btn--lg",
-        ButtonSize::Xl => "btn--xl",
     }
 }

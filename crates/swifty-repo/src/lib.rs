@@ -10,9 +10,6 @@ use fleet_download::{
     atomic_replace_file, DownloadEventSink, DownloadResult, DownloadService, DownloadSpec,
 };
 
-use sha1::{Digest, Sha1};
-pub mod touch;
-
 /// Internal cached blob stored as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepoCacheBlob {
@@ -38,7 +35,7 @@ pub struct CachedModSrf {
     pub http: Option<HttpCacheHints>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpCacheHints {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -79,10 +76,7 @@ impl FsRepoCacheStore {
 }
 
 pub fn repo_cache_key(repo_url: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(repo_url.as_bytes());
-    let digest = hasher.finalize();
-    format!("{:x}", digest)
+    fleet_domain::hash::sha1_hex(repo_url.as_bytes())
 }
 
 pub fn repo_cache_blob_path(cache_root: &Path, repo_url: &str) -> PathBuf {
@@ -216,6 +210,14 @@ pub struct RepoSyncResult {
     pub mods: BTreeMap<String, swifty_artifacts::SrfMod>,
     pub fetched_mods: Vec<String>,
     pub reused_mods: Vec<String>,
+    pub freshness: RepoFreshness,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoFreshness {
+    Unknown,
+    UpToDate,
+    UpdateAvailable,
 }
 
 fn collect_enabled_mod_names(repo: swifty_artifacts::RepoSpec) -> Vec<String> {
@@ -243,7 +245,7 @@ pub async fn sync_repo_metadata(
     let cache_opt = store.load_repo_cache(repo_url).await?;
     let repo_headers =
         build_conditional_headers(cache_opt.as_ref().and_then(|c| c.repo_http.as_ref()))?;
-    let now_ms = now_unix_ms()?;
+    let now_ms = fleet_domain::time::now_unix_ms();
     let repo_id = repo_manifest_id(repo_url);
     let repo_fetch = fetch_repo_json(
         downloads,
@@ -257,14 +259,14 @@ pub async fn sync_repo_metadata(
     .await?;
 
     // Step B: fetch repo.json via conditional GET
-    let (mut cache, remote_repo) = match (cache_opt, repo_fetch) {
-        (Some(cache), RepoJsonFetch::NotModified { .. }) => {
+    let (mut cache, remote_repo, freshness, mut cache_dirty) = match (cache_opt, repo_fetch) {
+        (Some(cache), RepoJsonFetch::NotModified) => {
             if cache.repo_fetched_at_unix_ms == 0 {
                 anyhow::bail!("received 304 for repo.json but cached repo is empty");
             }
             debug!(repo_url, "repo.json not modified; using cache");
             let repo = cache.repo.clone();
-            (cache, repo)
+            (cache, repo, RepoFreshness::UpToDate, false)
         }
         (
             Some(mut cache),
@@ -276,20 +278,36 @@ pub async fn sync_repo_metadata(
             },
         ) => {
             let repo = swifty_artifacts::read_repo_json(&bytes).context("parse repo.json")?;
-            cache.repo_json_checksum = Some(sha1_hex(&bytes));
+            let remote_checksum = fleet_domain::hash::sha1_hex(&bytes);
+            let prior_checksum = cache.repo_json_checksum.clone();
+            let freshness = match prior_checksum.as_deref() {
+                Some(before) if before == remote_checksum.as_str() => RepoFreshness::UpToDate,
+                Some(_) => RepoFreshness::UpdateAvailable,
+                None => RepoFreshness::Unknown,
+            };
+            let mut cache_dirty = false;
+
+            if prior_checksum.as_deref() != Some(remote_checksum.as_str()) {
+                cache.repo_json_checksum = Some(remote_checksum);
+                cache.repo_fetched_at_unix_ms = now_ms;
+                cache_dirty = true;
+            }
 
             // Update cache hints from GET response (fallback to prior values if absent)
-            let prior = cache.repo_http.take();
-            cache.repo_http = Some(HttpCacheHints {
+            let prior = cache.repo_http.clone();
+            let merged_repo_http = HttpCacheHints {
                 etag: etag.or_else(|| prior.as_ref().and_then(|p| p.etag.clone())),
                 last_modified: last_modified
                     .or_else(|| prior.as_ref().and_then(|p| p.last_modified.clone())),
-            });
-            cache.repo_fetched_at_unix_ms = now_ms;
+            };
+            if cache.repo_http.as_ref() != Some(&merged_repo_http) {
+                cache.repo_http = Some(merged_repo_http);
+                cache_dirty = true;
+            }
 
-            (cache, repo)
+            (cache, repo, freshness, cache_dirty)
         }
-        (None, RepoJsonFetch::NotModified { .. }) => {
+        (None, RepoJsonFetch::NotModified) => {
             anyhow::bail!("received 304 for repo.json but no cache exists");
         }
         (
@@ -315,15 +333,15 @@ pub async fn sync_repo_metadata(
                 }),
                 icon_image_checksum: None,
                 repo_image_checksum: None,
-                repo_json_checksum: Some(sha1_hex(&bytes)),
+                repo_json_checksum: Some(fleet_domain::hash::sha1_hex(&bytes)),
             };
 
-            (cache, repo)
+            (cache, repo, RepoFreshness::Unknown, true)
         }
     };
 
     if let Some(cache_root) = store.cache_root_path() {
-        sync_repo_assets(
+        cache_dirty |= sync_repo_assets(
             repo_url,
             &remote_repo,
             &mut cache,
@@ -375,6 +393,9 @@ pub async fn sync_repo_metadata(
         .filter(|k| !remote_mods.contains_key(*k))
         .cloned()
         .collect();
+    if !stale_keys.is_empty() {
+        cache_dirty = true;
+    }
     for k in stale_keys {
         cache.mods.remove(&k);
     }
@@ -397,6 +418,7 @@ pub async fn sync_repo_metadata(
 
     // Step E: download needed mods concurrently (bounded by DownloadServiceConfig.parallel_requests)
     if !mods_to_fetch.is_empty() {
+        cache_dirty = true;
         let tmp = tempfile::tempdir().context("create tempdir for mod.srf batch")?;
 
         let mut specs = Vec::with_capacity(mods_to_fetch.len());
@@ -441,7 +463,7 @@ pub async fn sync_repo_metadata(
                 anyhow::bail!("checksum mismatch for mod {k}");
             }
 
-            let now = now_unix_ms()?;
+            let now = fleet_domain::time::now_unix_ms();
             cache.mods.insert(
                 k.clone(),
                 CachedModSrf {
@@ -458,17 +480,20 @@ pub async fn sync_repo_metadata(
     }
 
     // Step F: update repo in cache and persist
-    cache.repo = remote_repo.clone();
-    store
-        .save_repo_cache(&cache.repo_url, &cache)
-        .await
-        .context("save cache")?;
+    if cache_dirty {
+        cache.repo = remote_repo.clone();
+        store
+            .save_repo_cache(&cache.repo_url, &cache)
+            .await
+            .context("save cache")?;
+    }
 
     Ok(RepoSyncResult {
         repo: remote_repo,
         mods: output_mods,
         fetched_mods,
         reused_mods,
+        freshness,
     })
 }
 
@@ -479,10 +504,11 @@ async fn sync_repo_assets(
     cache_root: &Path,
     downloads: &DownloadService,
     sink: Option<DownloadEventSink>,
-) {
+) -> bool {
     let Ok(base_url) = url::Url::parse(repo_url).and_then(|u| u.join("./")) else {
-        return;
+        return false;
     };
+    let mut cache_dirty = false;
 
     let assets = [
         (
@@ -526,7 +552,10 @@ async fn sync_repo_assets(
         {
             Ok(_) => {
                 if let Some(checksum) = checksum_opt {
-                    *cached_checksum = Some(checksum.to_string());
+                    if cached_checksum.as_deref() != Some(checksum) {
+                        *cached_checksum = Some(checksum.to_string());
+                        cache_dirty = true;
+                    }
                 }
             }
             Err(err) => {
@@ -539,6 +568,7 @@ async fn sync_repo_assets(
             }
         }
     }
+    cache_dirty
 }
 
 fn should_download_asset(
@@ -572,20 +602,6 @@ fn repo_manifest_id(repo_url: &str) -> String {
     seg.to_string()
 }
 
-pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    format!("{:x}", digest)
-}
-
-pub(crate) fn now_unix_ms() -> Result<u64> {
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("system clock must be >= unix epoch")?
-        .as_millis() as u64)
-}
-
 pub(crate) fn build_conditional_headers(
     hints: Option<&HttpCacheHints>,
 ) -> Result<Option<HeaderMap>> {
@@ -610,12 +626,8 @@ pub(crate) fn build_conditional_headers(
 }
 
 pub(crate) enum RepoJsonFetch {
-    NotModified {
-        etag: Option<String>,
-        last_modified: Option<String>,
-    },
+    NotModified,
     Downloaded {
-        status: u16,
         etag: Option<String>,
         last_modified: Option<String>,
         bytes: Vec<u8>,
@@ -645,23 +657,377 @@ pub(crate) async fn fetch_repo_json(
         .with_context(|| format!("{op_name} {repo_url}"))?;
 
     match result {
-        DownloadResult::NotModified {
-            etag,
-            last_modified,
-        } => Ok(RepoJsonFetch::NotModified {
-            etag,
-            last_modified,
-        }),
+        DownloadResult::NotModified { .. } => Ok(RepoJsonFetch::NotModified),
         DownloadResult::Downloaded(outcome) => {
             let bytes = tokio::fs::read(&outcome.path)
                 .await
                 .with_context(|| format!("read {}", outcome.path.display()))?;
             Ok(RepoJsonFetch::Downloaded {
-                status: outcome.status,
                 etag: outcome.etag,
                 last_modified: outcome.last_modified,
                 bytes,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use axum::extract::State;
+    use axum::http::header::{CONTENT_TYPE, ETAG, IF_NONE_MATCH, LAST_MODIFIED};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use axum::response::Response;
+    use axum::routing::get;
+    use axum::Router;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    const LAST_MODIFIED_VALUE: &str = "Fri, 23 Jan 2026 22:12:11 GMT";
+
+    #[derive(Clone, Default)]
+    struct MockStore {
+        inner: Arc<Mutex<MockStoreState>>,
+    }
+
+    #[derive(Default)]
+    struct MockStoreState {
+        cache: Option<RepoCacheBlob>,
+        save_calls: usize,
+    }
+
+    impl MockStore {
+        fn with_cache(cache: RepoCacheBlob) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(MockStoreState {
+                    cache: Some(cache),
+                    save_calls: 0,
+                })),
+            }
+        }
+
+        fn empty() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(MockStoreState::default())),
+            }
+        }
+
+        fn save_calls(&self) -> usize {
+            self.inner.lock().expect("lock store").save_calls
+        }
+    }
+
+    #[async_trait]
+    impl RepoCacheStore for MockStore {
+        async fn load_repo_cache(&self, _repo_url: &str) -> Result<Option<RepoCacheBlob>> {
+            Ok(self.inner.lock().expect("lock store").cache.clone())
+        }
+
+        async fn save_repo_cache(&self, _repo_url: &str, blob: &RepoCacheBlob) -> Result<()> {
+            let mut state = self.inner.lock().expect("lock store");
+            state.cache = Some(blob.clone());
+            state.save_calls += 1;
+            Ok(())
+        }
+
+        async fn delete_repo_cache(&self, _repo_url: &str) -> Result<()> {
+            self.inner.lock().expect("lock store").cache = None;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RepoServerState {
+        body: Arc<String>,
+        etag: String,
+        conditional_304: bool,
+    }
+
+    fn md5(hex: &str) -> swifty_artifacts::Md5Digest {
+        swifty_artifacts::Md5Digest::parse_hex(hex).expect("valid md5")
+    }
+
+    fn empty_repo_spec(repo_checksum: &str) -> swifty_artifacts::RepoSpec {
+        swifty_artifacts::RepoSpec {
+            repo_name: "test-pack".to_string(),
+            checksum: repo_checksum.to_string(),
+            required_mods: vec![],
+            optional_mods: vec![],
+            icon_image_path: None,
+            icon_image_checksum: None,
+            repo_image_path: None,
+            repo_image_checksum: None,
+            required_dlcs: vec![],
+            client_parameters: String::new(),
+            repo_basic_authentication: None,
+            version: String::new(),
+            servers: vec![],
+        }
+    }
+
+    fn repo_with_required_mod(
+        repo_checksum: &str,
+        mod_name: &str,
+        mod_checksum: &str,
+    ) -> swifty_artifacts::RepoSpec {
+        swifty_artifacts::RepoSpec {
+            repo_name: "test-pack".to_string(),
+            checksum: repo_checksum.to_string(),
+            required_mods: vec![swifty_artifacts::RepoMod {
+                mod_name: mod_name.to_string(),
+                checksum: md5(mod_checksum),
+                enabled: true,
+            }],
+            optional_mods: vec![],
+            icon_image_path: None,
+            icon_image_checksum: None,
+            repo_image_path: None,
+            repo_image_checksum: None,
+            required_dlcs: vec![],
+            client_parameters: String::new(),
+            repo_basic_authentication: None,
+            version: String::new(),
+            servers: vec![],
+        }
+    }
+
+    fn empty_mod_manifest(mod_name: &str, mod_checksum: &str) -> swifty_artifacts::SrfMod {
+        swifty_artifacts::SrfMod {
+            name: mod_name.to_string(),
+            checksum: md5(mod_checksum),
+            files: vec![],
+        }
+    }
+
+    fn make_cache_blob(
+        repo_url: &str,
+        repo: swifty_artifacts::RepoSpec,
+        repo_json_checksum: Option<String>,
+        etag: Option<&str>,
+        mods: BTreeMap<String, CachedModSrf>,
+    ) -> RepoCacheBlob {
+        RepoCacheBlob {
+            schema_version: 1,
+            repo_url: repo_url.to_string(),
+            repo_fetched_at_unix_ms: 1,
+            repo,
+            mods,
+            repo_http: etag.map(|value| HttpCacheHints {
+                etag: Some(value.to_string()),
+                last_modified: Some(LAST_MODIFIED_VALUE.to_string()),
+            }),
+            icon_image_checksum: None,
+            repo_image_checksum: None,
+            repo_json_checksum,
+        }
+    }
+
+    async fn repo_json_handler(
+        State(state): State<RepoServerState>,
+        headers: HeaderMap,
+    ) -> Response {
+        let conditional_match = headers
+            .get(IF_NONE_MATCH)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|value| value == state.etag.as_str());
+
+        if state.conditional_304 && conditional_match {
+            return response_with_headers(StatusCode::NOT_MODIFIED, String::new(), &state.etag);
+        }
+
+        response_with_headers(StatusCode::OK, state.body.as_str().to_string(), &state.etag)
+    }
+
+    fn response_with_headers(status: StatusCode, body: String, etag: &str) -> Response {
+        let mut response = Response::new(axum::body::Body::from(body));
+        *response.status_mut() = status;
+        let headers = response.headers_mut();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(ETAG, HeaderValue::from_str(etag).expect("valid etag"));
+        headers.insert(LAST_MODIFIED, HeaderValue::from_static(LAST_MODIFIED_VALUE));
+        response
+    }
+
+    async fn spawn_repo_server(
+        repo: &swifty_artifacts::RepoSpec,
+        etag: &str,
+        conditional_304: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let body = serde_json::to_string(repo).expect("serialize repo");
+        let state = RepoServerState {
+            body: Arc::new(body),
+            etag: etag.to_string(),
+            conditional_304,
+        };
+        let app = Router::new()
+            .route("/repo.json", get(repo_json_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (format!("http://{addr}/repo.json"), task)
+    }
+
+    #[tokio::test]
+    async fn sync_repo_metadata_returns_up_to_date_and_skips_save_on_304() {
+        let repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let (repo_url, server) = spawn_repo_server(&repo, "\"etag-v1\"", true).await;
+        let checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&repo).expect("serialize").as_bytes(),
+        );
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            repo,
+            Some(checksum),
+            Some("\"etag-v1\""),
+            BTreeMap::new(),
+        ));
+
+        let result = sync_repo_metadata(
+            &repo_url,
+            &store,
+            &DefaultModSrfResolver,
+            &DownloadService::new_default(),
+            None,
+        )
+        .await
+        .expect("sync metadata");
+
+        assert_eq!(result.freshness, RepoFreshness::UpToDate);
+        assert!(result.fetched_mods.is_empty());
+        assert!(result.reused_mods.is_empty());
+        assert_eq!(store.save_calls(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_repo_metadata_returns_update_available_when_repo_checksum_changes() {
+        let old_repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let new_repo = empty_repo_spec("1111111111111111111111111111111111111111");
+        let (repo_url, server) = spawn_repo_server(&new_repo, "\"etag-v2\"", false).await;
+        let old_checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&old_repo)
+                .expect("serialize old repo")
+                .as_bytes(),
+        );
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            old_repo,
+            Some(old_checksum),
+            None,
+            BTreeMap::new(),
+        ));
+
+        let result = sync_repo_metadata(
+            &repo_url,
+            &store,
+            &DefaultModSrfResolver,
+            &DownloadService::new_default(),
+            None,
+        )
+        .await
+        .expect("sync metadata");
+
+        assert_eq!(result.freshness, RepoFreshness::UpdateAvailable);
+        assert_eq!(store.save_calls(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_repo_metadata_returns_unknown_without_prior_repo_checksum() {
+        let repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let (repo_url, server) = spawn_repo_server(&repo, "\"etag-v1\"", false).await;
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            repo,
+            None,
+            None,
+            BTreeMap::new(),
+        ));
+
+        let result = sync_repo_metadata(
+            &repo_url,
+            &store,
+            &DefaultModSrfResolver,
+            &DownloadService::new_default(),
+            None,
+        )
+        .await
+        .expect("sync metadata");
+
+        assert_eq!(result.freshness, RepoFreshness::Unknown);
+        assert_eq!(store.save_calls(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_repo_metadata_reuses_cached_mods_when_checksums_match() {
+        let mod_name = "ace";
+        let mod_checksum = "00000000000000000000000000000000";
+        let repo = repo_with_required_mod(
+            "0000000000000000000000000000000000000000",
+            mod_name,
+            mod_checksum,
+        );
+        let (repo_url, server) = spawn_repo_server(&repo, "\"etag-v1\"", true).await;
+        let checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&repo).expect("serialize").as_bytes(),
+        );
+        let cache_mod = CachedModSrf {
+            checksum: md5(mod_checksum),
+            fetched_at_unix_ms: 1,
+            manifest: empty_mod_manifest(mod_name, mod_checksum),
+            http: None,
+        };
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            repo,
+            Some(checksum),
+            Some("\"etag-v1\""),
+            BTreeMap::from([(mod_name.to_string(), cache_mod)]),
+        ));
+
+        let result = sync_repo_metadata(
+            &repo_url,
+            &store,
+            &DefaultModSrfResolver,
+            &DownloadService::new_default(),
+            None,
+        )
+        .await
+        .expect("sync metadata");
+
+        assert_eq!(result.freshness, RepoFreshness::UpToDate);
+        assert!(result.fetched_mods.is_empty());
+        assert_eq!(result.reused_mods, vec![mod_name.to_string()]);
+        assert_eq!(store.save_calls(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sync_repo_metadata_returns_unknown_for_initial_cache_creation() {
+        let repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let (repo_url, server) = spawn_repo_server(&repo, "\"etag-v1\"", false).await;
+        let store = MockStore::empty();
+
+        let result = sync_repo_metadata(
+            &repo_url,
+            &store,
+            &DefaultModSrfResolver,
+            &DownloadService::new_default(),
+            None,
+        )
+        .await
+        .expect("sync metadata");
+
+        assert_eq!(result.freshness, RepoFreshness::Unknown);
+        assert_eq!(store.save_calls(), 1);
+        server.abort();
     }
 }

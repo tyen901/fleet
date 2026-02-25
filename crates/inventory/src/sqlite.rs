@@ -116,6 +116,7 @@ impl SqliteStore {
         }
         let schema = include_str!("../schema.sql");
         conn.execute_batch(schema)?;
+        migrate_files_drop_file_type(conn)?;
         debug!(
             elapsed_ms = start.elapsed().as_millis(),
             "sqlite schema initialized"
@@ -167,27 +168,6 @@ impl SqliteStore {
             "get_or_create_root done"
         );
         Ok(RootId(id))
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn get_root_path(&self, root_id: RootId) -> Result<String> {
-        let start = Instant::now();
-        let mut pooled = self.pooled()?;
-        let conn = pooled.conn()?;
-        let v: Option<String> = conn
-            .query_row(
-                "SELECT root_path FROM roots WHERE id=?1",
-                params![root_id.0],
-                |r| r.get(0),
-            )
-            .optional()?;
-        debug!(
-            root_id = root_id.0,
-            elapsed_ms = start.elapsed().as_millis(),
-            hit = v.is_some(),
-            "get_root_path done"
-        );
-        v.ok_or_else(|| Error::Store(format!("unknown root_id {}", root_id.0)))
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -247,7 +227,7 @@ impl SqliteStore {
         let mut pooled = self.pooled()?;
         let conn = pooled.conn()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT rel_path, length, checksum, file_type
+            "SELECT rel_path, length, checksum
              FROM files WHERE root_id=?1
              ORDER BY rel_path ASC",
         )?;
@@ -258,7 +238,6 @@ impl SqliteStore {
                 rel_path: r.get::<_, String>(0)?,
                 length: r.get::<_, i64>(1)? as u64,
                 checksum: r.get::<_, Option<String>>(2)?,
-                file_type: r.get::<_, Option<String>>(3)?,
             })?;
             count += 1;
         }
@@ -303,7 +282,7 @@ impl SqliteStore {
 
         let mut stmt = conn.prepare_cached(
             "SELECT
-                f.rel_path, f.length, f.checksum, f.file_type,
+                f.rel_path, f.length, f.checksum,
                 s.idx, s.name, s.start, s.length, s.checksum
              FROM files f
              LEFT JOIN segments s
@@ -322,7 +301,6 @@ impl SqliteStore {
             let rel_path: String = row.get(0)?;
             let length: i64 = row.get(1)?;
             let checksum: Option<String> = row.get(2)?;
-            let file_type: Option<String> = row.get(3)?;
 
             if current_path.as_deref() != Some(&rel_path) {
                 if let Some(c) = current.take() {
@@ -334,18 +312,17 @@ impl SqliteStore {
                         rel_path: rel_path.clone(),
                         length: length as u64,
                         checksum,
-                        file_type,
                     },
                     segments: Vec::new(),
                 });
             }
 
-            let idx: Option<i64> = row.get(4)?;
+            let idx: Option<i64> = row.get(3)?;
             if let (Some(idx), Some(mut c)) = (idx, current.take()) {
-                let name: String = row.get(5)?;
-                let start: i64 = row.get(6)?;
-                let seg_len: i64 = row.get(7)?;
-                let seg_checksum: String = row.get(8)?;
+                let name: String = row.get(4)?;
+                let start: i64 = row.get(5)?;
+                let seg_len: i64 = row.get(6)?;
+                let seg_checksum: String = row.get(7)?;
                 c.segments.push(SegmentEntry {
                     idx: idx as u32,
                     name,
@@ -395,12 +372,6 @@ impl SqliteStore {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
 
-        let segments_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM segments WHERE root_id=?1",
-            params![root_id.0],
-            |r| r.get(0),
-        )?;
-
         let last_stamp = self.get_last_stamp(root_id)?;
 
         let metrics = InventoryMetrics {
@@ -408,13 +379,11 @@ impl SqliteStore {
             root_path,
             files_count: files_count.max(0) as u64,
             files_bytes: files_bytes.max(0) as u64,
-            segments_count: segments_count.max(0) as u64,
             last_stamp,
         };
         debug!(
             root_id = root_id.0,
             files_count = metrics.files_count,
-            segments_count = metrics.segments_count,
             elapsed_ms = start.elapsed().as_millis(),
             "metrics done"
         );
@@ -487,19 +456,12 @@ impl SqliteUpdateSession {
             .map_err(|_| Error::InvalidInput("file length exceeds i64".to_string()))?;
 
         conn.execute(
-            "INSERT INTO files(root_id, rel_path, length, checksum, file_type)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(root_id, rel_path, length, checksum)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(root_id, rel_path) DO UPDATE SET
                length=excluded.length,
-               checksum=excluded.checksum,
-               file_type=excluded.file_type",
-            params![
-                root_id,
-                file.rel_path,
-                len_i64,
-                file.checksum,
-                file.file_type
-            ],
+               checksum=excluded.checksum",
+            params![root_id, file.rel_path, len_i64, file.checksum],
         )?;
         Ok(())
     }
@@ -513,23 +475,16 @@ impl SqliteUpdateSession {
         let root_id = self.root_id.0;
         let conn = self.conn()?;
         let mut stmt = conn.prepare_cached(
-            "INSERT INTO files(root_id, rel_path, length, checksum, file_type)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO files(root_id, rel_path, length, checksum)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(root_id, rel_path) DO UPDATE SET
                length=excluded.length,
-               checksum=excluded.checksum,
-               file_type=excluded.file_type",
+               checksum=excluded.checksum",
         )?;
         for file in files {
             let len_i64 = i64::try_from(file.length)
                 .map_err(|_| Error::InvalidInput("file length exceeds i64".to_string()))?;
-            stmt.execute(params![
-                root_id,
-                file.rel_path,
-                len_i64,
-                file.checksum,
-                file.file_type
-            ])?;
+            stmt.execute(params![root_id, file.rel_path, len_i64, file.checksum])?;
         }
         Ok(())
     }
@@ -729,6 +684,35 @@ fn reset_inventory_schema(conn: &mut Connection) -> Result<()> {
          DROP TABLE IF EXISTS roots;
          DROP TABLE IF EXISTS inventories;
          DROP TABLE IF EXISTS schema_meta;
+         COMMIT;
+         PRAGMA foreign_keys=ON;",
+    )?;
+    Ok(())
+}
+
+fn migrate_files_drop_file_type(conn: &mut Connection) -> Result<()> {
+    if !has_column(conn, "files", "file_type")? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         BEGIN IMMEDIATE;
+         DROP INDEX IF EXISTS idx_files_root;
+         ALTER TABLE files RENAME TO files_old;
+         CREATE TABLE files (
+           root_id     INTEGER NOT NULL,
+           rel_path    TEXT NOT NULL,
+           length      INTEGER NOT NULL,
+           checksum    TEXT,
+           PRIMARY KEY(root_id, rel_path),
+           FOREIGN KEY(root_id) REFERENCES roots(id) ON DELETE CASCADE
+         );
+         INSERT INTO files(root_id, rel_path, length, checksum)
+         SELECT root_id, rel_path, length, checksum
+         FROM files_old;
+         DROP TABLE files_old;
+         CREATE INDEX IF NOT EXISTS idx_files_root ON files(root_id);
          COMMIT;
          PRAGMA foreign_keys=ON;",
     )?;

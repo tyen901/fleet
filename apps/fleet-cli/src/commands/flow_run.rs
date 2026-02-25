@@ -1,12 +1,7 @@
 use crate::ui::progress::spawn_flow_printer;
-use fleet_core::{Core, FlowEventKind, FlowInput, FlowRequest, FlowResult, FlowSessionEvent};
-use std::io::{self, IsTerminal, Write};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeletePolicy {
-    Prompt,
-    AlwaysReject,
-}
+use fleet_core::{
+    Core, FlowResult, FlowSessionEvent, ProfileAssessmentReport, RepairSummary, SyncSummary,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOutput {
@@ -16,7 +11,6 @@ pub(crate) enum FlowOutput {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FlowRunOptions {
-    pub(crate) delete_policy: DeletePolicy,
     pub(crate) output: FlowOutput,
 }
 
@@ -46,11 +40,7 @@ pub(crate) async fn run_flow_session(
 
     let mut ev_rx = core.subscribe_events();
     let tx_forward = progress_tx.clone();
-    let core_for_input = core.clone();
-    let delete_policy = options.delete_policy;
     let forward = tokio::spawn(async move {
-        let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
-        let mut warned_non_interactive = false;
         loop {
             let ev = match ev_rx.recv().await {
                 Ok(ev) => ev,
@@ -60,45 +50,8 @@ pub(crate) async fn run_flow_session(
             if ev.session_id != session_id {
                 continue;
             }
-
-            let mut skip_forward = false;
-            if let FlowEventKind::InputRequired { prompt, request } = &ev.kind {
-                match request {
-                    FlowRequest::ConfirmDeletes { .. } => match delete_policy {
-                        DeletePolicy::AlwaysReject => {
-                            let _ = core_for_input
-                                .send_flow_input(
-                                    session_id,
-                                    FlowInput::ConfirmDeletes { confirm: false },
-                                )
-                                .await;
-                            skip_forward = true;
-                        }
-                        DeletePolicy::Prompt => {
-                            if interactive {
-                                let confirm =
-                                    prompt_delete_confirmation(prompt).await.unwrap_or(false);
-                                let _ = core_for_input
-                                    .send_flow_input(
-                                        session_id,
-                                        FlowInput::ConfirmDeletes { confirm },
-                                    )
-                                    .await;
-                            } else if !warned_non_interactive {
-                                warned_non_interactive = true;
-                                eprintln!(
-                                    "delete confirmation required without an interactive terminal; waiting for external input or cancellation"
-                                );
-                            }
-                        }
-                    },
-                }
-            }
-
-            if !skip_forward {
-                if let Some(tx) = &tx_forward {
-                    let _ = tx.send(ev);
-                }
+            if let Some(tx) = &tx_forward {
+                let _ = tx.send(ev);
             }
         }
     });
@@ -118,63 +71,46 @@ pub(crate) async fn run_flow_session(
     result
 }
 
-pub(crate) async fn prompt_delete_confirmation(prompt: &str) -> anyhow::Result<bool> {
-    let prompt = prompt.to_string();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
-        loop {
-            if prompt.contains('\n') {
-                println!("{prompt}");
-                print!("Proceed with delete? [y/n]: ");
-            } else {
-                print!("{prompt} [y/n]: ");
-            }
-            io::stdout().flush()?;
-
-            let mut line = String::new();
-            io::stdin().read_line(&mut line)?;
-
-            if let Some(confirm) = parse_delete_confirmation(&line) {
-                return Ok(confirm);
-            }
-
-            println!("Please enter 'y' or 'n'.");
-        }
-    })
-    .await
-    .map_err(anyhow::Error::new)?
-}
-
-pub(crate) fn parse_delete_confirmation(input: &str) -> Option<bool> {
-    let normalized = input.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "y" | "yes" => Some(true),
-        "n" | "no" => Some(false),
-        _ => None,
+pub(crate) async fn run_sync_session(
+    core: &Core,
+    session_id: u64,
+    options: FlowRunOptions,
+) -> anyhow::Result<SyncSummary> {
+    match run_flow_session(core, session_id, options).await? {
+        FlowResult::Sync(summary) => Ok(summary),
+        _ => Err(anyhow::anyhow!("internal: expected sync result")),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_delete_confirmation;
-
-    #[test]
-    fn parse_delete_confirmation_accepts_yes_inputs() {
-        assert_eq!(parse_delete_confirmation("y"), Some(true));
-        assert_eq!(parse_delete_confirmation("yes"), Some(true));
-        assert_eq!(parse_delete_confirmation(" YES "), Some(true));
+pub(crate) async fn run_repair_session(
+    core: &Core,
+    session_id: u64,
+    options: FlowRunOptions,
+) -> anyhow::Result<RepairSummary> {
+    match run_flow_session(core, session_id, options).await? {
+        FlowResult::Repair(summary) => Ok(summary),
+        _ => Err(anyhow::anyhow!("internal: expected repair result")),
     }
+}
 
-    #[test]
-    fn parse_delete_confirmation_accepts_no_inputs() {
-        assert_eq!(parse_delete_confirmation("n"), Some(false));
-        assert_eq!(parse_delete_confirmation("no"), Some(false));
-        assert_eq!(parse_delete_confirmation(" NO "), Some(false));
+pub(crate) async fn run_check_session(
+    core: &Core,
+    session_id: u64,
+    options: FlowRunOptions,
+) -> anyhow::Result<ProfileAssessmentReport> {
+    match run_flow_session(core, session_id, options).await? {
+        FlowResult::Check(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected check result")),
     }
+}
 
-    #[test]
-    fn parse_delete_confirmation_rejects_invalid_inputs() {
-        assert_eq!(parse_delete_confirmation(""), None);
-        assert_eq!(parse_delete_confirmation("maybe"), None);
-        assert_eq!(parse_delete_confirmation("1"), None);
+pub(crate) async fn run_clean_session(
+    core: &Core,
+    session_id: u64,
+    options: FlowRunOptions,
+) -> anyhow::Result<ProfileAssessmentReport> {
+    match run_flow_session(core, session_id, options).await? {
+        FlowResult::Clean(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected clean result")),
     }
 }
