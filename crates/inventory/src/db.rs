@@ -33,10 +33,6 @@ impl InventoryDb {
         self.store.get_or_create_root(inventory_id, root_path)
     }
 
-    pub fn get_root_path(&self, root_id: RootId) -> Result<String> {
-        self.store.get_root_path(root_id)
-    }
-
     pub fn compute_stamp(&self, root_path: &Path, policy: &ScanPolicy) -> Result<FolderStamp> {
         compute_stamp(root_path, policy)
     }

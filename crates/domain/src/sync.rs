@@ -10,7 +10,6 @@ pub enum SyncPhase {
     LoadingManifest,
     Planning,
     Syncing,
-    AwaitingDeleteDecision,
     Deleting,
     Finalizing,
     Done,

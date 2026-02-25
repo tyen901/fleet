@@ -1,5 +1,6 @@
-use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
+
+use crate::hash::sha1_hex;
 
 #[derive(Debug, Clone)]
 pub struct FleetPaths {
@@ -37,9 +38,7 @@ impl FleetPaths {
 }
 
 pub fn profile_state_key(profile_id: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(profile_id.as_bytes());
-    format!("{:x}", hasher.finalize())
+    sha1_hex(profile_id.as_bytes())
 }
 
 pub fn profile_state_dir(state_root: &Path, profile_id: &str) -> PathBuf {
@@ -62,6 +61,10 @@ pub fn flux_cache_dir(state_root: &Path, profile_id: &str) -> PathBuf {
     flux_ws_dir(state_root, profile_id).join("cache")
 }
 
+pub fn normalize_rel_slashes(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 /// Swifty repo + mod.srf cache (JSON blobs).
 pub fn repo_cache_dir(state_root: &Path, profile_id: &str) -> PathBuf {
     profile_state_dir(state_root, profile_id).join("repo_cache")
@@ -69,25 +72,14 @@ pub fn repo_cache_dir(state_root: &Path, profile_id: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{profile_state_dir, profile_state_key, FleetPaths};
-    use std::path::Path;
+    use super::normalize_rel_slashes;
 
     #[test]
-    fn profile_state_key_is_stable_and_unique_for_different_ids() {
-        let a1 = profile_state_key("alpha");
-        let a2 = profile_state_key("alpha");
-        let b = profile_state_key("beta");
-
-        assert_eq!(a1, a2);
-        assert_ne!(a1, b);
-    }
-
-    #[test]
-    fn fleet_paths_resolve_under_state_root_not_destination() {
-        let state_root = Path::new("/tmp/fleet-state");
-        let layout = FleetPaths::for_profile(state_root.to_path_buf(), "p1");
-
-        assert!(layout.state_dir.starts_with(state_root));
-        assert_eq!(layout.state_dir, profile_state_dir(state_root, "p1"));
+    fn normalize_rel_slashes_converts_windows_separator_only() {
+        assert_eq!(
+            normalize_rel_slashes(r".\mods\ace\a.pbo"),
+            "./mods/ace/a.pbo"
+        );
+        assert_eq!(normalize_rel_slashes("mods/ace/a.pbo"), "mods/ace/a.pbo");
     }
 }

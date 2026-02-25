@@ -10,6 +10,12 @@ use flux_types::{SegmentSpec, Signature, SourceRef};
 use tracing::{debug, debug_span, error};
 
 pub use flux_manifest::DesiredManifest;
+pub use swifty_repo::RepoFreshness as DesiredManifestFreshness;
+
+pub struct DesiredManifestLoadResult {
+    pub manifest: DesiredManifest,
+    pub freshness: DesiredManifestFreshness,
+}
 
 pub struct ManifestStats {
     pub total_download_bytes: u64,
@@ -36,6 +42,17 @@ pub async fn load_desired_manifest(
     downloads: &DownloadService,
     sink: Option<DownloadEventSink>,
 ) -> Result<DesiredManifest> {
+    let loaded =
+        load_desired_manifest_with_freshness(repo_url, repo_cache_dir, downloads, sink).await?;
+    Ok(loaded.manifest)
+}
+
+pub async fn load_desired_manifest_with_freshness(
+    repo_url: &str,
+    repo_cache_dir: &Path,
+    downloads: &DownloadService,
+    sink: Option<DownloadEventSink>,
+) -> Result<DesiredManifestLoadResult> {
     let span = debug_span!("sync.load_desired_manifest_from_swifty_repo", repo_url = %repo_url);
     let _g = span.enter();
 
@@ -43,10 +60,14 @@ pub async fn load_desired_manifest(
     let resolver = swifty_repo::DefaultModSrfResolver;
 
     let started_at = Instant::now();
-    let swifty_repo::RepoSyncResult { repo, mods, .. } =
-        swifty_repo::sync_repo_metadata(repo_url, &store, &resolver, downloads, sink.clone())
-            .await
-            .with_context(|| format!("sync swifty repo metadata {repo_url}"))?;
+    let swifty_repo::RepoSyncResult {
+        repo,
+        mods,
+        freshness,
+        ..
+    } = swifty_repo::sync_repo_metadata(repo_url, &store, &resolver, downloads, sink.clone())
+        .await
+        .with_context(|| format!("sync swifty repo metadata {repo_url}"))?;
     debug!(
         elapsed_ms = started_at.elapsed().as_millis(),
         mods = mods.len(),
@@ -62,7 +83,30 @@ pub async fn load_desired_manifest(
         elapsed_ms = started_at.elapsed().as_millis(),
         "transformed swifty repo -> flux DesiredManifest"
     );
-    Ok(manifest)
+    Ok(DesiredManifestLoadResult {
+        manifest,
+        freshness,
+    })
+}
+
+pub fn load_cached_desired_manifest(
+    repo_url: &str,
+    repo_cache_dir: &Path,
+) -> Result<Option<DesiredManifest>> {
+    let Some(cache) = swifty_repo::load_cached_repo_blocking(repo_cache_dir, repo_url)
+        .with_context(|| format!("load swifty cache for {repo_url}"))?
+    else {
+        return Ok(None);
+    };
+
+    let mods = cache
+        .mods
+        .into_iter()
+        .map(|(name, cached)| (name, cached.manifest))
+        .collect::<BTreeMap<_, _>>();
+    let manifest = swifty_repo_to_flux_desired_manifest(repo_url, &cache.repo, &mods)
+        .context("transform cached swifty repo -> flux DesiredManifest")?;
+    Ok(Some(manifest))
 }
 
 fn swifty_repo_to_flux_desired_manifest(
@@ -204,7 +248,7 @@ fn swifty_repo_to_flux_desired_manifest(
 }
 
 fn add_parent_dirs(out: &mut BTreeSet<PathBuf>, rel_path: &Path) {
-    let p = rel_path.to_string_lossy().replace('\\', "/");
+    let p = fleet_domain::normalize_rel_slashes(rel_path.to_string_lossy().as_ref());
     if !p.contains('/') {
         return;
     }
@@ -224,7 +268,7 @@ fn add_parent_dirs(out: &mut BTreeSet<PathBuf>, rel_path: &Path) {
 }
 
 fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<String> {
-    let normalized = raw_path.replace('\\', "/");
+    let normalized = fleet_domain::normalize_rel_slashes(raw_path);
     if normalized.starts_with('/') {
         anyhow::bail!(
             "invalid swifty mod.srf file path (must be relative): mod={} path={}",
@@ -272,9 +316,13 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_swifty_file_rel_path, swifty_repo_to_flux_desired_manifest};
+    use super::{
+        load_cached_desired_manifest, normalize_swifty_file_rel_path,
+        swifty_repo_to_flux_desired_manifest,
+    };
     use flux_manifest::ManifestEntry;
     use std::collections::BTreeMap;
+    use tempfile::TempDir;
 
     fn md5(hex: &str) -> swifty_artifacts::Md5Digest {
         swifty_artifacts::Md5Digest::parse_hex(hex).expect("valid md5")
@@ -317,6 +365,17 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn write_cached_repo_blob(
+        cache_root: &std::path::Path,
+        repo_url: &str,
+        blob: &swifty_repo::RepoCacheBlob,
+    ) {
+        std::fs::create_dir_all(cache_root).expect("create cache dir");
+        let path = swifty_repo::repo_cache_blob_path(cache_root, repo_url);
+        let bytes = serde_json::to_vec(blob).expect("serialize cache blob");
+        std::fs::write(path, bytes).expect("write cache blob");
     }
 
     #[test]
@@ -371,5 +430,76 @@ mod tests {
             assert!(!rel.contains("//"), "path was not canonicalized: {rel}");
             assert!(!rel.contains('\\'), "path was not canonicalized: {rel}");
         }
+    }
+
+    #[test]
+    fn load_cached_desired_manifest_returns_none_when_cache_is_missing() {
+        let td = TempDir::new().expect("tempdir");
+        let manifest = load_cached_desired_manifest("https://example.com/repo.json", td.path())
+            .expect("load cached");
+        assert!(manifest.is_none());
+    }
+
+    #[test]
+    fn load_cached_desired_manifest_builds_manifest_from_cached_repo() {
+        let td = TempDir::new().expect("tempdir");
+        let repo_url = "https://example.com/repo.json";
+        let repo = base_repo_spec("ace");
+        let mod_manifest = srf_mod("ace", &["addons/a.pbo"]);
+        let blob = swifty_repo::RepoCacheBlob {
+            schema_version: 1,
+            repo_url: repo_url.to_string(),
+            repo_fetched_at_unix_ms: 1,
+            repo,
+            mods: BTreeMap::from([(
+                "ace".to_string(),
+                swifty_repo::CachedModSrf {
+                    checksum: md5("00000000000000000000000000000000"),
+                    fetched_at_unix_ms: 1,
+                    manifest: mod_manifest,
+                    http: None,
+                },
+            )]),
+            repo_http: None,
+            icon_image_checksum: None,
+            repo_image_checksum: None,
+            repo_json_checksum: Some("abc".to_string()),
+        };
+        write_cached_repo_blob(td.path(), repo_url, &blob);
+
+        let manifest = load_cached_desired_manifest(repo_url, td.path())
+            .expect("load cached")
+            .expect("manifest");
+        let file_paths: Vec<String> = manifest
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ManifestEntry::File(file) => Some(file.rel_path.to_string_lossy().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(file_paths, vec!["ace/addons/a.pbo".to_string()]);
+    }
+
+    #[test]
+    fn load_cached_desired_manifest_errors_when_cache_is_incomplete() {
+        let td = TempDir::new().expect("tempdir");
+        let repo_url = "https://example.com/repo.json";
+        let blob = swifty_repo::RepoCacheBlob {
+            schema_version: 1,
+            repo_url: repo_url.to_string(),
+            repo_fetched_at_unix_ms: 1,
+            repo: base_repo_spec("ace"),
+            mods: BTreeMap::new(),
+            repo_http: None,
+            icon_image_checksum: None,
+            repo_image_checksum: None,
+            repo_json_checksum: Some("abc".to_string()),
+        };
+        write_cached_repo_blob(td.path(), repo_url, &blob);
+
+        let err = load_cached_desired_manifest(repo_url, td.path())
+            .expect_err("expected incomplete cache to fail");
+        assert!(!err.to_string().is_empty());
     }
 }

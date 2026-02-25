@@ -1,3 +1,4 @@
+use fleet_domain::ReleaseChannel;
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::Deserialize;
@@ -7,36 +8,7 @@ const STABLE_UPDATE_URL: &str = "https://github.com/tyen901/fleet/releases/lates
 const DEV_RELEASES_BASE: &str = "https://github.com/tyen901/fleet/releases/download";
 const DEV_TAGS_API: &str = "https://api.github.com/repos/tyen901/fleet/tags?per_page=100";
 
-pub fn update_feed_url_hint(channel: &str) -> String {
-    if std::env::var("FLEET_DISABLE_UPDATES")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
-        return "disabled".to_string();
-    }
-
-    if let Some(url) = std::env::var("FLEET_UPDATE_FEED")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        return url;
-    }
-
-    if let Some(url) = std::env::var("FLEET_UPDATE_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        return url;
-    }
-
-    if channel == "dev" {
-        "resolving dev tag…".to_string()
-    } else {
-        STABLE_UPDATE_URL.to_string()
-    }
-}
-
-pub fn resolve_feed_url(channel: &str) -> Result<String, String> {
+pub fn resolve_feed_url(channel: ReleaseChannel) -> Result<String, String> {
     if std::env::var("FLEET_DISABLE_UPDATES")
         .ok()
         .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -58,7 +30,7 @@ pub fn resolve_feed_url(channel: &str) -> Result<String, String> {
         return Ok(url);
     }
 
-    if channel == "dev" {
+    if channel == ReleaseChannel::Dev {
         let tag = resolve_latest_dev_tag()?;
         Ok(format!("{DEV_RELEASES_BASE}/{tag}"))
     } else {
@@ -66,13 +38,8 @@ pub fn resolve_feed_url(channel: &str) -> Result<String, String> {
     }
 }
 
-pub fn velopack_channel(user_channel: &str) -> String {
-    let normalized = user_channel.trim().to_lowercase();
-    let suffix = if normalized.is_empty() {
-        "stable".to_string()
-    } else {
-        normalized
-    };
+pub fn velopack_channel(user_channel: ReleaseChannel) -> String {
+    let suffix = user_channel.as_str();
     let os = if cfg!(target_os = "windows") {
         "win"
     } else if cfg!(target_os = "macos") {
@@ -95,7 +62,10 @@ pub fn installed_version_string() -> String {
         .unwrap_or_else(|_| build_version_string().to_string())
 }
 
-pub fn check_for_updates(feed_url: &str, channel: &str) -> Result<Option<String>, String> {
+pub fn check_for_updates(
+    feed_url: &str,
+    channel: ReleaseChannel,
+) -> Result<Option<String>, String> {
     if feed_url.trim().is_empty() || feed_url == "disabled" {
         return Err("Updates are disabled.".to_string());
     }
@@ -113,7 +83,7 @@ pub fn check_for_updates(feed_url: &str, channel: &str) -> Result<Option<String>
     }
 }
 
-pub fn download_apply_and_restart(feed_url: &str, channel: &str) -> Result<(), String> {
+pub fn download_apply_and_restart(feed_url: &str, channel: ReleaseChannel) -> Result<(), String> {
     if feed_url.trim().is_empty() || feed_url == "disabled" {
         return Err("Updates are disabled.".to_string());
     }

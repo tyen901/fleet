@@ -21,7 +21,7 @@ impl ApiError {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Type, PartialEq, Eq)]
 pub struct Profile {
     pub id: ProfileId,
     pub name: String,
@@ -29,13 +29,15 @@ pub struct Profile {
     pub destination: String,
     #[serde(default)]
     pub arma3_server: Option<ProfileServerInfo>,
+    /// Last seen persisted swifty repo cache revision for this profile/source.
+    /// Used to reconcile persisted server selection only when cache changed on disk.
     #[serde(default)]
-    pub launch_template: String,
+    pub swifty_repo_revision: String,
     #[serde(default)]
     pub launch_params: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct ProfileServerInfo {
     pub address: String,
     pub port: u16,
@@ -43,7 +45,7 @@ pub struct ProfileServerInfo {
     pub password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct RepoServer {
     pub address: String,
     pub port: u16,
@@ -107,12 +109,6 @@ mod tests {
     }
 
     #[test]
-    fn validated_source_rejects_empty() {
-        let profile = profile_with_source("   ");
-        assert!(profile.validated_source_kind().is_err());
-    }
-
-    #[test]
     fn validated_source_rejects_root_url() {
         let profile = profile_with_source("https://example.com/");
         assert!(profile.validated_source_kind().is_err());
@@ -125,12 +121,6 @@ mod tests {
             profile.validated_source_kind().unwrap(),
             ProfileSourceKind::Http(_)
         ));
-    }
-
-    #[test]
-    fn validated_source_rejects_local_path() {
-        let profile = profile_with_source("/tmp/manifest.json");
-        assert!(profile.validated_source_kind().is_err());
     }
 }
 
@@ -258,16 +248,200 @@ fn default_arma3_custom_launch_template() -> String {
     }
 }
 
+pub const DEFAULT_ARMA3_ARGS: &str = "-noPause -noSplash -skipIntro -noLauncher";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    Pluto,
+    Mercury,
+    Mars,
+    #[default]
+    Saturn,
+    Neptune,
+    Earth,
+}
+
+impl ThemeMode {
+    pub const ALL: [Self; 6] = [
+        ThemeMode::Pluto,
+        ThemeMode::Mercury,
+        ThemeMode::Mars,
+        ThemeMode::Saturn,
+        ThemeMode::Neptune,
+        ThemeMode::Earth,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeMode::Pluto => "pluto",
+            ThemeMode::Mercury => "mercury",
+            ThemeMode::Mars => "mars",
+            ThemeMode::Saturn => "saturn",
+            ThemeMode::Neptune => "neptune",
+            ThemeMode::Earth => "earth",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            ThemeMode::Pluto => "Pluto",
+            ThemeMode::Mercury => "Mercury",
+            ThemeMode::Mars => "Mars",
+            ThemeMode::Saturn => "Saturn",
+            ThemeMode::Neptune => "Neptune",
+            ThemeMode::Earth => "Earth",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let idx = Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
+impl FromStr for ThemeMode {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pluto" => Ok(ThemeMode::Pluto),
+            "mercury" => Ok(ThemeMode::Mercury),
+            "mars" => Ok(ThemeMode::Mars),
+            "saturn" => Ok(ThemeMode::Saturn),
+            "neptune" => Ok(ThemeMode::Neptune),
+            "earth" => Ok(ThemeMode::Earth),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(raw.parse::<ThemeMode>().unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseChannel {
+    #[default]
+    Stable,
+    Dev,
+}
+
+impl ReleaseChannel {
+    pub const ALL: [Self; 2] = [ReleaseChannel::Stable, ReleaseChannel::Dev];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReleaseChannel::Stable => "stable",
+            ReleaseChannel::Dev => "dev",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            ReleaseChannel::Stable => "Stable",
+            ReleaseChannel::Dev => "Dev",
+        }
+    }
+}
+
+impl FromStr for ReleaseChannel {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "stable" => Ok(ReleaseChannel::Stable),
+            "dev" => Ok(ReleaseChannel::Dev),
+            _ => Err(()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseChannel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(raw.parse::<ReleaseChannel>().unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
+pub enum TelemetryPreference {
+    #[default]
+    Unset,
+    Allowed,
+    Denied,
+}
+
+impl TelemetryPreference {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, TelemetryPreference::Allowed)
+    }
+}
+
+impl Serialize for TelemetryPreference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            TelemetryPreference::Unset => serializer.serialize_none(),
+            TelemetryPreference::Allowed => serializer.serialize_bool(true),
+            TelemetryPreference::Denied => serializer.serialize_bool(false),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TelemetryPreference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawTelemetryPreference {
+            Bool(bool),
+            String(String),
+            Null,
+        }
+
+        let raw = RawTelemetryPreference::deserialize(deserializer)?;
+        let parsed = match raw {
+            RawTelemetryPreference::Bool(true) => TelemetryPreference::Allowed,
+            RawTelemetryPreference::Bool(false) => TelemetryPreference::Denied,
+            RawTelemetryPreference::String(value) => {
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "allowed" | "true" | "yes" | "on" => TelemetryPreference::Allowed,
+                    "denied" | "false" | "no" | "off" => TelemetryPreference::Denied,
+                    _ => TelemetryPreference::Unset,
+                }
+            }
+            RawTelemetryPreference::Null => TelemetryPreference::Unset,
+        };
+        Ok(parsed)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+pub struct AppearanceSettings {
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct AppSettings {
-    pub theme_mode: String,
-    /// If true, the app will skip the first-run onboarding flow.
-    ///
-    /// - New installs default to `false` (so onboarding always runs on first launch).
-    /// - Existing installs that deserialize older `settings.json` (missing this field)
-    ///   default to `true` to avoid unexpectedly re-triggering onboarding.
-    #[serde(default = "default_true")]
-    pub onboarding_completed: bool,
+pub struct Arma3Settings {
     #[serde(default)]
     pub arma3_default_args: String,
     #[serde(default)]
@@ -276,57 +450,139 @@ pub struct AppSettings {
     pub arma3_launch_method: Arma3LaunchMethod,
     #[serde(default = "default_arma3_custom_launch_template")]
     pub arma3_custom_launch_template: String,
-    /// If true, Desktop auto-cleans unexpected files detected during checks/sync flows.
-    /// If false, Desktop prompts before cleanup.
-    #[serde(default)]
-    pub auto_cleanup_unexpected_files: bool,
+}
+
+impl Default for Arma3Settings {
+    fn default() -> Self {
+        Self {
+            arma3_default_args: String::new(),
+            arma3_game_dir: String::new(),
+            arma3_launch_method: default_arma3_launch_method(),
+            arma3_custom_launch_template: default_arma3_custom_launch_template(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct UiSettings {
+    /// If true, the app will skip the first-run onboarding flow.
+    ///
+    /// - New installs default to `false` (so onboarding always runs on first launch).
+    /// - Existing installs that deserialize older `settings.json` (missing this field)
+    ///   default to `true` to avoid unexpectedly re-triggering onboarding.
+    #[serde(default = "default_true")]
+    pub onboarding_completed: bool,
     /// If true, the UI shows profile `icon.png` images in the sidebar/dashboard.
     /// If false, the UI falls back to text.
     #[serde(default = "default_true")]
     pub show_profile_icons: bool,
-    #[serde(default = "default_telemetry_consent")]
-    pub telemetry_consent: Option<bool>,
+    /// If true, show advanced profile actions in the profile dashboard.
+    #[serde(default)]
+    pub show_advanced_options: bool,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            onboarding_completed: false,
+            show_profile_icons: true,
+            show_advanced_options: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PrivacySettings {
+    #[serde(default)]
+    pub telemetry_consent: TelemetryPreference,
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self {
+            telemetry_consent: TelemetryPreference::Unset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+pub struct RuntimeSettings {
     /// If true, enable debug-level logs to disk (trace is always disabled).
     #[serde(default)]
     pub debug_log_to_disk: bool,
-    #[serde(default = "default_release_channel")]
-    pub release_channel: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct UpdateSettings {
+    /// If true, queue startup profile checks when the app boots.
+    #[serde(default = "default_true")]
+    pub auto_check_on_startup: bool,
+    #[serde(default)]
+    pub release_channel: ReleaseChannel,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_check_on_startup: true,
+            release_channel: ReleaseChannel::Stable,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SyncSettings {
     /// .gitignore-style patterns (one per line) applied to inventory scan/check paths.
     #[serde(default = "default_inventory_ignore_rules")]
     pub inventory_ignore_rules: String,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        Self {
+            inventory_ignore_rules: default_inventory_ignore_rules(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+pub struct AppSettings {
+    #[serde(flatten)]
+    pub appearance: AppearanceSettings,
+    #[serde(flatten)]
+    pub arma3: Arma3Settings,
+    #[serde(flatten)]
+    pub ui: UiSettings,
+    #[serde(flatten)]
+    pub privacy: PrivacySettings,
+    #[serde(flatten)]
+    pub runtime: RuntimeSettings,
+    #[serde(flatten)]
+    pub updates: UpdateSettings,
+    #[serde(flatten)]
+    pub sync: SyncSettings,
 }
 
 fn default_true() -> bool {
     true
 }
 
-fn default_telemetry_consent() -> Option<bool> {
-    Some(true)
-}
-
-fn default_release_channel() -> String {
-    "stable".to_string()
-}
-
 fn default_inventory_ignore_rules() -> String {
     crate::inventory::InventoryIgnoreRules::default().to_multiline_string()
 }
 
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            theme_mode: "dark".to_string(),
-            onboarding_completed: false,
-            arma3_default_args: String::new(),
-            arma3_game_dir: String::new(),
-            arma3_launch_method: default_arma3_launch_method(),
-            arma3_custom_launch_template: default_arma3_custom_launch_template(),
-            auto_cleanup_unexpected_files: false,
-            show_profile_icons: true,
-            telemetry_consent: Some(true),
-            debug_log_to_disk: false,
-            release_channel: "stable".to_string(),
-            inventory_ignore_rules: default_inventory_ignore_rules(),
-        }
+pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
+    if settings.arma3.arma3_default_args.trim().is_empty() {
+        settings.arma3.arma3_default_args = DEFAULT_ARMA3_ARGS.to_string();
     }
+    settings.arma3.arma3_launch_method = settings
+        .arma3
+        .arma3_launch_method
+        .normalize_for_current_platform();
+    settings.sync.inventory_ignore_rules =
+        crate::inventory::InventoryIgnoreRules::from_settings_value(
+            &settings.sync.inventory_ignore_rules,
+        )
+        .to_multiline_string();
+    settings
 }

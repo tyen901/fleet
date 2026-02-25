@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use super::AppIcon;
+use crate::ui::platform::open_path;
 use icondata::BsFolder2Open;
 
 #[derive(Props, Clone, PartialEq)]
@@ -16,6 +17,12 @@ pub struct InputProps {
     pub folder_select: bool,
     #[props(default = false)]
     pub file_select: bool,
+    #[props(default = false)]
+    pub open_folder_when_disabled: bool,
+    #[props(default)]
+    pub pick_button_text: Option<String>,
+    #[props(default = false)]
+    pub invalid: bool,
     #[props(default)]
     pub on_change: EventHandler<String>,
 }
@@ -24,13 +31,36 @@ pub struct InputProps {
 pub fn Input(props: InputProps) -> Element {
     let placeholder = props.placeholder.unwrap_or_default();
     let label = props.label.clone();
+    let value = props.value.clone();
+    let value_for_browse = value.clone();
+    let pick_button_text = props.pick_button_text.clone();
+    let has_pick_text = pick_button_text
+        .as_ref()
+        .is_some_and(|text| !text.trim().is_empty());
+    let can_open_disabled_folder =
+        props.open_folder_when_disabled && props.folder_select && !value.trim().is_empty();
 
     let on_browse = move |_| {
         let disabled = props.disabled;
         let file_select = props.file_select;
         let folder_select = props.folder_select;
+        let open_folder_when_disabled = props.open_folder_when_disabled;
+        let value = value_for_browse.clone();
         let on_change = props.on_change;
-        if disabled || (!folder_select && !file_select) {
+        if disabled {
+            if open_folder_when_disabled && folder_select {
+                let path = value.trim().to_string();
+                if path.is_empty() {
+                    return;
+                }
+                spawn(async move {
+                    open_path(path.into()).await;
+                });
+            }
+            return;
+        }
+
+        if !folder_select && !file_select {
             return;
         }
 
@@ -60,11 +90,20 @@ pub fn Input(props: InputProps) -> Element {
 
             div { class: "field__row",
                 input {
-                    class: if props.folder_select || props.file_select { "field__input field__input--with-btn" } else { "field__input" },
+                    class: if props.folder_select || props.file_select {
+                        if has_pick_text {
+                            "field__input field__input--with-btn field__input--with-btn-text"
+                        } else {
+                            "field__input field__input--with-btn"
+                        }
+                    } else {
+                        "field__input"
+                    },
                     r#type: "text",
-                    value: props.value.clone(),
+                    value: value.clone(),
                     placeholder: placeholder,
                     disabled: props.disabled,
+                    "aria-invalid": if props.invalid { "true" } else { "false" },
                     autocomplete: "off",
                     spellcheck: "false",
                     onmousedown: move |evt| evt.stop_propagation(),
@@ -74,10 +113,17 @@ pub fn Input(props: InputProps) -> Element {
                 if props.folder_select || props.file_select {
                     button {
                         r#type: "button",
-                        class: "field__pick",
-                        disabled: props.disabled,
+                        class: if has_pick_text { "field__pick field__pick--text" } else { "field__pick" },
+                        disabled: if props.disabled {
+                            !can_open_disabled_folder
+                        } else {
+                            false
+                        },
                         onclick: on_browse,
                         AppIcon { icon: BsFolder2Open, class: "ico" }
+                        if let Some(text) = pick_button_text.as_ref().filter(|text| !text.trim().is_empty()) {
+                            span { class: "field__pick-label", "{text}" }
+                        }
                     }
                 }
             }

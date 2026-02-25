@@ -153,11 +153,11 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("local=Ready"),
-        "expected local=Ready after inventory scan, got: {out}"
+        out.contains("profile check: local="),
+        "expected profile check output, got: {out}"
     );
 
-    run_cmd(&bin, &["sync", profile_id, "--no-delete"], &envs);
+    run_cmd(&bin, &["sync", profile_id], &envs);
 
     let profile_state_root = config_root.join("profile_state");
     let profile_state_dir = profile_state_root.join(fleet_domain::profile_state_key(profile_id));

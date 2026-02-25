@@ -1843,6 +1843,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "dioxus",
  "dioxus-logger",
  "dioxus-router",
@@ -1926,6 +1927,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "specta",
+ "tempfile",
  "url",
 ]
 
@@ -1952,6 +1954,7 @@ dependencies = [
  "fleet-download",
  "fleet-flux",
  "fleet-manifest",
+ "flux-manifest",
  "fs2",
  "inventory",
  "serde",
@@ -1991,11 +1994,14 @@ name = "fleet-manifest"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fleet-domain",
  "fleet-download",
  "flux-manifest",
  "flux-types",
+ "serde_json",
  "swifty-repo",
  "swifty_artifacts",
+ "tempfile",
  "tracing",
  "url",
 ]
@@ -3013,8 +3019,10 @@ checksum = "412c95f764f89aad1a8505aa4273d931b66d5a26d1e6609a37243784a9128ad9"
 dependencies = [
  "icondata_bs",
  "icondata_core",
+ "icondata_fa",
  "icondata_io",
  "icondata_ri",
+ "icondata_wi",
 ]
 
 [[package]]
@@ -3033,6 +3041,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c97be924215abd5e630d84e95a47c710138a6559b4c55039f4f33aa897fa859"
 
 [[package]]
+name = "icondata_fa"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0108c409b3c06be1124a377b827922ad6091cb9eb467d521ea1cb3b1c3d7a76"
+dependencies = [
+ "icondata_core",
+]
+
+[[package]]
 name = "icondata_io"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3046,6 +3063,15 @@ name = "icondata_ri"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b1851b5662f59b888ba24595886a9e6b6f5c11151b3640ee1875810f7544865"
+dependencies = [
+ "icondata_core",
+]
+
+[[package]]
+name = "icondata_wi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "352f5a5df000eabb35894cec75048e97a46d738ebdaf1e060670b0cf473a2419"
 dependencies = [
  "icondata_core",
 ]
@@ -3217,6 +3243,7 @@ name = "inventory"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "fleet-domain",
  "rusqlite",
  "serde",
  "swifty_artifacts",
@@ -5770,6 +5797,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "fleet-domain",
  "fleet-download",
  "reqwest",
  "serde",

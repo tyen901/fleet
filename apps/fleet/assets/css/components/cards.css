@@ -1,44 +1,42 @@
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-3);
-  padding: 12px;
-  box-shadow: var(--shadow);
+.section-stack {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
 }
 
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-3);
-  padding: 10px;
-  box-shadow: var(--shadow);
+.form-stack {
+  display: grid;
+  gap: 12px;
+  padding: 2px 0;
 }
 
-.panel__row {
+.form-stack > * + * {
+  margin-top: 0;
+}
+
+.toggle-row {
   display: flex;
-  gap: 10px;
   align-items: center;
-}
-
-.panel__row--split {
   justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-2);
+  color: var(--clr-text-primary);
 }
 
 .kicker {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  font-weight: 800;
-  color: var(--muted);
+  font-weight: 500;
+  color: var(--clr-text-secondary);
 }
 
 .muted-sm {
   margin-top: 4px;
-  font-size: 12px;
-  color: var(--muted);
+  font-size: var(--font-size-sm);
+  color: var(--clr-text-secondary);
 }
 
 .mono {
@@ -47,44 +45,42 @@
 
 .mono-lg {
   font-family: var(--mono);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
   margin-top: 4px;
 }
 
 .mono-sm {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 
 .note {
-  margin-top: 10px;
+  margin-top: 6px;
   padding: 8px 10px;
-  border-radius: var(--radius-2);
-  border: 1px solid var(--border);
-  color: var(--muted);
+  border: 1px solid var(--clr-border);
+  color: var(--clr-text-secondary);
   display: flex;
   gap: 8px;
   align-items: center;
+  border-radius: var(--radius-2);
 }
 
 .note--ok {
-  border-color: color-mix(in oklab, var(--success) 35%, var(--border));
-  background: color-mix(in oklab, var(--success) 10%, var(--surface));
-  color: color-mix(in oklab, var(--success) 70%, var(--fg));
+  color: var(--clr-success-text);
+  border-color: var(--clr-success-subtle);
 }
 
 .note--bad {
-  border-color: color-mix(in oklab, var(--danger) 35%, var(--border));
-  background: color-mix(in oklab, var(--danger) 10%, var(--surface));
-  color: color-mix(in oklab, var(--danger) 70%, var(--fg));
+  color: var(--clr-danger-text);
+  border-color: var(--clr-danger-subtle);
 }
 
 .code {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-2);
   padding: 10px;
+  border-radius: var(--radius-2);
+  border: 1px solid var(--clr-border);
+  color: var(--clr-text-primary);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
   overflow: auto;
 }

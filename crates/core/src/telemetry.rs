@@ -6,9 +6,6 @@ use sentry::{ClientInitGuard, ClientOptions, Level};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use fleet_domain::inventory::{InventoryMetrics, InventoryScanSummary};
-use fleet_domain::sync::SyncSummary;
-
 static TELEMETRY: OnceLock<TelemetryState> = OnceLock::new();
 
 struct TelemetryState {
@@ -187,46 +184,4 @@ fn scrub_event_extra(
             *text = scrub_text(text, scrub_win, scrub_unix, scrub_url);
         }
     }
-}
-
-fn capture_metric(name: &str, segments: u64, files: u64, size_bytes: u64, duration_ms: u64) {
-    if !cfg!(debug_assertions) {
-        return;
-    }
-    if state()
-        .guard
-        .lock()
-        .expect("telemetry guard lock")
-        .is_none()
-    {
-        return;
-    }
-
-    sentry::capture_message(
-        &format!(
-            "fleet.metric.{} segments={} files={} size_bytes={} duration_ms={}",
-            name, segments, files, size_bytes, duration_ms
-        ),
-        Level::Info,
-    );
-}
-
-pub fn capture_inventory_scan(
-    summary: &InventoryScanSummary,
-    segments: u64,
-    files: u64,
-    size_bytes: u64,
-    duration_ms: u64,
-) {
-    let _ = summary;
-    capture_metric("inventory_scan", segments, files, size_bytes, duration_ms);
-}
-
-pub fn capture_downloads(sync: &SyncSummary, inv: Option<&InventoryMetrics>) {
-    let segments = inv.map(|m| m.segments_count).unwrap_or(0);
-    let files = sync.files_finalized;
-    let size_bytes = sync.bytes_downloaded;
-    let duration_ms = sync.duration_ms;
-
-    capture_metric("downloads", segments, files, size_bytes, duration_ms);
 }

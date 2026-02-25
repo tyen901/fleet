@@ -314,8 +314,8 @@ impl FluxInventorySqlite {
             let tx = conn.transaction()?;
 
             let mut upsert_file = tx.prepare_cached(
-                "INSERT INTO files(root_id, rel_path, length, checksum, file_type)
-                 VALUES (?1, ?2, ?3, NULL, NULL)
+                "INSERT INTO files(root_id, rel_path, length, checksum)
+                 VALUES (?1, ?2, ?3, NULL)
                  ON CONFLICT(root_id, rel_path) DO UPDATE SET
                    length=excluded.length",
             )?;

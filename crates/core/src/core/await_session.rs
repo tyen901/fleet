@@ -1,5 +1,6 @@
 use crate::ApiError;
 use crate::Core;
+use fleet_domain::health::ProfileAssessmentReport;
 use fleet_flow::{FlowEventKind, FlowResult, FlowSessionEvent};
 use tokio::sync::broadcast::Receiver;
 
@@ -52,6 +53,21 @@ impl Core {
             other => Err(ApiError::new(
                 "internal",
                 format!("unexpected terminal: {other:?}"),
+            )),
+        }
+    }
+
+    pub async fn await_assessment(
+        &self,
+        session_id: u64,
+    ) -> Result<ProfileAssessmentReport, ApiError> {
+        match self.await_finished(session_id).await? {
+            FlowResult::Check(report)
+            | FlowResult::RebuildInventory(report)
+            | FlowResult::Clean(report) => Ok(report),
+            FlowResult::Sync(_) | FlowResult::Repair(_) => Err(ApiError::new(
+                "internal",
+                "unexpected non-assessment result",
             )),
         }
     }

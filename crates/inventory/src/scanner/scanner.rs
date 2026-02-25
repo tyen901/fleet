@@ -1,5 +1,8 @@
-use crate::scanner::{ScanProgress, ScanStage, ScannerConfig, SyncMode, SyncRequest, SyncResult};
+use crate::scanner::{
+    CancelFn, ScanProgress, ScanStage, ScannerConfig, SyncMode, SyncRequest, SyncResult,
+};
 use crate::{
+    hash::{hash_file_record, mix64},
     scanner::walk::{WalkItem, WalkStream},
     Error, FileEntry, FolderStamp, InventoryDb, SegmentEntry, UpdateSession,
 };
@@ -53,7 +56,7 @@ struct WorkerPool {
 }
 
 impl WorkerPool {
-    fn new(workers: usize, cap: usize) -> Self {
+    fn new(workers: usize, cap: usize, cancel: Option<CancelFn>) -> Self {
         let (scan_tx, scan_rx) = chan::bounded::<WalkItem>(cap);
         let (res_tx, res_rx) = chan::bounded::<ScanMsg>(cap);
 
@@ -61,7 +64,8 @@ impl WorkerPool {
         for _ in 0..workers {
             let rx = scan_rx.clone();
             let tx = res_tx.clone();
-            handles.push(thread::spawn(move || worker_loop(rx, tx)));
+            let cancel = cancel.clone();
+            handles.push(thread::spawn(move || worker_loop(rx, tx, cancel)));
         }
         drop(res_tx);
 
@@ -288,7 +292,7 @@ impl Scanner {
 
         let cap = self.cfg.queue_capacity.max(1);
         let workers = self.cfg.workers.max(1);
-        let mut pool = WorkerPool::new(workers, cap);
+        let mut pool = WorkerPool::new(workers, cap, self.cfg.cancel.clone());
 
         let mut session = self.db.begin_update(root_id)?;
         session.begin_seen_set()?;
@@ -302,6 +306,15 @@ impl Scanner {
 
         let mut pending_scans = 0u64;
         for item in &scan_items {
+            if !cancelled && is_cancelled(&self.cfg) {
+                cancelled = true;
+                prog.stage = ScanStage::Cancelled;
+                prog.files_seen = files_seen;
+                prog.files_scanned = files_scanned;
+                prog.bytes_scanned = bytes_scanned;
+                emit_progress(&self.cfg, &prog);
+            }
+
             if cancelled {
                 pool.join();
                 session.rollback()?;
@@ -310,6 +323,21 @@ impl Scanner {
             }
 
             loop {
+                if !cancelled && is_cancelled(&self.cfg) {
+                    cancelled = true;
+                    prog.stage = ScanStage::Cancelled;
+                    prog.files_seen = files_seen;
+                    prog.files_scanned = files_scanned;
+                    prog.bytes_scanned = bytes_scanned;
+                    emit_progress(&self.cfg, &prog);
+                }
+                if cancelled {
+                    pool.join();
+                    session.rollback()?;
+                    emit_progress(&self.cfg, &prog);
+                    return Err(Error::Cancelled);
+                }
+
                 match pool.sender().try_send(item.clone()) {
                     Ok(()) => {
                         pending_scans = pending_scans.saturating_add(1);
@@ -346,6 +374,21 @@ impl Scanner {
         pool.close_sender();
 
         while pending_scans > 0 {
+            if !cancelled && is_cancelled(&self.cfg) {
+                cancelled = true;
+                prog.stage = ScanStage::Cancelled;
+                prog.files_seen = files_seen;
+                prog.files_scanned = files_scanned;
+                prog.bytes_scanned = bytes_scanned;
+                emit_progress(&self.cfg, &prog);
+            }
+            if cancelled {
+                pool.join();
+                session.rollback()?;
+                emit_progress(&self.cfg, &prog);
+                return Err(Error::Cancelled);
+            }
+
             let msg = pool.receiver().recv().map_err(|_| Error::ChannelClosed)?;
             if let Err(e) =
                 apply_scan_msg(&mut session, msg, &mut files_scanned, &mut bytes_scanned)
@@ -420,36 +463,26 @@ impl StampAccumulator {
     }
 }
 
-fn hash_file_record(rel: &str, len: u64) -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
+fn worker_loop(rx: chan::Receiver<WalkItem>, tx: chan::Sender<ScanMsg>, cancel: Option<CancelFn>) {
+    loop {
+        if cancel.as_ref().map(|c| c()).unwrap_or(false) {
+            break;
+        }
 
-    let mut h = OFFSET;
-    for &b in rel.as_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h ^= 0xFF;
-    h = h.wrapping_mul(PRIME);
+        let item = match rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(item) => item,
+            Err(chan::RecvTimeoutError::Timeout) => continue,
+            Err(chan::RecvTimeoutError::Disconnected) => break,
+        };
 
-    for &b in len.to_le_bytes().as_slice() {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
-}
+        if cancel.as_ref().map(|c| c()).unwrap_or(false) {
+            break;
+        }
 
-fn mix64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E3779B97F4A7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
-    x ^ (x >> 31)
-}
-
-fn worker_loop(rx: chan::Receiver<WalkItem>, tx: chan::Sender<ScanMsg>) {
-    for item in rx.iter() {
         let res = crate::scanner::swifty_map::scan_one(&item);
-        let _ = tx.send(ScanMsg { item, res });
+        if tx.send(ScanMsg { item, res }).is_err() {
+            break;
+        }
     }
 }
 

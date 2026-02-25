@@ -10,8 +10,7 @@ pub fn PageNotFound(route: Vec<String>) -> Element {
 
     rsx! {
         div { class: "page",
-            div { class: "page__inner",
-                h1 { class: "page__title", "Not Found" }
+            div { class: "page__inner stack-sm",
                 p { class: "page__muted", "That route doesn't exist." }
                 pre { class: "code", "attempted: {route:?}" }
                 div { class: "form-footer",
@@ -19,9 +18,9 @@ pub fn PageNotFound(route: Vec<String>) -> Element {
                         variant: ButtonVariant::Secondary,
                         size: ButtonSize::Lg,
                         onclick: move |_| {
-                            let _ = nav.push(Route::Dashboard {});
+                            let _ = nav.push(Route::Home {});
                         },
-                        "Back to Dashboard"
+                        "Back to Home"
                     }
                 }
             }

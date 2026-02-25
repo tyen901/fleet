@@ -7,12 +7,11 @@ build = "build.rs"
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
-base64 = "0.22.1"
 dotenvy = "0.15.7"
 open = "5.3.3"
 rfd = "0.17.2"
 directories = { workspace = true }
-icondata = { version = "0.7.0", default-features = false, features = ["bootstrap-icons", "ionicons", "remix-icon"] }
+icondata = { version = "0.7.0", default-features = false, features = ["bootstrap-icons", "font-awesome", "ionicons", "remix-icon", "weather-icons"] }
 
 fleet-core = { workspace = true }
 fleet-domain = { workspace = true }
@@ -20,7 +19,9 @@ swifty-repo = { workspace = true }
 velopack = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
 semver = "1.0.27"
+base64 = "0.22.1"
 
 # Dioxus
 dioxus = { version = "0.7.3", features = ["desktop", "router"] }

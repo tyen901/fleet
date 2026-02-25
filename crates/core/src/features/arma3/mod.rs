@@ -5,14 +5,13 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
+use fleet_domain::health::{LocalHealthState, OperationKind, ProfileAssessmentReport};
 use fleet_domain::{AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind};
 use serde::Serialize;
 use specta::Type;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tracing::info;
-
-pub const DEFAULT_ARMA3_ARGS: &str = "-noPause -noSplash -skipIntro -noLauncher";
 
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct ArmaLaunchResult {
@@ -23,28 +22,10 @@ pub struct ArmaLaunchResult {
     pub pid: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Type)]
-pub struct ArmaPreviewResult {
-    pub program: String,
-    pub args: Vec<String>,
-    pub cwd: Option<String>,
-    pub env: Vec<(String, String)>,
-    pub mods: Vec<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionKind {
     Launch,
     Join,
-}
-
-impl ActionKind {
-    fn as_launch_action(self) -> crate::state::LaunchAction {
-        match self {
-            ActionKind::Launch => crate::state::LaunchAction::Launch,
-            ActionKind::Join => crate::state::LaunchAction::Join,
-        }
-    }
 }
 
 impl Core {
@@ -76,22 +57,6 @@ impl Core {
         arma3_execute(profile, settings, ActionKind::Join, extra_args, dry_run)
     }
 
-    pub fn arma3_preview_launch(
-        &self,
-        profile: &Profile,
-        settings: &AppSettings,
-    ) -> Result<ArmaPreviewResult, ApiError> {
-        arma3_preview(profile, settings, ActionKind::Launch)
-    }
-
-    pub fn arma3_preview_join(
-        &self,
-        profile: &Profile,
-        settings: &AppSettings,
-    ) -> Result<ArmaPreviewResult, ApiError> {
-        arma3_preview(profile, settings, ActionKind::Join)
-    }
-
     pub async fn arma3_launch_by_profile_id(
         &self,
         profile_id: ProfileId,
@@ -119,8 +84,8 @@ impl Core {
         extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
-        let drift = self.profile_drift_assessment(&profile_id).await?;
-        validate_launch_compatibility(&drift)?;
+        let assessment = self.launch_assessment_by_profile_id(&profile_id).await?;
+        validate_launch_compatibility(&assessment)?;
         let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
         let extra_args_os: Option<Vec<OsString>> =
             extra_args.map(|v| v.into_iter().map(OsString::from).collect());
@@ -130,44 +95,6 @@ impl Core {
             ActionKind::Join => self.arma3_join(&profile, &settings, extra_args_os, dry_run),
         };
 
-        let now = fleet_domain::time::now_unix_ms();
-        match &result {
-            Ok(out) => {
-                let msg = match action {
-                    ActionKind::Launch => out
-                        .pid
-                        .map(|pid| format!("Launched (pid {pid})"))
-                        .unwrap_or_else(|| "Launch started".to_string()),
-                    ActionKind::Join => out
-                        .pid
-                        .map(|pid| format!("Join started (pid {pid})"))
-                        .unwrap_or_else(|| "Join started".to_string()),
-                };
-                self.update_state(|state| {
-                    state.last_launch = Some(crate::state::LastLaunchInfo {
-                        profile_id: profile_id.clone(),
-                        action: action.as_launch_action(),
-                        status: crate::state::LaunchStatus::Succeeded,
-                        updated_at_unix_ms: now,
-                        message: Some(msg),
-                        error: None,
-                    });
-                });
-            }
-            Err(err) => {
-                self.update_state(|state| {
-                    state.last_launch = Some(crate::state::LastLaunchInfo {
-                        profile_id: profile_id.clone(),
-                        action: action.as_launch_action(),
-                        status: crate::state::LaunchStatus::Failed,
-                        updated_at_unix_ms: now,
-                        message: None,
-                        error: Some(err.clone()),
-                    });
-                });
-            }
-        }
-
         if let Ok(settings) = self.load_settings().await {
             self.update_state(|state| {
                 state.settings = settings;
@@ -175,22 +102,6 @@ impl Core {
         }
 
         result
-    }
-
-    pub async fn arma3_preview_launch_by_profile_id(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<ArmaPreviewResult, ApiError> {
-        let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
-        arma3_preview(&profile, &settings, ActionKind::Launch)
-    }
-
-    pub async fn arma3_preview_join_by_profile_id(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<ArmaPreviewResult, ApiError> {
-        let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
-        arma3_preview(&profile, &settings, ActionKind::Join)
     }
 
     async fn load_profile_and_settings(
@@ -211,10 +122,37 @@ impl Core {
         Ok((profile, settings))
     }
 
+    async fn launch_assessment_by_profile_id(
+        &self,
+        profile_id: &ProfileId,
+    ) -> Result<ProfileAssessmentReport, ApiError> {
+        if let Some(report) = self.read_state(|state| {
+            state
+                .profile_runtime_by_id
+                .get(profile_id)
+                .and_then(|runtime| runtime.assessment.clone())
+        }) {
+            return Ok(report);
+        }
+
+        let profile = self
+            .load_profile(profile_id)
+            .await
+            .map_err(|e| ApiError::new("not_found", e.to_string()))?;
+        let cfg = self.current_flow_config();
+        let session_id = self
+            .flow()
+            .spawn_operation_with_config(cfg, profile, OperationKind::CheckLocal)
+            .await
+            .map_err(|e| ApiError::new("pipeline_error", e.to_string()))?;
+
+        self.await_assessment(session_id).await
+    }
+
     async fn ensure_arma3_settings(&self, settings: &mut AppSettings) -> Result<(), ApiError> {
-        if settings.arma3_game_dir.trim().is_empty() {
+        if settings.arma3.arma3_game_dir.trim().is_empty() {
             if let Some(path) = self.arma3_detect_install_dir() {
-                settings.arma3_game_dir = path.to_string_lossy().to_string();
+                settings.arma3.arma3_game_dir = path.to_string_lossy().to_string();
                 self.save_settings(settings.clone())
                     .await
                     .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
@@ -248,7 +186,7 @@ fn arma3_execute(
             profile_source = %profile.source,
             profile_destination = %profile.destination,
             action = ?kind,
-            launch_method = ?settings.arma3_launch_method,
+            launch_method = ?settings.arma3.arma3_launch_method,
             program = %built.spec.program,
             args = ?built.spec.args,
             "arma3 launch command"
@@ -270,31 +208,6 @@ fn arma3_execute(
             .map(|p| p.to_string_lossy().to_string()),
         env: built.spec.env.clone(),
         pid,
-    })
-}
-
-fn arma3_preview(
-    profile: &Profile,
-    settings: &AppSettings,
-    kind: ActionKind,
-) -> Result<ArmaPreviewResult, ApiError> {
-    let built = build_launch(profile, settings, kind, Vec::new())
-        .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
-
-    Ok(ArmaPreviewResult {
-        program: built.spec.program.clone(),
-        args: built.spec.args.clone(),
-        cwd: built
-            .spec
-            .cwd
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        env: built.spec.env.clone(),
-        mods: built
-            .mods
-            .iter()
-            .map(|m| m.to_string_lossy().to_string())
-            .collect(),
     })
 }
 
@@ -326,11 +239,11 @@ fn build_launch(
         CommandSpec::from_launch_command(&base_command)
     };
 
-    Ok(LaunchPlan { spec, mods })
+    Ok(LaunchPlan { spec })
 }
 
 fn resolve_game_dir(settings: &AppSettings) -> Result<PathBuf, Arma3Error> {
-    if let Some(p) = non_empty_path(&settings.arma3_game_dir) {
+    if let Some(p) = non_empty_path(&settings.arma3.arma3_game_dir) {
         return Ok(p);
     }
     detect_arma3_install_path().ok_or_else(|| {
@@ -363,10 +276,11 @@ struct ResolvedLaunchMode {
 
 fn resolve_launch_mode(settings: &AppSettings) -> Result<ResolvedLaunchMode, Arma3Error> {
     let method = settings
+        .arma3
         .arma3_launch_method
         .normalize_for_current_platform();
     let custom_template = if method == Arma3LaunchMethod::Custom {
-        let Some(template) = non_empty_string(&settings.arma3_custom_launch_template) else {
+        let Some(template) = non_empty_string(&settings.arma3.arma3_custom_launch_template) else {
             return Err(Arma3Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "custom launch template is empty",
@@ -429,7 +343,7 @@ fn build_args(
     let mut args = if !profile.launch_params.trim().is_empty() {
         parse_args(&profile.launch_params)?
     } else {
-        parse_args(&settings.arma3_default_args)?
+        parse_args(&settings.arma3.arma3_default_args)?
     };
 
     let has_connect_override = extra_args.iter().any(|a| {
@@ -439,14 +353,11 @@ fn build_args(
 
     if kind == ActionKind::Join && !has_connect_override {
         if let Some(server) = profile.arma3_server.as_ref() {
-            let address = server.address.trim();
-            if !address.is_empty() {
-                args.push(format!("-connect={address}"));
-                args.push(format!("-port={}", server.port));
-                if !server.password.trim().is_empty() {
-                    args.push(format!("-password={}", server.password));
-                }
-            }
+            args.extend(server_join_args(
+                &server.address,
+                server.port,
+                &server.password,
+            ));
         }
     }
 
@@ -455,6 +366,19 @@ fn build_args(
     }
 
     Ok(args)
+}
+
+pub fn server_join_args(address: &str, port: u16, password: &str) -> Vec<String> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Vec::new();
+    }
+
+    let mut args = vec![format!("-connect={address}"), format!("-port={port}")];
+    if !password.trim().is_empty() {
+        args.push(format!("-password={password}"));
+    }
+    args
 }
 
 fn discover_mods(profile: &Profile) -> Result<Vec<PathBuf>, Arma3Error> {
@@ -594,26 +518,23 @@ fn non_empty_string(s: &str) -> Option<String> {
     }
 }
 
-fn validate_launch_compatibility(
-    drift: &fleet_domain::health::DriftMetrics,
-) -> Result<(), ApiError> {
-    if drift.launch_compatible {
+fn validate_launch_compatibility(report: &ProfileAssessmentReport) -> Result<(), ApiError> {
+    if matches!(
+        report.local_health,
+        LocalHealthState::Ready | LocalHealthState::LocalDrift
+    ) {
         return Ok(());
     }
 
     Err(ApiError::new(
         "launch_incompatible",
-        format!(
-            "launch blocked: {} missing, {} modified",
-            drift.missing_files_count, drift.modified_files_count
-        ),
+        format!("launch blocked: local health {:?}", report.local_health),
     ))
 }
 
 #[derive(Debug, Clone)]
 struct LaunchPlan {
     spec: CommandSpec,
-    mods: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -655,15 +576,15 @@ impl CommandSpec {
 mod tests {
     use super::{build_args, resolve_launch_mode, validate_launch_compatibility, ActionKind};
     use fleet_arma3::LaunchMethod;
+    use fleet_domain::health::{LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState};
     use fleet_domain::types::ProfileServerInfo;
-    use fleet_domain::{health::DriftMetrics, AppSettings, Profile};
+    use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
 
     fn default_settings() -> AppSettings {
-        AppSettings {
-            arma3_default_args: String::new(),
-            ..Default::default()
-        }
+        let mut settings = AppSettings::default();
+        settings.arma3.arma3_default_args = String::new();
+        settings
     }
 
     fn default_profile() -> Profile {
@@ -682,7 +603,7 @@ mod tests {
         profile.launch_params = "-foo -bar".into();
 
         let mut settings = default_settings();
-        settings.arma3_default_args = "-baz".into();
+        settings.arma3.arma3_default_args = "-baz".into();
 
         let args = build_args(&profile, &settings, ActionKind::Launch, Vec::new()).unwrap();
         assert!(args.contains(&"-foo".to_string()));
@@ -726,11 +647,9 @@ mod tests {
 
     #[test]
     fn resolve_launch_mode_custom_base_matches_platform() {
-        let settings = AppSettings {
-            arma3_launch_method: fleet_domain::Arma3LaunchMethod::Custom,
-            arma3_custom_launch_template: "arma3_x64.exe $ARGS $MODS".to_string(),
-            ..Default::default()
-        };
+        let mut settings = AppSettings::default();
+        settings.arma3.arma3_launch_method = fleet_domain::Arma3LaunchMethod::Custom;
+        settings.arma3.arma3_custom_launch_template = "arma3_x64.exe $ARGS $MODS".to_string();
         let resolved = resolve_launch_mode(&settings).unwrap();
         #[cfg(target_os = "windows")]
         assert_eq!(resolved.wrapper_method, LaunchMethod::Arma3Exe);
@@ -740,11 +659,14 @@ mod tests {
 
     #[test]
     fn validate_launch_compatibility_rejects_missing_or_modified() {
-        let err = validate_launch_compatibility(&DriftMetrics {
-            launch_compatible: false,
-            missing_files_count: 2,
-            unexpected_files_count: 0,
-            modified_files_count: 1,
+        let err = validate_launch_compatibility(&ProfileAssessmentReport {
+            profile_id: "p1".to_string(),
+            local_health: LocalHealthState::MissingDestination,
+            remote_freshness: RemoteFreshnessState::Unknown,
+            checked_at_unix_ms: 0,
+            expected_missing_in_inventory_count: 0,
+            inventory_unexpected_paths_count: 0,
+            unexpected_delete_paths: Vec::new(),
         })
         .expect_err("must reject incompatible");
         assert_eq!(err.code, "launch_incompatible");

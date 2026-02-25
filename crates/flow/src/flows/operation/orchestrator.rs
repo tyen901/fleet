@@ -1,19 +1,18 @@
 use super::steps::{
-    apply_deletes, await_delete_confirmation, collect_unexpected_deletes, ensure_not_canceled,
-    load_manifest, plan_manifest_deletes, resolve_profile, run_flux_sync, scan_inventory,
+    apply_deletes, collect_unexpected_deletes, ensure_not_canceled, load_manifest,
+    plan_manifest_deletes, resolve_profile, run_flux_sync, scan_inventory,
 };
-use crate::events::{EventSink, FlowEventKind, FlowInput, LogLevel};
+use crate::events::{EventSink, FlowEventKind, LogLevel};
 use crate::locking::{acquire_lock, check_lock_state, InventoryLockState};
 use crate::FlowConfig;
 use anyhow::Context;
-use fleet_domain::health::RepairSummary;
+use fleet_domain::health::{CheckPhase, ProfileAssessmentReport, RepairSummary};
 use fleet_domain::{Profile, ProfileSourceKind, SyncPhase, SyncSummary};
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -23,23 +22,29 @@ struct RepoCacheSnapshot {
     prior_blob_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug, Clone)]
-struct DeletePlan {
-    paths: Vec<PathBuf>,
-    skipped: bool,
-}
-
 struct RunArtifacts {
     report: fleet_flux::FluxSyncReport,
-    delete_plan: DeletePlan,
+    deleted_paths: Vec<PathBuf>,
     duration_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CleanFlowOptions {
+    pub remove_empty_parent_dirs: bool,
+}
+
+impl Default for CleanFlowOptions {
+    fn default() -> Self {
+        Self {
+            remove_empty_parent_dirs: true,
+        }
+    }
 }
 
 pub async fn run_repair_flow(
     cfg: FlowConfig,
     profile: Profile,
     cancel: CancellationToken,
-    input_rx: mpsc::Receiver<FlowInput>,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<RepairSummary> {
     info!(
@@ -48,7 +53,7 @@ pub async fn run_repair_flow(
         op = "run_repair_flow",
         "repair flow started"
     );
-    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, input_rx, sink).await?;
+    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, sink).await?;
     info!(
         flow_kind = "repair",
         profile_id = %profile.id,
@@ -63,16 +68,7 @@ pub async fn run_repair_flow(
         destination: profile.destination,
         duration_ms: artifacts.duration_ms,
         files_reconciled: artifacts.report.files_finalized,
-        files_deleted: if artifacts.delete_plan.skipped {
-            0
-        } else {
-            artifacts.delete_plan.paths.len() as u64
-        },
-        files_skipped_delete: if artifacts.delete_plan.skipped {
-            artifacts.delete_plan.paths.len() as u64
-        } else {
-            0
-        },
+        files_deleted: artifacts.deleted_paths.len() as u64,
     })
 }
 
@@ -80,7 +76,6 @@ pub async fn run_sync_flow(
     cfg: FlowConfig,
     profile: Profile,
     cancel: CancellationToken,
-    input_rx: mpsc::Receiver<FlowInput>,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<SyncSummary> {
     info!(
@@ -89,7 +84,7 @@ pub async fn run_sync_flow(
         op = "run_sync_flow",
         "sync flow started"
     );
-    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, input_rx, sink).await?;
+    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, sink).await?;
     info!(
         flow_kind = "sync",
         profile_id = %profile.id,
@@ -110,11 +105,154 @@ pub async fn run_sync_flow(
     })
 }
 
+pub async fn run_clean_flow(
+    cfg: FlowConfig,
+    profile: Profile,
+    cancel: CancellationToken,
+    sink: Arc<dyn EventSink>,
+) -> anyhow::Result<ProfileAssessmentReport> {
+    run_clean_flow_with_options(cfg, profile, cancel, sink, CleanFlowOptions::default()).await
+}
+
+pub async fn run_rebuild_inventory_flow(
+    cfg: FlowConfig,
+    profile: Profile,
+    cancel: CancellationToken,
+    sink: Arc<dyn EventSink>,
+) -> anyhow::Result<ProfileAssessmentReport> {
+    info!(
+        flow_kind = "rebuild_inventory",
+        profile_id = %profile.id,
+        op = "run_rebuild_inventory_flow",
+        "rebuild inventory flow started"
+    );
+    ensure_not_canceled(&cancel)?;
+    sink.emit(FlowEventKind::CheckPhaseChanged {
+        phase: CheckPhase::ValidatingContext,
+    });
+    sink.emit(FlowEventKind::Message {
+        level: LogLevel::Info,
+        text: "Validating profile context...".into(),
+    });
+    let resolved = resolve_profile(&cfg, &profile)?;
+
+    let lock_state = check_lock_state(&resolved.paths.inventory_lock).await?;
+    if matches!(lock_state, InventoryLockState::Locked { .. }) {
+        anyhow::bail!("inventory lock is currently held by another running operation");
+    }
+
+    {
+        let _inventory_lock_guard = acquire_lock(resolved.paths.inventory_lock.clone()).await?;
+        match tokio::fs::remove_file(&resolved.paths.inventory_db).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "remove previous inventory db {}",
+                        resolved.paths.inventory_db.display()
+                    )
+                });
+            }
+        }
+
+        sink.emit(FlowEventKind::CheckPhaseChanged {
+            phase: CheckPhase::ScanningLocal,
+        });
+        sink.emit(FlowEventKind::Message {
+            level: LogLevel::Info,
+            text: "Rebuilding local inventory database...".into(),
+        });
+        sink.emit(FlowEventKind::SyncPhaseChanged {
+            phase: SyncPhase::EnsuringInventory,
+        });
+        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+    }
+
+    let report =
+        crate::flows::assess::run_assess_flow_with_sink(cfg, profile.clone(), false, cancel, sink)
+            .await?;
+    info!(
+        flow_kind = "rebuild_inventory",
+        profile_id = %profile.id,
+        op = "run_rebuild_inventory_flow",
+        outcome = "ok",
+        "rebuild inventory flow finished"
+    );
+    Ok(report)
+}
+
+pub async fn run_clean_flow_with_options(
+    cfg: FlowConfig,
+    profile: Profile,
+    cancel: CancellationToken,
+    sink: Arc<dyn EventSink>,
+    options: CleanFlowOptions,
+) -> anyhow::Result<ProfileAssessmentReport> {
+    info!(
+        flow_kind = "clean",
+        profile_id = %profile.id,
+        op = "run_clean_flow",
+        "clean flow started"
+    );
+    ensure_not_canceled(&cancel)?;
+    let resolved = resolve_profile(&cfg, &profile)?;
+
+    let lock_state = check_lock_state(&resolved.paths.inventory_lock).await?;
+    if matches!(lock_state, InventoryLockState::Locked { .. }) {
+        anyhow::bail!("inventory lock is currently held by another running operation");
+    }
+
+    {
+        let _inventory_lock_guard = acquire_lock(resolved.paths.inventory_lock.clone()).await?;
+        let delete_paths = collect_unexpected_deletes(&cfg, &profile, &resolved)?;
+
+        sink.emit(FlowEventKind::SyncPhaseChanged {
+            phase: SyncPhase::EnsuringInventory,
+        });
+        sink.emit(FlowEventKind::Message {
+            level: LogLevel::Info,
+            text: "Scanning inventory...".into(),
+        });
+        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        if !delete_paths.is_empty() {
+            sink.emit(FlowEventKind::SyncPhaseChanged {
+                phase: SyncPhase::Deleting,
+            });
+            sink.emit(FlowEventKind::Message {
+                level: LogLevel::Info,
+                text: "Deleting planned files...".into(),
+            });
+            apply_deletes(
+                &resolved,
+                &profile.id,
+                delete_paths,
+                sink.clone(),
+                options.remove_empty_parent_dirs,
+            )
+            .await?;
+        }
+
+        sink.emit(FlowEventKind::SyncPhaseChanged {
+            phase: SyncPhase::Finalizing,
+        });
+        sink.emit(FlowEventKind::Message {
+            level: LogLevel::Info,
+            text: "Finalizing inventory state...".into(),
+        });
+        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        sink.emit(FlowEventKind::SyncPhaseChanged {
+            phase: SyncPhase::Done,
+        });
+    }
+
+    crate::flows::assess::run_assess_flow(cfg, profile, false, cancel).await
+}
+
 async fn run_operation_flow(
     cfg: FlowConfig,
     profile: Profile,
     cancel: CancellationToken,
-    mut input_rx: mpsc::Receiver<FlowInput>,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<RunArtifacts> {
     let started = Instant::now();
@@ -185,6 +323,27 @@ async fn run_operation_flow(
     );
 
     let run_result = async {
+        let unexpected_pre_sync = match collect_unexpected_deletes(&cfg, &profile, &resolved) {
+            Ok(paths) => paths.into_iter().collect::<BTreeSet<_>>(),
+            Err(err) => {
+                warn!(
+                    flow_kind = "operation",
+                    profile_id = %profile.id,
+                    op = "collect_unexpected_deletes",
+                    reason = "collect_failed",
+                    "failed to collect unexpected delete candidates before sync"
+                );
+                debug!(
+                    flow_kind = "operation",
+                    profile_id = %profile.id,
+                    op = "collect_unexpected_deletes",
+                    error = %err,
+                    "unexpected delete collection error details"
+                );
+                BTreeSet::new()
+            }
+        };
+
         sink.emit(FlowEventKind::SyncPhaseChanged {
             phase: SyncPhase::EnsuringInventory,
         });
@@ -272,116 +431,57 @@ async fn run_operation_flow(
             "flux sync finished"
         );
 
-        let mut delete_paths = plan_manifest_deletes(&resolved.dest_path, &report);
-        match collect_unexpected_deletes(&cfg, &profile, &resolved) {
-            Ok(unexpected) => {
-                debug!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "collect_unexpected_deletes",
-                    count = unexpected.len(),
-                    "unexpected delete candidates collected"
-                );
-                delete_paths = merge_delete_candidates(delete_paths, unexpected);
-            }
-            Err(err) => {
-                warn!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "collect_unexpected_deletes",
-                    reason = "collect_failed",
-                    "failed to collect unexpected delete candidates"
-                );
-                debug!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "collect_unexpected_deletes",
-                    error = %err,
-                    "unexpected delete collection error details"
-                );
-                sink.emit(FlowEventKind::Message {
-                    level: LogLevel::Warn,
-                    text: "Could not collect some delete candidates.".into(),
-                });
-            }
-        }
-
-        let mut delete_plan = DeletePlan {
-            paths: delete_paths,
-            skipped: false,
-        };
-
-        if !delete_plan.paths.is_empty() {
+        let mut deleted_paths = Vec::new();
+        let delete_paths = plan_manifest_deletes(&resolved.dest_path, &report)
+            .into_iter()
+            .filter(|path| !unexpected_pre_sync.contains(path))
+            .collect::<Vec<_>>();
+        if !delete_paths.is_empty() {
             info!(
                 flow_kind = "operation",
                 profile_id = %profile.id,
                 op = "plan_deletes",
-                count = delete_plan.paths.len(),
+                count = delete_paths.len(),
                 "delete plan produced candidates"
             );
             sink.emit(FlowEventKind::Message {
                 level: LogLevel::Info,
-                text: format!("Planned {} delete candidates", delete_plan.paths.len()),
+                text: format!("Planned {} delete candidates", delete_paths.len()),
             });
 
             sink.emit(FlowEventKind::SyncPhaseChanged {
-                phase: SyncPhase::AwaitingDeleteDecision,
+                phase: SyncPhase::Deleting,
             });
-            let confirm = await_delete_confirmation(
-                &cancel,
-                &mut input_rx,
-                sink.clone(),
-                delete_plan.paths.clone(),
-            )
-            .await?;
+            sink.emit(FlowEventKind::Message {
+                level: LogLevel::Info,
+                text: "Deleting planned files...".into(),
+            });
             info!(
                 flow_kind = "operation",
                 profile_id = %profile.id,
-                op = "delete_decision",
-                outcome = if confirm { "confirm" } else { "skip" },
-                count = delete_plan.paths.len(),
-                "delete decision received"
+                op = "apply_deletes",
+                phase = "deleting",
+                count = delete_paths.len(),
+                "delete apply started"
             );
-
-            if confirm {
-                sink.emit(FlowEventKind::SyncPhaseChanged {
-                    phase: SyncPhase::Deleting,
-                });
-                sink.emit(FlowEventKind::Message {
-                    level: LogLevel::Info,
-                    text: "Deleting planned files...".into(),
-                });
-                info!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "apply_deletes",
-                    phase = "deleting",
-                    count = delete_plan.paths.len(),
-                    "delete apply started"
-                );
-                apply_deletes(
-                    &resolved,
-                    &profile.id,
-                    delete_plan.paths.clone(),
-                    sink.clone(),
-                )
-                .await?;
-                info!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "apply_deletes",
-                    phase = "deleting",
-                    outcome = "ok",
-                    count = delete_plan.paths.len(),
-                    "delete apply finished"
-                );
-            } else {
-                delete_plan.skipped = true;
-                sink.emit(FlowEventKind::Message {
-                    level: LogLevel::Info,
-                    text: "Delete candidates skipped".into(),
-                });
-            }
+            apply_deletes(
+                &resolved,
+                &profile.id,
+                delete_paths.clone(),
+                sink.clone(),
+                true,
+            )
+            .await?;
+            deleted_paths = delete_paths.clone();
+            info!(
+                flow_kind = "operation",
+                profile_id = %profile.id,
+                op = "apply_deletes",
+                phase = "deleting",
+                outcome = "ok",
+                count = delete_paths.len(),
+                "delete apply finished"
+            );
         }
 
         sink.emit(FlowEventKind::SyncPhaseChanged {
@@ -425,7 +525,7 @@ async fn run_operation_flow(
         );
         Ok(RunArtifacts {
             report,
-            delete_plan,
+            deleted_paths,
             duration_ms,
         })
     }
@@ -480,20 +580,6 @@ async fn run_operation_flow(
             Err(operation_err)
         }
     }
-}
-
-fn merge_delete_candidates(primary: Vec<PathBuf>, secondary: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-
-    for path in primary.into_iter().chain(secondary) {
-        if seen.insert(path.clone()) {
-            out.push(path);
-        }
-    }
-
-    out.sort();
-    out
 }
 
 async fn snapshot_repo_cache_blob(

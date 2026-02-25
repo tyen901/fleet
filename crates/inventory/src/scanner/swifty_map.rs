@@ -10,10 +10,9 @@ pub fn scan_one(
     let checksum = Some(srf.checksum.to_hex_upper());
 
     let file = FileEntry {
-        rel_path: normalize_inventory_key(&item.rel_path),
+        rel_path: fleet_domain::normalize_rel_slashes(&item.rel_path),
         length: srf.length,
         checksum,
-        file_type: srf.r#type.clone(),
     };
 
     let segs = map_parts(&srf.parts);
@@ -32,8 +31,4 @@ fn map_parts(parts: &[SrfPart]) -> Vec<SegmentEntry> {
             checksum: p.checksum.to_hex_upper(),
         })
         .collect()
-}
-
-fn normalize_inventory_key(rel_path: &str) -> String {
-    rel_path.replace('\\', "/")
 }

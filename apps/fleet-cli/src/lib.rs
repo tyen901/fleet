@@ -26,8 +26,16 @@ pub enum Commands {
     /// Repair local state and reconcile drift
     Repair { profile_id: String },
 
+    /// Check profile health and list dirty/update status
+    Check { profile_id: String },
+
     /// Check for unexpected files and optionally delete them
-    Clean { profile_id: String },
+    Clean {
+        profile_id: String,
+        /// Auto-confirm cleanup without prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 
     /// Run a sync oneshot and print live progress
     Sync {
@@ -35,9 +43,6 @@ pub enum Commands {
         /// Disable progress bars/spinners (useful for clean debug logs).
         #[arg(long)]
         no_progress: bool,
-        /// Do not delete planned delete candidates.
-        #[arg(long)]
-        no_delete: bool,
     },
 
     /// Launch Arma 3 using synced mods from the profile destination

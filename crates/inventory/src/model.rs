@@ -26,7 +26,6 @@ pub struct FileEntry {
     pub rel_path: String,
     pub length: u64,
     pub checksum: Option<String>,
-    pub file_type: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,7 +82,6 @@ pub struct InventoryMetrics {
 
     pub files_count: u64,
     pub files_bytes: u64,
-    pub segments_count: u64,
 
     pub last_stamp: Option<FolderStamp>,
 }

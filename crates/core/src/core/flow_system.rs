@@ -1,16 +1,15 @@
 use super::flow_logging::{
-    flow_kind_label, log_session_cancel_requested, log_session_cancel_unknown, log_session_cleanup,
-    log_session_input_rejected, log_session_input_routed, log_session_rejected_duplicate,
-    log_session_spawn_requested, log_session_started, log_terminal_result,
+    log_operation_cancel_requested, log_operation_cancel_unknown, log_operation_cleanup,
+    log_operation_rejected_duplicate, log_operation_spawn_requested, log_operation_started,
+    log_terminal_result, operation_kind_label,
 };
+use fleet_domain::health::OperationKind;
 use fleet_domain::{Profile, ProfileId};
-use fleet_flow::{
-    EventSink, FlowConfig, FlowEventKind, FlowInput, FlowKind, FlowResult, FlowSessionEvent,
-};
+use fleet_flow::{EventSink, FlowConfig, FlowEventKind, FlowResult, FlowSessionEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -27,9 +26,8 @@ struct Sessions {
 
 struct Session {
     profile_id: ProfileId,
-    flow: FlowKind,
+    operation: OperationKind,
     cancel: CancellationToken,
-    input_tx: mpsc::Sender<FlowInput>,
 }
 
 impl FlowSystem {
@@ -49,131 +47,112 @@ impl FlowSystem {
         self.events_tx.subscribe()
     }
 
-    pub async fn spawn_sync_with_config(
+    pub async fn spawn_operation_with_config(
         &self,
         cfg: FlowConfig,
         profile: Profile,
+        operation: OperationKind,
     ) -> anyhow::Result<u64> {
-        self.spawn_flow(
-            cfg,
-            profile.id.clone(),
-            FlowKind::Sync,
-            move |ctx| async move {
-                let summary = fleet_flow::flows::operation::run_sync_flow(
-                    ctx.cfg,
-                    profile,
-                    ctx.cancel,
-                    ctx.input_rx,
-                    ctx.sink,
-                )
-                .await?;
-                Ok(FlowResult::Sync(summary))
-            },
-        )
-        .await
-    }
-
-    pub async fn spawn_repair_with_config(
-        &self,
-        cfg: FlowConfig,
-        profile: Profile,
-    ) -> anyhow::Result<u64> {
-        self.spawn_flow(
-            cfg,
-            profile.id.clone(),
-            FlowKind::Repair,
-            move |ctx| async move {
-                let summary = fleet_flow::flows::operation::run_repair_flow(
-                    ctx.cfg,
-                    profile,
-                    ctx.cancel,
-                    ctx.input_rx,
-                    ctx.sink,
-                )
-                .await?;
-                Ok(FlowResult::Repair(summary))
-            },
-        )
-        .await
-    }
-
-    pub async fn spawn_check_with_config(
-        &self,
-        cfg: FlowConfig,
-        profile: Profile,
-        include_remote: bool,
-    ) -> anyhow::Result<u64> {
-        self.spawn_flow(
-            cfg,
-            profile.id.clone(),
-            FlowKind::Check,
-            move |ctx| async move {
-                let report = fleet_flow::flows::assess::run_assess_flow(
-                    ctx.cfg,
-                    profile,
-                    include_remote,
-                    ctx.cancel,
-                )
-                .await?;
-                Ok(FlowResult::Check(report))
-            },
-        )
-        .await
-    }
-
-    pub async fn send_input(&self, session_id: u64, input: FlowInput) -> anyhow::Result<()> {
-        let session_meta = {
-            let sessions = self.sessions.lock().unwrap();
-            sessions
-                .by_session
-                .get(&session_id)
-                .map(|s| (s.profile_id.clone(), s.flow, s.input_tx.clone()))
-        }
-        .ok_or_else(|| anyhow::anyhow!("unknown session"));
-
-        let (profile_id, flow_kind, input_tx) = match session_meta {
-            Ok(v) => v,
-            Err(err) => {
-                log_session_input_rejected(session_id, "send_input", "unknown_session");
-                return Err(err);
+        self.spawn_operation(cfg, profile.id.clone(), operation, move |ctx| async move {
+            match operation {
+                OperationKind::Sync => {
+                    let summary = fleet_flow::flows::operation::run_sync_flow(
+                        ctx.cfg, profile, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Sync(summary))
+                }
+                OperationKind::Repair => {
+                    let summary = fleet_flow::flows::operation::run_repair_flow(
+                        ctx.cfg, profile, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Repair(summary))
+                }
+                OperationKind::CheckLocal => {
+                    let report = fleet_flow::flows::assess::run_assess_flow_with_sink(
+                        ctx.cfg, profile, false, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Check(report))
+                }
+                OperationKind::RebuildInventory => {
+                    let report = fleet_flow::flows::operation::run_rebuild_inventory_flow(
+                        ctx.cfg, profile, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::RebuildInventory(report))
+                }
+                OperationKind::CheckRemote => {
+                    let report = fleet_flow::flows::assess::run_assess_flow_with_sink(
+                        ctx.cfg, profile, true, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Check(report))
+                }
+                OperationKind::Clean => {
+                    let report = fleet_flow::flows::operation::run_clean_flow(
+                        ctx.cfg, profile, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Clean(report))
+                }
             }
-        };
-
-        input_tx
-            .send(input)
-            .await
-            .map_err(|_| anyhow::anyhow!("session input channel closed"))
-            .inspect_err(|_err| {
-                log_session_input_rejected(session_id, "send_input", "session_input_closed");
-            })?;
-
-        log_session_input_routed(&profile_id, flow_kind, session_id, "send_input");
-
-        Ok(())
+        })
+        .await
     }
 
-    pub fn cancel_session(&self, session_id: u64) {
+    pub async fn spawn_clean_operation_with_config(
+        &self,
+        cfg: FlowConfig,
+        profile: Profile,
+        remove_empty_parent_dirs: bool,
+    ) -> anyhow::Result<u64> {
+        self.spawn_operation(
+            cfg,
+            profile.id.clone(),
+            OperationKind::Clean,
+            move |ctx| async move {
+                let report = fleet_flow::flows::operation::run_clean_flow_with_options(
+                    ctx.cfg,
+                    profile,
+                    ctx.cancel,
+                    ctx.sink,
+                    fleet_flow::flows::operation::CleanFlowOptions {
+                        remove_empty_parent_dirs,
+                    },
+                )
+                .await?;
+                Ok(FlowResult::Clean(report))
+            },
+        )
+        .await
+    }
+
+    pub fn cancel_session(&self, session_id: u64) -> bool {
         let session_meta = {
             let sessions = self.sessions.lock().unwrap();
             sessions
                 .by_session
                 .get(&session_id)
-                .map(|s| (s.profile_id.clone(), s.flow, s.cancel.clone()))
+                .map(|s| (s.profile_id.clone(), s.operation, s.cancel.clone()))
         };
 
-        if let Some((profile_id, flow_kind, cancel)) = session_meta {
-            log_session_cancel_requested(&profile_id, flow_kind, session_id);
+        if let Some((profile_id, operation_kind, cancel)) = session_meta {
+            log_operation_cancel_requested(&profile_id, operation_kind, session_id);
             cancel.cancel();
+            true
         } else {
-            log_session_cancel_unknown(session_id);
+            log_operation_cancel_unknown(session_id);
+            false
         }
     }
 
-    async fn spawn_flow<F, Fut>(
+    async fn spawn_operation<F, Fut>(
         &self,
         cfg: FlowConfig,
         profile_id: ProfileId,
-        flow: FlowKind,
+        operation: OperationKind,
         run: F,
     ) -> anyhow::Result<u64>
     where
@@ -181,46 +160,23 @@ impl FlowSystem {
         Fut: std::future::Future<Output = anyhow::Result<FlowResult>> + Send + 'static,
     {
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        log_session_spawn_requested(&profile_id, flow, session_id);
+        log_operation_spawn_requested(&profile_id, operation, session_id);
 
         let cancel = CancellationToken::new();
-        let (input_tx, input_rx) = mpsc::channel(16);
 
         {
             let mut sessions = self.sessions.lock().unwrap();
-            if let Some(existing_session_id) = sessions.by_profile.get(&profile_id).copied() {
-                let should_preempt_check = sessions
-                    .by_session
-                    .get(&existing_session_id)
-                    .is_some_and(|existing| existing.flow == FlowKind::Check);
-
-                if should_preempt_check {
-                    if let Some(existing) = sessions.by_session.remove(&existing_session_id) {
-                        existing.cancel.cancel();
-                        sessions.by_profile.remove(&profile_id);
-                        tracing::info!(
-                            flow_kind = flow_kind_label(flow),
-                            profile_id = %profile_id,
-                            session_id = existing_session_id,
-                            op = "spawn",
-                            outcome = "preempted",
-                            reason = "check_preempted_by_new_session",
-                            "preempted existing check flow for new session"
-                        );
-                    }
-                } else {
-                    log_session_rejected_duplicate(&profile_id, flow);
-                    anyhow::bail!("a flow is already running for this profile");
-                }
+            if sessions.by_profile.contains_key(&profile_id) {
+                log_operation_rejected_duplicate(&profile_id, operation);
+                anyhow::bail!("an operation is already running for this profile");
             }
             sessions.by_profile.insert(profile_id.clone(), session_id);
             sessions.by_session.insert(
                 session_id,
                 Session {
                     profile_id: profile_id.clone(),
-                    flow,
+                    operation,
                     cancel: cancel.clone(),
-                    input_tx,
                 },
             );
         }
@@ -228,27 +184,26 @@ impl FlowSystem {
         let _ = self.events_tx.send(FlowSessionEvent::new(
             session_id,
             profile_id.clone(),
-            flow,
+            operation,
             FlowEventKind::Started,
         ));
-        log_session_started(&profile_id, flow, session_id);
+        log_operation_started(&profile_id, operation, session_id);
 
         let sink: Arc<dyn EventSink> = Arc::new(PipelineSink {
             events_tx: self.events_tx.clone(),
             session_id,
             profile_id: profile_id.clone(),
-            flow,
+            operation,
         });
 
         let sessions = self.sessions.clone();
         let events_tx = self.events_tx.clone();
-        let flow_kind = flow_kind_label(flow);
+        let operation_kind = operation_kind_label(operation);
 
         tokio::spawn(async move {
             let result = run(SpawnCtx {
                 cfg,
                 cancel: cancel.clone(),
-                input_rx,
                 sink,
             })
             .await;
@@ -259,18 +214,18 @@ impl FlowSystem {
                     guard.by_profile.remove(&session.profile_id);
                 }
             }
-            log_session_cleanup(&profile_id, flow, session_id);
+            log_operation_cleanup(&profile_id, operation, session_id);
 
             let terminal_kind = match result {
                 Ok(result) => {
-                    log_terminal_result(&profile_id, flow, session_id, "finished", None);
+                    log_terminal_result(&profile_id, operation, session_id, "finished", None);
                     FlowEventKind::Finished { result }
                 }
                 Err(e) => {
                     if cancel.is_cancelled() {
                         log_terminal_result(
                             &profile_id,
-                            flow,
+                            operation,
                             session_id,
                             "canceled",
                             Some("cancel_requested"),
@@ -279,13 +234,13 @@ impl FlowSystem {
                     } else {
                         log_terminal_result(
                             &profile_id,
-                            flow,
+                            operation,
                             session_id,
                             "failed",
                             Some("flow_error"),
                         );
                         tracing::debug!(
-                            flow_kind = flow_kind,
+                            flow_kind = operation_kind,
                             profile_id = %profile_id,
                             session_id = session_id,
                             op = "terminal",
@@ -303,7 +258,7 @@ impl FlowSystem {
             let _ = events_tx.send(FlowSessionEvent::new(
                 session_id,
                 profile_id,
-                flow,
+                operation,
                 terminal_kind,
             ));
         });
@@ -315,7 +270,6 @@ impl FlowSystem {
 struct SpawnCtx {
     cfg: FlowConfig,
     cancel: CancellationToken,
-    input_rx: mpsc::Receiver<FlowInput>,
     sink: Arc<dyn EventSink>,
 }
 
@@ -323,7 +277,7 @@ struct PipelineSink {
     events_tx: broadcast::Sender<FlowSessionEvent>,
     session_id: u64,
     profile_id: ProfileId,
-    flow: FlowKind,
+    operation: OperationKind,
 }
 
 impl EventSink for PipelineSink {
@@ -331,7 +285,7 @@ impl EventSink for PipelineSink {
         let _ = self.events_tx.send(FlowSessionEvent::new(
             self.session_id,
             self.profile_id.clone(),
-            self.flow,
+            self.operation,
             kind,
         ));
     }
@@ -340,7 +294,8 @@ impl EventSink for PipelineSink {
 #[cfg(test)]
 mod tests {
     use super::FlowSystem;
-    use fleet_flow::{FlowConfig, FlowEventKind, FlowKind, FlowResult, FlowSessionEvent};
+    use fleet_domain::health::OperationKind;
+    use fleet_flow::{FlowConfig, FlowEventKind, FlowResult, FlowSessionEvent};
     use tokio::sync::oneshot;
 
     fn test_cfg() -> FlowConfig {
@@ -360,7 +315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_flow_rejects_duplicate_non_check_profile_session() {
+    async fn spawn_operation_rejects_duplicate_profile_session() {
         let system = FlowSystem::new();
         let mut first_rx = system.subscribe();
         let cfg = test_cfg();
@@ -368,10 +323,10 @@ mod tests {
         let (tx, rx) = oneshot::channel::<()>();
 
         let session_id = system
-            .spawn_flow(
+            .spawn_operation(
                 cfg,
                 profile_id.clone(),
-                FlowKind::Sync,
+                OperationKind::Sync,
                 move |_| async move {
                     let _ = rx.await;
                     Ok(FlowResult::Sync(fleet_domain::sync::SyncSummary {
@@ -389,10 +344,10 @@ mod tests {
             .expect("session started");
 
         let duplicate = system
-            .spawn_flow(
+            .spawn_operation(
                 FlowConfig::new_default(),
                 profile_id,
-                FlowKind::Repair,
+                OperationKind::Repair,
                 |_| async move { anyhow::bail!("not used") },
             )
             .await;
@@ -409,10 +364,10 @@ mod tests {
         let system = FlowSystem::new();
         let mut rx = system.subscribe();
         let session_id = system
-            .spawn_flow(
+            .spawn_operation(
                 test_cfg(),
                 "p2".to_string(),
-                FlowKind::Sync,
+                OperationKind::Sync,
                 move |ctx| async move {
                     ctx.cancel.cancelled().await;
                     anyhow::bail!("canceled")
@@ -432,10 +387,10 @@ mod tests {
         let system = FlowSystem::new();
         let mut rx = system.subscribe();
         let session_id = system
-            .spawn_flow(
+            .spawn_operation(
                 test_cfg(),
                 "p3".to_string(),
-                FlowKind::Repair,
+                OperationKind::Repair,
                 |_| async move { anyhow::bail!("boom") },
             )
             .await
@@ -447,17 +402,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_flow_preempts_existing_check_for_same_profile() {
+    async fn check_operation_rejects_duplicate_for_same_profile() {
         let system = FlowSystem::new();
         let cfg = test_cfg();
         let profile_id = "p4".to_string();
         let (tx, rx) = oneshot::channel::<()>();
 
         let first_session = system
-            .spawn_flow(
+            .spawn_operation(
                 cfg,
                 profile_id.clone(),
-                FlowKind::Check,
+                OperationKind::CheckLocal,
                 move |_| async move {
                     let _ = rx.await;
                     Ok(FlowResult::Check(
@@ -467,6 +422,8 @@ mod tests {
                             remote_freshness:
                                 fleet_domain::health::RemoteFreshnessState::NotRelevant,
                             checked_at_unix_ms: 0,
+                            expected_missing_in_inventory_count: 0,
+                            inventory_unexpected_paths_count: 0,
                             unexpected_delete_paths: Vec::new(),
                         },
                     ))
@@ -474,12 +431,13 @@ mod tests {
             )
             .await
             .expect("first check started");
+        assert!(first_session > 0);
 
         let second_session = system
-            .spawn_flow(
+            .spawn_operation(
                 FlowConfig::new_default(),
                 profile_id,
-                FlowKind::Check,
+                OperationKind::CheckLocal,
                 |_| async move {
                     Ok(FlowResult::Check(
                         fleet_domain::health::ProfileAssessmentReport {
@@ -488,15 +446,16 @@ mod tests {
                             remote_freshness:
                                 fleet_domain::health::RemoteFreshnessState::NotRelevant,
                             checked_at_unix_ms: 0,
+                            expected_missing_in_inventory_count: 0,
+                            inventory_unexpected_paths_count: 0,
                             unexpected_delete_paths: Vec::new(),
                         },
                     ))
                 },
             )
-            .await
-            .expect("second check started");
+            .await;
+        assert!(second_session.is_err());
 
-        assert_ne!(first_session, second_session);
         tx.send(()).expect("release first check");
     }
 }

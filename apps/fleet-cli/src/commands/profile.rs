@@ -1,8 +1,7 @@
 use crate::ProfileCommands;
-use fleet_core::{Core, FlowResult};
+use fleet_core::Core;
 
-use super::flow_run::{run_flow_session, DeletePolicy, FlowOutput, FlowRunOptions};
-use super::load_profile;
+use super::check::{print_check_report, run_check_report};
 
 pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
     match command {
@@ -14,30 +13,8 @@ pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
             }
         }
         ProfileCommands::Check { profile_id } => {
-            let profile = load_profile(core, &profile_id).await?;
-            let session_id = core
-                .start_check(profile.id.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
-            let report = match run_flow_session(
-                core,
-                session_id,
-                FlowRunOptions {
-                    delete_policy: DeletePolicy::AlwaysReject,
-                    output: FlowOutput::Quiet,
-                },
-            )
-            .await?
-            {
-                FlowResult::Check(report) => report,
-                FlowResult::Sync(_) | FlowResult::Repair(_) => {
-                    return Err(anyhow::anyhow!("unexpected flow result"));
-                }
-            };
-            println!(
-                "profile check: local={:?} remote={:?} (checked_at_unix_ms={})",
-                report.local_health, report.remote_freshness, report.checked_at_unix_ms
-            );
+            let report = run_check_report(core, &profile_id, true).await?;
+            print_check_report(&report);
         }
         ProfileCommands::Add {
             id,

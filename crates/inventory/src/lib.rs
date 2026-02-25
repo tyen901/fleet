@@ -4,6 +4,7 @@ mod api;
 mod db;
 mod error;
 mod flux_sqlite;
+mod hash;
 mod model;
 mod policy;
 mod stamp;
@@ -13,7 +14,7 @@ mod sqlite_conn;
 
 pub mod scanner;
 
-pub use api::{DriftSummary, Inventory, InventoryState, RepairOutcome, RootInventory};
+pub use api::{Inventory, InventoryState, RootInventory};
 pub use db::{InventoryDb, UpdateSession};
 pub use error::{Error, Result};
 pub use flux_sqlite::{

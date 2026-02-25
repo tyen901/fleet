@@ -5,7 +5,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCK_FORMAT_VERSION: u32 = 1;
 
@@ -165,7 +164,7 @@ fn read_lock_metadata(path: &Path) -> Result<LockMetadata> {
     }
 
     let age_seconds = acquired_unix_ms.and_then(|ms| {
-        let now_ms = now_unix_ms();
+        let now_ms = fleet_domain::time::now_unix_ms();
         now_ms.checked_sub(ms).map(|delta_ms| delta_ms / 1000)
     });
 
@@ -180,19 +179,12 @@ fn write_lock_metadata(file: &mut File) -> Result<()> {
     file.seek(SeekFrom::Start(0))?;
 
     let pid = std::process::id();
-    let now_ms = now_unix_ms();
+    let now_ms = fleet_domain::time::now_unix_ms();
     let body =
         format!("format_version={LOCK_FORMAT_VERSION}\npid={pid}\nacquired_unix_ms={now_ms}\n");
     file.write_all(body.as_bytes())?;
     file.sync_data()?;
     Ok(())
-}
-
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]

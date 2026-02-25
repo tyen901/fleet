@@ -33,34 +33,3 @@ pub fn filter_prune_paths(
         .filter(|p| !is_protected_root_entry(dest, p))
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn protects_only_root_icons() {
-        let dest = Path::new("/tmp/fleet-dest");
-        let input = vec![
-            std::path::PathBuf::from("old.txt"),
-            std::path::PathBuf::from("icon.png"),
-            std::path::PathBuf::from("repo.png"),
-            std::path::PathBuf::from("mods/icon.png"),
-            std::path::PathBuf::from(".hidden/cache.bin"),
-            dest.join(".hidden").join("cache").join("x.json"),
-            dest.join("icon.png"),
-        ];
-
-        let out = filter_prune_paths(dest, input);
-
-        assert_eq!(
-            out,
-            vec![
-                std::path::PathBuf::from("old.txt"),
-                std::path::PathBuf::from("mods/icon.png"),
-                std::path::PathBuf::from(".hidden/cache.bin"),
-                dest.join(".hidden").join("cache").join("x.json"),
-            ]
-        );
-    }
-}

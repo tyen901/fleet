@@ -14,6 +14,28 @@ Everything else (`fleet-domain`, `inventory`, `fleet-download`, `fleet-manifest`
 (state subscription, commands, flow session control). Apps should not access
 internal layers or shims inside core.
 
+## Operation model (authoritative)
+
+Flow execution is operation-centric and keyed by a single shared type:
+`fleet_domain::health::OperationKind` (`Sync`, `Repair`, `CheckLocal`,
+`CheckRemote`, `Clean`).
+
+- `fleet-core` owns operation lifecycle APIs:
+  - `start_operation(profile_id, operation_kind) -> session_id`
+  - `send_operation_input(session_id, FlowInput)`
+  - `cancel_session(session_id)`
+- Runtime state is per-profile and stored in
+  `AppState.operations_by_profile` (no global sync slot).
+- `FlowSessionEvent.operation` carries the domain `OperationKind` directly.
+- There is no compatibility alias `FlowOperationKind` and no duplicate
+  operation-kind type in `fleet-flow`.
+
+Removed architectural paths that must stay deleted:
+
+- `crates/core/src/features/flow_ops.rs` shim layer
+- core retry/wait shim in `start_operation` for duplicate sessions
+- `run_check_flow` wrapper in `flows/operation` (checks use assess runner directly)
+
 ## Sync pipeline boundaries
 
 The sync pipeline is split into purpose-built crates with strict dependency rules:

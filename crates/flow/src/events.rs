@@ -1,5 +1,5 @@
+use fleet_domain::health::OperationKind;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -10,28 +10,13 @@ pub enum LogLevel {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FlowKind {
-    Sync,
-    Repair,
-    Check,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FlowRequest {
-    ConfirmDeletes { paths: Vec<PathBuf> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FlowInput {
-    ConfirmDeletes { confirm: bool },
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FlowResult {
     Sync(fleet_domain::sync::SyncSummary),
     Repair(fleet_domain::health::RepairSummary),
     Check(fleet_domain::health::ProfileAssessmentReport),
+    RebuildInventory(fleet_domain::health::ProfileAssessmentReport),
+    Clean(fleet_domain::health::ProfileAssessmentReport),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,9 +50,8 @@ pub enum FlowEventKind {
         text: String,
     },
 
-    InputRequired {
-        prompt: String,
-        request: FlowRequest,
+    CheckPhaseChanged {
+        phase: fleet_domain::health::CheckPhase,
     },
 
     /// Mirrors your domain status so downstream mapping is trivial.
@@ -92,7 +76,7 @@ pub enum FlowEventKind {
 pub struct FlowSessionEvent {
     pub session_id: u64,
     pub profile_id: fleet_domain::ProfileId,
-    pub flow: FlowKind,
+    pub operation: OperationKind,
     pub timestamp_ms: u64,
     pub kind: FlowEventKind,
 }
@@ -101,13 +85,13 @@ impl FlowSessionEvent {
     pub fn new(
         session_id: u64,
         profile_id: fleet_domain::ProfileId,
-        flow: FlowKind,
+        operation: OperationKind,
         kind: FlowEventKind,
     ) -> Self {
         Self {
             session_id,
             profile_id,
-            flow,
+            operation,
             timestamp_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
