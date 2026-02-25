@@ -95,7 +95,8 @@ impl Core {
     pub(crate) fn inventory_scan_policy_from_settings(
         settings: &AppSettings,
     ) -> inventory::ScanPolicy {
-        let rules = InventoryIgnoreRules::from_settings_value(&settings.inventory_ignore_rules);
+        let rules =
+            InventoryIgnoreRules::from_settings_value(&settings.sync.inventory_ignore_rules);
         inventory::ScanPolicy::with_ignore_patterns(rules.patterns)
     }
 

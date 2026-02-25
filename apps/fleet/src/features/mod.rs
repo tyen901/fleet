@@ -1,4 +1,5 @@
-pub mod dashboard;
+pub mod boot;
+pub mod home;
 pub mod not_found;
 pub mod onboarding;
 pub mod profiles;

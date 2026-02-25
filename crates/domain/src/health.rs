@@ -21,18 +21,6 @@ pub enum RemoteFreshnessState {
     Error,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub struct DriftMetrics {
-    #[serde(default)]
-    pub launch_compatible: bool,
-    #[serde(default)]
-    pub missing_files_count: u64,
-    #[serde(default)]
-    pub unexpected_files_count: u64,
-    #[serde(default)]
-    pub modified_files_count: u64,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct ProfileAssessmentReport {
     pub profile_id: ProfileId,
@@ -40,14 +28,38 @@ pub struct ProfileAssessmentReport {
     pub remote_freshness: RemoteFreshnessState,
     pub checked_at_unix_ms: u64,
     #[serde(default)]
+    pub expected_missing_in_inventory_count: u64,
+    #[serde(default)]
+    pub inventory_unexpected_paths_count: u64,
+    #[serde(default)]
     pub unexpected_delete_paths: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum OperationKind {
-    Checking,
-    Repairing,
-    Syncing,
+    Sync,
+    Repair,
+    CheckLocal,
+    RebuildInventory,
+    CheckRemote,
+    Clean,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub enum CancelResult {
+    Requested,
+    AlreadyTerminal,
+    NotFound,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub enum CheckPhase {
+    ValidatingContext,
+    ScanningLocal,
+    EvaluatingLocal,
+    LoadingRemoteManifest,
+    ComparingExpectedState,
+    Finalizing,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -57,27 +69,4 @@ pub struct RepairSummary {
     pub duration_ms: u64,
     pub files_reconciled: u64,
     pub files_deleted: u64,
-    pub files_skipped_delete: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn assessment_roundtrips() {
-        let report = ProfileAssessmentReport {
-            profile_id: "p1".into(),
-            local_health: LocalHealthState::Ready,
-            remote_freshness: RemoteFreshnessState::UpToDate,
-            checked_at_unix_ms: 1,
-            unexpected_delete_paths: Vec::new(),
-        };
-        let json = serde_json::to_string(&report).expect("serialize");
-        let decoded: ProfileAssessmentReport = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(decoded.profile_id, "p1");
-        assert_eq!(decoded.local_health, LocalHealthState::Ready);
-        assert_eq!(decoded.remote_freshness, RemoteFreshnessState::UpToDate);
-        assert!(decoded.unexpected_delete_paths.is_empty());
-    }
 }

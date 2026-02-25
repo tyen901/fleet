@@ -24,8 +24,6 @@ impl Arma3Install {
 #[derive(Debug, Clone)]
 pub struct LaunchRequest {
     pub method: LaunchMethod,
-    /// If true, include `-nolauncher` (Steam-side).
-    pub no_launcher: bool,
     /// Extra user args (e.g. `-skipIntro`, `-world=empty`).
     pub args: Vec<String>,
     /// Local mod directories.
@@ -38,7 +36,6 @@ impl LaunchRequest {
     pub fn new(method: LaunchMethod, mods: ModList) -> Self {
         Self {
             method,
-            no_launcher: true,
             args: Vec::new(),
             mods,
             env: BTreeMap::new(),
@@ -78,9 +75,7 @@ impl Launcher {
             LaunchMethod::SteamNative => {
                 args.push("-applaunch".into());
                 args.push(ARMA3_APP_ID.to_string());
-                if req.no_launcher {
-                    args.push("-nolauncher".into());
-                }
+                args.push("-nolauncher".into());
             }
         }
 

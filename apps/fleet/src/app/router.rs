@@ -1,25 +1,31 @@
 use dioxus::prelude::*;
 use dioxus_router::Routable;
 
-use crate::app::shell::MainLayout;
+use crate::app::shell::ShellLayout;
 use crate::features::{
-    dashboard::Dashboard,
+    boot::Boot,
+    home::Home,
     not_found::PageNotFound,
     onboarding::Onboarding,
-    profiles::{edit::EditProfile, new::NewProfile},
+    profiles::{new::NewProfile, ProfileEdit, ProfileView},
     settings::Settings,
 };
 
 #[derive(Clone, Routable, Debug, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
-    #[layout(MainLayout)]
-        #[route("/")]
-        Dashboard {},
-        #[route("/new")]
+    #[route("/")]
+    Boot {},
+
+    #[layout(ShellLayout)]
+        #[route("/home")]
+        Home {},
+        #[route("/profiles/new")]
         NewProfile {},
-        #[route("/edit/:id")]
-        EditProfile { id: String },
+        #[route("/profiles/:id")]
+        ProfileView { id: String },
+        #[route("/profiles/:id/edit")]
+        ProfileEdit { id: String },
         #[route("/settings")]
         Settings {},
     #[end_layout]

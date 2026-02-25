@@ -1,4 +1,5 @@
 mod arma3;
+mod check;
 mod clean;
 mod flow_run;
 mod profile;
@@ -10,14 +11,14 @@ use fleet_core::Core;
 
 pub async fn dispatch(core: &Core, command: Commands) -> anyhow::Result<()> {
     match command {
+        Commands::Check { profile_id } => check::run(core, &profile_id).await,
         Commands::Profile { command } => profile::run(core, command).await,
-        Commands::Clean { profile_id } => clean::run(core, &profile_id).await,
+        Commands::Clean { profile_id, yes } => clean::run(core, &profile_id, yes).await,
         Commands::Repair { profile_id } => repair::run(core, &profile_id).await,
         Commands::Sync {
             profile_id,
             no_progress,
-            no_delete,
-        } => sync::run(core, &profile_id, no_progress, no_delete).await,
+        } => sync::run(core, &profile_id, no_progress).await,
         Commands::Launch {
             profile_id,
             dry_run,

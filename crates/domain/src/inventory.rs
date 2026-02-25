@@ -1,4 +1,3 @@
-use crate::{ApiError, ProfileId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -76,7 +75,6 @@ pub struct InventoryMetrics {
 
     pub files_count: u64,
     pub files_bytes: u64,
-    pub segments_count: u64,
 
     pub last_stamp: Option<InventoryStamp>,
 }
@@ -108,73 +106,4 @@ pub struct InventoryScanProgress {
     /// Planned hashing workload bytes for this scan pass (not total walked bytes).
     #[serde(default)]
     pub bytes_total: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct InventoryProgressSummary {
-    pub done_files: u64,
-    pub total_files: u64,
-    pub indeterminate: bool,
-}
-
-pub fn derive_inventory_progress(
-    scan_progress: &InventoryScanProgress,
-    metrics_total_files: Option<u64>,
-) -> InventoryProgressSummary {
-    let scanner_total = scan_progress.files_total;
-    let total_files = if scanner_total > 0 {
-        std::cmp::max(scanner_total, 1)
-    } else if let Some(m) = metrics_total_files {
-        std::cmp::max(m, 1)
-    } else {
-        0
-    };
-
-    let (done_files, indeterminate) = match scan_progress.stage {
-        InventoryScanStage::Planning | InventoryScanStage::Walking => {
-            (scan_progress.files_seen, total_files == 0)
-        }
-        InventoryScanStage::Scanning
-        | InventoryScanStage::Verifying
-        | InventoryScanStage::UpdatingDb
-        | InventoryScanStage::Finished
-        | InventoryScanStage::Cancelled => (scan_progress.files_scanned, total_files == 0),
-    };
-
-    let clamped_done = if total_files > 0 {
-        std::cmp::min(done_files, total_files)
-    } else {
-        done_files
-    };
-
-    InventoryProgressSummary {
-        done_files: clamped_done,
-        total_files,
-        indeterminate,
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum InventoryScanMode {
-    SkippedClean,
-    DeltaSync,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InventoryScanSummary {
-    pub profile_id: ProfileId,
-    pub root_path: String,
-    pub db_path: String,
-
-    pub mode: InventoryScanMode,
-    pub files_seen: u64,
-    pub files_scanned: u64,
-    pub bytes_scanned: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InventoryOutcome {
-    Succeeded { summary: InventoryScanSummary },
-    Failed { error: ApiError },
-    Canceled,
 }

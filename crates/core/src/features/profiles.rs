@@ -1,8 +1,10 @@
 use crate::core::run_config_blocking;
-use crate::state::AppState;
+use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
-use fleet_domain::{Profile, ProfileId, ProfileSourceKind};
+use fleet_domain::health::OperationKind;
+use fleet_domain::inventory::{InventoryMetrics, InventoryStamp};
+use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::PathBuf;
@@ -42,6 +44,23 @@ impl Core {
             );
         }
         res
+    }
+
+    pub async fn profile_set_selected(
+        &self,
+        profile_id: Option<ProfileId>,
+    ) -> Result<(), crate::ApiError> {
+        if let Some(ref requested_id) = profile_id {
+            let exists = self.read_state(|state| state.profiles.contains_key(requested_id));
+            if !exists {
+                return Err(crate::ApiError::new("not_found", requested_id.clone()));
+            }
+        }
+
+        self.update_state(|state| {
+            state.selected_profile_id = profile_id.clone();
+        });
+        Ok(())
     }
 
     pub async fn save_profile(&self, profile: Profile) -> anyhow::Result<Profile> {
@@ -124,6 +143,7 @@ impl Core {
 
         let profile_id_for_log = profile.id.clone();
         let res = run_config_blocking(self.config_repo(), move |config| {
+            let mut profile = profile;
             let mut cfg = config.load_profiles()?;
 
             let normalize_path = |path: &str| {
@@ -153,6 +173,12 @@ impl Core {
             }
 
             if let Some(idx) = cfg.profiles.iter().position(|p| p.id == profile.id) {
+                if normalize_source_for_compare(&cfg.profiles[idx].source)
+                    != normalize_source_for_compare(&profile.source)
+                {
+                    // Source changed; force fresh cache revision baseline for the new repo URL.
+                    profile.swifty_repo_revision = String::new();
+                }
                 cfg.profiles[idx] = profile.clone();
             } else {
                 cfg.profiles.push(profile.clone());
@@ -228,15 +254,18 @@ impl Core {
         run_config_blocking(self.config_repo(), |c| c.delete_profiles()).await
     }
 
-    pub async fn profile_repo_servers(
+    pub async fn profile_inventory_metrics(
         &self,
         profile_id: &ProfileId,
-    ) -> Result<Vec<fleet_domain::RepoServer>, crate::ApiError> {
+    ) -> Result<InventoryMetrics, crate::ApiError> {
         let profile = self
             .load_profile(profile_id)
             .await
             .map_err(|e| crate::ApiError::new("not_found", e.to_string()))?;
-        profile_repo_servers(&profile).await
+
+        tokio::task::spawn_blocking(move || load_profile_inventory_metrics(&profile))
+            .await
+            .map_err(|e| crate::ApiError::new("inventory_metrics", e.to_string()))?
     }
 
     pub async fn profile_save(&self, profile: Profile) -> Result<Profile, crate::ApiError> {
@@ -263,10 +292,12 @@ impl Core {
         self.update_state(|state| {
             let pid = saved.id.clone();
             state.profiles.insert(pid.clone(), saved.clone());
-            state.profile_states.entry(pid.clone()).or_insert_with(|| {
-                crate::state::ProfileState::new(pid, fleet_domain::time::now_unix_ms())
-            });
+            let now = fleet_domain::time::now_unix_ms();
+            let _ = ensure_profile_runtime_mut(state, &pid, now);
+            set_profile_repo_servers_runtime(state, &pid, Vec::new(), false);
+            recompute_profile_status(state, &pid);
         });
+        self.spawn_profile_repo_cache_refresh(saved.id.clone(), false);
         info!(
             op = "profile_save",
             profile_id = %saved.id,
@@ -298,7 +329,10 @@ impl Core {
                 clear_profile_check_state(state, &pid, now);
             });
 
-            if let Err(err) = self.start_check_local(saved.id.clone()).await {
+            if let Err(err) = self
+                .start_operation(saved.id.clone(), OperationKind::CheckLocal)
+                .await
+            {
                 tracing::warn!(
                     profile_id = %saved.id,
                     code = %err.code,
@@ -328,11 +362,13 @@ impl Core {
 
         self.update_state(|state| {
             state.profiles.remove(&profile_id);
-            state.profile_states.remove(&profile_id);
-            if let Some(sync) = &state.sync {
-                if sync.profile_id == profile_id {
-                    state.sync = None;
-                }
+            state.profile_runtime_by_id.remove(&profile_id);
+            if state
+                .selected_profile_id
+                .as_ref()
+                .is_some_and(|selected_id| selected_id == &profile_id)
+            {
+                state.selected_profile_id = None;
             }
         });
         info!(
@@ -344,28 +380,264 @@ impl Core {
 
         Ok(())
     }
+
+    pub(crate) fn spawn_profile_repo_cache_refresh(
+        &self,
+        profile_id: ProfileId,
+        allow_server_reconcile: bool,
+    ) {
+        let core = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = core
+                .refresh_profile_repo_cache(profile_id.clone(), allow_server_reconcile)
+                .await
+            {
+                warn!(
+                    profile_id = %profile_id,
+                    code = %err.code,
+                    message = %err.message,
+                    "failed to refresh profile repo cache state"
+                );
+            }
+        });
+    }
+
+    pub(crate) async fn refresh_profile_repo_cache(
+        &self,
+        profile_id: ProfileId,
+        allow_server_reconcile: bool,
+    ) -> Result<(), crate::ApiError> {
+        let profile = if let Some(profile) =
+            self.read_state(|state| state.profiles.get(&profile_id).cloned())
+        {
+            profile
+        } else {
+            return Ok(());
+        };
+
+        let snapshot = load_cached_repo_server_snapshot(&profile).await?;
+        let (servers, revision) = if let Some(snapshot) = snapshot {
+            (snapshot.servers, snapshot.revision)
+        } else {
+            (Vec::new(), None)
+        };
+
+        let servers_for_state = servers.clone();
+        self.update_state(|state| {
+            set_profile_repo_servers_runtime(state, &profile_id, servers_for_state, true);
+        });
+
+        self.reconcile_profile_server_from_cache_revision(
+            &profile_id,
+            revision,
+            &servers,
+            allow_server_reconcile,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn reconcile_profile_server_from_cache_revision(
+        &self,
+        profile_id: &str,
+        cache_revision: Option<String>,
+        servers: &[RepoServer],
+        allow_server_reconcile: bool,
+    ) -> Result<(), crate::ApiError> {
+        // Keep startup/background cache reads side-effect free for profile storage.
+        // Persisted server/revision changes are only allowed on explicit reconcile paths
+        // (triggered after operations that can update repo cache on disk).
+        if !allow_server_reconcile {
+            return Ok(());
+        }
+
+        let Some(cache_revision) = cache_revision.filter(|value| !value.trim().is_empty()) else {
+            return Ok(());
+        };
+        let profile_id_owned = profile_id.to_string();
+        let cache_revision_owned = cache_revision.clone();
+        let servers_owned = servers.to_vec();
+
+        let updated_profile = run_config_blocking(self.config_repo(), move |config| {
+            let mut cfg = config.load_profiles()?;
+            let Some(idx) = cfg
+                .profiles
+                .iter()
+                .position(|profile| profile.id == profile_id_owned)
+            else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+
+            let mut next = cfg.profiles[idx].clone();
+            let previous_revision = next.swifty_repo_revision.trim().to_string();
+            if previous_revision == cache_revision_owned {
+                return Ok(None);
+            }
+
+            next.arma3_server = canonical_profile_server(next.arma3_server.clone(), &servers_owned);
+            next.swifty_repo_revision = cache_revision_owned.clone();
+
+            cfg.profiles[idx] = next.clone();
+            config.save_profiles(&cfg)?;
+            Ok(Some(next))
+        })
+        .await
+        .map_err(|e| crate::ApiError::new("profile_reconcile", e.to_string()))?;
+
+        if let Some(updated) = updated_profile {
+            self.update_state(|state| {
+                state.profiles.insert(updated.id.clone(), updated);
+            });
+        }
+
+        Ok(())
+    }
 }
 
-async fn profile_repo_servers(
+#[derive(Debug, Clone)]
+pub(crate) struct CachedRepoServerSnapshot {
+    pub servers: Vec<RepoServer>,
+    pub revision: Option<String>,
+}
+
+fn canonical_profile_server(
+    saved: Option<fleet_domain::types::ProfileServerInfo>,
+    servers: &[RepoServer],
+) -> Option<fleet_domain::types::ProfileServerInfo> {
+    if let Some(saved_server) = saved {
+        let exists_in_cache = servers.iter().any(|server| {
+            server.address.trim() == saved_server.address.trim() && server.port == saved_server.port
+        });
+        if exists_in_cache {
+            return Some(saved_server);
+        }
+    }
+
+    servers
+        .first()
+        .map(|server| fleet_domain::types::ProfileServerInfo {
+            address: server.address.clone(),
+            port: server.port,
+            password: server.password.clone(),
+        })
+}
+
+fn cached_repo_revision(cache: &swifty_repo::RepoCacheBlob) -> Option<String> {
+    if let Some(revision) = cache
+        .repo_json_checksum
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(revision.to_string());
+    }
+
+    let checksum = cache.repo.checksum.trim();
+    if !checksum.is_empty() {
+        return Some(checksum.to_string());
+    }
+
+    // Some legacy cache blobs may not have repo_json_checksum/repo.checksum.
+    // Fall back to a deterministic server fingerprint so reconciliation still works.
+    let mut server_fingerprint = cache
+        .repo
+        .servers
+        .iter()
+        .map(|server| {
+            format!(
+                "{}:{}:{}",
+                server.address.trim().to_ascii_lowercase(),
+                server.port,
+                server.password.trim()
+            )
+        })
+        .collect::<Vec<_>>();
+    server_fingerprint.sort();
+    Some(format!("servers:{}", server_fingerprint.join("|")))
+}
+
+pub(crate) fn load_cached_repo_server_snapshot_blocking(
     profile: &Profile,
-) -> Result<Vec<fleet_domain::RepoServer>, crate::ApiError> {
+) -> Result<Option<CachedRepoServerSnapshot>, crate::ApiError> {
     let Some((cache_root, repo_url)) = swifty_cache_target(profile)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
 
-    let servers = swifty_repo::cached_repo_servers(&cache_root, &repo_url)
-        .await
-        .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?;
+    let Some(cache) = swifty_repo::load_cached_repo_blocking(&cache_root, &repo_url)
+        .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
+    else {
+        return Ok(None);
+    };
 
-    Ok(servers
-        .unwrap_or_default()
+    let revision = cached_repo_revision(&cache);
+    let servers = cache
+        .repo
+        .servers
         .into_iter()
-        .map(|s| fleet_domain::RepoServer {
-            address: s.address,
-            port: s.port,
-            password: s.password,
+        .map(|server| RepoServer {
+            address: server.address,
+            port: server.port,
+            password: server.password,
         })
-        .collect())
+        .collect::<Vec<_>>();
+
+    Ok(Some(CachedRepoServerSnapshot { servers, revision }))
+}
+
+pub(crate) async fn load_cached_repo_server_snapshot(
+    profile: &Profile,
+) -> Result<Option<CachedRepoServerSnapshot>, crate::ApiError> {
+    let profile = profile.clone();
+    tokio::task::spawn_blocking(move || load_cached_repo_server_snapshot_blocking(&profile))
+        .await
+        .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
+}
+
+pub(crate) fn set_profile_repo_servers_runtime(
+    state: &mut AppState,
+    profile_id: &str,
+    servers: Vec<RepoServer>,
+    loaded: bool,
+) {
+    let now_ms = fleet_domain::time::now_unix_ms();
+    let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
+    runtime.repo_servers = servers;
+    runtime.repo_servers_loaded = loaded;
+}
+
+fn load_profile_inventory_metrics(profile: &Profile) -> Result<InventoryMetrics, crate::ApiError> {
+    let destination = profile
+        .dest_path()
+        .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
+    let state_root =
+        profile_state_root_dir().map_err(|e| crate::ApiError::new("state_root", e.to_string()))?;
+    let inventory_db = fleet_domain::inventory_db_path(&state_root, &profile.id);
+    if let Some(parent) = inventory_db.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
+    }
+    let store = inventory::SqliteStore::open(&inventory_db)
+        .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
+    let inventory = inventory::Inventory::from_store(store)
+        .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
+    let root = inventory
+        .open_root(&profile.id, destination)
+        .map_err(|e| crate::ApiError::new("inventory_root", e.to_string()))?;
+    let metrics = root
+        .metrics()
+        .map_err(|e| crate::ApiError::new("inventory_metrics", e.to_string()))?;
+
+    Ok(InventoryMetrics {
+        root_path: metrics.root_path,
+        files_count: metrics.files_count,
+        files_bytes: metrics.files_bytes,
+        last_stamp: metrics.last_stamp.map(|stamp| InventoryStamp {
+            algo: stamp.algo,
+            hash64: stamp.hash64,
+            file_count: stamp.file_count,
+            total_bytes: stamp.total_bytes,
+        }),
+    })
 }
 
 fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, crate::ApiError> {
@@ -379,22 +651,6 @@ fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, c
         fleet_domain::repo_cache_dir(&state_root, &profile.id),
         repo_url.to_string(),
     )))
-}
-
-pub fn apply_profile_save_to_state(
-    state: &AppState,
-    active_id: Option<String>,
-    saved: Profile,
-) -> (AppState, Option<String>) {
-    let mut next_state = state.clone();
-    next_state.profiles.insert(saved.id.clone(), saved.clone());
-
-    let next_active = match active_id {
-        Some(current) if next_state.profiles.contains_key(&current) => Some(current),
-        _ => Some(saved.id),
-    };
-
-    (next_state, next_active)
 }
 
 pub fn validate_profile_name(name: &str) -> bool {
@@ -456,15 +712,11 @@ fn normalize_source_for_compare(value: &str) -> String {
 }
 
 fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64) {
-    let v = state
-        .profile_states
-        .entry(profile_id.to_string())
-        .or_insert_with(|| crate::state::ProfileState::new(profile_id.to_string(), now_ms));
-    v.assessment = None;
-    v.assessment_delete_pending_paths.clear();
-    v.error = None;
-    v.active_operation = None;
-    v.last_checked_ms = now_ms;
+    let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
+    runtime.assessment = None;
+    runtime.last_error = None;
+    runtime.active = None;
+    recompute_profile_status(state, profile_id);
 }
 
 fn map_profile_save_error(err: &anyhow::Error) -> crate::ApiError {
@@ -479,14 +731,25 @@ fn map_profile_save_error(err: &anyhow::Error) -> crate::ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_profile_check_state, map_profile_save_error, normalize_destination_for_compare,
+        canonical_profile_server, clear_profile_check_state, normalize_destination_for_compare,
         profile_path_context_changed,
     };
     use crate::state::AppState;
-    use fleet_domain::health::{
-        LocalHealthState, OperationKind, ProfileAssessmentReport, RemoteFreshnessState,
-    };
+    use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+    use crate::Core;
+    use fleet_domain::health::{LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState};
+    use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{ApiError, Profile};
+
+    fn sample_profile(id: &str, destination: &str) -> Profile {
+        Profile {
+            id: id.to_string(),
+            name: "Profile".to_string(),
+            source: "https://example.com/repo.json".to_string(),
+            destination: destination.to_string(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn destination_normalization_ignores_case_whitespace_and_trailing_slashes() {
@@ -537,42 +800,211 @@ mod tests {
         let mut state = AppState::default();
         let profile_id = "p1".to_string();
 
-        state.profile_states.insert(
+        state.profiles.insert(
             profile_id.clone(),
-            crate::state::ProfileState {
+            Profile {
+                id: profile_id.clone(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/mods".to_string(),
+                ..Default::default()
+            },
+        );
+        state.profile_runtime_by_id.insert(
+            profile_id.clone(),
+            crate::state::ProfileRuntimeState {
                 profile_id: profile_id.clone(),
                 assessment: Some(ProfileAssessmentReport {
                     profile_id: profile_id.clone(),
                     local_health: LocalHealthState::Error,
                     remote_freshness: RemoteFreshnessState::Unknown,
                     checked_at_unix_ms: 10,
+                    expected_missing_in_inventory_count: 0,
+                    inventory_unexpected_paths_count: 0,
                     unexpected_delete_paths: Vec::new(),
                 }),
-                assessment_delete_pending_paths: vec!["extra.txt".to_string()],
-                last_checked_ms: 10,
-                active_operation: Some(OperationKind::Checking),
-                error: Some(ApiError::new("check_failed", "symlink path rejected")),
+                active: Some(crate::state::ActiveOperationState::new(
+                    7,
+                    fleet_domain::health::OperationKind::CheckLocal,
+                    10,
+                )),
+                last_operation: None,
+                last_error: Some(ApiError::new("check_failed", "symlink path rejected")),
+                repo_servers: Vec::new(),
+                repo_servers_loaded: false,
+                status: crate::state::ProfileStatusState::unknown(10),
             },
         );
 
         clear_profile_check_state(&mut state, &profile_id, 42);
 
         let updated = state
-            .profile_states
+            .profile_runtime_by_id
             .get(&profile_id)
-            .expect("profile state");
+            .expect("profile runtime");
         assert!(updated.assessment.is_none());
-        assert!(updated.assessment_delete_pending_paths.is_empty());
-        assert!(updated.error.is_none());
-        assert!(updated.active_operation.is_none());
-        assert_eq!(updated.last_checked_ms, 42);
+        assert!(updated.last_error.is_none());
+        assert!(updated.active.is_none());
+        assert_eq!(updated.status.last_check_ms, 0);
     }
 
     #[test]
-    fn map_profile_save_error_maps_destination_conflict_code() {
-        let err = anyhow::anyhow!("destination_in_use: destination already used by profile p2");
-        let api = map_profile_save_error(&err);
-        assert_eq!(api.code, "destination_in_use");
-        assert_eq!(api.message, "destination already used by profile p2");
+    fn profile_set_selected_does_not_persist_in_profiles_config() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            let profile = sample_profile("p1", "/tmp/p1");
+            core.profile_save(profile).await.expect("save profile");
+            core.profile_set_selected(Some("p1".to_string()))
+                .await
+                .expect("set selected");
+
+            let cfg = core.list_profiles().await.expect("list profiles");
+            assert_eq!(cfg.profiles.len(), 1);
+            assert_eq!(cfg.profiles[0].id, "p1");
+        });
+    }
+
+    #[test]
+    fn profile_set_selected_rejects_unknown_profile_id() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            let err = core
+                .profile_set_selected(Some("missing".to_string()))
+                .await
+                .expect_err("set selected should fail");
+            assert_eq!(err.code, "not_found");
+            assert_eq!(err.message, "missing");
+        });
+    }
+
+    #[test]
+    fn deleting_selected_profile_removes_profile_from_config() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            let profile = sample_profile("p1", "/tmp/p1");
+            core.profile_save(profile).await.expect("save profile");
+            core.profile_set_selected(Some("p1".to_string()))
+                .await
+                .expect("set selected");
+
+            core.profile_delete("p1".to_string())
+                .await
+                .expect("delete profile");
+
+            let cfg = core.list_profiles().await.expect("list profiles");
+            assert!(cfg.profiles.is_empty());
+        });
+    }
+
+    #[test]
+    fn profile_inventory_metrics_reads_root_metrics() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let destination = temp_dir.path().join("mods");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            let profile = sample_profile("p1", destination.to_string_lossy().as_ref());
+            core.profile_save(profile).await.expect("save profile");
+
+            let metrics = core
+                .profile_inventory_metrics(&"p1".to_string())
+                .await
+                .expect("metrics");
+            assert_eq!(metrics.root_path, destination.to_string_lossy());
+        });
+    }
+
+    #[test]
+    fn canonical_profile_server_keeps_saved_server_when_still_present() {
+        let saved = Some(ProfileServerInfo {
+            address: "127.0.0.1".to_string(),
+            port: 2302,
+            password: "pw".to_string(),
+        });
+        let servers = vec![
+            fleet_domain::RepoServer {
+                address: "127.0.0.1".to_string(),
+                port: 2302,
+                password: "pw".to_string(),
+            },
+            fleet_domain::RepoServer {
+                address: "127.0.0.2".to_string(),
+                port: 2302,
+                password: String::new(),
+            },
+        ];
+        let resolved = canonical_profile_server(saved.clone(), &servers);
+        assert_eq!(resolved, saved);
+    }
+
+    #[test]
+    fn canonical_profile_server_falls_back_to_first_cached_server_when_saved_missing() {
+        let saved = Some(ProfileServerInfo {
+            address: "old.example.com".to_string(),
+            port: 2302,
+            password: String::new(),
+        });
+        let servers = vec![
+            fleet_domain::RepoServer {
+                address: "new.example.com".to_string(),
+                port: 2402,
+                password: "next".to_string(),
+            },
+            fleet_domain::RepoServer {
+                address: "other.example.com".to_string(),
+                port: 2502,
+                password: String::new(),
+            },
+        ];
+        let resolved = canonical_profile_server(saved, &servers).expect("resolved server");
+        assert_eq!(resolved.address, "new.example.com");
+        assert_eq!(resolved.port, 2402);
+        assert_eq!(resolved.password, "next");
+    }
+
+    #[test]
+    fn canonical_profile_server_returns_none_when_no_cached_servers_exist() {
+        let saved = Some(ProfileServerInfo {
+            address: "old.example.com".to_string(),
+            port: 2302,
+            password: String::new(),
+        });
+        let resolved = canonical_profile_server(saved, &[]);
+        assert!(resolved.is_none());
     }
 }

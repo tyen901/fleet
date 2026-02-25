@@ -13,32 +13,28 @@
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 10px;
-  background: var(--toast-bg);
-  color: var(--toast-fg);
-  border: 1px solid var(--toast-border);
-  border-left: 3px solid var(--info);
+  background: var(--clr-toast-bg);
+  outline: 1px solid var(--clr-toast-border);
+  color: var(--clr-toast-fg);
   border-radius: var(--radius-3);
   padding: 10px 12px;
-  box-shadow: var(--toast-shadow);
   animation: toast-in 140ms ease-out;
 }
 
 .toast--success {
-  border-left-color: var(--success);
 }
 
 .toast--error {
-  border-left-color: var(--danger);
 }
 
 .toast__title {
   font-weight: 600;
-  font-size: 0.92rem;
+  font-size: var(--font-size-md);
   margin-bottom: 3px;
 }
 
 .toast__message {
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
   opacity: 0.88;
   line-height: 1.3;
 }
@@ -49,7 +45,7 @@
   border: none;
   color: inherit;
   opacity: 0.6;
-  font-size: 1rem;
+  font-size: var(--font-size-md);
   cursor: pointer;
   padding: 0 2px;
 }

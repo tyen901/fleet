@@ -74,37 +74,6 @@ pub struct RootInventory {
     root_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DriftSummary {
-    pub launch_compatible: bool,
-    pub missing_files_count: u64,
-    pub unexpected_files_count: u64,
-    pub modified_files_count: u64,
-}
-
-impl DriftSummary {
-    fn from_dirty_files(dirty_files: &[DirtyFile]) -> Self {
-        let mut missing_files_count = 0_u64;
-        let mut unexpected_files_count = 0_u64;
-        let mut modified_files_count = 0_u64;
-
-        for dirty in dirty_files {
-            match dirty.kind {
-                DirtyKind::Removed => missing_files_count += 1,
-                DirtyKind::Added => unexpected_files_count += 1,
-                DirtyKind::Modified => modified_files_count += 1,
-            }
-        }
-
-        Self {
-            launch_compatible: missing_files_count == 0 && modified_files_count == 0,
-            missing_files_count,
-            unexpected_files_count,
-            modified_files_count,
-        }
-    }
-}
-
 impl RootInventory {
     pub fn inventory_name(&self) -> &str {
         &self.inventory_name
@@ -184,11 +153,6 @@ impl RootInventory {
         Ok(out)
     }
 
-    pub fn drift_summary(&self, policy: &ScanPolicy) -> Result<DriftSummary> {
-        let dirty = self.dirty_files(policy)?;
-        Ok(DriftSummary::from_dirty_files(&dirty))
-    }
-
     pub fn state(&self, policy: &ScanPolicy) -> Result<InventoryState> {
         // If root is missing, report it as state (not an error).
         if !self.root_path.exists() {
@@ -235,22 +199,6 @@ impl RootInventory {
             root_path: self.root_path.clone(),
         })
     }
-
-    /// Repair policy:
-    /// - If MissingRoot: no-op (can't repair a missing directory).
-    /// - If Dirty/Clean but index is inconsistent: run scan.
-    /// - If already Clean: no-op.
-    pub fn repair(&self, cfg: ScannerConfig) -> Result<RepairOutcome> {
-        let st = self.state(&cfg.policy)?;
-        match st {
-            InventoryState::MissingRoot { .. } => Ok(RepairOutcome::NoopMissingRoot),
-            InventoryState::Clean { .. } => Ok(RepairOutcome::NoopAlreadyClean),
-            InventoryState::Dirty { .. } => {
-                let res = self.scan(cfg)?;
-                Ok(RepairOutcome::Scanned(res))
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -269,47 +217,4 @@ pub enum InventoryState {
         root_path: PathBuf,
         current: FolderStamp,
     },
-}
-
-#[derive(Debug)]
-pub enum RepairOutcome {
-    NoopMissingRoot,
-    NoopAlreadyClean,
-    Scanned(SyncResult),
-}
-
-#[cfg(test)]
-mod tests {
-    use super::DriftSummary;
-    use crate::{DirtyFile, DirtyKind};
-
-    #[test]
-    fn drift_summary_counts_and_launch_compatibility() {
-        let dirty = vec![
-            DirtyFile {
-                rel_path: "a".to_string(),
-                kind: DirtyKind::Added,
-                disk_len: Some(1),
-                db_len: None,
-            },
-            DirtyFile {
-                rel_path: "b".to_string(),
-                kind: DirtyKind::Removed,
-                disk_len: None,
-                db_len: Some(2),
-            },
-            DirtyFile {
-                rel_path: "c".to_string(),
-                kind: DirtyKind::Modified,
-                disk_len: Some(3),
-                db_len: Some(4),
-            },
-        ];
-
-        let summary = DriftSummary::from_dirty_files(&dirty);
-        assert_eq!(summary.missing_files_count, 1);
-        assert_eq!(summary.unexpected_files_count, 1);
-        assert_eq!(summary.modified_files_count, 1);
-        assert!(!summary.launch_compatible);
-    }
 }

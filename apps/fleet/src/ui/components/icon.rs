@@ -1,5 +1,15 @@
 use dioxus::prelude::*;
-use icondata::Icon;
+use icondata::{BsCheck2, Icon};
+
+#[component]
+pub fn ActionMarkIcon(#[props(default = "ico".to_string())] class: String) -> Element {
+    rsx! {
+        AppIcon {
+            icon: BsCheck2,
+            class: class,
+        }
+    }
+}
 
 #[derive(Props, Clone, PartialEq)]
 pub struct IconProps {

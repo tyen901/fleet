@@ -1,97 +1,149 @@
 .field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 
 .field__label {
-  font-size: 11px;
-  letter-spacing: 0.14em;
+  font-size: var(--text-size-caption);
+  letter-spacing: 0.15em;
   text-transform: uppercase;
-  font-weight: 800;
-  color: var(--muted);
-  margin-left: 2px;
+  font-weight: 500;
+  color: var(--clr-text-secondary);
 }
 
 .field__row {
-  position: relative;
   display: flex;
   align-items: center;
+  gap: 6px;
 }
 
 .field__input {
   width: 100%;
-  height: 38px;
+  min-height: 38px;
+  appearance: none;
+  -webkit-appearance: none;
   border-radius: var(--radius-2);
-  border: 1px solid var(--border);
-  background: color-mix(in oklab, var(--surface) 92%, var(--bg));
-  color: var(--fg);
+  border: 1px solid var(--clr-input-border);
+  background: var(--clr-input-bg);
+  color: var(--clr-input-fg);
+  outline: none;
   padding: 0 10px;
-  font-size: 12px;
+  font-size: var(--text-size-body);
   font-family: var(--mono);
+  letter-spacing: 0.01em;
+  caret-color: currentColor;
   user-select: text;
   -webkit-user-select: text;
   transition:
+    color 120ms ease,
     border-color 120ms ease,
-    box-shadow 120ms ease,
     background 120ms ease;
 }
 
 .field__textarea {
-  min-height: 110px;
+  min-height: 114px;
   height: auto;
   padding: 8px 10px;
   resize: vertical;
-  line-height: 1.4;
+  line-height: 1.42;
+}
+
+.field__input::placeholder {
+  color: var(--clr-input-placeholder);
 }
 
 .field__input--with-btn {
-  padding-right: 40px;
+  padding-right: 10px;
+}
+
+.field__input--with-btn-text {
+  padding-right: 10px;
 }
 
 .field__input:focus {
-  outline: none;
-  border-color: var(--border-2);
-  box-shadow: 0 0 0 2px var(--focus-ring);
+  border-color: var(--clr-input-border);
+  outline: 2px solid var(--clr-focus);
+  outline-offset: 0;
+  background: var(--clr-input-bg-focus);
+}
+
+.field__input[aria-invalid='true'] {
+  border-color: var(--clr-input-error-ring);
+  outline: 2px solid var(--clr-input-error-ring);
+}
+
+.field__input:disabled,
+.select:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
 }
 
 .field__pick {
-  position: absolute;
-  right: 3px;
-  width: 32px;
+  min-width: 32px;
   height: 32px;
+  padding-inline: 8px;
   border-radius: var(--radius-2);
-  border: 1px solid transparent;
+  border: 1px solid var(--clr-border-emphasis);
   background: transparent;
-  color: var(--muted);
-  display: grid;
-  place-items: center;
+  color: var(--clr-control-fg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
   transition:
-    background 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease;
+    color 130ms ease,
+    background 130ms ease,
+    border-color 130ms ease;
 }
 
 .field__pick:hover {
-  background: var(--surface-2);
-  border-color: var(--border);
-  color: var(--fg);
+  background: var(--clr-control-bg-hover);
+  color: var(--clr-control-fg-hover);
+}
+
+.field__pick:active {
+  background: var(--clr-control-bg-active);
+}
+
+.field__pick:focus-visible {
+  outline: 2px solid var(--clr-focus);
+  outline-offset: 1px;
+}
+
+.field__pick:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.field__pick--text {
+  min-width: 0;
+}
+
+.field__pick-label {
+  font-family: var(--mono);
+  font-size: var(--text-size-caption);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1;
 }
 
 .field__error {
-  color: var(--danger);
-  font-size: 12px;
-  margin-top: -5px;
+  color: var(--clr-error-fg);
+  background: var(--clr-error-bg);
+  outline: 1px solid var(--clr-error-border);
+  border-radius: var(--radius-2);
+  padding: 4px 8px;
+  line-height: 1.34;
+  font-size: var(--text-size-label);
+  margin-top: -2px;
 }
 
 .form-footer {
-  margin-top: 14px;
+  margin-top: 10px;
   display: flex;
   justify-content: flex-end;
-}
-
-.form-footer--split {
-  justify-content: space-between;
 }
 
 .select-wrap {
@@ -99,21 +151,29 @@
   min-width: 200px;
 }
 
+.select-wrap--full {
+  width: 100%;
+  min-width: 0;
+}
+
 .select {
   width: 100%;
-  height: 32px;
+  min-height: 34px;
   border-radius: var(--radius-2);
-  border: 1px solid var(--border);
-  background: color-mix(in oklab, var(--surface) 92%, var(--bg));
-  color: var(--fg);
+  border: 1px solid var(--clr-border-emphasis);
+  background: transparent;
+  color: var(--clr-text-primary);
   padding: 0 30px 0 10px;
-  font-size: 12px;
+  font-size: var(--text-size-body);
+  font-family: var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
   appearance: none;
 }
 
 .select:focus {
-  outline: none;
-  border-color: var(--border-2);
+  outline: 2px solid var(--clr-focus);
+  outline-offset: 0;
 }
 
 .select-wrap__chev {
@@ -121,12 +181,12 @@
   right: 10px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--muted);
+  color: var(--clr-text-secondary);
   pointer-events: none;
 }
 
 .check {
   width: 16px;
   height: 16px;
-  accent-color: color-mix(in oklab, var(--fg) 70%, transparent);
+  accent-color: var(--clr-accent);
 }

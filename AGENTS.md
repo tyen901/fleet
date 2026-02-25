@@ -20,7 +20,7 @@ Fleet is a Rust workspace with a native Dioxus desktop UI.
 - `cargo clippy --workspace --all-targets -- -D warnings`: lint Rust workspace (CI-style).
 - `npm run fmt:css`: format CSS with Prettier.
 - `npm run lint:css`: check CSS formatting with Prettier.
-- `cargo run -p fleet-cli -- <command>`: run CLI tasks (sync, inventory, profile). Example: `cargo run -p fleet-cli -- inventory check <profile_id>`.
+- `cargo run -p fleet-cli -- <command>`: run CLI tasks (sync, repair, clean, profile, launch/join). Example: `cargo run -p fleet-cli -- profile check <profile_id>`.
 - `cargo run -p fleet`: run the native UI.
 - `cargo test`: run Rust unit tests across the workspace.
 
@@ -42,6 +42,8 @@ Always run a build and at least one validation step (tests and/or lint) before r
 - Do not leave commented-out code or placeholder TODOs for removed behavior.
 - If a refactor renames or replaces a concept, remove the old identifier usage from Rust and CSS in the same pass.
 - Keep one authoritative implementation path per behavior.
+- UI policy: never add container wrapper elements for UI content unless explicitly requested.
+- UI policy: never add background fill to UI panels/sections unless explicitly requested.
 
 ### Enforcement Checklist (Required For Refactors)
 
@@ -54,6 +56,9 @@ Always run a build and at least one validation step (tests and/or lint) before r
 
 - Unit tests live alongside Rust modules (e.g., `crates/app/...` with `mod tests`).
 - Name test functions descriptively to match behavior (e.g., `repairs_corrupt_inventory`).
+- Do not add tests that only verify third-party/library behavior (e.g., serde roundtrips without app-specific logic, std `trim`, basic boolean operators, direct assignment/match passthroughs).
+- Prefer behavior-focused tests that cover Fleet-specific logic, regressions, invariants, integration boundaries, or previously broken paths.
+- Delete or avoid legacy/coincidental tests that pass without asserting current behavior.
 
 ## Linting & Formatting
 
@@ -76,3 +81,20 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
 - Enabled mods are sourced from the Swifty repo cache under profile state (`<config_root>/profile_state/<profile_key>/repo_cache`) and translated into `-mod=...`.
 - Linux launch methods use Proton-style mod paths when applicable.
 - Custom launch commands are only used when the launch method is set to `custom`.
+
+## Operation Flow Notes
+
+- Flow execution is operation-centric and uses one shared kind type:
+  `fleet_domain::health::OperationKind`.
+- Core operation APIs are:
+  - `start_operation(profile_id, operation_kind)`
+  - `send_operation_input(session_id, FlowInput)`
+  - `cancel_session(session_id)`
+- Runtime operation state is per-profile in `AppState.operations_by_profile`.
+- Keep remote checks (`CheckRemote`) supported.
+- Keep both dashboard delete pathways (`PendingSync` and `UnexpectedReview`) unless explicitly changed.
+- Removed paths that should not be reintroduced:
+  - `crates/core/src/features/flow_ops.rs`
+  - `FlowOperationKind` alias exports
+  - `flows/operation::run_check_flow` wrapper
+  - start-operation duplicate-session retry shims
