@@ -4,7 +4,7 @@ use super::flow_logging::{
     log_terminal_result, operation_kind_label,
 };
 use fleet_domain::health::OperationKind;
-use fleet_domain::{Profile, ProfileId};
+use fleet_domain::{ApiError, Profile, ProfileId, INVENTORY_REBUILD_REQUIRED_CODE};
 use fleet_flow::{EventSink, FlowConfig, FlowEventKind, FlowResult, FlowSessionEvent};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -249,7 +249,7 @@ impl FlowSystem {
                             "flow terminal error details"
                         );
                         FlowEventKind::Failed {
-                            error: format!("{e:#}"),
+                            error: map_flow_error(&e),
                         }
                     }
                 }
@@ -265,6 +265,21 @@ impl FlowSystem {
 
         Ok(session_id)
     }
+}
+
+fn map_flow_error(err: &anyhow::Error) -> ApiError {
+    if err
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
+        .any(inventory::Error::is_corrupted_database)
+    {
+        return ApiError::new(
+            INVENTORY_REBUILD_REQUIRED_CODE,
+            inventory::REBUILD_REQUIRED_MESSAGE,
+        );
+    }
+
+    ApiError::new("pipeline_error", format!("{err:#}"))
 }
 
 struct SpawnCtx {
@@ -398,7 +413,38 @@ mod tests {
 
         let _started = recv_matching(&mut rx, session_id).await;
         let terminal = recv_matching(&mut rx, session_id).await;
-        assert!(matches!(terminal.kind, FlowEventKind::Failed { .. }));
+        let FlowEventKind::Failed { error } = terminal.kind else {
+            panic!("expected failed terminal event");
+        };
+        assert_eq!(error.code, "pipeline_error");
+        assert!(error.message.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn corrupted_inventory_flow_emits_rebuild_required_error() {
+        let system = FlowSystem::new();
+        let mut rx = system.subscribe();
+        let session_id = system
+            .spawn_operation(
+                test_cfg(),
+                "p3".to_string(),
+                OperationKind::Sync,
+                |_| async move {
+                    Err(anyhow::Error::new(inventory::Error::CorruptedDatabase(
+                        "legacy inventory schema is no longer supported".to_string(),
+                    )))
+                },
+            )
+            .await
+            .expect("session started");
+
+        let _started = recv_matching(&mut rx, session_id).await;
+        let terminal = recv_matching(&mut rx, session_id).await;
+        let FlowEventKind::Failed { error } = terminal.kind else {
+            panic!("expected failed terminal event");
+        };
+        assert_eq!(error.code, "inventory_rebuild_required");
+        assert_eq!(error.message, inventory::REBUILD_REQUIRED_MESSAGE);
     }
 
     #[tokio::test]

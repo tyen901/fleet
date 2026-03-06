@@ -48,13 +48,25 @@ fn load_inventory_metrics(
 fn build_main_actions(
     profile_status: Option<&fleet_core::ProfileStatusState>,
     repair_required: bool,
+    rebuild_inventory_required: bool,
 ) -> Vec<MainActionUi> {
     let Some(status) = profile_status else {
         return Vec::new();
     };
 
     let mut actions = Vec::with_capacity(4);
-    if repair_required {
+    if rebuild_inventory_required {
+        actions.push(MainActionUi {
+            label: "Rebuild Inventory",
+            operation: fleet_core::OperationKind::RebuildInventory,
+            action: "rebuild_inventory",
+            error_reason: "start_rebuild_inventory_failed",
+            fail_title: "Rebuild inventory failed",
+            recommended: fleet_core::ProfileRecommendedAction::RebuildInventory,
+            enabled: status.actions.rebuild_inventory_enabled,
+            running: status.actions.rebuild_inventory_running,
+        });
+    } else if repair_required {
         actions.push(MainActionUi {
             label: "Repair",
             operation: fleet_core::OperationKind::Repair,
@@ -214,6 +226,9 @@ pub fn ProfileView(id: String) -> Element {
     let repair_required = profile_status
         .map(|status| status.repair_required)
         .unwrap_or(false);
+    let rebuild_inventory_required = profile_status
+        .map(|status| status.rebuild_inventory_required)
+        .unwrap_or(false);
     let recommended_action = profile_status
         .map(|status| status.recommended_action)
         .unwrap_or(fleet_core::ProfileRecommendedAction::Sync);
@@ -231,7 +246,8 @@ pub fn ProfileView(id: String) -> Element {
         .unwrap_or_else(|| "Never".to_string());
     let modpack_size = modpack_size_text(inventory_metrics().as_ref(), inventory_metrics_loading());
 
-    let main_actions = build_main_actions(profile_status, repair_required);
+    let main_actions =
+        build_main_actions(profile_status, repair_required, rebuild_inventory_required);
     let progress_display = progress_ui.clone().or_else(|| {
         operation_active.then_some(fleet_core::ProfileProgressView {
             label: "Starting operation...".to_string(),

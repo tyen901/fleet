@@ -8,7 +8,6 @@ use fleet_domain::health::{
     LocalHealthState, OperationKind, ProfileAssessmentReport, RemoteFreshnessState,
 };
 use fleet_domain::sync::{SyncPhase, SyncProgress};
-use fleet_domain::ApiError;
 use fleet_flow::{FlowEventKind, FlowResult, FlowSessionEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tokio::sync::broadcast;
@@ -164,13 +163,8 @@ impl AutoCheckCoalescer {
                 }
             }
             FlowEventKind::Failed { .. } | FlowEventKind::Canceled => {
-                if let Some((profile_id, kind)) = self.auto_sessions.remove(&ev.session_id) {
-                    let queue = self
-                        .pending_auto_check
-                        .entry(profile_id.clone())
-                        .or_default();
-                    queue.push_front(kind);
-                    self.mark_terminal(&profile_id);
+                if let Some((profile_id, _kind)) = self.auto_sessions.remove(&ev.session_id) {
+                    self.drop_profile(&profile_id);
                 }
             }
             _ => {}
@@ -463,7 +457,6 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
 
         FlowEventKind::Failed { error } => {
             let message = active_message(state, &ev.profile_id, ev.session_id);
-            let pipeline_error = ApiError::new("pipeline_error", error.clone());
             let runtime = ensure_profile_runtime_mut(state, &ev.profile_id, now);
             runtime.last_operation = Some(OperationOutcomeState {
                 session_id: ev.session_id,
@@ -472,7 +465,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                 updated_at_unix_ms: now,
                 message,
                 summary: None,
-                error: Some(pipeline_error.clone()),
+                error: Some(error.clone()),
             });
             runtime.active = None;
             if matches!(
@@ -481,7 +474,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                     | OperationKind::RebuildInventory
                     | OperationKind::CheckRemote
             ) {
-                runtime.last_error = Some(ApiError::new("check_failed", error.clone()));
+                runtime.last_error = Some(error.clone());
             } else {
                 runtime.last_error = None;
             }
@@ -559,6 +552,7 @@ mod tests {
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use fleet_domain::health::{CheckPhase, LocalHealthState, RemoteFreshnessState};
     use fleet_domain::sync::SyncSummary;
+    use fleet_domain::ApiError;
     use fleet_domain::{AppSettings, Profile};
 
     #[test]
@@ -889,5 +883,160 @@ mod tests {
         assert_eq!(final_view.label, "Finalize");
         assert_eq!(final_view.done, Some(6));
         assert_eq!(final_view.total, Some(6));
+    }
+
+    #[test]
+    fn sync_progress_switches_to_file_finalization_after_fetch_completes() {
+        let mut state = AppState::default();
+        let profile_id = "p-sync-progress".to_string();
+
+        state.profiles.insert(
+            profile_id.clone(),
+            Profile {
+                id: profile_id.clone(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/destination".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let started = FlowSessionEvent::new(
+            15,
+            profile_id.clone(),
+            OperationKind::Sync,
+            FlowEventKind::Started,
+        );
+        apply_event(&mut state, &started, 1_000);
+
+        let phase = FlowSessionEvent::new(
+            15,
+            profile_id.clone(),
+            OperationKind::Sync,
+            FlowEventKind::SyncPhaseChanged {
+                phase: SyncPhase::Syncing,
+            },
+        );
+        apply_event(&mut state, &phase, 1_100);
+
+        let progress = FlowSessionEvent::new(
+            15,
+            profile_id.clone(),
+            OperationKind::Sync,
+            FlowEventKind::SyncProgress {
+                progress: SyncProgress {
+                    bytes_done: Some(100),
+                    bytes_total: Some(100),
+                    files_total: Some(10),
+                    files_finalized: Some(7),
+                    bytes_per_sec: Some(12_345),
+                    ..Default::default()
+                },
+                rate_bps: None,
+                eta_seconds: None,
+                message: None,
+            },
+        );
+        apply_event(&mut state, &progress, 1_200);
+
+        let runtime = state
+            .profile_runtime_by_id
+            .get(&profile_id)
+            .expect("profile runtime");
+        let view = runtime
+            .status
+            .progress
+            .as_ref()
+            .expect("sync progress view");
+        assert_eq!(view.label, "Finalizing files");
+        assert_eq!(view.detail, "7 / 10 files");
+        assert_eq!(view.done, Some(7));
+        assert_eq!(view.total, Some(10));
+    }
+
+    #[test]
+    fn auto_check_failure_drops_profile_instead_of_requeueing() {
+        let mut auto_check = AutoCheckCoalescer::default();
+        let profile_id = "p-auto".to_string();
+        auto_check.enqueue(profile_id.clone());
+        auto_check.mark_running(&profile_id, 21, OperationKind::CheckLocal);
+
+        auto_check.observe_event(&FlowSessionEvent::new(
+            21,
+            profile_id.clone(),
+            OperationKind::CheckLocal,
+            FlowEventKind::Failed {
+                error: ApiError::new(
+                    "inventory_rebuild_required",
+                    inventory::REBUILD_REQUIRED_MESSAGE,
+                ),
+            },
+        ));
+
+        assert!(!auto_check.is_running(&profile_id));
+        assert!(auto_check.peek_next(&profile_id).is_none());
+        assert!(auto_check.pending_entries().is_empty());
+    }
+
+    #[test]
+    fn failed_check_preserves_rebuild_required_error_code() {
+        let mut state = AppState::default();
+        let profile_id = "p-check-failed".to_string();
+
+        state.profiles.insert(
+            profile_id.clone(),
+            Profile {
+                id: profile_id.clone(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/destination".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let started = FlowSessionEvent::new(
+            21,
+            profile_id.clone(),
+            OperationKind::CheckLocal,
+            FlowEventKind::Started,
+        );
+        apply_event(&mut state, &started, 1_000);
+
+        let failed = FlowSessionEvent::new(
+            21,
+            profile_id.clone(),
+            OperationKind::CheckLocal,
+            FlowEventKind::Failed {
+                error: ApiError::new(
+                    "inventory_rebuild_required",
+                    inventory::REBUILD_REQUIRED_MESSAGE,
+                ),
+            },
+        );
+        apply_event(&mut state, &failed, 2_000);
+
+        let runtime = state
+            .profile_runtime_by_id
+            .get(&profile_id)
+            .expect("profile runtime");
+        let last_operation = runtime.last_operation.as_ref().expect("last operation");
+        let op_error = last_operation.error.as_ref().expect("operation error");
+        assert_eq!(op_error.code, "inventory_rebuild_required");
+        assert_eq!(op_error.message, inventory::REBUILD_REQUIRED_MESSAGE);
+
+        let last_error = runtime.last_error.as_ref().expect("last error");
+        assert_eq!(last_error.code, "inventory_rebuild_required");
+        assert_eq!(last_error.message, inventory::REBUILD_REQUIRED_MESSAGE);
+        assert_eq!(
+            runtime.status.recommended_action,
+            crate::state::ProfileRecommendedAction::RebuildInventory
+        );
+        assert!(!runtime.status.repair_required);
+        assert!(runtime.status.rebuild_inventory_required);
+        assert!(runtime.status.actions.rebuild_inventory_enabled);
+        assert_eq!(
+            runtime.status.headline,
+            crate::state::ProfileStatusHeadline::NeedsBaselineRepair
+        );
     }
 }

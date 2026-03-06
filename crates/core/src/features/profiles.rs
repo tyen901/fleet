@@ -617,15 +617,15 @@ fn load_profile_inventory_metrics(profile: &Profile) -> Result<InventoryMetrics,
             .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
     }
     let store = inventory::SqliteStore::open(&inventory_db)
-        .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
+        .map_err(|e| map_inventory_api_error("inventory_store", e))?;
     let inventory = inventory::Inventory::from_store(store)
-        .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
+        .map_err(|e| map_inventory_api_error("inventory_store", e))?;
     let root = inventory
         .open_root(&profile.id, destination)
-        .map_err(|e| crate::ApiError::new("inventory_root", e.to_string()))?;
+        .map_err(|e| map_inventory_api_error("inventory_root", e))?;
     let metrics = root
         .metrics()
-        .map_err(|e| crate::ApiError::new("inventory_metrics", e.to_string()))?;
+        .map_err(|e| map_inventory_api_error("inventory_metrics", e))?;
 
     Ok(InventoryMetrics {
         root_path: metrics.root_path,
@@ -651,6 +651,16 @@ fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, c
         fleet_domain::repo_cache_dir(&state_root, &profile.id),
         repo_url.to_string(),
     )))
+}
+
+fn map_inventory_api_error(default_code: &'static str, err: inventory::Error) -> crate::ApiError {
+    if err.is_corrupted_database() {
+        return crate::ApiError::new(
+            fleet_domain::INVENTORY_REBUILD_REQUIRED_CODE,
+            inventory::REBUILD_REQUIRED_MESSAGE,
+        );
+    }
+    crate::ApiError::new(default_code, err.to_string())
 }
 
 pub fn validate_profile_name(name: &str) -> bool {

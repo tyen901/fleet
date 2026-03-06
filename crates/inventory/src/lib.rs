@@ -16,7 +16,7 @@ pub mod scanner;
 
 pub use api::{Inventory, InventoryState, RootInventory};
 pub use db::{InventoryDb, UpdateSession};
-pub use error::{Error, Result};
+pub use error::{Error, Result, REBUILD_REQUIRED_MESSAGE};
 pub use flux_sqlite::{
     open_flux_inventory, FinalizedFileRecord, FluxInventoryApi, SegmentLoc, SegmentSignature,
     TrustedFileMeta, TrustedFileRecord,

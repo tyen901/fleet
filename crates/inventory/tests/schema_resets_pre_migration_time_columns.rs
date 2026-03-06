@@ -1,4 +1,4 @@
-use inventory::{InventoryDb, SqliteStore};
+use inventory::{Error, InventoryDb, SqliteStore};
 use rusqlite::{params, Connection};
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
@@ -16,7 +16,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
 }
 
 #[test]
-fn init_resets_pre_migration_schema_with_time_columns() {
+fn init_rejects_pre_migration_schema_with_time_columns() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("pre_migration.db");
 
@@ -88,36 +88,42 @@ fn init_resets_pre_migration_schema_with_time_columns() {
 
     let store = SqliteStore::open(&db_path).expect("open store");
     let db = InventoryDb::new(store);
-    db.init().expect("init should reset pre-migration schema");
+    let err = db
+        .init()
+        .expect_err("init should reject unsupported pre-migration schema");
+    assert!(
+        matches!(err, Error::CorruptedDatabase(_)),
+        "expected corrupted database error, got: {err}"
+    );
 
-    let conn = Connection::open(&db_path).expect("open migrated db");
+    let conn = Connection::open(&db_path).expect("open legacy db");
     assert!(
-        !has_column(&conn, "inventories", "created_at"),
-        "inventories.created_at must be removed"
+        has_column(&conn, "inventories", "created_at"),
+        "inventories.created_at should remain until the user rebuilds the db"
     );
     assert!(
-        !has_column(&conn, "inventories", "updated_at"),
-        "inventories.updated_at must be removed"
+        has_column(&conn, "inventories", "updated_at"),
+        "inventories.updated_at should remain until the user rebuilds the db"
     );
     assert!(
-        !has_column(&conn, "roots", "created_at"),
-        "roots.created_at must be removed"
+        has_column(&conn, "roots", "created_at"),
+        "roots.created_at should remain until the user rebuilds the db"
     );
     assert!(
-        !has_column(&conn, "roots", "updated_at"),
-        "roots.updated_at must be removed"
+        has_column(&conn, "roots", "updated_at"),
+        "roots.updated_at should remain until the user rebuilds the db"
     );
     assert!(
-        !has_column(&conn, "folder_stamps", "computed_at"),
-        "folder_stamps.computed_at must be removed"
+        has_column(&conn, "folder_stamps", "computed_at"),
+        "folder_stamps.computed_at should remain until the user rebuilds the db"
     );
     assert!(
-        !has_column(&conn, "files", "updated_at"),
-        "files.updated_at must be removed"
+        has_column(&conn, "files", "updated_at"),
+        "files.updated_at should remain until the user rebuilds the db"
     );
 
     let inventories_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM inventories", [], |r| r.get(0))
         .expect("count inventories");
-    assert_eq!(inventories_count, 0, "pre-migration rows should be dropped");
+    assert_eq!(inventories_count, 1, "legacy rows should remain untouched");
 }

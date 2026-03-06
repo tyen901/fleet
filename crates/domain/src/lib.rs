@@ -26,5 +26,5 @@ pub use types::{
     normalize_app_settings, ApiError, AppSettings, AppearanceSettings, Arma3LaunchMethod,
     Arma3Settings, PrivacySettings, Profile, ProfileId, ProfileSourceKind, ReleaseChannel,
     RepoServer, RuntimeSettings, SyncSettings, TelemetryPreference, ThemeMode, UiSettings,
-    UpdateSettings, DEFAULT_ARMA3_ARGS,
+    UpdateSettings, DEFAULT_ARMA3_ARGS, INVENTORY_REBUILD_REQUIRED_CODE,
 };
