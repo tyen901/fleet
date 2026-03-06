@@ -46,7 +46,7 @@ pub async fn run_assess_flow_with_sink(
         "Validating profile context...",
     );
 
-    let mut local_assessment = evaluate_local_health(&cfg, &profile, &cancel, sink.clone()).await;
+    let mut local_assessment = evaluate_local_health(&cfg, &profile, &cancel, sink.clone()).await?;
     emit_check_phase(
         sink.as_ref(),
         CheckPhase::EvaluatingLocal,
@@ -180,7 +180,7 @@ async fn evaluate_local_health(
     profile: &Profile,
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> LocalAssessmentResult {
+) -> anyhow::Result<LocalAssessmentResult> {
     if check_canceled(cancel).is_err() {
         warn!(
             flow_kind = "check",
@@ -189,7 +189,7 @@ async fn evaluate_local_health(
             outcome = "canceled",
             "local health evaluation canceled"
         );
-        return local_error();
+        return Ok(local_error());
     }
 
     if profile.dest_path().is_err() || profile.validated_source_kind().is_err() {
@@ -201,16 +201,16 @@ async fn evaluate_local_health(
             reason = "invalid_profile_context",
             "local health evaluation failed profile validation"
         );
-        return local_error();
+        return Ok(local_error());
     }
     let dest_path = match profile.dest_path() {
         Ok(path) => path,
-        Err(_) => return local_error(),
+        Err(_) => return Ok(local_error()),
     };
 
     let dest_exists = fs::try_exists(&dest_path).await;
     if check_canceled(cancel).is_err() {
-        return local_error();
+        return Ok(local_error());
     }
     match dest_exists {
         Ok(true) => {}
@@ -222,7 +222,7 @@ async fn evaluate_local_health(
                 outcome = "missing_destination",
                 "local health detected missing destination"
             );
-            return local_assessment(LocalHealthState::MissingDestination);
+            return Ok(local_assessment(LocalHealthState::MissingDestination));
         }
         Err(_) => {
             error!(
@@ -233,18 +233,18 @@ async fn evaluate_local_health(
                 reason = "destination_probe_failed",
                 "local health failed while probing destination"
             );
-            return local_error();
+            return Ok(local_error());
         }
     }
 
     let layout = FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
     let state_dir_exists = fs::try_exists(&layout.state_dir).await;
     if check_canceled(cancel).is_err() {
-        return local_error();
+        return Ok(local_error());
     }
     let db_exists = fs::try_exists(&layout.inventory_db).await;
     if check_canceled(cancel).is_err() {
-        return local_error();
+        return Ok(local_error());
     }
     match (state_dir_exists, db_exists) {
         (Ok(true), Ok(true)) => {}
@@ -256,7 +256,7 @@ async fn evaluate_local_health(
                 outcome = "missing_local_state",
                 "local health detected missing local state"
             );
-            return local_assessment(LocalHealthState::LocalStateMissing);
+            return Ok(local_assessment(LocalHealthState::LocalStateMissing));
         }
         _ => {
             error!(
@@ -267,7 +267,7 @@ async fn evaluate_local_health(
                 reason = "state_probe_failed",
                 "local health failed while probing state files"
             );
-            return local_error();
+            return Ok(local_error());
         }
     }
 
@@ -282,7 +282,7 @@ async fn evaluate_local_health(
                 reason = "inventory_lock_held",
                 "local health found active inventory lock"
             );
-            return local_error();
+            return Ok(local_error());
         }
         Err(_) => {
             error!(
@@ -293,11 +293,11 @@ async fn evaluate_local_health(
                 reason = "inventory_lock_probe_failed",
                 "local health failed while checking lock state"
             );
-            return local_error();
+            return Ok(local_error());
         }
     }
     if check_canceled(cancel).is_err() {
-        return local_error();
+        return Ok(local_error());
     }
 
     let policy = cfg.scanner_config.policy.clone();
@@ -369,13 +369,13 @@ async fn evaluate_local_health(
     let local_state = tokio::select! {
         _ = cancel.cancelled() => {
             local_state_task.abort();
-            return local_error();
+            return Ok(local_error());
         }
         result = &mut local_state_task => result,
     };
 
     if check_canceled(cancel).is_err() {
-        return local_error();
+        return Ok(local_error());
     }
 
     match local_state {
@@ -388,7 +388,7 @@ async fn evaluate_local_health(
                 reason = "local_state_computed",
                 "local health evaluation complete"
             );
-            v
+            Ok(v)
         }
         Ok(Err(err)) => {
             error!(
@@ -406,7 +406,11 @@ async fn evaluate_local_health(
                 error = %err,
                 "local health inventory state error details"
             );
-            local_error()
+            if has_corrupted_inventory_db(&err) {
+                Err(err)
+            } else {
+                Ok(local_error())
+            }
         }
         Err(err) => {
             error!(
@@ -424,7 +428,7 @@ async fn evaluate_local_health(
                 error = %err,
                 "local health blocking task error details"
             );
-            local_error()
+            Ok(local_error())
         }
     }
 }
@@ -643,4 +647,10 @@ fn check_canceled(cancel: &CancellationToken) -> anyhow::Result<()> {
         anyhow::bail!("canceled");
     }
     Ok(())
+}
+
+fn has_corrupted_inventory_db(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
+        .any(inventory::Error::is_corrupted_database)
 }

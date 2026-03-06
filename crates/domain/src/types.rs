@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 pub type ProfileId = String;
+pub const INVENTORY_REBUILD_REQUIRED_CODE: &str = "inventory_rebuild_required";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ApiError {
@@ -18,6 +19,10 @@ impl ApiError {
             code: code.into(),
             message: message.into(),
         }
+    }
+
+    pub fn is_inventory_rebuild_required(&self) -> bool {
+        self.code == INVENTORY_REBUILD_REQUIRED_CODE
     }
 }
 

@@ -504,6 +504,67 @@ async fn sync_flow_fails_when_inventory_lock_is_held() {
         .contains("inventory lock is currently held by another running operation"));
 }
 
+#[tokio::test]
+async fn sync_flow_fails_when_inventory_db_is_corrupted() {
+    let td = TempDir::new().expect("tempdir");
+    let dest = td.path().join("dest");
+    tokio::fs::create_dir_all(&dest).await.expect("mkdir");
+    tokio::fs::write(dest.join("a.txt"), b"aaa")
+        .await
+        .expect("write");
+
+    let cfg = test_flow_config(td.path());
+    let cancel = CancellationToken::new();
+    let profile = profile_with_source(&dest, "https://example.com/repo.json");
+    let layout =
+        fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
+    tokio::fs::create_dir_all(&layout.state_dir)
+        .await
+        .expect("create state dir");
+    tokio::fs::write(&layout.inventory_db, b"not a sqlite database")
+        .await
+        .expect("write invalid db");
+
+    let (sink, _rx) = channel_sink();
+    let err = run_sync_flow(cfg, profile, cancel, sink)
+        .await
+        .expect_err("expected corrupted inventory db to fail sync");
+    assert!(err
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
+        .any(inventory::Error::is_corrupted_database));
+}
+
+#[tokio::test]
+async fn assess_flow_fails_when_inventory_db_is_corrupted() {
+    let td = TempDir::new().expect("tempdir");
+    let dest = td.path().join("dest");
+    tokio::fs::create_dir_all(&dest).await.expect("mkdir");
+    tokio::fs::write(dest.join("a.txt"), b"aaa")
+        .await
+        .expect("write");
+
+    let cfg = test_flow_config(td.path());
+    let cancel = CancellationToken::new();
+    let profile = profile_with_source(&dest, "https://example.com/repo.json");
+    let layout =
+        fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
+    tokio::fs::create_dir_all(&layout.state_dir)
+        .await
+        .expect("create state dir");
+    tokio::fs::write(&layout.inventory_db, b"not a sqlite database")
+        .await
+        .expect("write invalid db");
+
+    let err = run_assess_flow(cfg, profile, false, cancel)
+        .await
+        .expect_err("expected corrupted inventory db to fail assess flow");
+    assert!(err
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
+        .any(inventory::Error::is_corrupted_database));
+}
+
 async fn run_delete_flow(flow: DeleteFlow) -> DeleteFlowOutcome {
     let td = workspace_tempdir();
     let dest = td.path().join("dest");

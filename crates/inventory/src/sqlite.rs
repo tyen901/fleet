@@ -111,12 +111,11 @@ impl SqliteStore {
         let start = Instant::now();
         let mut pooled = self.pooled()?;
         let conn = pooled.conn()?;
-        if has_pre_migration_time_columns(conn)? {
-            reset_inventory_schema(conn)?;
+        if let Some(reason) = incompatible_schema_reason(conn)? {
+            return Err(Error::CorruptedDatabase(reason.to_string()));
         }
         let schema = include_str!("../schema.sql");
         conn.execute_batch(schema)?;
-        migrate_files_drop_file_type(conn)?;
         debug!(
             elapsed_ms = start.elapsed().as_millis(),
             "sqlite schema initialized"
@@ -665,7 +664,7 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn has_pre_migration_time_columns(conn: &Connection) -> Result<bool> {
+fn has_legacy_time_columns(conn: &Connection) -> Result<bool> {
     Ok(has_column(conn, "inventories", "created_at")?
         || has_column(conn, "inventories", "updated_at")?
         || has_column(conn, "roots", "created_at")?
@@ -674,47 +673,49 @@ fn has_pre_migration_time_columns(conn: &Connection) -> Result<bool> {
         || has_column(conn, "files", "updated_at")?)
 }
 
-fn reset_inventory_schema(conn: &mut Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         BEGIN IMMEDIATE;
-         DROP TABLE IF EXISTS segments;
-         DROP TABLE IF EXISTS files;
-         DROP TABLE IF EXISTS folder_stamps;
-         DROP TABLE IF EXISTS roots;
-         DROP TABLE IF EXISTS inventories;
-         DROP TABLE IF EXISTS schema_meta;
-         COMMIT;
-         PRAGMA foreign_keys=ON;",
-    )?;
-    Ok(())
+fn has_table(conn: &Connection, table: &str) -> Result<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT 1
+             FROM sqlite_master
+             WHERE type='table' AND name=?1
+             LIMIT 1",
+            params![table],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(exists)
 }
 
-fn migrate_files_drop_file_type(conn: &mut Connection) -> Result<()> {
-    if !has_column(conn, "files", "file_type")? {
-        return Ok(());
+fn segments_reference_files(conn: &Connection) -> Result<bool> {
+    if !has_table(conn, "segments")? {
+        return Ok(true);
     }
 
-    conn.execute_batch(
-        "PRAGMA foreign_keys=OFF;
-         BEGIN IMMEDIATE;
-         DROP INDEX IF EXISTS idx_files_root;
-         ALTER TABLE files RENAME TO files_old;
-         CREATE TABLE files (
-           root_id     INTEGER NOT NULL,
-           rel_path    TEXT NOT NULL,
-           length      INTEGER NOT NULL,
-           checksum    TEXT,
-           PRIMARY KEY(root_id, rel_path),
-           FOREIGN KEY(root_id) REFERENCES roots(id) ON DELETE CASCADE
-         );
-         INSERT INTO files(root_id, rel_path, length, checksum)
-         SELECT root_id, rel_path, length, checksum
-         FROM files_old;
-         DROP TABLE files_old;
-         CREATE INDEX IF NOT EXISTS idx_files_root ON files(root_id);
-         COMMIT;
-         PRAGMA foreign_keys=ON;",
-    )?;
-    Ok(())
+    let mut stmt = conn.prepare("PRAGMA foreign_key_list(segments)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let table: String = r.get(2)?;
+        if table != "files" {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn incompatible_schema_reason(conn: &Connection) -> Result<Option<&'static str>> {
+    if has_legacy_time_columns(conn)? {
+        return Ok(Some("legacy inventory schema is no longer supported"));
+    }
+    if has_column(conn, "files", "file_type")? {
+        return Ok(Some("legacy inventory file schema is no longer supported"));
+    }
+    if has_table(conn, "files_old")? {
+        return Ok(Some("stale inventory migration artifacts detected"));
+    }
+    if !segments_reference_files(conn)? {
+        return Ok(Some("inventory schema references a stale files table"));
+    }
+    Ok(None)
 }

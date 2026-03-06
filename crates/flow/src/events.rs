@@ -1,4 +1,5 @@
 use fleet_domain::health::OperationKind;
+use fleet_domain::ApiError;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -66,7 +67,7 @@ pub enum FlowEventKind {
 
     /// Flow failed with an error.
     Failed {
-        error: String,
+        error: ApiError,
     },
 
     Canceled,

@@ -1,15 +1,28 @@
 use fleet_core::{FlowEventKind, FlowSessionEvent};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SyncBarMode {
     Bytes,
     Files,
+    FinalizingFiles,
 }
 
 fn sync_progress_counts(kind: &FlowEventKind) -> Option<(SyncBarMode, u64, u64)> {
     match kind {
         FlowEventKind::SyncProgress { progress, .. } => {
+            if let (Some(done), Some(total)) = (
+                progress.files_finalized,
+                progress.files_total.filter(|total| *total > 0),
+            ) {
+                let fetch_complete = matches!(
+                    (progress.bytes_done, progress.bytes_total.filter(|value| *value > 0)),
+                    (Some(bytes_done), Some(bytes_total)) if bytes_done >= bytes_total
+                );
+                if fetch_complete && done < total {
+                    return Some((SyncBarMode::FinalizingFiles, done, total));
+                }
+            }
             if let (Some(done), Some(total)) = (
                 progress.bytes_done,
                 progress.bytes_total.filter(|total| *total > 0),
@@ -35,6 +48,9 @@ fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
             sync_progress_counts(&ev.kind).map(|(mode, done, total)| match mode {
                 SyncBarMode::Bytes => format!("Progress: {done}/{total} bytes"),
                 SyncBarMode::Files => format!("Progress: {done}/{total} files"),
+                SyncBarMode::FinalizingFiles => {
+                    format!("Progress: {done}/{total} files finalized")
+                }
             })
         }
         FlowEventKind::InventoryStageChanged { stage } => {
@@ -53,7 +69,9 @@ fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
         FlowEventKind::Message { text, .. } => Some(text.clone()),
         FlowEventKind::InventoryStatus { status } => Some(format!("Inventory: {status:?}")),
         FlowEventKind::Finished { .. } => Some("finished".to_string()),
-        FlowEventKind::Failed { error } => Some(format!("failed: {error}")),
+        FlowEventKind::Failed { error } => {
+            Some(format!("failed: {}: {}", error.code, error.message))
+        }
         FlowEventKind::Canceled => Some("canceled".to_string()),
         FlowEventKind::Started => Some(format!("started: {:?}", ev.operation)),
     }
@@ -116,6 +134,10 @@ pub fn spawn_flow_printer(
                                     sync_pb.set_style(style_file_bar.clone());
                                     sync_pb.set_message("Sync (files)");
                                 }
+                                SyncBarMode::FinalizingFiles => {
+                                    sync_pb.set_style(style_file_bar.clone());
+                                    sync_pb.set_message("Sync (finalizing)");
+                                }
                             }
                             sync_bar_mode = mode;
                         }
@@ -148,7 +170,7 @@ pub fn spawn_flow_printer(
                     phase_pb.finish_with_message("Phase: done");
                 }
                 FlowEventKind::Failed { error } => {
-                    let _ = mp.println(format!("failed: {error}"));
+                    let _ = mp.println(format!("failed: {}: {}", error.code, error.message));
                 }
                 FlowEventKind::Canceled => {
                     let _ = mp.println("canceled");
@@ -159,4 +181,31 @@ pub fn spawn_flow_printer(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sync_progress_counts, SyncBarMode};
+    use fleet_core::FlowEventKind;
+
+    #[test]
+    fn sync_progress_prefers_file_finalization_after_bytes_complete() {
+        let kind = FlowEventKind::SyncProgress {
+            progress: fleet_core::SyncProgress {
+                bytes_done: Some(100),
+                bytes_total: Some(100),
+                files_finalized: Some(7),
+                files_total: Some(10),
+                ..Default::default()
+            },
+            rate_bps: None,
+            eta_seconds: None,
+            message: None,
+        };
+
+        assert_eq!(
+            sync_progress_counts(&kind),
+            Some((SyncBarMode::FinalizingFiles, 7, 10))
+        );
+    }
 }
