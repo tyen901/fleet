@@ -48,7 +48,7 @@ impl Core {
             .await?
         {
             FlowEventKind::Finished { result } => Ok(result),
-            FlowEventKind::Failed { error } => Err(ApiError::new("pipeline_error", error)),
+            FlowEventKind::Failed { error } => Err(error),
             FlowEventKind::Canceled => Err(ApiError::new("canceled", "canceled")),
             other => Err(ApiError::new(
                 "internal",

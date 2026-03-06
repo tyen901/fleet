@@ -172,6 +172,7 @@ pub enum ProfileRecommendedAction {
     #[default]
     Sync,
     Repair,
+    RebuildInventory,
     Validate,
     CheckUpdates,
 }
@@ -180,6 +181,7 @@ pub enum ProfileRecommendedAction {
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
     pub repair_enabled: bool,
+    pub rebuild_inventory_enabled: bool,
     pub validate_enabled: bool,
     pub check_updates_enabled: bool,
     pub clean_enabled: bool,
@@ -216,6 +218,7 @@ pub struct ProfileStatusState {
     pub remote_freshness: RemoteFreshnessState,
     pub has_error: bool,
     pub repair_required: bool,
+    pub rebuild_inventory_required: bool,
     pub clean_candidate_count: u64,
     pub last_check_ms: u64,
     pub can_launch: bool,
@@ -239,6 +242,7 @@ impl ProfileStatusState {
             remote_freshness: RemoteFreshnessState::Unknown,
             has_error: false,
             repair_required: false,
+            rebuild_inventory_required: false,
             clean_candidate_count: 0,
             last_check_ms: now_ms,
             can_launch: false,
@@ -328,31 +332,40 @@ fn derive_profile_status(
     let missing_destination = matches!(local_health, LocalHealthState::MissingDestination);
     let can_run_actions = !operation_active;
     let clean_available = clean_candidate_count > 0;
+    let rebuild_inventory_required = runtime
+        .last_error
+        .as_ref()
+        .map(fleet_domain::ApiError::is_inventory_rebuild_required)
+        .unwrap_or(false);
 
-    let repair_required = has_error
-        || matches!(
-            local_health,
-            LocalHealthState::LocalStateMissing | LocalHealthState::Error
-        );
+    let repair_required = !rebuild_inventory_required
+        && (has_error
+            || matches!(
+                local_health,
+                LocalHealthState::LocalStateMissing | LocalHealthState::Error
+            ));
 
-    let recommended_action =
-        if clean_available || matches!(local_health, LocalHealthState::LocalStateMissing) {
-            ProfileRecommendedAction::Repair
-        } else if matches!(local_health, LocalHealthState::Unknown) {
-            ProfileRecommendedAction::Validate
-        } else if has_repo_source
-            && matches!(
-                remote_freshness,
-                RemoteFreshnessState::Unknown | RemoteFreshnessState::UpdateAvailable
-            )
-        {
-            ProfileRecommendedAction::CheckUpdates
-        } else {
-            ProfileRecommendedAction::Sync
-        };
+    let recommended_action = if rebuild_inventory_required {
+        ProfileRecommendedAction::RebuildInventory
+    } else if clean_available || matches!(local_health, LocalHealthState::LocalStateMissing) {
+        ProfileRecommendedAction::Repair
+    } else if matches!(local_health, LocalHealthState::Unknown) {
+        ProfileRecommendedAction::Validate
+    } else if has_repo_source
+        && matches!(
+            remote_freshness,
+            RemoteFreshnessState::Unknown | RemoteFreshnessState::UpdateAvailable
+        )
+    {
+        ProfileRecommendedAction::CheckUpdates
+    } else {
+        ProfileRecommendedAction::Sync
+    };
 
     let headline = if validate_running || rebuild_inventory_running || check_updates_running {
         ProfileStatusHeadline::Checking
+    } else if rebuild_inventory_required {
+        ProfileStatusHeadline::NeedsBaselineRepair
     } else if has_error {
         ProfileStatusHeadline::StatusError
     } else if matches!(remote_freshness, RemoteFreshnessState::UpdateAvailable) {
@@ -408,6 +421,7 @@ fn derive_profile_status(
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !missing_destination,
         repair_enabled: can_run_actions
+            && !rebuild_inventory_required
             && !missing_destination
             && matches!(
                 local_health,
@@ -415,6 +429,7 @@ fn derive_profile_status(
                     | LocalHealthState::Error
                     | LocalHealthState::Unknown
             ),
+        rebuild_inventory_enabled: can_run_actions && !missing_destination,
         validate_enabled: can_run_actions,
         check_updates_enabled: can_run_actions,
         clean_enabled: can_run_actions && clean_available,
@@ -443,6 +458,7 @@ fn derive_profile_status(
         remote_freshness,
         has_error,
         repair_required,
+        rebuild_inventory_required,
         clean_candidate_count,
         last_check_ms,
         can_launch,
@@ -465,6 +481,29 @@ fn build_progress_view(operation: &ActiveOperationState) -> ProfileProgressView 
     ) {
         if let Some(stage) = operation.inventory_stage {
             label = format!("Inventory: {stage:?}");
+        }
+    }
+
+    if let (Some(files_done), Some(files_total)) = (
+        progress.files_finalized,
+        progress.files_total.filter(|v| *v > 0),
+    ) {
+        let fetch_complete = matches!(
+            (progress.bytes_done, progress.bytes_total.filter(|v| *v > 0)),
+            (Some(bytes_done), Some(bytes_total)) if bytes_done >= bytes_total
+        );
+        if fetch_complete && files_done < files_total {
+            return ProfileProgressView {
+                label: if matches!(operation.phase, SyncPhase::Syncing) {
+                    "Finalizing files".to_string()
+                } else {
+                    label.clone()
+                },
+                detail: format!("{files_done} / {files_total} files"),
+                done: Some(files_done),
+                total: Some(files_total),
+                indeterminate: false,
+            };
         }
     }
 
