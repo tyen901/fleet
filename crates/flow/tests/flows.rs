@@ -3,10 +3,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use fleet_domain::health::{LocalHealthState, RemoteFreshnessState};
+use fleet_domain::health::{LocalStateHealth, RemoteFreshnessState};
 use fleet_domain::Profile;
 use fleet_flow::flows::assess::run_assess_flow;
-use fleet_flow::flows::operation::{run_clean_flow, run_repair_flow, run_sync_flow};
+use fleet_flow::flows::operation::{run_clean_flow, run_sync_flow};
 use fleet_flow::{acquire_lock, channel_sink, FlowConfig};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,6 @@ const TEST_PROFILE_ID: &str = "test-profile";
 #[derive(Clone, Copy)]
 enum DeleteFlow {
     Sync,
-    Repair,
     Clean,
 }
 
@@ -28,7 +27,6 @@ struct DeleteFlowOutcome {
     dest: PathBuf,
     cfg: FlowConfig,
     repo_url: String,
-    summary: Option<fleet_domain::health::RepairSummary>,
 }
 
 fn workspace_tempdir() -> TempDir {
@@ -147,7 +145,7 @@ const MIN_REPO_JSON: &str = r#"{"repoName":"test-pack","checksum":"0000000000000
 async fn seed_repo_cache(cfg: &FlowConfig, profile_id: &str, repo_url: &str) {
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), profile_id);
-    let store = swifty_repo::FsRepoCacheStore::new(layout.repo_cache);
+    let store = swifty_repo::FsRepoCacheStore::new(layout.profile.repo_cache);
     swifty_repo::sync_repo_metadata(
         repo_url,
         &store,
@@ -162,7 +160,7 @@ async fn seed_repo_cache(cfg: &FlowConfig, profile_id: &str, repo_url: &str) {
 fn clear_cached_repo_checksum(cfg: &FlowConfig, profile_id: &str, repo_url: &str) {
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), profile_id);
-    let cache_path = swifty_repo::repo_cache_blob_path(&layout.repo_cache, repo_url);
+    let cache_path = swifty_repo::repo_cache_blob_path(&layout.profile.repo_cache, repo_url);
     let bytes = std::fs::read(&cache_path).expect("read cache");
     let mut blob: swifty_repo::RepoCacheBlob = serde_json::from_slice(&bytes).expect("parse cache");
     blob.repo_json_checksum = None;
@@ -182,15 +180,17 @@ async fn ensure_baseline(
 
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), profile_id);
-    tokio::fs::create_dir_all(&layout.state_dir)
+    tokio::fs::create_dir_all(&layout.profile.state_dir)
         .await
         .expect("create profile state dir");
-    let store = (cfg.inventory_store_factory)(&layout.inventory_db).expect("open inventory store");
-    let inv = inventory::Inventory::from_store(store).expect("inventory");
-    let root = inv
-        .open_root(profile_id, &dest)
-        .expect("open inventory root");
-    root.scan(cfg.scanner_config.clone())
+    cfg.local_state
+        .scan(
+            profile_id,
+            &dest,
+            &layout.profile.local_state.db,
+            &cfg.local_state_config,
+            None,
+        )
         .expect("baseline scan");
 }
 
@@ -211,8 +211,8 @@ async fn assess_destination_missing_marks_missing_destination() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::MissingDestination);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::Unknown);
+    assert_eq!(report.local_health, LocalStateHealth::MissingDestination);
+    assert_eq!(report.remote_freshness, Some(RemoteFreshnessState::Unknown));
 }
 
 #[tokio::test]
@@ -233,12 +233,12 @@ async fn assess_missing_baseline_artifacts_returns_local_state_missing() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::LocalStateMissing);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::Unknown);
+    assert_eq!(report.local_health, LocalStateHealth::LocalStateMissing);
+    assert_eq!(report.remote_freshness, Some(RemoteFreshnessState::Unknown));
 }
 
 #[tokio::test]
-async fn assess_local_clean_include_remote_false_marks_remote_not_relevant() {
+async fn assess_local_clean_include_remote_false_clears_remote_freshness() {
     let td = TempDir::new().expect("tempdir");
     let dest = td.path().join("dest");
     tokio::fs::create_dir_all(&dest).await.expect("mkdir");
@@ -259,12 +259,12 @@ async fn assess_local_clean_include_remote_false_marks_remote_not_relevant() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::Ready);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::NotRelevant);
+    assert_eq!(report.local_health, LocalStateHealth::Ready);
+    assert_eq!(report.remote_freshness, None);
 }
 
 #[tokio::test]
-async fn assess_local_check_uses_cached_expected_to_preserve_unexpected_files() {
+async fn assess_local_check_uses_cached_expected_to_find_unexpected_files() {
     let td = TempDir::new().expect("tempdir");
     let dest = td.path().join("dest");
     tokio::fs::create_dir_all(&dest).await.expect("mkdir");
@@ -288,8 +288,8 @@ async fn assess_local_check_uses_cached_expected_to_preserve_unexpected_files() 
         .await
         .expect("assess");
 
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::NotRelevant);
-    assert_eq!(report.local_health, LocalHealthState::LocalDrift);
+    assert_eq!(report.remote_freshness, None);
+    assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
     assert_eq!(
         report.unexpected_delete_paths,
         vec!["manual-extra.txt".to_string()]
@@ -316,8 +316,11 @@ async fn assess_remote_up_to_date_returns_healthy() {
         .await
         .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::Ready);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::UpToDate);
+    assert_eq!(report.local_health, LocalStateHealth::Ready);
+    assert_eq!(
+        report.remote_freshness,
+        Some(RemoteFreshnessState::UpToDate)
+    );
 }
 
 #[tokio::test]
@@ -341,8 +344,11 @@ async fn assess_remote_304_up_to_date_does_not_depend_on_cached_repo_checksum() 
         .await
         .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::Ready);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::UpToDate);
+    assert_eq!(report.local_health, LocalStateHealth::Ready);
+    assert_eq!(
+        report.remote_freshness,
+        Some(RemoteFreshnessState::UpToDate)
+    );
 }
 
 #[tokio::test]
@@ -364,8 +370,8 @@ async fn assess_remote_no_cache_maps_to_unknown_remote_state() {
         .await
         .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::Ready);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::Unknown);
+    assert_eq!(report.local_health, LocalStateHealth::Ready);
+    assert_eq!(report.remote_freshness, Some(RemoteFreshnessState::Unknown));
 }
 
 #[tokio::test]
@@ -392,10 +398,10 @@ async fn assess_remote_update_available_returns_update_available_remote_state() 
         .await
         .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::Ready);
+    assert_eq!(report.local_health, LocalStateHealth::Ready);
     assert_eq!(
         report.remote_freshness,
-        RemoteFreshnessState::UpdateAvailable
+        Some(RemoteFreshnessState::UpdateAvailable)
     );
 }
 
@@ -425,8 +431,8 @@ async fn assess_local_drift_reports_local_drift() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::LocalDrift);
-    assert_eq!(report.remote_freshness, RemoteFreshnessState::Unknown);
+    assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
+    assert_eq!(report.remote_freshness, Some(RemoteFreshnessState::Unknown));
     assert_eq!(
         report.unexpected_delete_paths,
         vec!["extra.txt".to_string()]
@@ -448,7 +454,7 @@ async fn assess_lock_gate_is_deterministic_for_held_and_released_lock() {
 
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
-    let lock_guard = acquire_lock(layout.inventory_lock.clone())
+    let lock_guard = acquire_lock(layout.profile.local_state.lock.clone())
         .await
         .expect("lock");
 
@@ -461,7 +467,7 @@ async fn assess_lock_gate_is_deterministic_for_held_and_released_lock() {
     .await
     .expect("assess held");
 
-    assert_eq!(held.local_health, LocalHealthState::Error);
+    assert_eq!(held.local_health, LocalStateHealth::Blocked);
 
     drop(lock_guard);
 
@@ -474,7 +480,7 @@ async fn assess_lock_gate_is_deterministic_for_held_and_released_lock() {
     .await
     .expect("assess released");
 
-    assert_ne!(released.local_health, LocalHealthState::Error);
+    assert_ne!(released.local_health, LocalStateHealth::Blocked);
 }
 
 #[tokio::test]
@@ -491,7 +497,7 @@ async fn sync_flow_fails_when_inventory_lock_is_held() {
     let profile = profile_with_source(&dest, "https://example.com/repo.json");
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
-    let _guard = acquire_lock(layout.inventory_lock.clone())
+    let _guard = acquire_lock(layout.profile.local_state.lock.clone())
         .await
         .expect("lock");
 
@@ -518,10 +524,10 @@ async fn sync_flow_fails_when_inventory_db_is_corrupted() {
     let profile = profile_with_source(&dest, "https://example.com/repo.json");
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
-    tokio::fs::create_dir_all(&layout.state_dir)
+    tokio::fs::create_dir_all(&layout.profile.state_dir)
         .await
         .expect("create state dir");
-    tokio::fs::write(&layout.inventory_db, b"not a sqlite database")
+    tokio::fs::write(&layout.profile.local_state.db, b"not a sqlite database")
         .await
         .expect("write invalid db");
 
@@ -531,12 +537,12 @@ async fn sync_flow_fails_when_inventory_db_is_corrupted() {
         .expect_err("expected corrupted inventory db to fail sync");
     assert!(err
         .chain()
-        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
-        .any(inventory::Error::is_corrupted_database));
+        .filter_map(|cause| cause.downcast_ref::<fleet_local_state::LocalStateError>())
+        .any(fleet_local_state::LocalStateError::is_corrupted_database));
 }
 
 #[tokio::test]
-async fn assess_flow_fails_when_inventory_db_is_corrupted() {
+async fn assess_flow_marks_inventory_corrupt_when_inventory_db_is_corrupted() {
     let td = TempDir::new().expect("tempdir");
     let dest = td.path().join("dest");
     tokio::fs::create_dir_all(&dest).await.expect("mkdir");
@@ -549,20 +555,18 @@ async fn assess_flow_fails_when_inventory_db_is_corrupted() {
     let profile = profile_with_source(&dest, "https://example.com/repo.json");
     let layout =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), TEST_PROFILE_ID);
-    tokio::fs::create_dir_all(&layout.state_dir)
+    tokio::fs::create_dir_all(&layout.profile.state_dir)
         .await
         .expect("create state dir");
-    tokio::fs::write(&layout.inventory_db, b"not a sqlite database")
+    tokio::fs::write(&layout.profile.local_state.db, b"not a sqlite database")
         .await
         .expect("write invalid db");
 
-    let err = run_assess_flow(cfg, profile, false, cancel)
+    let report = run_assess_flow(cfg, profile, false, cancel)
         .await
-        .expect_err("expected corrupted inventory db to fail assess flow");
-    assert!(err
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
-        .any(inventory::Error::is_corrupted_database));
+        .expect("assess should return typed health");
+    assert_eq!(report.local_health, LocalStateHealth::InventoryCorrupt);
+    assert_eq!(report.remote_freshness, None);
 }
 
 async fn run_delete_flow(flow: DeleteFlow) -> DeleteFlowOutcome {
@@ -585,43 +589,30 @@ async fn run_delete_flow(flow: DeleteFlow) -> DeleteFlowOutcome {
 
     let profile = profile_with_source(&dest, &repo_url);
     let (sink, _event_rx) = channel_sink();
-    let summary = match flow {
+    match flow {
         DeleteFlow::Sync => {
             run_sync_flow(cfg.clone(), profile, cancel, sink)
                 .await
                 .expect("sync");
-            None
         }
-        DeleteFlow::Repair => Some(
-            run_repair_flow(cfg.clone(), profile, cancel, sink)
-                .await
-                .expect("repair"),
-        ),
         DeleteFlow::Clean => {
             let _ = run_clean_flow(cfg.clone(), profile, cancel, sink)
                 .await
                 .expect("clean");
-            None
         }
-    };
+    }
     DeleteFlowOutcome {
         _temp_dir: td,
         dest,
         cfg,
         repo_url,
-        summary,
     }
 }
 
 #[tokio::test]
-async fn sync_and_repair_keep_unexpected_files() {
+async fn sync_keeps_unexpected_files() {
     let sync = run_delete_flow(DeleteFlow::Sync).await;
     assert!(sync.dest.join("extra.txt").exists());
-
-    let repair = run_delete_flow(DeleteFlow::Repair).await;
-    assert!(repair.dest.join("extra.txt").exists());
-    let repair_summary = repair.summary.expect("repair summary");
-    assert_eq!(repair_summary.files_deleted, 0);
 }
 
 #[tokio::test]
@@ -637,7 +628,7 @@ async fn sync_keeps_drift_visible_in_follow_up_check() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::LocalDrift);
+    assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
     assert!(report
         .unexpected_delete_paths
         .contains(&"extra.txt".to_string()));
@@ -728,7 +719,7 @@ async fn assess_missing_expected_manifest_marks_local_drift() {
     .await
     .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::LocalDrift);
+    assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
 }
 
 #[tokio::test]
@@ -761,9 +752,9 @@ async fn assess_local_drift_can_coexist_with_remote_update_available() {
         .await
         .expect("assess");
 
-    assert_eq!(report.local_health, LocalHealthState::LocalDrift);
+    assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
     assert_eq!(
         report.remote_freshness,
-        RemoteFreshnessState::UpdateAvailable
+        Some(RemoteFreshnessState::UpdateAvailable)
     );
 }

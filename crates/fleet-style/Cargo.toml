@@ -1,0 +1,9 @@
+[package]
+name = "fleet-style"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7.3", features = ["desktop", "router"] }
+fleet-domain = { workspace = true }
+icondata = { version = "0.7.0", default-features = false, features = ["bootstrap-icons", "font-awesome", "ionicons", "weather-icons"] }

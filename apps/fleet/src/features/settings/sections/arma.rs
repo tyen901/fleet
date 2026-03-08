@@ -1,13 +1,13 @@
 use dioxus::prelude::*;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
-use icondata::{BsChevronDown, BsFolder2Open};
-
-use crate::ui::components::{
-    AppIcon, Button, ButtonSize, ButtonVariant, Input, PanelRowControlInline, PanelRowControlStack,
-    PanelRowMeta,
+use fleet_style::{
+    AppIcon, Button, ButtonSize, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta,
+    FieldRowStack, Section, SectionHeader, SelectField, SelectOption, TextField,
 };
+use icondata::BsFolder2Open;
 
 use super::field_reset::PanelFieldResetButton;
+use crate::features::shared::browse_field::BrowseField;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn arma_section<
@@ -50,22 +50,15 @@ where
     let preview_rows = preview_text.lines().count().max(3);
 
     rsx! {
-        section { class: "panel-section",
-            div { class: "panel-section__meta",
-                header { class: "panel-section__header",
-                    h2 { class: "panel-section__title", "Arma 3" }
-                }
-            }
+        Section {
+            SectionHeader { title: "Arma 3".to_string() }
             div { class: "panel-section__content",
                 div { class: "panel-group",
-                div { class: "panel-row panel-row--split",
-                    PanelRowMeta {
-                        title: "Game Dir".to_string(),
-                    }
-                    PanelRowControlStack {
+                FieldRow {
+                    FieldRowMeta { title: "Game Dir".to_string() }
+                    FieldRowStack {
                         div { class: "panel-row__control-main settings-game-dir-main",
-                            Input {
-                                label: None,
+                            BrowseField {
                                 value: settings.arma3.arma3_game_dir,
                                 folder_select: true,
                                 on_change: move |next: String| on_set_game_dir(next),
@@ -76,7 +69,7 @@ where
                                 variant: ButtonVariant::Secondary,
                                 size: ButtonSize::Sm,
                                 icon: Some(rsx! {
-                                    AppIcon { icon: BsFolder2Open, class: "ico" }
+                                    AppIcon { icon: BsFolder2Open }
                                 }),
                                 onclick: move |_| on_detect_arma3(),
                                 "Detect"
@@ -85,14 +78,11 @@ where
                     }
                 }
 
-                div { class: "panel-row panel-row--split",
-                    PanelRowMeta {
-                        title: "Default Args".to_string(),
-                    }
-                    PanelRowControlInline {
+                FieldRow {
+                    FieldRowMeta { title: "Default Args".to_string() }
+                    FieldRowInline {
                         div { class: "panel-row__control-main",
-                            Input {
-                                label: None,
+                            TextField {
                                 value: settings.arma3.arma3_default_args,
                                 on_change: move |next: String| on_set_default_args(next),
                             }
@@ -104,23 +94,18 @@ where
                     }
                 }
 
-                div { class: "panel-row panel-row--split",
-                    PanelRowMeta {
-                        title: "Launch Type".to_string(),
-                    }
-                    PanelRowControlInline {
-                        div { class: "select-wrap panel-row__control-main",
-                            select {
-                                class: "select",
-                                value: "{settings.arma3.arma3_launch_method.as_str()}",
-                                onchange: move |e| on_set_launch_method(e.value()),
-                                for method in Arma3LaunchMethod::selectable_for_current_platform().iter().copied() {
-                                    option { value: "{method.as_str()}", "{method.display_label()}" }
-                                }
-                            }
-                            AppIcon {
-                                icon: BsChevronDown,
-                                class: "ico ico--sm select-wrap__chev",
+                FieldRow {
+                    FieldRowMeta { title: "Launch Type".to_string() }
+                    FieldRowInline {
+                        div { class: "panel-row__control-main",
+                            SelectField {
+                                value: settings.arma3.arma3_launch_method.as_str().to_string(),
+                                options: Arma3LaunchMethod::selectable_for_current_platform()
+                                    .iter()
+                                    .copied()
+                                    .map(|method| SelectOption::new(method.as_str(), method.display_label()))
+                                    .collect::<Vec<_>>(),
+                                onchange: on_set_launch_method,
                             }
                         }
                         PanelFieldResetButton {
@@ -131,13 +116,10 @@ where
                 }
 
                 if settings.arma3.arma3_launch_method == Arma3LaunchMethod::Custom {
-                    div { class: "panel-row panel-row--split",
-                        PanelRowMeta {
-                            title: "Custom Template".to_string(),
-                        }
-                        PanelRowControlStack {
-                            Input {
-                                label: None,
+                    FieldRow {
+                        FieldRowMeta { title: "Custom Template".to_string() }
+                        FieldRowStack {
+                            TextField {
                                 value: settings.arma3.arma3_custom_launch_template,
                                 placeholder: Some(custom_default_template.to_string()),
                                 invalid: custom_template_error.is_some(),
@@ -153,7 +135,7 @@ where
                                     readonly: true,
                                 }
                             }
-                            PanelRowControlInline {
+                            FieldRowInline {
                                 PanelFieldResetButton {
                                     field: SettingsField::Arma3CustomLaunchTemplate,
                                     show: is_arma3_custom_template_non_default,

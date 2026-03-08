@@ -5,7 +5,7 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
-use fleet_domain::health::{LocalHealthState, OperationKind, ProfileAssessmentReport};
+use fleet_domain::health::{AssessScope, LocalStateHealth, OperationKind, ProfileStateReport};
 use fleet_domain::{AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind};
 use serde::Serialize;
 use specta::Type;
@@ -125,7 +125,7 @@ impl Core {
     async fn launch_assessment_by_profile_id(
         &self,
         profile_id: &ProfileId,
-    ) -> Result<ProfileAssessmentReport, ApiError> {
+    ) -> Result<ProfileStateReport, ApiError> {
         if let Some(report) = self.read_state(|state| {
             state
                 .profile_runtime_by_id
@@ -142,7 +142,7 @@ impl Core {
         let cfg = self.current_flow_config();
         let session_id = self
             .flow()
-            .spawn_operation_with_config(cfg, profile, OperationKind::CheckLocal)
+            .spawn_operation_with_config(cfg, profile, OperationKind::Assess(AssessScope::Local))
             .await
             .map_err(|e| ApiError::new("pipeline_error", e.to_string()))?;
 
@@ -518,10 +518,10 @@ fn non_empty_string(s: &str) -> Option<String> {
     }
 }
 
-fn validate_launch_compatibility(report: &ProfileAssessmentReport) -> Result<(), ApiError> {
+fn validate_launch_compatibility(report: &ProfileStateReport) -> Result<(), ApiError> {
     if matches!(
         report.local_health,
-        LocalHealthState::Ready | LocalHealthState::LocalDrift
+        LocalStateHealth::Ready | LocalStateHealth::LocalDrift
     ) {
         return Ok(());
     }
@@ -576,7 +576,7 @@ impl CommandSpec {
 mod tests {
     use super::{build_args, resolve_launch_mode, validate_launch_compatibility, ActionKind};
     use fleet_arma3::LaunchMethod;
-    use fleet_domain::health::{LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState};
+    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
@@ -659,10 +659,10 @@ mod tests {
 
     #[test]
     fn validate_launch_compatibility_rejects_missing_or_modified() {
-        let err = validate_launch_compatibility(&ProfileAssessmentReport {
+        let err = validate_launch_compatibility(&ProfileStateReport {
             profile_id: "p1".to_string(),
-            local_health: LocalHealthState::MissingDestination,
-            remote_freshness: RemoteFreshnessState::Unknown,
+            local_health: LocalStateHealth::MissingDestination,
+            remote_freshness: Some(RemoteFreshnessState::Unknown),
             checked_at_unix_ms: 0,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 0,

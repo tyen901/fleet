@@ -154,7 +154,7 @@
   animation-duration: 2s;
 }
 
-.home-card__icon {
+.home-card__icon-box > .ico {
   width: 56%;
   height: 56%;
 }
@@ -176,6 +176,16 @@
   transition: gap 140ms ease;
 }
 
+.home-card__badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(42%, 240px);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .home-card__name {
   margin: 0;
   font-size: calc(var(--font-size-lg) * 1.8);
@@ -184,27 +194,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.home-card__status {
-  margin: 0;
-  color: var(--clr-text-secondary);
-  font-size: var(--font-size-sm);
-  letter-spacing: 0.02em;
-  max-height: 0;
-  opacity: 0;
-  overflow: hidden;
-  transform: translateY(-3px);
-  transition:
-    max-height 140ms ease,
-    opacity 140ms ease,
-    transform 140ms ease;
-}
-
-.home-card--selected .home-card__status {
-  max-height: 24px;
-  opacity: 1;
-  transform: translateY(0);
 }
 
 .home-card__notice {
@@ -231,7 +220,7 @@
   color: var(--clr-danger-text);
 }
 
-.home-card__notice-icon {
+.home-card__notice > .ico {
   width: 11px;
   height: 11px;
   display: block;

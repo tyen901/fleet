@@ -1,0 +1,25 @@
+[package]
+name = "fleet-reconcile"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+fleet-domain = { workspace = true }
+flux-api = { workspace = true }
+flux-inventory-contract = { workspace = true }
+flux-manifest = { workspace = true }
+flux-provider = { workspace = true }
+flux-segment-cache = { workspace = true }
+flux-types = { workspace = true }
+futures-util = { workspace = true }
+inventory = { workspace = true }
+retriever = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

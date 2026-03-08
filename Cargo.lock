@@ -1851,6 +1851,7 @@ dependencies = [
  "dotenvy",
  "fleet-core",
  "fleet-domain",
+ "fleet-style",
  "icondata",
  "open",
  "reqwest",
@@ -1899,9 +1900,10 @@ dependencies = [
  "fleet-domain",
  "fleet-download",
  "fleet-flow",
- "fleet-flux",
+ "fleet-local-state",
+ "fleet-local-state-inventory",
+ "fleet-reconcile",
  "futures",
- "inventory",
  "rand 0.8.5",
  "regex",
  "sentry",
@@ -1923,6 +1925,7 @@ name = "fleet-domain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fleet-local-state",
  "serde",
  "serde_json",
  "sha1",
@@ -1952,11 +1955,12 @@ dependencies = [
  "directories",
  "fleet-domain",
  "fleet-download",
- "fleet-flux",
+ "fleet-local-state",
+ "fleet-local-state-inventory",
  "fleet-manifest",
+ "fleet-reconcile",
  "flux-manifest",
  "fs2",
- "inventory",
  "serde",
  "serde_json",
  "swifty-repo",
@@ -1967,7 +1971,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet-flux"
+name = "fleet-local-state"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "specta",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "fleet-local-state-inventory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fleet-domain",
+ "fleet-local-state",
+ "inventory",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fleet-manifest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fleet-domain",
+ "fleet-download",
+ "flux-manifest",
+ "flux-types",
+ "serde_json",
+ "swifty-repo",
+ "swifty_artifacts",
+ "tempfile",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "fleet-reconcile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1990,20 +2033,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet-manifest"
+name = "fleet-style"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "dioxus",
  "fleet-domain",
- "fleet-download",
- "flux-manifest",
- "flux-types",
- "serde_json",
- "swifty-repo",
- "swifty_artifacts",
- "tempfile",
- "tracing",
- "url",
+ "icondata",
 ]
 
 [[package]]

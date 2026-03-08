@@ -23,7 +23,6 @@ pub fn ShellLayout() -> Element {
         save_action: use_signal(|| None::<ShellSaveAction>),
         profile_action: use_signal(|| None::<ShellSaveAction>),
         back_disabled: use_signal(|| false),
-        profile_open_folder_enabled: use_signal(|| false),
         home_search_text: use_signal(String::new),
         home_search_active: use_signal(|| false),
         home_search_enabled: use_signal(|| true),

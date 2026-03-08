@@ -49,6 +49,26 @@ pub struct ScannerConfig {
     pub cancel: Option<CancelFn>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScanRuntimeConfig {
+    pub workers: usize,
+    pub queue_capacity: usize,
+    pub progress_interval: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanBehaviorConfig {
+    pub delta: bool,
+    pub delta_index_cache: bool,
+    pub policy: ScanPolicy,
+}
+
+#[derive(Clone, Default)]
+pub struct ScanObserver {
+    pub progress: Option<ProgressFn>,
+    pub cancel: Option<CancelFn>,
+}
+
 impl std::fmt::Debug for ScannerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ScannerConfig")
@@ -77,6 +97,31 @@ impl Default for ScannerConfig {
             progress_interval: Duration::from_millis(100),
             progress: None,
             cancel: None,
+        }
+    }
+}
+
+impl ScannerConfig {
+    pub(crate) fn runtime(&self) -> ScanRuntimeConfig {
+        ScanRuntimeConfig {
+            workers: self.workers,
+            queue_capacity: self.queue_capacity,
+            progress_interval: self.progress_interval,
+        }
+    }
+
+    pub(crate) fn behavior(&self) -> ScanBehaviorConfig {
+        ScanBehaviorConfig {
+            delta: self.delta,
+            delta_index_cache: self.delta_index_cache,
+            policy: self.policy.clone(),
+        }
+    }
+
+    pub(crate) fn observer(&self) -> ScanObserver {
+        ScanObserver {
+            progress: self.progress.clone(),
+            cancel: self.cancel.clone(),
         }
     }
 }

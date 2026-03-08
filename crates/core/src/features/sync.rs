@@ -2,7 +2,7 @@ use crate::core::flow_logging::{
     log_operation_spawn_failure, log_operation_spawn_success, log_operation_start_request,
 };
 use crate::Core;
-use fleet_domain::health::{CancelResult, OperationKind};
+use fleet_domain::health::{AssessScope, CancelResult, OperationKind};
 use fleet_domain::{ApiError, ProfileId};
 
 impl Core {
@@ -29,9 +29,8 @@ impl Core {
     ) -> Result<u64, ApiError> {
         let op = match operation {
             OperationKind::Sync => "start_sync",
-            OperationKind::Repair => "start_repair",
-            OperationKind::CheckRemote => "start_check_remote",
-            OperationKind::CheckLocal => "start_check_local",
+            OperationKind::Assess(AssessScope::Remote) => "start_assess_remote",
+            OperationKind::Assess(AssessScope::Local) => "start_assess_local",
             OperationKind::RebuildInventory => "start_rebuild_inventory",
             OperationKind::Clean => "start_clean",
         };
@@ -61,21 +60,26 @@ impl Core {
             .spawn_operation_with_config(cfg, profile, operation)
             .await
             .map_err(|e| {
+                let api_err = map_start_operation_error(e);
                 log_operation_spawn_failure(
                     &profile_id,
                     operation,
                     op,
-                    "pipeline_error",
-                    "spawn_failed",
+                    &api_err.code,
+                    if api_err.code == "profile_busy" {
+                        "profile_busy"
+                    } else {
+                        "spawn_failed"
+                    },
                 );
                 tracing::debug!(
                     flow_kind = crate::core::flow_logging::operation_kind_label(operation),
                     profile_id = %profile_id,
                     op = op,
-                    error = %e,
+                    error = %api_err.message,
                     "flow start spawn error details"
                 );
-                ApiError::new("pipeline_error", e.to_string())
+                api_err
             })?;
 
         log_operation_spawn_success(&profile_id, operation, session_id, op);
@@ -124,21 +128,26 @@ impl Core {
             .spawn_clean_operation_with_config(cfg, profile, remove_empty_parent_dirs)
             .await
             .map_err(|e| {
+                let api_err = map_start_operation_error(e);
                 log_operation_spawn_failure(
                     &profile_id,
                     operation,
                     op,
-                    "pipeline_error",
-                    "spawn_failed",
+                    &api_err.code,
+                    if api_err.code == "profile_busy" {
+                        "profile_busy"
+                    } else {
+                        "spawn_failed"
+                    },
                 );
                 tracing::debug!(
                     flow_kind = crate::core::flow_logging::operation_kind_label(operation),
                     profile_id = %profile_id,
                     op = op,
-                    error = %e,
+                    error = %api_err.message,
                     "flow start spawn error details"
                 );
-                ApiError::new("pipeline_error", e.to_string())
+                api_err
             })?;
 
         log_operation_spawn_success(&profile_id, operation, session_id, op);
@@ -180,4 +189,12 @@ impl Core {
             Ok(CancelResult::NotFound)
         }
     }
+}
+
+fn map_start_operation_error(err: anyhow::Error) -> ApiError {
+    if err.to_string() == "profile_busy" {
+        return ApiError::new("profile_busy", "profile busy");
+    }
+
+    ApiError::new("pipeline_error", err.to_string())
 }

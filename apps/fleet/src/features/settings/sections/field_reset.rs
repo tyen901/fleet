@@ -1,10 +1,10 @@
 use dioxus::prelude::*;
 use fleet_core::SettingsField;
+use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant};
 use icondata::BsArrowClockwise;
 
 use crate::services::bridge::FleetBridge;
 use crate::stores::toast_store::ToastStore;
-use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant};
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct PanelFieldResetButtonProps {
@@ -28,7 +28,7 @@ pub(crate) fn PanelFieldResetButton(props: PanelFieldResetButtonProps) -> Elemen
                 variant: ButtonVariant::Secondary,
                 size: ButtonSize::Sm,
                 icon: Some(rsx! {
-                    AppIcon { icon: BsArrowClockwise, class: "ico panel-field-reset__icon" }
+                    AppIcon { icon: BsArrowClockwise }
                 }),
                 onclick: move |_| {
                     let bridge = bridge.clone();

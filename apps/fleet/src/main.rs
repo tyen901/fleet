@@ -5,68 +5,19 @@ mod app;
 mod features;
 mod services;
 mod stores;
-mod ui;
 
 use app::root::AppRoot;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
+use fleet_style::StyleAssets;
 use services::bridge::FleetBridge;
 use tracing::{error, info};
 
 const APP_MIN_WIDTH: f64 = 700.0;
 const APP_MIN_HEIGHT: f64 = 500.0;
 
-// Global stylesheets for the UI. Each asset is bundled via asset!().
-static TOKENS_CSS: Asset = asset!(
-    "/assets/css/tokens.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static BASE_CSS: Asset = asset!(
-    "/assets/css/base.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static PRIMITIVES_CSS: Asset = asset!(
-    "/assets/css/components/primitives.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static PANELS_CSS: Asset = asset!(
-    "/assets/css/components/panels.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static LAYOUT_CSS: Asset = asset!(
-    "/assets/css/layout.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static BUTTONS_CSS: Asset = asset!(
-    "/assets/css/components/buttons.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static CARDS_CSS: Asset = asset!(
-    "/assets/css/components/cards.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static FORMS_CSS: Asset = asset!(
-    "/assets/css/components/forms.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static TOASTS_CSS: Asset = asset!(
-    "/assets/css/components/toasts.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static SETTINGS_CSS: Asset = asset!(
-    "/assets/css/pages/settings.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static PROFILES_CSS: Asset = asset!(
-    "/assets/css/pages/profiles.css",
-    CssAssetOptions::new().with_minify(false)
-);
 static HOME_CSS: Asset = asset!(
     "/assets/css/pages/home.css",
-    CssAssetOptions::new().with_minify(false)
-);
-static ONBOARDING_CSS: Asset = asset!(
-    "/assets/css/pages/onboarding.css",
     CssAssetOptions::new().with_minify(false)
 );
 
@@ -115,19 +66,8 @@ fn main() -> anyhow::Result<()> {
 
 fn App() -> Element {
     rsx! {
-        document::Stylesheet { href: TOKENS_CSS }
-        document::Stylesheet { href: BASE_CSS }
-        document::Stylesheet { href: PRIMITIVES_CSS }
-        document::Stylesheet { href: PANELS_CSS }
-        document::Stylesheet { href: LAYOUT_CSS }
-        document::Stylesheet { href: BUTTONS_CSS }
-        document::Stylesheet { href: CARDS_CSS }
-        document::Stylesheet { href: FORMS_CSS }
-        document::Stylesheet { href: TOASTS_CSS }
-        document::Stylesheet { href: SETTINGS_CSS }
-        document::Stylesheet { href: PROFILES_CSS }
+        StyleAssets {}
         document::Stylesheet { href: HOME_CSS }
-        document::Stylesheet { href: ONBOARDING_CSS }
         AppRoot {}
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
-    Error, FileEntry, FileWithSegments, FolderStamp, InventoryId, InventoryMetrics,
-    InventorySnapshot, Result, RootId, SegmentEntry,
+    Error, FileEntry, FileWithSegments, FolderStamp, InventoryId, InventorySnapshot,
+    LocalStateMetrics, Result, RootId, SegmentEntry,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -352,7 +352,7 @@ impl SqliteStore {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn metrics(&self, root_id: RootId) -> Result<InventoryMetrics> {
+    pub fn metrics(&self, root_id: RootId) -> Result<LocalStateMetrics> {
         let start = Instant::now();
         let mut pooled = self.pooled()?;
         let conn = pooled.conn()?;
@@ -373,7 +373,7 @@ impl SqliteStore {
 
         let last_stamp = self.get_last_stamp(root_id)?;
 
-        let metrics = InventoryMetrics {
+        let metrics = LocalStateMetrics {
             root_id,
             root_path,
             files_count: files_count.max(0) as u64,

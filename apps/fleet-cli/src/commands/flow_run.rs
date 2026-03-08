@@ -1,7 +1,5 @@
 use crate::ui::progress::spawn_flow_printer;
-use fleet_core::{
-    Core, FlowResult, FlowSessionEvent, ProfileAssessmentReport, RepairSummary, SyncSummary,
-};
+use fleet_core::{Core, FlowResult, FlowSessionEvent, ProfileStateReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOutput {
@@ -75,32 +73,21 @@ pub(crate) async fn run_sync_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<SyncSummary> {
+) -> anyhow::Result<ProfileStateReport> {
     match run_flow_session(core, session_id, options).await? {
-        FlowResult::Sync(summary) => Ok(summary),
+        FlowResult::Sync(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected sync result")),
     }
 }
 
-pub(crate) async fn run_repair_session(
+pub(crate) async fn run_assess_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<RepairSummary> {
+) -> anyhow::Result<ProfileStateReport> {
     match run_flow_session(core, session_id, options).await? {
-        FlowResult::Repair(summary) => Ok(summary),
-        _ => Err(anyhow::anyhow!("internal: expected repair result")),
-    }
-}
-
-pub(crate) async fn run_check_session(
-    core: &Core,
-    session_id: u64,
-    options: FlowRunOptions,
-) -> anyhow::Result<ProfileAssessmentReport> {
-    match run_flow_session(core, session_id, options).await? {
-        FlowResult::Check(report) => Ok(report),
-        _ => Err(anyhow::anyhow!("internal: expected check result")),
+        FlowResult::Assess(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected assess result")),
     }
 }
 
@@ -108,7 +95,7 @@ pub(crate) async fn run_clean_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     match run_flow_session(core, session_id, options).await? {
         FlowResult::Clean(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected clean result")),

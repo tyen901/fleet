@@ -481,9 +481,6 @@ pub struct UiSettings {
     /// If false, the UI falls back to text.
     #[serde(default = "default_true")]
     pub show_profile_icons: bool,
-    /// If true, show advanced profile actions in the profile dashboard.
-    #[serde(default)]
-    pub show_advanced_options: bool,
 }
 
 impl Default for UiSettings {
@@ -491,7 +488,6 @@ impl Default for UiSettings {
         Self {
             onboarding_completed: false,
             show_profile_icons: true,
-            show_advanced_options: false,
         }
     }
 }
@@ -538,14 +534,14 @@ impl Default for UpdateSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SyncSettings {
     /// .gitignore-style patterns (one per line) applied to inventory scan/check paths.
-    #[serde(default = "default_inventory_ignore_rules")]
-    pub inventory_ignore_rules: String,
+    #[serde(default = "default_local_state_ignore_rules")]
+    pub local_state_ignore_rules: String,
 }
 
 impl Default for SyncSettings {
     fn default() -> Self {
         Self {
-            inventory_ignore_rules: default_inventory_ignore_rules(),
+            local_state_ignore_rules: default_local_state_ignore_rules(),
         }
     }
 }
@@ -572,8 +568,8 @@ fn default_true() -> bool {
     true
 }
 
-fn default_inventory_ignore_rules() -> String {
-    crate::inventory::InventoryIgnoreRules::default().to_multiline_string()
+fn default_local_state_ignore_rules() -> String {
+    ["repo.json", "mod.srf"].join("\n")
 }
 
 pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
@@ -584,10 +580,17 @@ pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         .arma3
         .arma3_launch_method
         .normalize_for_current_platform();
-    settings.sync.inventory_ignore_rules =
-        crate::inventory::InventoryIgnoreRules::from_settings_value(
-            &settings.sync.inventory_ignore_rules,
-        )
-        .to_multiline_string();
+    settings.sync.local_state_ignore_rules = settings
+        .sync
+        .local_state_ignore_rules
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.replace('\\', "/"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if settings.sync.local_state_ignore_rules.is_empty() {
+        settings.sync.local_state_ignore_rules = default_local_state_ignore_rules();
+    }
     settings
 }

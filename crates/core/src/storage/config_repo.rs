@@ -81,7 +81,9 @@ impl ConfigRepo {
 
     fn save_json<T: Serialize>(&self, filename: &str, value: &T) -> anyhow::Result<()> {
         let path = self.root.join(filename);
-        let tmp_path = self.root.join(format!("{filename}.tmp"));
+        let tmp_path = self
+            .root
+            .join(format!("{filename}.{}.tmp", uuid::Uuid::new_v4()));
         let bak_path = self.root.join(format!("{filename}.bak"));
 
         let bytes = serde_json::to_vec_pretty(value)?;

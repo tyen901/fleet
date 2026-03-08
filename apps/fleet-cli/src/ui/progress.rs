@@ -53,10 +53,10 @@ fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
                 }
             })
         }
-        FlowEventKind::InventoryStageChanged { stage } => {
+        FlowEventKind::LocalStateStageChanged { stage } => {
             Some(format!("Inventory stage: {stage:?}"))
         }
-        FlowEventKind::InventoryProgress {
+        FlowEventKind::LocalStateProgress {
             progress, rate_bps, ..
         } => Some(format!(
             "Inventory: stage={:?} files_scanned={} bytes_scanned={} ({} B/s)",
@@ -65,9 +65,9 @@ fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
             progress.bytes_scanned,
             rate_bps.unwrap_or(0.0) as u64
         )),
-        FlowEventKind::CheckPhaseChanged { phase } => Some(format!("Check phase: {phase:?}")),
+        FlowEventKind::AssessPhaseChanged { phase } => Some(format!("Check phase: {phase:?}")),
         FlowEventKind::Message { text, .. } => Some(text.clone()),
-        FlowEventKind::InventoryStatus { status } => Some(format!("Inventory: {status:?}")),
+        FlowEventKind::LocalStateStatus { status } => Some(format!("Inventory: {status:?}")),
         FlowEventKind::Finished { .. } => Some("finished".to_string()),
         FlowEventKind::Failed { error } => {
             Some(format!("failed: {}: {}", error.code, error.message))
@@ -119,7 +119,7 @@ pub fn spawn_flow_printer(
                 FlowEventKind::Message { text, .. } => {
                     let _ = mp.println(text);
                 }
-                FlowEventKind::InventoryStatus { status } => {
+                FlowEventKind::LocalStateStatus { status } => {
                     let _ = mp.println(format!("Inventory: {status:?}"));
                 }
                 FlowEventKind::SyncProgress { .. } => {
@@ -147,7 +147,7 @@ pub fn spawn_flow_printer(
                         sync_pb.set_position(done);
                     }
                 }
-                FlowEventKind::InventoryProgress { progress, .. } => {
+                FlowEventKind::LocalStateProgress { progress, .. } => {
                     if sync_bar_mode != SyncBarMode::Bytes {
                         sync_pb.set_style(style_bar.clone());
                         sync_pb.set_message("Sync");
@@ -160,10 +160,10 @@ pub fn spawn_flow_printer(
                     }
                     sync_pb.set_position(progress.bytes_scanned);
                 }
-                FlowEventKind::InventoryStageChanged { stage } => {
+                FlowEventKind::LocalStateStageChanged { stage } => {
                     phase_pb.set_message(format!("Inventory stage: {stage:?}"));
                 }
-                FlowEventKind::CheckPhaseChanged { phase } => {
+                FlowEventKind::AssessPhaseChanged { phase } => {
                     phase_pb.set_message(format!("Check phase: {phase:?}"));
                 }
                 FlowEventKind::Finished { .. } => {

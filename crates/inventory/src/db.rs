@@ -1,6 +1,6 @@
 use crate::{
     compute_stamp, sqlite::SqliteUpdateSession, Error, FileEntry, FolderStamp, InventoryId,
-    InventoryMetrics, InventorySnapshot, Result, RootId, ScanPolicy, SegmentEntry, SqliteStore,
+    InventorySnapshot, LocalStateMetrics, Result, RootId, ScanPolicy, SegmentEntry, SqliteStore,
 };
 use std::path::Path;
 
@@ -76,7 +76,7 @@ impl InventoryDb {
         self.store.export_snapshot(root_id)
     }
 
-    pub fn metrics(&self, root_id: RootId) -> Result<InventoryMetrics> {
+    pub fn metrics(&self, root_id: RootId) -> Result<LocalStateMetrics> {
         self.store.metrics(root_id)
     }
 }
