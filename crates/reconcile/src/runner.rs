@@ -3,12 +3,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use flux_api::PruneMode;
-use flux_api::{HaveState, SyncConfig};
+use flux_api::{PrunePolicy, SyncConfig, SyncEnvironment};
 use flux_types::Verifier;
 use tokio_util::sync::CancellationToken;
 
-use crate::convert;
 use crate::flux_sqlite::SqliteFluxInventory;
 use crate::progress;
 use crate::{FluxProgressSink, FluxSyncOptions, FluxSyncReport};
@@ -24,9 +22,6 @@ pub(crate) async fn sync(
     cancel: CancellationToken,
     progress_sink: Option<FluxProgressSink>,
 ) -> Result<FluxSyncReport> {
-    let desired_state = convert::desired_manifest_to_desired_state(&desired)
-        .context("convert manifest -> DesiredState")?;
-
     let local_store: Arc<dyn flux_types::SegmentStore> = Arc::new(
         flux_segment_cache::SegmentCache::new(flux_cache_dir.clone()),
     );
@@ -37,11 +32,11 @@ pub(crate) async fn sync(
     let inventory_db_path = inventory_db_path.to_path_buf();
     let inventory_name = inventory_name.to_string();
 
-    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<flux_api::ProgressEvent>();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<flux_api::SyncEvent>();
     let (bridge, totals, last) =
         progress::spawn_bridge(cancel.clone(), progress_sink.clone(), progress_rx);
 
-    let report_res = tokio::task::spawn_blocking(move || -> Result<flux_api::SyncReport> {
+    let report_res = tokio::task::spawn_blocking(move || -> Result<flux_api::SyncOutcome> {
         if cancel_clone.is_cancelled() {
             anyhow::bail!("canceled");
         }
@@ -51,26 +46,20 @@ pub(crate) async fn sync(
                 .context("open fleet_inventory for flux")?,
         );
 
-        let retriever_cfg = retriever::RetrievalConfig::default();
-        let retriever = retriever::Retriever::new(retriever_cfg).context("build retriever")?;
-        let remote: Arc<dyn flux_provider::Provider> = crate::retrieval::provider_arc(retriever);
-        let have = HaveState {
+        let have = SyncEnvironment {
             target_root: dest.clone(),
             local_store,
-            nearby_indices: vec![],
-            remote,
             inventory,
             verifier: None::<Arc<dyn Verifier>>,
         };
 
         let cfg = SyncConfig {
             progress_sender: Some(progress_tx),
-            prune_mode: if opts.enable_prune {
-                PruneMode::ScanAndCompute
+            prune_policy: if opts.enable_prune {
+                PrunePolicy::ApplyComputed
             } else {
-                PruneMode::ExplicitOnly
+                PrunePolicy::Disabled
             },
-            apply_prune: false,
             ..SyncConfig::default()
         };
 
@@ -79,9 +68,7 @@ pub(crate) async fn sync(
             .build()
             .context("create flux runtime")?;
         let report = rt
-            .block_on(
-                async move { flux_api::sync_async(cfg, desired_state, have, cancel_clone).await },
-            )
+            .block_on(async move { flux_api::sync_async(cfg, desired, have, cancel_clone).await })
             .context("flux_api::sync_async")?;
         Ok(report)
     })
@@ -99,9 +86,9 @@ pub(crate) async fn sync(
 
     Ok(FluxSyncReport {
         duration_ms,
-        bytes_reused: report.bytes_reused,
-        bytes_downloaded: report.bytes_downloaded,
-        files_finalized: report.files_finalized,
+        bytes_reused: report.runtime.bytes_reused,
+        bytes_downloaded: report.runtime.bytes_downloaded,
+        files_finalized: report.runtime.files_committed,
         prune_paths: report.prune_paths,
     })
 }
@@ -121,15 +108,9 @@ pub(crate) fn prune_only(
     let local_store: Arc<dyn flux_types::SegmentStore> =
         Arc::new(flux_segment_cache::SegmentCache::new(flux_cache_dir));
 
-    let retriever_cfg = retriever::RetrievalConfig::default();
-    let retriever = retriever::Retriever::new(retriever_cfg).context("build retriever")?;
-    let remote: Arc<dyn flux_provider::Provider> = crate::retrieval::provider_arc(retriever);
-
-    let have = HaveState {
+    let have = SyncEnvironment {
         target_root: dest.to_path_buf(),
         local_store,
-        nearby_indices: vec![],
-        remote,
         inventory,
         verifier: None::<Arc<dyn Verifier>>,
     };

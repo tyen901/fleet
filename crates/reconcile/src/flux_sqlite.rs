@@ -1,6 +1,6 @@
 use anyhow::Result;
 use flux_inventory_contract::{
-    FinalizedFileRecord, FluxInventory, SegmentLoc, TrustedFileMeta, TrustedFileRecord,
+    CommittedFileRecord, FluxInventory, SegmentLoc, TrustedFileMeta, TrustedFileRecord,
 };
 use flux_types::Signature;
 use inventory::trusted_index::{
@@ -74,39 +74,7 @@ impl FluxInventory for SqliteFluxInventory {
         self.inner.protected_local_paths()
     }
 
-    fn get_trusted_file(&self, rel_path: &Path) -> Result<Option<TrustedFileMeta>> {
-        let meta = self
-            .inner
-            .get_trusted_file(rel_path)?
-            .map(to_flux_trusted_file_meta);
-        Ok(meta)
-    }
-
-    fn get_segment_locations(&self, sig: &Signature) -> Result<Vec<SegmentLoc>> {
-        let inv_sig = to_inventory_signature(sig);
-        let locations = self
-            .inner
-            .get_segment_locations(&inv_sig)?
-            .into_iter()
-            .map(to_flux_segment_loc)
-            .collect();
-        Ok(locations)
-    }
-
-    fn has_segment_location(
-        &self,
-        rel_path: &Path,
-        sig: &Signature,
-        offset: u64,
-        len: u64,
-    ) -> Result<bool> {
-        let inv_sig = to_inventory_signature(sig);
-        Ok(self
-            .inner
-            .has_segment_location(rel_path, &inv_sig, offset, len)?)
-    }
-
-    fn record_finalized_file_batch(&self, records: &[FinalizedFileRecord]) -> Result<()> {
+    fn record_committed_file_batch(&self, records: &[CommittedFileRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
         }
@@ -163,7 +131,7 @@ mod tests {
     use super::{
         to_flux_signature, to_flux_trusted_file_record, to_inventory_signature, SqliteFluxInventory,
     };
-    use flux_inventory_contract::{FinalizedFileRecord, FluxInventory};
+    use flux_inventory_contract::{CommittedFileRecord, FluxInventory};
     use flux_types::Signature;
     use std::path::PathBuf;
 
@@ -214,7 +182,7 @@ mod tests {
         let sig = signature("aaaaaaaa", 4);
 
         inventory
-            .record_finalized_file_batch(&[FinalizedFileRecord {
+            .record_committed_file_batch(&[CommittedFileRecord {
                 rel_path: PathBuf::from("a.bin"),
                 size_bytes: 4,
                 mtime_ns: 1,
