@@ -52,7 +52,7 @@ impl InventoryIgnoreRules {
 pub type InventorySessionId = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum InventoryStatus {
+pub enum LocalStateStatus {
     Unknown,
     Missing,
     Dirty,
@@ -62,7 +62,7 @@ pub enum InventoryStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct InventoryStamp {
+pub struct BaselineStamp {
     pub algo: String,
     pub hash64: u64,
     pub file_count: u64,
@@ -70,17 +70,17 @@ pub struct InventoryStamp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct InventoryMetrics {
+pub struct LocalStateMetrics {
     pub root_path: String,
 
     pub files_count: u64,
     pub files_bytes: u64,
 
-    pub last_stamp: Option<InventoryStamp>,
+    pub last_stamp: Option<BaselineStamp>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Type)]
-pub enum InventoryScanStage {
+pub enum LocalStateStage {
     #[default]
     Planning,
     Walking,
@@ -92,8 +92,8 @@ pub enum InventoryScanStage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Type)]
-pub struct InventoryScanProgress {
-    pub stage: InventoryScanStage,
+pub struct LocalStateProgress {
+    pub stage: LocalStateStage,
 
     /// Planned hashing workload for this scan pass (not total walked files).
     #[serde(default)]

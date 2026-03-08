@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use icondata::BsChevronDown;
+use fleet_style::{Button, ButtonSize, ButtonVariant, ConfirmDialog, SelectField, SelectOption};
 use tracing::{error, info};
 
 use crate::app::router::Route;
@@ -16,7 +16,6 @@ use crate::features::profiles::{
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
-use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant, ConfirmModal};
 
 #[component]
 pub fn ProfileEdit(id: String) -> Element {
@@ -111,6 +110,31 @@ pub fn ProfileEdit(id: String) -> Element {
     } else {
         selected_idx
     };
+    let join_server_value = if display_repo_servers.len() == 1 {
+        "0".to_string()
+    } else if let Some(idx) = display_selected_idx {
+        idx.to_string()
+    } else {
+        String::new()
+    };
+    let join_server_options = if display_repo_servers.len() <= 1 {
+        if let Some(server) = display_repo_servers.first() {
+            vec![SelectOption::new("0", format_repo_server_label(server))]
+        } else {
+            vec![SelectOption::new("", "None (use default join behavior)")]
+        }
+    } else {
+        let mut options = vec![SelectOption::new("", "None (use default join behavior)")];
+        options.extend(
+            display_repo_servers
+                .iter()
+                .enumerate()
+                .map(|(idx, server)| {
+                    SelectOption::new(idx.to_string(), format_repo_server_label(server))
+                }),
+        );
+        options
+    };
 
     let next_profile = build_profile_edit_candidate(
         &profile,
@@ -122,11 +146,12 @@ pub fn ProfileEdit(id: String) -> Element {
     );
     let profile_dirty = next_profile != profile;
     let can_save = validation.is_valid() && profile_dirty;
+    let form_card_subtitle =
+        operation_active.then_some("Finish the active operation before saving.");
 
     {
         let mut save_action = shell_nav_actions.save_action;
         let mut profile_action = shell_nav_actions.profile_action;
-        let mut profile_open_folder_enabled = shell_nav_actions.profile_open_folder_enabled;
         let mut back_disabled = shell_nav_actions.back_disabled;
         use_effect(use_reactive(
             (&can_save, &operation_active),
@@ -136,7 +161,6 @@ pub fn ProfileEdit(id: String) -> Element {
                     !can_save || operation_active,
                 )));
                 profile_action.set(None);
-                profile_open_folder_enabled.set(false);
                 back_disabled.set(false);
             },
         ));
@@ -270,12 +294,18 @@ pub fn ProfileEdit(id: String) -> Element {
     };
 
     rsx! {
-        div { class: "page page--scroll page--form-rows profile-form-page",
+        div { class: "page page--scroll profile-form-page",
             div { class: "page__inner dash-page__inner",
                 div { class: "dash-layout",
                     div { class: "dash-layout__content",
-                        section { class: "panel-section panel-section--split dash-status",
-                            div { class: "panel-section__content",
+                        section { class: "profile-form-view",
+                            article { class: "profile-card",
+                                div { class: "profile-card__header",
+                                    h3 { class: "profile-card__title", "Profile Details" }
+                                    if let Some(form_card_subtitle) = form_card_subtitle {
+                                        div { class: "profile-card__subtitle", "{form_card_subtitle}" }
+                                    }
+                                }
                                 div { class: "panel-group dash-readonly",
                                     ProfileTextFieldRow {
                                         title: "Name".to_string(),
@@ -321,37 +351,13 @@ pub fn ProfileEdit(id: String) -> Element {
                                             div { class: "panel-row__title", "Join Server" }
                                         }
                                         div { class: "panel-row__control panel-row__control--stack",
-                                            div { class: "select-wrap select-wrap--full",
-                                                select {
-                                                    class: "select",
-                                                    disabled: display_repo_servers.len() <= 1,
-                                                    value: if display_repo_servers.len() == 1 {
-                                                        "0".to_string()
-                                                    } else if let Some(idx) = display_selected_idx {
-                                                        idx.to_string()
-                                                    } else {
-                                                        String::new()
-                                                    },
-                                                    onchange: move |evt| {
-                                                        selected_repo_server.set(evt.value().parse::<usize>().ok());
-                                                    },
-                                                    if display_repo_servers.len() <= 1 {
-                                                        if let Some(server) = display_repo_servers.first() {
-                                                            option { value: "0", "{format_repo_server_label(server)}" }
-                                                        } else {
-                                                            option { value: "", "None (use default join behavior)" }
-                                                        }
-                                                    } else {
-                                                        option { value: "", "None (use default join behavior)" }
-                                                        for (idx, server) in display_repo_servers.iter().enumerate() {
-                                                            option { value: "{idx}", "{format_repo_server_label(server)}" }
-                                                        }
-                                                    }
-                                                }
-                                                AppIcon {
-                                                    icon: BsChevronDown,
-                                                    class: "ico ico--sm select-wrap__chev",
-                                                }
+                                            SelectField {
+                                                disabled: display_repo_servers.len() <= 1,
+                                                value: join_server_value.clone(),
+                                                options: join_server_options.clone(),
+                                                onchange: move |value: String| {
+                                                    selected_repo_server.set(value.parse::<usize>().ok());
+                                                },
                                             }
                                         }
                                     }
@@ -384,21 +390,24 @@ pub fn ProfileEdit(id: String) -> Element {
                                             on_change: move |v| launch_params.set(v),
                                         }
                                     }
+                                }
+                            }
 
-                                    div { class: "dash-section-divider dash-profile-edit-divider" }
-
-                                    div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit dash-profile-row--delete",
-                                        div { class: "panel-row__meta",
-                                            div { class: "panel-row__title", "Delete Profile" }
-                                        }
-                                        div { class: "panel-row__control panel-row__control--stack dash-profile-edit-actions",
-                                            Button {
-                                                variant: ButtonVariant::Danger,
-                                                size: ButtonSize::Md,
-                                                disabled: operation_active,
-                                                onclick: on_request_delete,
-                                                "Delete Profile"
-                                            }
+                            article { class: "profile-card profile-card--danger",
+                                div { class: "profile-card__header",
+                                    h3 { class: "profile-card__title", "Danger Zone" }
+                                }
+                                div { class: "profile-danger",
+                                    p { class: "profile-danger__summary",
+                                        "Remove this profile from Fleet. The destination folder and files on disk stay untouched."
+                                    }
+                                    div { class: "profile-danger__actions",
+                                        Button {
+                                            variant: ButtonVariant::Danger,
+                                            size: ButtonSize::Md,
+                                            disabled: operation_active,
+                                            onclick: on_request_delete,
+                                            "Delete Profile"
                                         }
                                     }
                                 }
@@ -407,7 +416,7 @@ pub fn ProfileEdit(id: String) -> Element {
                     }
                 }
 
-                ConfirmModal {
+                ConfirmDialog {
                     open: delete_modal_open(),
                     title: "Delete Profile".to_string(),
                     message: format!(

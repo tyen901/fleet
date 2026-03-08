@@ -1,0 +1,12 @@
+[package]
+name = "fleet-local-state-inventory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+fleet-domain = { workspace = true }
+fleet-local-state = { workspace = true }
+inventory = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

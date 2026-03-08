@@ -1,9 +1,9 @@
 use fleet_domain::health::{
-    CheckPhase, LocalHealthState, OperationKind, ProfileAssessmentReport, RemoteFreshnessState,
-    RepairSummary,
+    AssessPhase, AssessScope, LocalStateHealth, OperationKind, ProfileStateReport,
+    RemoteFreshnessState,
 };
-use fleet_domain::inventory::InventoryScanStage;
-use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId, SyncSummary};
+use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId};
+use fleet_domain::LocalStateStage;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -26,7 +26,7 @@ pub struct AppState {
 pub struct ProfileRuntimeState {
     pub profile_id: ProfileId,
     #[serde(default)]
-    pub assessment: Option<ProfileAssessmentReport>,
+    pub assessment: Option<ProfileStateReport>,
     #[serde(default)]
     pub active: Option<ActiveOperationState>,
     #[serde(default)]
@@ -69,9 +69,9 @@ pub struct ActiveOperationState {
     pub progress: SyncProgress,
     pub message: Option<String>,
     #[serde(default)]
-    pub inventory_stage: Option<InventoryScanStage>,
+    pub inventory_stage: Option<LocalStateStage>,
     #[serde(default)]
-    pub check_phase: Option<CheckPhase>,
+    pub check_phase: Option<AssessPhase>,
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
 }
@@ -101,11 +101,10 @@ pub enum OperationTerminalStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub enum OperationSummary {
-    Sync(SyncSummary),
-    Repair(RepairSummary),
-    Check(ProfileAssessmentReport),
-    RebuildInventory(ProfileAssessmentReport),
-    Clean(ProfileAssessmentReport),
+    Sync(ProfileStateReport),
+    Assess(ProfileStateReport),
+    RebuildInventory(ProfileStateReport),
+    Clean(ProfileStateReport),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -126,11 +125,11 @@ pub enum ProfileStatusHeadline {
     ReadyToPlay,
     NeedsSync,
     MissingDestination,
-    NeedsBaselineRepair,
-    StatusError,
+    NeedsRecovery,
+    ActionRequired,
     InSync,
     SyncNotRequired,
-    SyncCheckError,
+    UpdateCheckFailed,
     #[default]
     StatusUnknown,
 }
@@ -143,11 +142,11 @@ impl ProfileStatusHeadline {
             Self::ReadyToPlay => "Ready to play",
             Self::NeedsSync => "Needs sync",
             Self::MissingDestination => "Missing destination",
-            Self::NeedsBaselineRepair => "Needs baseline repair",
-            Self::StatusError => "Status error",
+            Self::NeedsRecovery => "Needs recovery",
+            Self::ActionRequired => "Action required",
             Self::InSync => "In sync",
             Self::SyncNotRequired => "Sync not required",
-            Self::SyncCheckError => "Sync check error",
+            Self::UpdateCheckFailed => "Update check failed",
             Self::StatusUnknown => "Status unknown",
         }
     }
@@ -171,7 +170,7 @@ pub enum ProfileStatusBadge {
 pub enum ProfileRecommendedAction {
     #[default]
     Sync,
-    Repair,
+    Clean,
     RebuildInventory,
     Validate,
     CheckUpdates,
@@ -180,7 +179,6 @@ pub enum ProfileRecommendedAction {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
-    pub repair_enabled: bool,
     pub rebuild_inventory_enabled: bool,
     pub validate_enabled: bool,
     pub check_updates_enabled: bool,
@@ -188,7 +186,6 @@ pub struct ProfileActionAvailability {
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
-    pub repair_running: bool,
     pub validate_running: bool,
     pub rebuild_inventory_running: bool,
     pub check_updates_running: bool,
@@ -214,10 +211,9 @@ pub struct ProfileStatusState {
     pub actions: ProfileActionAvailability,
     #[serde(default)]
     pub progress: Option<ProfileProgressView>,
-    pub local_health: LocalHealthState,
-    pub remote_freshness: RemoteFreshnessState,
+    pub local_health: LocalStateHealth,
+    pub remote_freshness: Option<RemoteFreshnessState>,
     pub has_error: bool,
-    pub repair_required: bool,
     pub rebuild_inventory_required: bool,
     pub clean_candidate_count: u64,
     pub last_check_ms: u64,
@@ -238,10 +234,9 @@ impl ProfileStatusState {
                 ..ProfileActionAvailability::default()
             },
             progress: None,
-            local_health: LocalHealthState::Unknown,
-            remote_freshness: RemoteFreshnessState::Unknown,
+            local_health: LocalStateHealth::Unknown,
+            remote_freshness: None,
             has_error: false,
-            repair_required: false,
             rebuild_inventory_required: false,
             clean_candidate_count: 0,
             last_check_ms: now_ms,
@@ -300,18 +295,17 @@ fn derive_profile_status(
         .assessment
         .as_ref()
         .map(|report| report.local_health.clone())
-        .unwrap_or(LocalHealthState::Unknown);
+        .unwrap_or(LocalStateHealth::Unknown);
     let remote_freshness = runtime
         .assessment
         .as_ref()
         .map(|report| report.remote_freshness.clone())
-        .unwrap_or(RemoteFreshnessState::Unknown);
+        .unwrap_or(None);
     let clean_candidate_count = runtime
         .assessment
         .as_ref()
         .map(|report| report.unexpected_delete_paths.len() as u64)
         .unwrap_or(0);
-    let has_error = runtime.last_error.is_some();
     let last_check_ms = runtime
         .assessment
         .as_ref()
@@ -322,40 +316,60 @@ fn derive_profile_status(
     let operation_active = active_operation.is_some();
 
     let sync_running = matches!(active_operation, Some(OperationKind::Sync));
-    let repair_running = matches!(active_operation, Some(OperationKind::Repair));
-    let validate_running = matches!(active_operation, Some(OperationKind::CheckLocal));
+    let validate_running = matches!(
+        active_operation,
+        Some(OperationKind::Assess(AssessScope::Local))
+    );
     let rebuild_inventory_running =
         matches!(active_operation, Some(OperationKind::RebuildInventory));
-    let check_updates_running = matches!(active_operation, Some(OperationKind::CheckRemote));
+    let check_updates_running = matches!(
+        active_operation,
+        Some(OperationKind::Assess(AssessScope::Remote))
+    );
     let clean_running = matches!(active_operation, Some(OperationKind::Clean));
 
-    let missing_destination = matches!(local_health, LocalHealthState::MissingDestination);
+    let missing_destination = matches!(local_health, LocalStateHealth::MissingDestination);
     let can_run_actions = !operation_active;
     let clean_available = clean_candidate_count > 0;
-    let rebuild_inventory_required = runtime
-        .last_error
-        .as_ref()
-        .map(fleet_domain::ApiError::is_inventory_rebuild_required)
-        .unwrap_or(false);
+    let rebuild_inventory_required = matches!(local_health, LocalStateHealth::InventoryCorrupt);
+    let hard_blocked = matches!(
+        local_health,
+        LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+    );
+    let sync_blocked = matches!(
+        local_health,
+        LocalStateHealth::MissingDestination
+            | LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+            | LocalStateHealth::InventoryCorrupt
+    );
+    let maintenance_blocked = missing_destination || hard_blocked;
+    let has_error = matches!(
+        local_health,
+        LocalStateHealth::MissingDestination
+            | LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+            | LocalStateHealth::InventoryCorrupt
+    ) || matches!(remote_freshness, Some(RemoteFreshnessState::Error));
 
-    let repair_required = !rebuild_inventory_required
-        && (has_error
-            || matches!(
-                local_health,
-                LocalHealthState::LocalStateMissing | LocalHealthState::Error
-            ));
-
-    let recommended_action = if rebuild_inventory_required {
-        ProfileRecommendedAction::RebuildInventory
-    } else if clean_available || matches!(local_health, LocalHealthState::LocalStateMissing) {
-        ProfileRecommendedAction::Repair
-    } else if matches!(local_health, LocalHealthState::Unknown) {
+    let recommended_action = if matches!(
+        local_health,
+        LocalStateHealth::Unknown
+            | LocalStateHealth::MissingDestination
+            | LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::InventoryCorrupt
+            | LocalStateHealth::ProbeFailed
+    ) {
         ProfileRecommendedAction::Validate
+    } else if clean_available {
+        ProfileRecommendedAction::Clean
     } else if has_repo_source
-        && matches!(
-            remote_freshness,
-            RemoteFreshnessState::Unknown | RemoteFreshnessState::UpdateAvailable
-        )
+        && matches!(remote_freshness, None | Some(RemoteFreshnessState::Unknown))
     {
         ProfileRecommendedAction::CheckUpdates
     } else {
@@ -365,24 +379,31 @@ fn derive_profile_status(
     let headline = if validate_running || rebuild_inventory_running || check_updates_running {
         ProfileStatusHeadline::Checking
     } else if rebuild_inventory_required {
-        ProfileStatusHeadline::NeedsBaselineRepair
+        ProfileStatusHeadline::NeedsRecovery
     } else if has_error {
-        ProfileStatusHeadline::StatusError
-    } else if matches!(remote_freshness, RemoteFreshnessState::UpdateAvailable) {
+        ProfileStatusHeadline::ActionRequired
+    } else if matches!(
+        remote_freshness,
+        Some(RemoteFreshnessState::UpdateAvailable)
+    ) {
         ProfileStatusHeadline::UpdateAvailable
     } else {
         match local_health {
-            LocalHealthState::Ready => ProfileStatusHeadline::ReadyToPlay,
-            LocalHealthState::LocalDrift => ProfileStatusHeadline::NeedsSync,
-            LocalHealthState::MissingDestination => ProfileStatusHeadline::MissingDestination,
-            LocalHealthState::LocalStateMissing => ProfileStatusHeadline::NeedsBaselineRepair,
-            LocalHealthState::Error => ProfileStatusHeadline::StatusError,
-            LocalHealthState::Unknown => match remote_freshness {
-                RemoteFreshnessState::UpToDate => ProfileStatusHeadline::InSync,
-                RemoteFreshnessState::NotRelevant => ProfileStatusHeadline::SyncNotRequired,
-                RemoteFreshnessState::Error => ProfileStatusHeadline::SyncCheckError,
-                RemoteFreshnessState::Unknown => ProfileStatusHeadline::StatusUnknown,
-                RemoteFreshnessState::UpdateAvailable => ProfileStatusHeadline::UpdateAvailable,
+            LocalStateHealth::Ready => ProfileStatusHeadline::ReadyToPlay,
+            LocalStateHealth::LocalDrift => ProfileStatusHeadline::NeedsSync,
+            LocalStateHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
+            LocalStateHealth::LocalStateMissing => ProfileStatusHeadline::NeedsSync,
+            LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+            | LocalStateHealth::InventoryCorrupt => ProfileStatusHeadline::ActionRequired,
+            LocalStateHealth::Unknown => match remote_freshness {
+                Some(RemoteFreshnessState::UpToDate) => ProfileStatusHeadline::InSync,
+                Some(RemoteFreshnessState::Error) => ProfileStatusHeadline::UpdateCheckFailed,
+                Some(RemoteFreshnessState::Unknown) | None => ProfileStatusHeadline::StatusUnknown,
+                Some(RemoteFreshnessState::UpdateAvailable) => {
+                    ProfileStatusHeadline::UpdateAvailable
+                }
             },
         }
     };
@@ -396,46 +417,32 @@ fn derive_profile_status(
         | ProfileStatusHeadline::UpdateAvailable
         | ProfileStatusHeadline::StatusUnknown => ProfileStatusSeverity::Warning,
         ProfileStatusHeadline::MissingDestination
-        | ProfileStatusHeadline::NeedsBaselineRepair
-        | ProfileStatusHeadline::StatusError
-        | ProfileStatusHeadline::SyncCheckError => ProfileStatusSeverity::Error,
+        | ProfileStatusHeadline::NeedsRecovery
+        | ProfileStatusHeadline::ActionRequired
+        | ProfileStatusHeadline::UpdateCheckFailed => ProfileStatusSeverity::Error,
     };
 
-    let badge = if matches!(remote_freshness, RemoteFreshnessState::UpdateAvailable) {
-        Some(ProfileStatusBadge::UpdateAvailable)
-    } else if has_error
-        || matches!(
-            local_health,
-            LocalHealthState::MissingDestination
-                | LocalHealthState::LocalStateMissing
-                | LocalHealthState::LocalDrift
-                | LocalHealthState::Error
-        )
-        || matches!(remote_freshness, RemoteFreshnessState::Error)
-    {
+    let badge = if has_error {
         Some(ProfileStatusBadge::Error)
+    } else if matches!(
+        remote_freshness,
+        Some(RemoteFreshnessState::UpdateAvailable)
+    ) {
+        Some(ProfileStatusBadge::UpdateAvailable)
     } else {
         None
     };
 
     let actions = ProfileActionAvailability {
-        sync_enabled: can_run_actions && !missing_destination,
-        repair_enabled: can_run_actions
-            && !rebuild_inventory_required
-            && !missing_destination
-            && matches!(
-                local_health,
-                LocalHealthState::LocalStateMissing
-                    | LocalHealthState::Error
-                    | LocalHealthState::Unknown
-            ),
-        rebuild_inventory_enabled: can_run_actions && !missing_destination,
+        sync_enabled: can_run_actions && !sync_blocked,
+        rebuild_inventory_enabled: can_run_actions
+            && !maintenance_blocked
+            && rebuild_inventory_required,
         validate_enabled: can_run_actions,
-        check_updates_enabled: can_run_actions,
-        clean_enabled: can_run_actions && clean_available,
+        check_updates_enabled: can_run_actions && !hard_blocked,
+        clean_enabled: can_run_actions && clean_available && !maintenance_blocked,
         cancel_enabled: operation_active,
         sync_running,
-        repair_running,
         validate_running,
         rebuild_inventory_running,
         check_updates_running,
@@ -444,7 +451,7 @@ fn derive_profile_status(
     let can_launch = !operation_active
         && matches!(
             local_health,
-            LocalHealthState::Ready | LocalHealthState::LocalDrift
+            LocalStateHealth::Ready | LocalStateHealth::LocalDrift
         );
 
     ProfileStatusState {
@@ -457,7 +464,6 @@ fn derive_profile_status(
         local_health,
         remote_freshness,
         has_error,
-        repair_required,
         rebuild_inventory_required,
         clean_candidate_count,
         last_check_ms,
@@ -468,7 +474,7 @@ fn derive_profile_status(
 fn build_progress_view(operation: &ActiveOperationState) -> ProfileProgressView {
     if matches!(
         operation.operation,
-        OperationKind::CheckLocal | OperationKind::RebuildInventory | OperationKind::CheckRemote
+        OperationKind::Assess(_) | OperationKind::RebuildInventory
     ) {
         return build_check_progress_view(operation);
     }
@@ -604,7 +610,7 @@ fn build_check_progress_view(operation: &ActiveOperationState) -> ProfileProgres
 
     let phase = operation
         .check_phase
-        .unwrap_or(CheckPhase::ValidatingContext);
+        .unwrap_or(AssessPhase::ValidatingContext);
     let detail = operation
         .message
         .clone()
@@ -620,44 +626,47 @@ fn build_check_progress_view(operation: &ActiveOperationState) -> ProfileProgres
     }
 }
 
-fn default_check_phase_detail(phase: CheckPhase) -> &'static str {
+fn default_check_phase_detail(phase: AssessPhase) -> &'static str {
     match phase {
-        CheckPhase::ValidatingContext => "Validating profile context...",
-        CheckPhase::ScanningLocal => "Scanning local files...",
-        CheckPhase::EvaluatingLocal => "Evaluating local state...",
-        CheckPhase::LoadingRemoteManifest => "Loading remote manifest...",
-        CheckPhase::ComparingExpectedState => "Comparing local and expected state...",
-        CheckPhase::Finalizing => "Finalizing check report...",
+        AssessPhase::ValidatingContext => "Validating profile context...",
+        AssessPhase::ScanningLocal => "Scanning local files...",
+        AssessPhase::EvaluatingLocal => "Evaluating local state...",
+        AssessPhase::LoadingRemoteManifest => "Loading remote manifest...",
+        AssessPhase::ComparingExpectedState => "Comparing local and expected state...",
+        AssessPhase::Finalizing => "Finalizing check report...",
     }
 }
 
-fn check_phase_progress(operation: OperationKind, phase: CheckPhase) -> (Option<u64>, Option<u64>) {
-    let total: u64 = if matches!(operation, OperationKind::CheckRemote) {
+fn check_phase_progress(
+    operation: OperationKind,
+    phase: AssessPhase,
+) -> (Option<u64>, Option<u64>) {
+    let total: u64 = if matches!(operation, OperationKind::Assess(AssessScope::Remote)) {
         6
     } else {
         4
     };
     let done: u64 = match (operation, phase) {
-        (_, CheckPhase::ValidatingContext) => 0,
-        (_, CheckPhase::ScanningLocal) => 1,
-        (_, CheckPhase::EvaluatingLocal) => 2,
-        (OperationKind::CheckRemote, CheckPhase::LoadingRemoteManifest) => 3,
-        (OperationKind::CheckRemote, CheckPhase::ComparingExpectedState) => 4,
-        (OperationKind::CheckRemote, CheckPhase::Finalizing) => total,
-        (_, CheckPhase::Finalizing) => total,
+        (_, AssessPhase::ValidatingContext) => 0,
+        (_, AssessPhase::ScanningLocal) => 1,
+        (_, AssessPhase::EvaluatingLocal) => 2,
+        (OperationKind::Assess(AssessScope::Remote), AssessPhase::LoadingRemoteManifest) => 3,
+        (OperationKind::Assess(AssessScope::Remote), AssessPhase::ComparingExpectedState) => 4,
+        (OperationKind::Assess(AssessScope::Remote), AssessPhase::Finalizing) => total,
+        (_, AssessPhase::Finalizing) => total,
         _ => 0,
     };
     (Some(done), Some(total))
 }
 
-fn check_phase_label(phase: CheckPhase) -> &'static str {
+fn check_phase_label(phase: AssessPhase) -> &'static str {
     match phase {
-        CheckPhase::ValidatingContext => "Validate Context",
-        CheckPhase::ScanningLocal => "Scan Local",
-        CheckPhase::EvaluatingLocal => "Evaluate Local",
-        CheckPhase::LoadingRemoteManifest => "Load Remote",
-        CheckPhase::ComparingExpectedState => "Compare State",
-        CheckPhase::Finalizing => "Finalize",
+        AssessPhase::ValidatingContext => "Validate Context",
+        AssessPhase::ScanningLocal => "Scan Local",
+        AssessPhase::EvaluatingLocal => "Evaluate Local",
+        AssessPhase::LoadingRemoteManifest => "Load Remote",
+        AssessPhase::ComparingExpectedState => "Compare State",
+        AssessPhase::Finalizing => "Finalize",
     }
 }
 

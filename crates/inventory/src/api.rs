@@ -1,7 +1,7 @@
 use crate::{
     scanner::walk::WalkStream,
     scanner::{Scanner, ScannerConfig, SyncRequest, SyncResult},
-    DirtyFile, DirtyKind, Error, FolderStamp, InventoryDb, InventoryMetrics, InventorySnapshot,
+    DirtyFile, DirtyKind, Error, FolderStamp, InventoryDb, InventorySnapshot, LocalStateMetrics,
     Result, RootId, ScanPolicy, SqliteStore,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -87,7 +87,7 @@ impl RootInventory {
         &self.root_path
     }
 
-    pub fn metrics(&self) -> Result<InventoryMetrics> {
+    pub fn metrics(&self) -> Result<LocalStateMetrics> {
         self.db.metrics(self.root_id)
     }
 

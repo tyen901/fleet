@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use fleet_domain::ThemeMode;
-use icondata::{BsChevronDown, BsGlobe2};
-
-use crate::ui::components::{
-    AppIcon, Button, ButtonSize, ButtonVariant, Input, PanelRowControlInline, PanelRowMeta,
+use fleet_style::{
+    Button, ButtonSize, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta, Section,
+    ThemeCycleButton, ThemeCycleButtonKind, ThemeSelect,
 };
+
+use crate::features::shared::browse_field::BrowseField;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn onboarding_form_section<FDetect, FFinish, FSetTheme>(
@@ -32,17 +33,14 @@ where
                 }
                 p { class: "onboard-page__subtitle", "Set up your Arma 3 location, theme, and telemetry preferences. You can change these later in Settings." }
 
-                section { class: "panel-section",
+                Section {
                     div { class: "panel-section__content",
                         div { class: "panel-group",
-                            div { class: "panel-row panel-row--split",
-                                PanelRowMeta {
-                                    title: "Game Dir".to_string(),
-                                }
-                                PanelRowControlInline {
+                            FieldRow {
+                                FieldRowMeta { title: "Game Dir".to_string() }
+                                FieldRowInline {
                                     div { class: "panel-row__control-main onboard-page__game-dir-main",
-                                        Input {
-                                            label: None,
+                                        BrowseField {
                                             value: game_dir(),
                                             folder_select: true,
                                             on_change: move |v| game_dir.set(v),
@@ -59,51 +57,37 @@ where
                                 }
                             }
 
-                            div { class: "panel-row panel-row--split",
-                                PanelRowMeta {
-                                    title: "Theme".to_string(),
-                                }
-                                PanelRowControlInline {
-                                    div { class: "select-wrap panel-row__control-main onboard-page__theme-select",
-                                        select {
-                                            class: "select",
-                                            value: "{theme_mode().as_str()}",
-                                            onchange: move |evt| {
-                                                let next = evt
-                                                    .value()
-                                                    .parse::<ThemeMode>()
-                                                    .unwrap_or_default();
+                            FieldRow {
+                                FieldRowMeta { title: "Theme".to_string() }
+                                FieldRowInline {
+                                    div { class: "panel-row__control-main onboard-page__theme-select",
+                                        ThemeSelect {
+                                            value: theme_mode(),
+                                            onchange: move |next| {
                                                 theme_mode.set(next);
                                                 on_set_theme_select.clone()(next);
                                             },
-                                            for theme in ThemeMode::ALL {
-                                                option { value: theme.as_str(), "{theme.display_label()}" }
-                                            }
                                         }
-                                        AppIcon { icon: BsChevronDown, class: "ico ico--sm select-wrap__chev" }
                                     }
                                     div { class: "panel-row__control-action",
-                                        button {
-                                            class: "onboard-page__theme-cycle",
-                                            r#type: "button",
-                                            aria_label: "Cycle theme",
-                                            onclick: move |_| {
-                                                let next = theme_mode().next();
+                                        ThemeCycleButton {
+                                            theme: theme_mode(),
+                                            kind: ThemeCycleButtonKind::Plain,
+                                            onclick: move |next| {
                                                 theme_mode.set(next);
                                                 on_set_theme_cycle.clone()(next);
                                             },
-                                            AppIcon { icon: BsGlobe2, class: "ico" }
                                         }
                                     }
                                 }
                             }
 
-                            div { class: "panel-row panel-row--split",
-                                PanelRowMeta {
+                            FieldRow {
+                                FieldRowMeta {
                                     title: "Telemetry".to_string(),
-                                    div { class: "panel-row__desc", "Optional anonymous usage data." }
+                                    description: Some("Optional anonymous usage data.".to_string()),
                                 }
-                                PanelRowControlInline { class: "onboard-page__telemetry-control",
+                                FieldRowInline {
                                     input {
                                         r#type: "checkbox",
                                         class: "check",

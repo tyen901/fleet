@@ -2,20 +2,12 @@ use crate::core::run_config_blocking;
 use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
-use fleet_domain::health::OperationKind;
-use fleet_domain::inventory::{InventoryMetrics, InventoryStamp};
+use fleet_domain::LocalStateMetrics;
 use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
-use serde::{Deserialize, Serialize};
-use specta::Type;
+use fleet_local_state::LocalStateEngine;
+use fleet_local_state_inventory::InventoryLocalStateEngine;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct ProfileSaveAndReassessResult {
-    pub profile: Profile,
-    #[serde(default)]
-    pub reassess_warning: Option<String>,
-}
 
 impl Core {
     pub async fn list_profiles(&self) -> anyhow::Result<ProfilesConfig> {
@@ -257,7 +249,7 @@ impl Core {
     pub async fn profile_inventory_metrics(
         &self,
         profile_id: &ProfileId,
-    ) -> Result<InventoryMetrics, crate::ApiError> {
+    ) -> Result<LocalStateMetrics, crate::ApiError> {
         let profile = self
             .load_profile(profile_id)
             .await
@@ -269,6 +261,11 @@ impl Core {
     }
 
     pub async fn profile_save(&self, profile: Profile) -> Result<Profile, crate::ApiError> {
+        let previous = if profile.id.trim().is_empty() {
+            None
+        } else {
+            self.load_profile(&profile.id.trim().to_string()).await.ok()
+        };
         let requested_profile_id = profile.id.clone();
         let saved = self.save_profile(profile.clone()).await.map_err(|e| {
             let api_err = map_profile_save_error(&e);
@@ -289,11 +286,17 @@ impl Core {
             api_err
         })?;
 
+        let path_context_changed = profile_path_context_changed(previous.as_ref(), &saved);
+
         self.update_state(|state| {
             let pid = saved.id.clone();
             state.profiles.insert(pid.clone(), saved.clone());
             let now = fleet_domain::time::now_unix_ms();
-            let _ = ensure_profile_runtime_mut(state, &pid, now);
+            if path_context_changed {
+                clear_profile_check_state(state, &pid, now);
+            } else {
+                let _ = ensure_profile_runtime_mut(state, &pid, now);
+            }
             set_profile_repo_servers_runtime(state, &pid, Vec::new(), false);
             recompute_profile_status(state, &pid);
         });
@@ -306,48 +309,6 @@ impl Core {
         );
 
         Ok(saved)
-    }
-
-    pub async fn profile_save_and_reassess(
-        &self,
-        profile: Profile,
-    ) -> Result<ProfileSaveAndReassessResult, crate::ApiError> {
-        let previous = if profile.id.trim().is_empty() {
-            None
-        } else {
-            self.load_profile(&profile.id.trim().to_string()).await.ok()
-        };
-
-        let saved = self.profile_save(profile).await?;
-        let path_context_changed = profile_path_context_changed(previous.as_ref(), &saved);
-
-        let mut reassess_warning = None;
-        if path_context_changed {
-            let now = fleet_domain::time::now_unix_ms();
-            let pid = saved.id.clone();
-            self.update_state(|state| {
-                clear_profile_check_state(state, &pid, now);
-            });
-
-            if let Err(err) = self
-                .start_operation(saved.id.clone(), OperationKind::CheckLocal)
-                .await
-            {
-                tracing::warn!(
-                    profile_id = %saved.id,
-                    code = %err.code,
-                    message = %err.message,
-                    "failed to start local health re-check after profile save"
-                );
-                reassess_warning =
-                    Some("Health re-check could not start. Use Retry Check.".to_string());
-            }
-        }
-
-        Ok(ProfileSaveAndReassessResult {
-            profile: saved,
-            reassess_warning,
-        })
     }
 
     pub async fn profile_delete(&self, profile_id: ProfileId) -> Result<(), crate::ApiError> {
@@ -605,7 +566,7 @@ pub(crate) fn set_profile_repo_servers_runtime(
     runtime.repo_servers_loaded = loaded;
 }
 
-fn load_profile_inventory_metrics(profile: &Profile) -> Result<InventoryMetrics, crate::ApiError> {
+fn load_profile_inventory_metrics(profile: &Profile) -> Result<LocalStateMetrics, crate::ApiError> {
     let destination = profile
         .dest_path()
         .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
@@ -616,28 +577,18 @@ fn load_profile_inventory_metrics(profile: &Profile) -> Result<InventoryMetrics,
         std::fs::create_dir_all(parent)
             .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
     }
-    let store = inventory::SqliteStore::open(&inventory_db)
-        .map_err(|e| map_inventory_api_error("inventory_store", e))?;
-    let inventory = inventory::Inventory::from_store(store)
-        .map_err(|e| map_inventory_api_error("inventory_store", e))?;
-    let root = inventory
-        .open_root(&profile.id, destination)
-        .map_err(|e| map_inventory_api_error("inventory_root", e))?;
-    let metrics = root
-        .metrics()
-        .map_err(|e| map_inventory_api_error("inventory_metrics", e))?;
-
-    Ok(InventoryMetrics {
-        root_path: metrics.root_path,
-        files_count: metrics.files_count,
-        files_bytes: metrics.files_bytes,
-        last_stamp: metrics.last_stamp.map(|stamp| InventoryStamp {
-            algo: stamp.algo,
-            hash64: stamp.hash64,
-            file_count: stamp.file_count,
-            total_bytes: stamp.total_bytes,
-        }),
-    })
+    InventoryLocalStateEngine::new()
+        .load_metrics(&profile.id, &destination, &inventory_db)
+        .map_err(|err| {
+            if err.is_corrupted_database() {
+                crate::ApiError::new(
+                    fleet_domain::INVENTORY_REBUILD_REQUIRED_CODE,
+                    fleet_local_state::REBUILD_REQUIRED_MESSAGE,
+                )
+            } else {
+                crate::ApiError::new("inventory_metrics", err.to_string())
+            }
+        })
 }
 
 fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, crate::ApiError> {
@@ -651,16 +602,6 @@ fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, c
         fleet_domain::repo_cache_dir(&state_root, &profile.id),
         repo_url.to_string(),
     )))
-}
-
-fn map_inventory_api_error(default_code: &'static str, err: inventory::Error) -> crate::ApiError {
-    if err.is_corrupted_database() {
-        return crate::ApiError::new(
-            fleet_domain::INVENTORY_REBUILD_REQUIRED_CODE,
-            inventory::REBUILD_REQUIRED_MESSAGE,
-        );
-    }
-    crate::ApiError::new(default_code, err.to_string())
 }
 
 pub fn validate_profile_name(name: &str) -> bool {
@@ -747,7 +688,7 @@ mod tests {
     use crate::state::AppState;
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use crate::Core;
-    use fleet_domain::health::{LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState};
+    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{ApiError, Profile};
 
@@ -824,10 +765,10 @@ mod tests {
             profile_id.clone(),
             crate::state::ProfileRuntimeState {
                 profile_id: profile_id.clone(),
-                assessment: Some(ProfileAssessmentReport {
+                assessment: Some(ProfileStateReport {
                     profile_id: profile_id.clone(),
-                    local_health: LocalHealthState::Error,
-                    remote_freshness: RemoteFreshnessState::Unknown,
+                    local_health: LocalStateHealth::ProbeFailed,
+                    remote_freshness: Some(RemoteFreshnessState::Unknown),
                     checked_at_unix_ms: 10,
                     expected_missing_in_inventory_count: 0,
                     inventory_unexpected_paths_count: 0,
@@ -835,7 +776,9 @@ mod tests {
                 }),
                 active: Some(crate::state::ActiveOperationState::new(
                     7,
-                    fleet_domain::health::OperationKind::CheckLocal,
+                    fleet_domain::health::OperationKind::Assess(
+                        fleet_domain::health::AssessScope::Local,
+                    ),
                     10,
                 )),
                 last_operation: None,

@@ -76,7 +76,7 @@ pub struct DirtyFile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InventoryMetrics {
+pub struct LocalStateMetrics {
     pub root_id: RootId,
     pub root_path: String,
 

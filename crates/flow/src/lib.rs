@@ -1,6 +1,5 @@
 mod config;
 mod events;
-mod inventory_access;
 mod locking;
 pub mod prune_policy;
 

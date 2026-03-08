@@ -5,7 +5,7 @@ mod runtime;
 
 use crate::state::AppState;
 use crate::storage::{profile_state_root_dir, ConfigRepo};
-use fleet_domain::{AppSettings, InventoryIgnoreRules};
+use fleet_domain::AppSettings;
 use fleet_flow::FlowConfig;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
@@ -22,6 +22,7 @@ struct CoreInner {
     config: Arc<ConfigRepo>,
     state: Mutex<AppState>,
     state_tx: watch::Sender<AppState>,
+    startup_auto_check_enabled: bool,
 }
 
 impl Core {
@@ -32,7 +33,13 @@ impl Core {
     }
 
     pub fn new_in_current_runtime_default() -> anyhow::Result<Self> {
-        let core = Self::new_default()?;
+        let core = Self::new_default_with_startup_checks(true)?;
+        runtime::spawn_in_current(core.clone());
+        Ok(core)
+    }
+
+    pub fn new_in_current_runtime_without_startup_checks() -> anyhow::Result<Self> {
+        let core = Self::new_default_with_startup_checks(false)?;
         runtime::spawn_in_current(core.clone());
         Ok(core)
     }
@@ -77,6 +84,10 @@ impl Core {
     }
 
     fn new_default() -> anyhow::Result<Self> {
+        Self::new_default_with_startup_checks(true)
+    }
+
+    fn new_default_with_startup_checks(startup_auto_check_enabled: bool) -> anyhow::Result<Self> {
         let config = Arc::new(ConfigRepo::new_default()?);
         let flow = FlowSystem::new();
         let (state_tx, _state_rx) = watch::channel(AppState::default());
@@ -88,16 +99,9 @@ impl Core {
                 config,
                 state,
                 state_tx,
+                startup_auto_check_enabled,
             }),
         })
-    }
-
-    pub(crate) fn inventory_scan_policy_from_settings(
-        settings: &AppSettings,
-    ) -> inventory::ScanPolicy {
-        let rules =
-            InventoryIgnoreRules::from_settings_value(&settings.sync.inventory_ignore_rules);
-        inventory::ScanPolicy::with_ignore_patterns(rules.patterns)
     }
 
     pub(crate) fn flow_config_from_settings(settings: &AppSettings) -> FlowConfig {
@@ -105,7 +109,7 @@ impl Core {
         if let Ok(root) = profile_state_root_dir() {
             cfg.profile_state_root_dir = root;
         }
-        cfg.scanner_config.policy = Self::inventory_scan_policy_from_settings(settings);
+        cfg.local_state_config.ignore_rules_text = settings.sync.local_state_ignore_rules.clone();
         cfg
     }
 

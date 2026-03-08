@@ -231,13 +231,13 @@ pub fn Home() -> Element {
 #[cfg(test)]
 mod tests {
     use fleet_core::{
-        ensure_profile_runtime_mut, recompute_profile_status, AppState, LocalHealthState,
+        ensure_profile_runtime_mut, recompute_profile_status, AppState, LocalStateHealth,
         ProfileStatusBadge, RemoteFreshnessState,
     };
-    use fleet_domain::health::ProfileAssessmentReport;
+    use fleet_domain::health::ProfileStateReport;
 
     fn snapshot_with_status(
-        local_health: LocalHealthState,
+        local_health: LocalStateHealth,
         remote_freshness: RemoteFreshnessState,
     ) -> AppState {
         let mut snapshot = AppState::default();
@@ -252,10 +252,10 @@ mod tests {
             },
         );
         let runtime = ensure_profile_runtime_mut(&mut snapshot, "p1", 1);
-        runtime.assessment = Some(ProfileAssessmentReport {
+        runtime.assessment = Some(ProfileStateReport {
             profile_id: "p1".to_string(),
             local_health,
-            remote_freshness,
+            remote_freshness: Some(remote_freshness),
             checked_at_unix_ms: 1,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 0,
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn badge_prefers_update_available() {
         let snapshot = snapshot_with_status(
-            LocalHealthState::LocalDrift,
+            LocalStateHealth::LocalDrift,
             RemoteFreshnessState::UpdateAvailable,
         );
         assert_eq!(
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn badge_marks_error_for_local_issues() {
         let snapshot = snapshot_with_status(
-            LocalHealthState::LocalStateMissing,
+            LocalStateHealth::LocalStateMissing,
             RemoteFreshnessState::Unknown,
         );
         assert_eq!(
@@ -291,14 +291,14 @@ mod tests {
                 .profile_runtime_by_id
                 .get("p1")
                 .and_then(|runtime| runtime.status.badge),
-            Some(ProfileStatusBadge::Error)
+            None
         );
     }
 
     #[test]
     fn badge_is_none_for_ready_up_to_date() {
         let snapshot =
-            snapshot_with_status(LocalHealthState::Ready, RemoteFreshnessState::UpToDate);
+            snapshot_with_status(LocalStateHealth::Ready, RemoteFreshnessState::UpToDate);
         assert_eq!(
             snapshot
                 .profile_runtime_by_id

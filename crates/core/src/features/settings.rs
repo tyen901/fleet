@@ -13,7 +13,6 @@ pub enum SettingsField {
     TelemetryConsent,
     AutoCheckOnStartup,
     ShowProfileIcons,
-    ShowAdvancedOptions,
 }
 
 pub fn effective_settings_defaults() -> AppSettings {
@@ -99,14 +98,6 @@ fn settings_field_spec(field: SettingsField) -> SettingsFieldSpec {
             },
             is_non_default: |settings, defaults| {
                 settings.ui.show_profile_icons != defaults.ui.show_profile_icons
-            },
-        },
-        SettingsField::ShowAdvancedOptions => SettingsFieldSpec {
-            apply_default: |settings, defaults| {
-                settings.ui.show_advanced_options = defaults.ui.show_advanced_options;
-            },
-            is_non_default: |settings, defaults| {
-                settings.ui.show_advanced_options != defaults.ui.show_advanced_options
             },
         },
     }
@@ -243,11 +234,10 @@ fn settings_changed_after_normalize(before: &AppSettings, after: &AppSettings) -
         SettingsField::TelemetryConsent,
         SettingsField::AutoCheckOnStartup,
         SettingsField::ShowProfileIcons,
-        SettingsField::ShowAdvancedOptions,
     ]
     .into_iter()
     .any(|field| settings_field_is_non_default(field, after, before))
-        || before.sync.inventory_ignore_rules != after.sync.inventory_ignore_rules
+        || before.sync.local_state_ignore_rules != after.sync.local_state_ignore_rules
 }
 
 #[cfg(test)]
@@ -271,8 +261,8 @@ mod tests {
             expected.arma3.arma3_launch_method
         );
         assert_eq!(
-            actual.sync.inventory_ignore_rules,
-            expected.sync.inventory_ignore_rules
+            actual.sync.local_state_ignore_rules,
+            expected.sync.local_state_ignore_rules
         );
     }
 

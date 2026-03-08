@@ -1,8 +1,9 @@
-use fleet_core::{Core, LocalHealthState, OperationKind};
+use fleet_core::{Core, LocalStateHealth, OperationKind};
 use std::io::{self, Write};
 
 use super::check::run_check_report;
 use super::flow_run::{run_clean_session, FlowOutput, FlowRunOptions};
+use super::start_operation;
 
 fn prompt_confirm_clean(paths: &[String]) -> anyhow::Result<bool> {
     println!(
@@ -34,24 +35,13 @@ pub async fn run(core: &Core, profile_id: &str, yes: bool) -> anyhow::Result<()>
         return Ok(());
     }
 
-    let mut session_id = None;
-    for _ in 0..10 {
-        match core
-            .start_operation(precheck.profile_id.clone(), OperationKind::Clean)
-            .await
-        {
-            Ok(id) => {
-                session_id = Some(id);
-                break;
-            }
-            Err(e) if e.message.contains("already running for this profile") => {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            Err(e) => return Err(anyhow::anyhow!("{}: {}", e.code, e.message)),
-        }
-    }
-    let session_id = session_id
-        .ok_or_else(|| anyhow::anyhow!("pipeline_error: timed out waiting to start clean"))?;
+    let session_id = start_operation(
+        core,
+        precheck.profile_id.clone(),
+        OperationKind::Clean,
+        "cleanup",
+    )
+    .await?;
 
     let report = run_clean_session(
         core,
@@ -69,7 +59,7 @@ pub async fn run(core: &Core, profile_id: &str, yes: bool) -> anyhow::Result<()>
         report.unexpected_delete_paths.len()
     );
     println!("local_health: {:?}", report.local_health);
-    if report.local_health == LocalHealthState::LocalDrift
+    if report.local_health == LocalStateHealth::LocalDrift
         && !report.unexpected_delete_paths.is_empty()
     {
         println!("Some unexpected files remain after cleanup.");
