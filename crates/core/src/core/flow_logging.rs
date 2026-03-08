@@ -1,13 +1,12 @@
-use fleet_domain::health::OperationKind;
+use fleet_domain::health::{AssessScope, OperationKind};
 use fleet_domain::ProfileId;
 
 pub(crate) fn operation_kind_label(kind: OperationKind) -> &'static str {
     match kind {
+        OperationKind::Assess(AssessScope::Local) => "assess_local",
+        OperationKind::Assess(AssessScope::Remote) => "assess_remote",
         OperationKind::Sync => "sync",
-        OperationKind::Repair => "repair",
-        OperationKind::CheckLocal => "check_local",
         OperationKind::RebuildInventory => "rebuild_inventory",
-        OperationKind::CheckRemote => "check_remote",
         OperationKind::Clean => "clean",
     }
 }

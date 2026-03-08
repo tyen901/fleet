@@ -149,8 +149,6 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
         "expected profile creation output, got: {out}"
     );
 
-    run_cmd(&bin, &["repair", profile_id], &envs);
-
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
         out.contains("profile check: local="),

@@ -2,11 +2,11 @@ use base64::Engine as _;
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
 use fleet_core::ProfileStatusBadge;
+use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant};
 use icondata::{BsArrowClockwise, BsExclamationTriangleFill, BsPersonFill};
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
-use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant};
 
 fn profile_icon_src(
     settings: &fleet_core::AppSettings,
@@ -115,24 +115,24 @@ pub(crate) fn build_profile_items(
                                     alt: format!("{profile_name} icon"),
                                 }
                             } else {
-                                AppIcon { icon: BsPersonFill, class: "ico home-card__icon" }
+                                AppIcon { icon: BsPersonFill }
                             }
                             if check_running {
                                 div { class: "home-card__icon-check",
-                                    AppIcon { icon: BsArrowClockwise, class: "ico ico--sm ico--spin" }
+                                    AppIcon { icon: BsArrowClockwise, size: fleet_style::IconSize::Sm, spin: true }
                                 }
                             }
                         }
                         div { class: "home-card__content",
                             h3 { class: "home-card__name", "{profile_name}" }
-                            p { class: "home-card__status", "{status}" }
                         }
+                        span { class: "profile-hero__badge home-card__badge", "{status}" }
                     }
                     if matches!(badge, Some(ProfileStatusBadge::Error)) {
                         span {
                             class: "home-card__notice home-card__notice--error",
                             title: "Error detected",
-                            AppIcon { icon: BsExclamationTriangleFill, class: "ico home-card__notice-icon" }
+                            AppIcon { icon: BsExclamationTriangleFill }
                             span { class: "home-card__notice-label", "Issue" }
                         }
                     }

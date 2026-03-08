@@ -1,20 +1,16 @@
 use directories::ProjectDirs;
-use fleet_domain::InventoryIgnoreRules;
 use fleet_download::DownloadService;
-use inventory::{ScannerConfig, SqliteStore};
-use std::path::{Path, PathBuf};
+use fleet_local_state::{LocalStateConfig, LocalStateEngine};
+use fleet_local_state_inventory::InventoryLocalStateEngine;
+use std::path::PathBuf;
 use std::sync::Arc;
-
-pub type InventoryStoreFactory = Arc<dyn Fn(&Path) -> anyhow::Result<SqliteStore> + Send + Sync>;
 
 /// Shared, lightweight dependencies and policy settings used by all flows.
 #[derive(Clone)]
 pub struct FlowConfig {
-    pub inventory_store_factory: InventoryStoreFactory,
     pub profile_state_root_dir: PathBuf,
-
-    /// Base scanner configuration (threading, etc).
-    pub scanner_config: ScannerConfig,
+    pub local_state: Arc<dyn LocalStateEngine>,
+    pub local_state_config: LocalStateConfig,
 
     /// Download service used for manifest/repo checks.
     pub downloads: Arc<DownloadService>,
@@ -23,18 +19,12 @@ pub struct FlowConfig {
 impl FlowConfig {
     pub fn new_default() -> Self {
         let profile_state_root_dir = default_profile_state_root_dir();
-        let scanner_config = ScannerConfig {
-            policy: inventory::ScanPolicy::with_ignore_patterns(
-                InventoryIgnoreRules::default().patterns,
-            ),
-            ..Default::default()
-        };
         Self {
-            inventory_store_factory: Arc::new(|path| {
-                SqliteStore::open(path).map_err(anyhow::Error::new)
-            }),
             profile_state_root_dir,
-            scanner_config,
+            local_state: Arc::new(InventoryLocalStateEngine::new()),
+            local_state_config: LocalStateConfig {
+                ignore_rules_text: ["repo.json", "mod.srf"].join("\n"),
+            },
             downloads: Arc::new(DownloadService::new_default()),
         }
     }

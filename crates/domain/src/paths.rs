@@ -6,12 +6,27 @@ use crate::hash::sha1_hex;
 pub struct FleetPaths {
     pub state_root: PathBuf,
     pub profile_id: String,
+    pub profile: ProfilePaths,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfilePaths {
     pub state_dir: PathBuf,
-    pub inventory_db: PathBuf,
-    pub inventory_lock: PathBuf,
+    pub local_state: LocalStatePaths,
+    pub reconcile: ReconcilePaths,
     pub repo_cache: PathBuf,
-    pub flux_ws: PathBuf,
-    pub flux_cache: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalStatePaths {
+    pub db: PathBuf,
+    pub lock: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcilePaths {
+    pub workspace: PathBuf,
+    pub cache: PathBuf,
 }
 
 impl FleetPaths {
@@ -27,12 +42,18 @@ impl FleetPaths {
         Self {
             state_root,
             profile_id,
-            state_dir,
-            inventory_db,
-            inventory_lock,
-            repo_cache,
-            flux_ws,
-            flux_cache,
+            profile: ProfilePaths {
+                state_dir,
+                local_state: LocalStatePaths {
+                    db: inventory_db,
+                    lock: inventory_lock,
+                },
+                reconcile: ReconcilePaths {
+                    workspace: flux_ws,
+                    cache: flux_cache,
+                },
+                repo_cache,
+            },
         }
     }
 }

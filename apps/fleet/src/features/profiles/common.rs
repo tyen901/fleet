@@ -1,16 +1,17 @@
 use chrono::{Local, TimeZone};
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
-use fleet_core::InventoryMetrics;
+use fleet_core::LocalStateMetrics;
+use fleet_style::{
+    Button, ButtonSize, ButtonVariant, FieldRow, FieldRowMeta, FieldRowStack, TextField,
+};
 use tracing::{error, info};
 
 use crate::app::router::Route;
+use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
-use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
-use crate::ui::components::{
-    Button, ButtonSize, ButtonVariant, Input, PanelRowControlStack, PanelRowMeta,
-};
+use crate::stores::toast_store::ToastStore;
 
 pub(crate) const UNEXPECTED_PATH_PREVIEW_LIMIT: usize = 6;
 
@@ -31,26 +32,32 @@ pub(crate) struct ProfileTextFieldRowProps {
 
 #[component]
 pub(crate) fn ProfileTextFieldRow(props: ProfileTextFieldRowProps) -> Element {
-    let row_class = props
-        .class
-        .as_deref()
-        .filter(|class| !class.trim().is_empty())
-        .unwrap_or("panel-row panel-row--split");
+    let class = props.class.unwrap_or_default();
 
     rsx! {
-        div { class: row_class,
-            PanelRowMeta { title: props.title }
-            PanelRowControlStack {
-                Input {
-                    label: None,
-                    value: props.value,
-                    placeholder: props.placeholder,
-                    folder_select: props.folder_select,
-                    invalid: props.error.is_some(),
-                    on_change: move |v| props.on_change.call(v),
-                }
-                if let Some(error) = props.error {
-                    div { class: "field__error", "{error}" }
+        div { class: class,
+            FieldRow {
+                FieldRowMeta { title: props.title }
+                FieldRowStack {
+                    if props.folder_select {
+                        BrowseField {
+                            value: props.value,
+                            placeholder: props.placeholder,
+                            folder_select: true,
+                            invalid: props.error.is_some(),
+                            on_change: move |v| props.on_change.call(v),
+                        }
+                    } else {
+                        TextField {
+                            value: props.value,
+                            placeholder: props.placeholder,
+                            invalid: props.error.is_some(),
+                            on_change: move |v| props.on_change.call(v),
+                        }
+                    }
+                    if let Some(error) = props.error {
+                        div { class: "field__error", "{error}" }
+                    }
                 }
             }
         }
@@ -108,21 +115,16 @@ pub(crate) fn new_profile_from_draft(
 pub(crate) async fn save_profile_and_update_state(
     bridge: FleetBridge,
     mut store: AppStore,
-    toasts: ToastStore,
+    _toasts: ToastStore,
     profile: fleet_core::Profile,
-    warning_detail: &'static str,
+    _warning_detail: &'static str,
 ) -> Result<fleet_core::Profile, fleet_core::ApiError> {
-    let result = bridge.core().profile_save_and_reassess(profile).await?;
-    let saved = result.profile;
+    let saved = bridge.core().profile_save(profile).await?;
 
     let mut next_state = (store.state)();
     next_state.profiles.insert(saved.id.clone(), saved.clone());
     next_state.selected_profile_id = Some(saved.id.clone());
     store.state.set(next_state);
-
-    if result.reassess_warning.is_some() {
-        toasts.push(Toast::new(ToastKind::Info, "Profile saved", warning_detail));
-    }
 
     Ok(saved)
 }
@@ -149,7 +151,7 @@ pub(crate) fn format_absolute_timestamp(ms: u64) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
-pub(crate) fn modpack_size_text(metrics: Option<&InventoryMetrics>, loading: bool) -> String {
+pub(crate) fn modpack_size_text(metrics: Option<&LocalStateMetrics>, loading: bool) -> String {
     if loading {
         return "Loading...".to_string();
     }
@@ -329,11 +331,11 @@ pub(crate) fn build_profile_edit_candidate(
 }
 
 pub(crate) fn profile_row_class() -> &'static str {
-    "panel-row panel-row--split dash-profile-row dash-profile-row--edit"
+    "dash-profile-row dash-profile-row--edit"
 }
 
 pub(crate) fn profile_folder_row_class() -> &'static str {
-    "panel-row panel-row--split dash-profile-row dash-profile-row--edit dash-folder-row dash-folder-row--edit"
+    "dash-profile-row dash-profile-row--edit dash-folder-row dash-folder-row--edit"
 }
 
 #[cfg(test)]
@@ -390,11 +392,11 @@ mod tests {
 
     #[test]
     fn modpack_size_prefers_stamp_total_bytes() {
-        let metrics = fleet_core::InventoryMetrics {
+        let metrics = fleet_core::LocalStateMetrics {
             root_path: "/tmp/x".to_string(),
             files_count: 1,
             files_bytes: 10,
-            last_stamp: Some(fleet_core::InventoryStamp {
+            last_stamp: Some(fleet_core::BaselineStamp {
                 algo: "quick-v1".to_string(),
                 hash64: 1,
                 file_count: 1,

@@ -1,5 +1,6 @@
 use fleet_domain::health::OperationKind;
 use fleet_domain::ApiError;
+use fleet_local_state::{LocalStateProgress, LocalStateStage, LocalStateStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -13,11 +14,10 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FlowResult {
-    Sync(fleet_domain::sync::SyncSummary),
-    Repair(fleet_domain::health::RepairSummary),
-    Check(fleet_domain::health::ProfileAssessmentReport),
-    RebuildInventory(fleet_domain::health::ProfileAssessmentReport),
-    Clean(fleet_domain::health::ProfileAssessmentReport),
+    Sync(fleet_domain::health::ProfileStateReport),
+    Assess(fleet_domain::health::ProfileStateReport),
+    RebuildInventory(fleet_domain::health::ProfileStateReport),
+    Clean(fleet_domain::health::ProfileStateReport),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,12 +36,12 @@ pub enum FlowEventKind {
         message: Option<String>,
     },
 
-    InventoryStageChanged {
-        stage: fleet_domain::inventory::InventoryScanStage,
+    LocalStateStageChanged {
+        stage: LocalStateStage,
     },
 
-    InventoryProgress {
-        progress: fleet_domain::inventory::InventoryScanProgress,
+    LocalStateProgress {
+        progress: LocalStateProgress,
         rate_bps: Option<f64>,
         eta_seconds: Option<u64>,
     },
@@ -51,13 +51,13 @@ pub enum FlowEventKind {
         text: String,
     },
 
-    CheckPhaseChanged {
-        phase: fleet_domain::health::CheckPhase,
+    AssessPhaseChanged {
+        phase: fleet_domain::health::AssessPhase,
     },
 
     /// Mirrors your domain status so downstream mapping is trivial.
-    InventoryStatus {
-        status: fleet_domain::InventoryStatus,
+    LocalStateStatus {
+        status: LocalStateStatus,
     },
 
     /// Flow completed successfully.

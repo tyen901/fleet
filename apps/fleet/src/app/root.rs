@@ -2,9 +2,10 @@ use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
-use crate::ui::components::ToastLayer;
+use crate::stores::toast_view::ToastViewport;
 use dioxus::prelude::*;
 use fleet_core::{OperationKind, OperationTerminalStatus};
+use fleet_style::ThemeRoot;
 use tracing::{error, warn};
 
 #[component]
@@ -161,12 +162,12 @@ pub fn AppRoot() -> Element {
         });
     }
 
-    let theme_mode = (app_state)().settings.appearance.theme_mode.as_str();
+    let theme_mode = (app_state)().settings.appearance.theme_mode;
 
     rsx! {
-        div { class: "app-root", "data-theme": theme_mode,
+        ThemeRoot { theme: theme_mode,
             dioxus_router::Router::<Route> {}
-            ToastLayer {}
+            ToastViewport {}
         }
     }
 }

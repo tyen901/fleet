@@ -1,27 +1,24 @@
 use crate::events::{EventSink, FlowEventKind, LogLevel};
-use crate::inventory_access::open_inventory_root;
 use crate::locking::{check_lock_state, InventoryLockState};
-use crate::prune_policy;
 use crate::FlowConfig;
 use fleet_domain::health::{
-    CheckPhase, LocalHealthState, ProfileAssessmentReport, RemoteFreshnessState,
+    AssessPhase, LocalStateHealth, ProfileStateReport, RemoteFreshnessState,
 };
 use fleet_domain::{FleetPaths, Profile, ProfileSourceKind};
+use fleet_local_state::{BaselineStatus, LocalStateAssessment};
 use flux_manifest::ManifestEntry;
-use inventory::{DirtyKind, InventoryState};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::fs;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 pub async fn run_assess_flow(
     cfg: FlowConfig,
     profile: Profile,
     include_remote: bool,
     cancel: CancellationToken,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     run_assess_flow_with_sink(cfg, profile, include_remote, cancel, Arc::new(NoopSink)).await
 }
 
@@ -31,7 +28,7 @@ pub async fn run_assess_flow_with_sink(
     include_remote: bool,
     cancel: CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     info!(
         flow_kind = "check",
         profile_id = %profile.id,
@@ -40,76 +37,73 @@ pub async fn run_assess_flow_with_sink(
         "assessment flow started"
     );
     check_canceled(&cancel)?;
-    emit_check_phase(
+    emit_assess_phase(
         sink.as_ref(),
-        CheckPhase::ValidatingContext,
+        AssessPhase::ValidatingContext,
         "Validating profile context...",
     );
 
-    let mut local_assessment = evaluate_local_health(&cfg, &profile, &cancel, sink.clone()).await?;
-    emit_check_phase(
+    let mut assessment = evaluate_local_state(&cfg, &profile, sink.clone()).await?;
+    emit_assess_phase(
         sink.as_ref(),
-        CheckPhase::EvaluatingLocal,
+        AssessPhase::EvaluatingLocal,
         "Evaluating local state...",
     );
-    let local_health = local_assessment.local_health.clone();
     let remote_freshness = if !include_remote {
-        if !is_hard_local_invalid_state(&local_health) {
+        if !is_hard_local_invalid_state(&assessment.health) {
             if let Some(expected_paths) = cached_expected_paths(&cfg, &profile) {
                 apply_expected_validation(
-                    &mut local_assessment,
+                    &mut assessment,
                     &profile.destination,
                     Some(&expected_paths),
                 );
             }
         }
-        RemoteFreshnessState::NotRelevant
-    } else if is_hard_local_invalid_state(&local_health) {
-        RemoteFreshnessState::Unknown
+        None
+    } else if is_hard_local_invalid_state(&assessment.health) {
+        Some(RemoteFreshnessState::Unknown)
     } else {
-        emit_check_phase(
+        emit_assess_phase(
             sink.as_ref(),
-            CheckPhase::LoadingRemoteManifest,
+            AssessPhase::LoadingRemoteManifest,
             "Loading remote manifest...",
         );
         let remote_assessment = evaluate_remote_expected_state(&cfg, &profile, &cancel).await;
-        emit_check_phase(
+        emit_assess_phase(
             sink.as_ref(),
-            CheckPhase::ComparingExpectedState,
+            AssessPhase::ComparingExpectedState,
             "Comparing local and remote expected state...",
         );
         apply_expected_validation(
-            &mut local_assessment,
+            &mut assessment,
             &profile.destination,
             remote_assessment.expected_paths.as_ref(),
         );
-        remote_assessment.remote_freshness
+        Some(remote_assessment.remote_freshness)
     };
-    emit_check_phase(
+    emit_assess_phase(
         sink.as_ref(),
-        CheckPhase::Finalizing,
+        AssessPhase::Finalizing,
         "Finalizing check report...",
     );
 
-    let report = ProfileAssessmentReport {
-        profile_id: profile.id.clone(),
-        local_health: local_assessment.local_health,
-        remote_freshness,
-        checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-        expected_missing_in_inventory_count: local_assessment.expected_missing_in_inventory.len()
-            as u64,
-        inventory_unexpected_paths_count: local_assessment.inventory_unexpected_paths.len() as u64,
-        unexpected_delete_paths: local_assessment.unexpected_delete_paths,
-    };
     debug!(
         flow_kind = "check",
         profile_id = %profile.id,
         op = "run_assess_flow",
-        expected_validation = ?local_assessment.expected_validation_state,
-        expected_missing = local_assessment.expected_missing_in_inventory.len(),
-        inventory_unexpected = local_assessment.inventory_unexpected_paths.len(),
+        expected_missing = assessment.expected_missing_count,
+        unexpected = assessment.unexpected_count,
         "assessment strict expected-state signals"
     );
+    let report = ProfileStateReport {
+        profile_id: assessment.profile_id,
+        local_health: assessment.health,
+        remote_freshness,
+        checked_at_unix_ms: assessment.checked_at_unix_ms,
+        expected_missing_in_inventory_count: assessment.expected_missing_count,
+        inventory_unexpected_paths_count: assessment.unexpected_count,
+        unexpected_delete_paths: assessment.unexpected_paths,
+    };
     info!(
         flow_kind = "check",
         profile_id = %profile.id,
@@ -131,43 +125,12 @@ impl EventSink for NoopSink {
     fn emit(&self, _event: FlowEventKind) {}
 }
 
-fn emit_check_phase(sink: &dyn EventSink, phase: CheckPhase, text: &str) {
-    sink.emit(FlowEventKind::CheckPhaseChanged { phase });
+fn emit_assess_phase(sink: &dyn EventSink, phase: AssessPhase, text: &str) {
+    sink.emit(FlowEventKind::AssessPhaseChanged { phase });
     sink.emit(FlowEventKind::Message {
         level: LogLevel::Info,
         text: text.to_string(),
     });
-}
-
-struct LocalAssessmentResult {
-    local_health: LocalHealthState,
-    unexpected_delete_paths: Vec<String>,
-    expected_validation_state: ExpectedValidationState,
-    expected_missing_in_inventory: Vec<String>,
-    inventory_unexpected_paths: Vec<String>,
-    inventory_file_paths: BTreeSet<String>,
-}
-
-fn local_assessment(local_health: LocalHealthState) -> LocalAssessmentResult {
-    LocalAssessmentResult {
-        local_health,
-        unexpected_delete_paths: Vec::new(),
-        expected_validation_state: ExpectedValidationState::NotRequested,
-        expected_missing_in_inventory: Vec::new(),
-        inventory_unexpected_paths: Vec::new(),
-        inventory_file_paths: BTreeSet::new(),
-    }
-}
-
-fn local_error() -> LocalAssessmentResult {
-    local_assessment(LocalHealthState::Error)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExpectedValidationState {
-    NotRequested,
-    Available,
-    Unavailable,
 }
 
 struct RemoteExpectedState {
@@ -175,262 +138,110 @@ struct RemoteExpectedState {
     expected_paths: Option<BTreeSet<String>>,
 }
 
-async fn evaluate_local_health(
+async fn evaluate_local_state(
     cfg: &FlowConfig,
     profile: &Profile,
-    cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<LocalAssessmentResult> {
-    if check_canceled(cancel).is_err() {
-        warn!(
-            flow_kind = "check",
-            profile_id = %profile.id,
-            op = "evaluate_local_health",
-            outcome = "canceled",
-            "local health evaluation canceled"
-        );
-        return Ok(local_error());
-    }
-
-    if profile.dest_path().is_err() || profile.validated_source_kind().is_err() {
-        warn!(
-            flow_kind = "check",
-            profile_id = %profile.id,
-            op = "evaluate_local_health",
-            outcome = "failed",
-            reason = "invalid_profile_context",
-            "local health evaluation failed profile validation"
-        );
-        return Ok(local_error());
-    }
+) -> anyhow::Result<LocalStateAssessment> {
     let dest_path = match profile.dest_path() {
         Ok(path) => path,
-        Err(_) => return Ok(local_error()),
-    };
-
-    let dest_exists = fs::try_exists(&dest_path).await;
-    if check_canceled(cancel).is_err() {
-        return Ok(local_error());
-    }
-    match dest_exists {
-        Ok(true) => {}
-        Ok(false) => {
-            info!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "missing_destination",
-                "local health detected missing destination"
-            );
-            return Ok(local_assessment(LocalHealthState::MissingDestination));
-        }
         Err(_) => {
-            error!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "failed",
-                reason = "destination_probe_failed",
-                "local health failed while probing destination"
-            );
-            return Ok(local_error());
+            return Ok(LocalStateAssessment {
+                profile_id: profile.id.clone(),
+                health: LocalStateHealth::InvalidProfile,
+                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+                expected_missing_count: 0,
+                unexpected_count: 0,
+                unexpected_paths: Vec::new(),
+                baseline_status: BaselineStatus::Missing,
+                tracked_paths: Vec::new(),
+            });
         }
+    };
+    if profile.validated_source_kind().is_err() {
+        return Ok(LocalStateAssessment {
+            profile_id: profile.id.clone(),
+            health: LocalStateHealth::InvalidProfile,
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+            expected_missing_count: 0,
+            unexpected_count: 0,
+            unexpected_paths: Vec::new(),
+            baseline_status: BaselineStatus::Missing,
+            tracked_paths: Vec::new(),
+        });
     }
 
     let layout = FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
-    let state_dir_exists = fs::try_exists(&layout.state_dir).await;
-    if check_canceled(cancel).is_err() {
-        return Ok(local_error());
-    }
-    let db_exists = fs::try_exists(&layout.inventory_db).await;
-    if check_canceled(cancel).is_err() {
-        return Ok(local_error());
-    }
-    match (state_dir_exists, db_exists) {
-        (Ok(true), Ok(true)) => {}
-        (Ok(_), Ok(_)) => {
-            info!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "missing_local_state",
-                "local health detected missing local state"
-            );
-            return Ok(local_assessment(LocalHealthState::LocalStateMissing));
-        }
-        _ => {
-            error!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "failed",
-                reason = "state_probe_failed",
-                "local health failed while probing state files"
-            );
-            return Ok(local_error());
-        }
-    }
-
-    match check_lock_state(&layout.inventory_lock).await {
+    match check_lock_state(&layout.profile.local_state.lock).await {
         Ok(InventoryLockState::NotLocked) => {}
         Ok(InventoryLockState::Locked { .. }) => {
-            warn!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "locked",
-                reason = "inventory_lock_held",
-                "local health found active inventory lock"
-            );
-            return Ok(local_error());
+            return Ok(LocalStateAssessment {
+                profile_id: profile.id.clone(),
+                health: LocalStateHealth::Blocked,
+                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+                expected_missing_count: 0,
+                unexpected_count: 0,
+                unexpected_paths: Vec::new(),
+                baseline_status: BaselineStatus::Missing,
+                tracked_paths: Vec::new(),
+            });
         }
         Err(_) => {
-            error!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "failed",
-                reason = "inventory_lock_probe_failed",
-                "local health failed while checking lock state"
-            );
-            return Ok(local_error());
+            return Ok(LocalStateAssessment {
+                profile_id: profile.id.clone(),
+                health: LocalStateHealth::ProbeFailed,
+                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+                expected_missing_count: 0,
+                unexpected_count: 0,
+                unexpected_paths: Vec::new(),
+                baseline_status: BaselineStatus::Missing,
+                tracked_paths: Vec::new(),
+            });
         }
     }
-    if check_canceled(cancel).is_err() {
-        return Ok(local_error());
-    }
-
-    let policy = cfg.scanner_config.policy.clone();
-    let profile_id = profile.id.clone();
-    let cfg_cloned = cfg.clone();
-    emit_check_phase(
+    emit_assess_phase(
         sink.as_ref(),
-        CheckPhase::ScanningLocal,
+        AssessPhase::ScanningLocal,
         "Scanning local files...",
     );
-
-    let mut local_state_task =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<LocalAssessmentResult> {
-            let root =
-                open_inventory_root(&cfg_cloned, &layout.inventory_db, &profile_id, &dest_path)?;
-            let inventory_snapshot = root.snapshot()?;
-            let initial_inventory_file_paths = inventory_snapshot
-                .files
-                .into_iter()
-                .map(|file| fleet_domain::normalize_rel_slashes(&file.file.rel_path))
-                .collect::<BTreeSet<_>>();
-            if root.metrics()?.last_stamp.is_none() {
-                let mut result = local_assessment(LocalHealthState::LocalStateMissing);
-                result.inventory_file_paths = initial_inventory_file_paths;
-                return Ok(result);
-            }
-
-            let inventory_snapshot = root.snapshot()?;
-            let inventory_file_paths = inventory_snapshot
-                .files
-                .into_iter()
-                .map(|file| fleet_domain::normalize_rel_slashes(&file.file.rel_path))
-                .collect::<BTreeSet<_>>();
-            let state = root.state(&policy)?;
-            let (local_health, unexpected_delete_paths, inventory_file_paths) = match state {
-                InventoryState::Clean { .. } => {
-                    (LocalHealthState::Ready, Vec::new(), inventory_file_paths)
-                }
-                InventoryState::Dirty { .. } => {
-                    let mut paths = root
-                        .dirty_files(&policy)?
-                        .into_iter()
-                        .filter(|dirty| dirty.kind == DirtyKind::Added)
-                        .map(|dirty| std::path::PathBuf::from(dirty.rel_path))
-                        .filter(|rel| !prune_policy::is_protected_root_entry(&dest_path, rel))
-                        .map(|rel| rel.to_string_lossy().to_string())
-                        .collect::<Vec<_>>();
-                    paths.sort();
-                    paths.dedup();
-                    (LocalHealthState::LocalDrift, paths, inventory_file_paths)
-                }
-                InventoryState::MissingRoot { .. } => (
-                    LocalHealthState::MissingDestination,
-                    Vec::new(),
-                    BTreeSet::new(),
-                ),
-            };
-
-            Ok(LocalAssessmentResult {
-                local_health,
-                unexpected_delete_paths,
-                expected_validation_state: ExpectedValidationState::NotRequested,
-                expected_missing_in_inventory: Vec::new(),
-                inventory_unexpected_paths: Vec::new(),
-                inventory_file_paths,
+    let cfg_cloned = cfg.clone();
+    let profile_id_for_engine = profile.id.clone();
+    let profile_id_for_error = profile.id.clone();
+    tokio::task::spawn_blocking(move || {
+        cfg_cloned.local_state.assess(
+            &profile_id_for_engine,
+            &dest_path,
+            &layout.profile.local_state.db,
+            &layout.profile.local_state.lock,
+            &cfg_cloned.local_state_config,
+            None,
+        )
+    })
+    .await?
+    .map_err(|err| match err {
+        fleet_local_state::LocalStateError::CorruptDatabase => anyhow::Error::new(err),
+        other => anyhow::Error::new(other),
+    })
+    .or_else(|err| {
+        if err
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<fleet_local_state::LocalStateError>())
+            .any(fleet_local_state::LocalStateError::is_corrupted_database)
+        {
+            Ok(LocalStateAssessment {
+                profile_id: profile_id_for_error,
+                health: LocalStateHealth::InventoryCorrupt,
+                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+                expected_missing_count: 0,
+                unexpected_count: 0,
+                unexpected_paths: Vec::new(),
+                baseline_status: BaselineStatus::Present,
+                tracked_paths: Vec::new(),
             })
-        });
-
-    let local_state = tokio::select! {
-        _ = cancel.cancelled() => {
-            local_state_task.abort();
-            return Ok(local_error());
+        } else {
+            Err(err)
         }
-        result = &mut local_state_task => result,
-    };
-
-    if check_canceled(cancel).is_err() {
-        return Ok(local_error());
-    }
-
-    match local_state {
-        Ok(Ok(v)) => {
-            info!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "ok",
-                reason = "local_state_computed",
-                "local health evaluation complete"
-            );
-            Ok(v)
-        }
-        Ok(Err(err)) => {
-            error!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "failed",
-                reason = "inventory_state_failed",
-                "local health inventory state failed"
-            );
-            debug!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                error = %err,
-                "local health inventory state error details"
-            );
-            if has_corrupted_inventory_db(&err) {
-                Err(err)
-            } else {
-                Ok(local_error())
-            }
-        }
-        Err(err) => {
-            error!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                outcome = "failed",
-                reason = "blocking_task_failed",
-                "local health background task failed"
-            );
-            debug!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_local_health",
-                error = %err,
-                "local health blocking task error details"
-            );
-            Ok(local_error())
-        }
-    }
+    })
 }
 
 async fn evaluate_remote_expected_state(
@@ -438,26 +249,11 @@ async fn evaluate_remote_expected_state(
     profile: &Profile,
     cancel: &CancellationToken,
 ) -> RemoteExpectedState {
-    info!(
-        flow_kind = "check",
-        profile_id = %profile.id,
-        op = "evaluate_remote_expected_state",
-        phase = "remote",
-        "remote expected-state evaluation started"
-    );
     let layout = FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
 
     let repo_url = match profile.validated_source_kind() {
         Ok(ProfileSourceKind::Http(url)) => url.to_string(),
         Err(_) => {
-            warn!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_remote_expected_state",
-                outcome = "failed",
-                reason = "invalid_repo_source",
-                "remote expected-state evaluation skipped due to invalid source"
-            );
             return RemoteExpectedState {
                 remote_freshness: RemoteFreshnessState::Error,
                 expected_paths: None,
@@ -467,7 +263,7 @@ async fn evaluate_remote_expected_state(
 
     let refreshed_manifest = fleet_manifest::load_desired_manifest_with_freshness(
         &repo_url,
-        &layout.repo_cache,
+        &layout.profile.repo_cache,
         &cfg.downloads,
         None,
     )
@@ -480,65 +276,18 @@ async fn evaluate_remote_expected_state(
     }
 
     match refreshed_manifest {
-        Ok(loaded) => {
-            let expected_paths = manifest_expected_file_paths(&loaded.manifest);
-            let remote_freshness = map_manifest_freshness(loaded.freshness);
-            info!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_remote_expected_state",
-                outcome = "ok",
-                remote = ?remote_freshness,
-                expected_paths = expected_paths.len(),
-                "remote expected-state evaluation complete"
-            );
-            RemoteExpectedState {
-                remote_freshness,
-                expected_paths: Some(expected_paths),
-            }
-        }
-        Err(err) => {
-            warn!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_remote_expected_state",
-                outcome = "failed",
-                reason = "manifest_refresh_failed",
-                "remote expected manifest refresh failed; attempting cache fallback"
-            );
-            debug!(
-                flow_kind = "check",
-                profile_id = %profile.id,
-                op = "evaluate_remote_expected_state",
-                error = %err,
-                "remote expected manifest refresh error details"
-            );
-
-            let cached_manifest =
-                fleet_manifest::load_cached_desired_manifest(&repo_url, &layout.repo_cache);
-            let expected_paths = match cached_manifest {
+        Ok(loaded) => RemoteExpectedState {
+            remote_freshness: map_manifest_freshness(loaded.freshness),
+            expected_paths: Some(manifest_expected_file_paths(&loaded.manifest)),
+        },
+        Err(_) => {
+            let expected_paths = match fleet_manifest::load_cached_desired_manifest(
+                &repo_url,
+                &layout.profile.repo_cache,
+            ) {
                 Ok(Some(manifest)) => Some(manifest_expected_file_paths(&manifest)),
-                Ok(None) => None,
-                Err(cache_err) => {
-                    warn!(
-                        flow_kind = "check",
-                        profile_id = %profile.id,
-                        op = "evaluate_remote_expected_state",
-                        outcome = "failed",
-                        reason = "manifest_cache_fallback_failed",
-                        "remote expected manifest cache fallback failed"
-                    );
-                    debug!(
-                        flow_kind = "check",
-                        profile_id = %profile.id,
-                        op = "evaluate_remote_expected_state",
-                        error = %cache_err,
-                        "remote expected manifest cache fallback error details"
-                    );
-                    None
-                }
+                _ => None,
             };
-
             let remote_freshness = if expected_paths.is_some() {
                 RemoteFreshnessState::Error
             } else {
@@ -552,12 +301,15 @@ async fn evaluate_remote_expected_state(
     }
 }
 
-fn is_hard_local_invalid_state(state: &LocalHealthState) -> bool {
+fn is_hard_local_invalid_state(state: &LocalStateHealth) -> bool {
     matches!(
         state,
-        LocalHealthState::MissingDestination
-            | LocalHealthState::LocalStateMissing
-            | LocalHealthState::Error
+        LocalStateHealth::MissingDestination
+            | LocalStateHealth::LocalStateMissing
+            | LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+            | LocalStateHealth::InventoryCorrupt
     )
 }
 
@@ -593,52 +345,57 @@ fn cached_expected_paths(cfg: &FlowConfig, profile: &Profile) -> Option<BTreeSet
         Ok(ProfileSourceKind::Http(url)) => url.to_string(),
         Err(_) => return None,
     };
-    match fleet_manifest::load_cached_desired_manifest(&repo_url, &layout.repo_cache) {
+    match fleet_manifest::load_cached_desired_manifest(&repo_url, &layout.profile.repo_cache) {
         Ok(Some(manifest)) => Some(manifest_expected_file_paths(&manifest)),
         _ => None,
     }
 }
 
 fn apply_expected_validation(
-    assessment: &mut LocalAssessmentResult,
+    assessment: &mut LocalStateAssessment,
     destination: &str,
     expected_paths: Option<&BTreeSet<String>>,
 ) {
+    let tracked = assessment
+        .tracked_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let Some(expected_paths) = expected_paths else {
-        assessment.expected_validation_state = ExpectedValidationState::Unavailable;
-        assessment.local_health = LocalHealthState::LocalDrift;
+        assessment.health = LocalStateHealth::LocalDrift;
         return;
     };
 
-    assessment.expected_validation_state = ExpectedValidationState::Available;
-    assessment.expected_missing_in_inventory = expected_paths
-        .difference(&assessment.inventory_file_paths)
+    let expected_missing = expected_paths
+        .difference(&tracked)
         .cloned()
-        .collect();
-    assessment.inventory_unexpected_paths = assessment
-        .inventory_file_paths
+        .collect::<Vec<_>>();
+    let inventory_unexpected = tracked
         .difference(expected_paths)
         .filter(|rel| {
-            !prune_policy::is_protected_root_entry(Path::new(destination), Path::new(rel.as_str()))
+            !crate::prune_policy::is_protected_root_entry(
+                Path::new(destination),
+                Path::new(rel.as_str()),
+            )
         })
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
 
     let mut merged_unexpected = assessment
-        .unexpected_delete_paths
+        .unexpected_paths
         .iter()
         .map(|rel| fleet_domain::normalize_rel_slashes(rel))
         .filter(|rel| !expected_paths.contains(rel))
         .collect::<Vec<_>>();
-    merged_unexpected.extend(assessment.inventory_unexpected_paths.iter().cloned());
+    merged_unexpected.extend(inventory_unexpected);
     merged_unexpected.sort();
     merged_unexpected.dedup();
-    assessment.unexpected_delete_paths = merged_unexpected;
+    assessment.unexpected_paths = merged_unexpected;
+    assessment.unexpected_count = assessment.unexpected_paths.len() as u64;
+    assessment.expected_missing_count = expected_missing.len() as u64;
 
-    if !assessment.expected_missing_in_inventory.is_empty()
-        || !assessment.inventory_unexpected_paths.is_empty()
-    {
-        assessment.local_health = LocalHealthState::LocalDrift;
+    if assessment.expected_missing_count > 0 || assessment.unexpected_count > 0 {
+        assessment.health = LocalStateHealth::LocalDrift;
     }
 }
 
@@ -647,10 +404,4 @@ fn check_canceled(cancel: &CancellationToken) -> anyhow::Result<()> {
         anyhow::bail!("canceled");
     }
     Ok(())
-}
-
-fn has_corrupted_inventory_db(err: &anyhow::Error) -> bool {
-    err.chain()
-        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
-        .any(inventory::Error::is_corrupted_database)
 }

@@ -1,13 +1,13 @@
 use super::steps::{
     apply_deletes, collect_unexpected_deletes, ensure_not_canceled, load_manifest,
-    plan_manifest_deletes, resolve_profile, run_flux_sync, scan_inventory,
+    plan_manifest_deletes, resolve_profile, run_reconcile, scan_local_state,
 };
 use crate::events::{EventSink, FlowEventKind, LogLevel};
 use crate::locking::{acquire_lock, check_lock_state, InventoryLockState};
 use crate::FlowConfig;
 use anyhow::Context;
-use fleet_domain::health::{CheckPhase, ProfileAssessmentReport, RepairSummary};
-use fleet_domain::{Profile, ProfileSourceKind, SyncPhase, SyncSummary};
+use fleet_domain::health::{AssessPhase, ProfileStateReport, RemoteFreshnessState};
+use fleet_domain::{Profile, ProfileSourceKind, SyncPhase};
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -23,8 +23,7 @@ struct RepoCacheSnapshot {
 }
 
 struct RunArtifacts {
-    report: fleet_flux::FluxSyncReport,
-    deleted_paths: Vec<PathBuf>,
+    report: fleet_reconcile::FluxSyncReport,
     duration_ms: u64,
 }
 
@@ -41,50 +40,20 @@ impl Default for CleanFlowOptions {
     }
 }
 
-pub async fn run_repair_flow(
-    cfg: FlowConfig,
-    profile: Profile,
-    cancel: CancellationToken,
-    sink: Arc<dyn EventSink>,
-) -> anyhow::Result<RepairSummary> {
-    info!(
-        flow_kind = "repair",
-        profile_id = %profile.id,
-        op = "run_repair_flow",
-        "repair flow started"
-    );
-    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, sink).await?;
-    info!(
-        flow_kind = "repair",
-        profile_id = %profile.id,
-        op = "run_repair_flow",
-        outcome = "ok",
-        duration_ms = artifacts.duration_ms,
-        count = artifacts.report.files_finalized,
-        "repair flow finished"
-    );
-    Ok(RepairSummary {
-        profile_id: profile.id,
-        destination: profile.destination,
-        duration_ms: artifacts.duration_ms,
-        files_reconciled: artifacts.report.files_finalized,
-        files_deleted: artifacts.deleted_paths.len() as u64,
-    })
-}
-
 pub async fn run_sync_flow(
     cfg: FlowConfig,
     profile: Profile,
     cancel: CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<SyncSummary> {
+) -> anyhow::Result<ProfileStateReport> {
     info!(
         flow_kind = "sync",
         profile_id = %profile.id,
         op = "run_sync_flow",
         "sync flow started"
     );
-    let artifacts = run_operation_flow(cfg, profile.clone(), cancel, sink).await?;
+    let artifacts = run_operation_flow(cfg.clone(), profile.clone(), cancel, sink).await?;
+    let assessment = post_sync_assessment(cfg, profile.clone()).await?;
     info!(
         flow_kind = "sync",
         profile_id = %profile.id,
@@ -94,15 +63,18 @@ pub async fn run_sync_flow(
         count = artifacts.report.files_finalized,
         "sync flow finished"
     );
-    Ok(SyncSummary {
-        profile_id: profile.id,
-        destination: profile.destination,
-        manifest_source: profile.source,
-        duration_ms: artifacts.duration_ms,
-        bytes_reused: artifacts.report.bytes_reused,
-        bytes_downloaded: artifacts.report.bytes_downloaded,
-        files_finalized: artifacts.report.files_finalized,
-    })
+    Ok(assessment)
+}
+
+async fn post_sync_assessment(
+    cfg: FlowConfig,
+    profile: Profile,
+) -> anyhow::Result<ProfileStateReport> {
+    let mut report =
+        crate::flows::assess::run_assess_flow(cfg, profile, false, CancellationToken::new())
+            .await?;
+    report.remote_freshness = Some(RemoteFreshnessState::UpToDate);
+    Ok(report)
 }
 
 pub async fn run_clean_flow(
@@ -110,7 +82,7 @@ pub async fn run_clean_flow(
     profile: Profile,
     cancel: CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     run_clean_flow_with_options(cfg, profile, cancel, sink, CleanFlowOptions::default()).await
 }
 
@@ -119,7 +91,7 @@ pub async fn run_rebuild_inventory_flow(
     profile: Profile,
     cancel: CancellationToken,
     sink: Arc<dyn EventSink>,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     info!(
         flow_kind = "rebuild_inventory",
         profile_id = %profile.id,
@@ -127,8 +99,8 @@ pub async fn run_rebuild_inventory_flow(
         "rebuild inventory flow started"
     );
     ensure_not_canceled(&cancel)?;
-    sink.emit(FlowEventKind::CheckPhaseChanged {
-        phase: CheckPhase::ValidatingContext,
+    sink.emit(FlowEventKind::AssessPhaseChanged {
+        phase: AssessPhase::ValidatingContext,
     });
     sink.emit(FlowEventKind::Message {
         level: LogLevel::Info,
@@ -136,28 +108,29 @@ pub async fn run_rebuild_inventory_flow(
     });
     let resolved = resolve_profile(&cfg, &profile)?;
 
-    let lock_state = check_lock_state(&resolved.paths.inventory_lock).await?;
+    let lock_state = check_lock_state(&resolved.paths.profile.local_state.lock).await?;
     if matches!(lock_state, InventoryLockState::Locked { .. }) {
         anyhow::bail!("inventory lock is currently held by another running operation");
     }
 
     {
-        let _inventory_lock_guard = acquire_lock(resolved.paths.inventory_lock.clone()).await?;
-        match tokio::fs::remove_file(&resolved.paths.inventory_db).await {
+        let _inventory_lock_guard =
+            acquire_lock(resolved.paths.profile.local_state.lock.clone()).await?;
+        match tokio::fs::remove_file(&resolved.paths.profile.local_state.db).await {
             Ok(()) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
                 return Err(err).with_context(|| {
                     format!(
                         "remove previous inventory db {}",
-                        resolved.paths.inventory_db.display()
+                        resolved.paths.profile.local_state.db.display()
                     )
                 });
             }
         }
 
-        sink.emit(FlowEventKind::CheckPhaseChanged {
-            phase: CheckPhase::ScanningLocal,
+        sink.emit(FlowEventKind::AssessPhaseChanged {
+            phase: AssessPhase::ScanningLocal,
         });
         sink.emit(FlowEventKind::Message {
             level: LogLevel::Info,
@@ -166,7 +139,7 @@ pub async fn run_rebuild_inventory_flow(
         sink.emit(FlowEventKind::SyncPhaseChanged {
             phase: SyncPhase::EnsuringInventory,
         });
-        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        scan_local_state(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
     }
 
     let report =
@@ -188,7 +161,7 @@ pub async fn run_clean_flow_with_options(
     cancel: CancellationToken,
     sink: Arc<dyn EventSink>,
     options: CleanFlowOptions,
-) -> anyhow::Result<ProfileAssessmentReport> {
+) -> anyhow::Result<ProfileStateReport> {
     info!(
         flow_kind = "clean",
         profile_id = %profile.id,
@@ -198,13 +171,14 @@ pub async fn run_clean_flow_with_options(
     ensure_not_canceled(&cancel)?;
     let resolved = resolve_profile(&cfg, &profile)?;
 
-    let lock_state = check_lock_state(&resolved.paths.inventory_lock).await?;
+    let lock_state = check_lock_state(&resolved.paths.profile.local_state.lock).await?;
     if matches!(lock_state, InventoryLockState::Locked { .. }) {
         anyhow::bail!("inventory lock is currently held by another running operation");
     }
 
     {
-        let _inventory_lock_guard = acquire_lock(resolved.paths.inventory_lock.clone()).await?;
+        let _inventory_lock_guard =
+            acquire_lock(resolved.paths.profile.local_state.lock.clone()).await?;
         let delete_paths = collect_unexpected_deletes(&cfg, &profile, &resolved)?;
 
         sink.emit(FlowEventKind::SyncPhaseChanged {
@@ -214,7 +188,7 @@ pub async fn run_clean_flow_with_options(
             level: LogLevel::Info,
             text: "Scanning inventory...".into(),
         });
-        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        scan_local_state(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
         if !delete_paths.is_empty() {
             sink.emit(FlowEventKind::SyncPhaseChanged {
                 phase: SyncPhase::Deleting,
@@ -240,7 +214,7 @@ pub async fn run_clean_flow_with_options(
             level: LogLevel::Info,
             text: "Finalizing inventory state...".into(),
         });
-        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        scan_local_state(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
         sink.emit(FlowEventKind::SyncPhaseChanged {
             phase: SyncPhase::Done,
         });
@@ -283,7 +257,7 @@ async fn run_operation_flow(
         outcome = "ok",
         "profile validation complete"
     );
-    let lock_state = check_lock_state(&resolved.paths.inventory_lock).await?;
+    let lock_state = check_lock_state(&resolved.paths.profile.local_state.lock).await?;
     info!(
         flow_kind = "operation",
         profile_id = %profile.id,
@@ -304,7 +278,8 @@ async fn run_operation_flow(
         anyhow::bail!("inventory lock is currently held by another running operation");
     }
 
-    let _inventory_lock_guard = acquire_lock(resolved.paths.inventory_lock.clone()).await?;
+    let _inventory_lock_guard =
+        acquire_lock(resolved.paths.profile.local_state.lock.clone()).await?;
     info!(
         flow_kind = "operation",
         profile_id = %profile.id,
@@ -313,7 +288,7 @@ async fn run_operation_flow(
         "inventory lock acquired"
     );
     let repo_cache_snapshot =
-        snapshot_repo_cache_blob(&resolved.paths.repo_cache, &profile).await?;
+        snapshot_repo_cache_blob(&resolved.paths.profile.repo_cache, &profile).await?;
     debug!(
         flow_kind = "operation",
         profile_id = %profile.id,
@@ -354,15 +329,15 @@ async fn run_operation_flow(
         info!(
             flow_kind = "operation",
             profile_id = %profile.id,
-            op = "scan_inventory",
+            op = "scan_local_state",
             phase = "ensuring_inventory",
             "inventory scan started"
         );
-        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        scan_local_state(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
         info!(
             flow_kind = "operation",
             profile_id = %profile.id,
-            op = "scan_inventory",
+            op = "scan_local_state",
             phase = "ensuring_inventory",
             outcome = "ok",
             "inventory scan finished"
@@ -420,7 +395,7 @@ async fn run_operation_flow(
         );
 
         let report =
-            run_flux_sync(&profile, &resolved, manifest, &cancel, sink.clone(), true).await?;
+            run_reconcile(&profile, &resolved, manifest, &cancel, sink.clone(), true).await?;
         info!(
             flow_kind = "operation",
             profile_id = %profile.id,
@@ -431,7 +406,6 @@ async fn run_operation_flow(
             "flux sync finished"
         );
 
-        let mut deleted_paths = Vec::new();
         let delete_paths = plan_manifest_deletes(&resolved.dest_path, &report)
             .into_iter()
             .filter(|path| !unexpected_pre_sync.contains(path))
@@ -472,7 +446,6 @@ async fn run_operation_flow(
                 true,
             )
             .await?;
-            deleted_paths = delete_paths.clone();
             info!(
                 flow_kind = "operation",
                 profile_id = %profile.id,
@@ -498,7 +471,7 @@ async fn run_operation_flow(
             phase = "finalizing",
             "final inventory scan started"
         );
-        scan_inventory(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
+        scan_local_state(&cfg, &profile, &resolved, &cancel, sink.clone()).await?;
         info!(
             flow_kind = "operation",
             profile_id = %profile.id,
@@ -525,7 +498,6 @@ async fn run_operation_flow(
         );
         Ok(RunArtifacts {
             report,
-            deleted_paths,
             duration_ms,
         })
     }

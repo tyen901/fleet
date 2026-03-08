@@ -1,4 +1,7 @@
+mod apply;
 mod config;
+mod exec;
+mod plan;
 #[allow(clippy::module_inception)]
 mod scanner;
 mod swifty_map;

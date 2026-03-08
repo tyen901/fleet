@@ -3,7 +3,7 @@ use super::flow_logging::{
     log_operation_rejected_duplicate, log_operation_spawn_requested, log_operation_started,
     log_terminal_result, operation_kind_label,
 };
-use fleet_domain::health::OperationKind;
+use fleet_domain::health::{AssessScope, OperationKind};
 use fleet_domain::{ApiError, Profile, ProfileId, INVENTORY_REBUILD_REQUIRED_CODE};
 use fleet_flow::{EventSink, FlowConfig, FlowEventKind, FlowResult, FlowSessionEvent};
 use std::collections::HashMap;
@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+const PROFILE_BUSY_CODE: &str = "profile_busy";
 
 #[derive(Clone)]
 pub struct FlowSystem {
@@ -29,6 +31,17 @@ struct Session {
     operation: OperationKind,
     cancel: CancellationToken,
 }
+
+#[derive(Debug)]
+struct ProfileBusyError;
+
+impl std::fmt::Display for ProfileBusyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(PROFILE_BUSY_CODE)
+    }
+}
+
+impl std::error::Error for ProfileBusyError {}
 
 impl FlowSystem {
     pub fn new() -> Self {
@@ -55,26 +68,23 @@ impl FlowSystem {
     ) -> anyhow::Result<u64> {
         self.spawn_operation(cfg, profile.id.clone(), operation, move |ctx| async move {
             match operation {
-                OperationKind::Sync => {
-                    let summary = fleet_flow::flows::operation::run_sync_flow(
-                        ctx.cfg, profile, ctx.cancel, ctx.sink,
-                    )
-                    .await?;
-                    Ok(FlowResult::Sync(summary))
-                }
-                OperationKind::Repair => {
-                    let summary = fleet_flow::flows::operation::run_repair_flow(
-                        ctx.cfg, profile, ctx.cancel, ctx.sink,
-                    )
-                    .await?;
-                    Ok(FlowResult::Repair(summary))
-                }
-                OperationKind::CheckLocal => {
+                OperationKind::Assess(scope) => {
                     let report = fleet_flow::flows::assess::run_assess_flow_with_sink(
-                        ctx.cfg, profile, false, ctx.cancel, ctx.sink,
+                        ctx.cfg,
+                        profile,
+                        matches!(scope, AssessScope::Remote),
+                        ctx.cancel,
+                        ctx.sink,
                     )
                     .await?;
-                    Ok(FlowResult::Check(report))
+                    Ok(FlowResult::Assess(report))
+                }
+                OperationKind::Sync => {
+                    let report = fleet_flow::flows::operation::run_sync_flow(
+                        ctx.cfg, profile, ctx.cancel, ctx.sink,
+                    )
+                    .await?;
+                    Ok(FlowResult::Sync(report))
                 }
                 OperationKind::RebuildInventory => {
                     let report = fleet_flow::flows::operation::run_rebuild_inventory_flow(
@@ -82,13 +92,6 @@ impl FlowSystem {
                     )
                     .await?;
                     Ok(FlowResult::RebuildInventory(report))
-                }
-                OperationKind::CheckRemote => {
-                    let report = fleet_flow::flows::assess::run_assess_flow_with_sink(
-                        ctx.cfg, profile, true, ctx.cancel, ctx.sink,
-                    )
-                    .await?;
-                    Ok(FlowResult::Check(report))
                 }
                 OperationKind::Clean => {
                     let report = fleet_flow::flows::operation::run_clean_flow(
@@ -168,7 +171,7 @@ impl FlowSystem {
             let mut sessions = self.sessions.lock().unwrap();
             if sessions.by_profile.contains_key(&profile_id) {
                 log_operation_rejected_duplicate(&profile_id, operation);
-                anyhow::bail!("an operation is already running for this profile");
+                return Err(anyhow::Error::new(ProfileBusyError));
             }
             sessions.by_profile.insert(profile_id.clone(), session_id);
             sessions.by_session.insert(
@@ -268,14 +271,18 @@ impl FlowSystem {
 }
 
 fn map_flow_error(err: &anyhow::Error) -> ApiError {
+    if err.downcast_ref::<ProfileBusyError>().is_some() {
+        return ApiError::new(PROFILE_BUSY_CODE, "profile busy");
+    }
+
     if err
         .chain()
-        .filter_map(|cause| cause.downcast_ref::<inventory::Error>())
-        .any(inventory::Error::is_corrupted_database)
+        .filter_map(|cause| cause.downcast_ref::<fleet_local_state::LocalStateError>())
+        .any(fleet_local_state::LocalStateError::is_corrupted_database)
     {
         return ApiError::new(
             INVENTORY_REBUILD_REQUIRED_CODE,
-            inventory::REBUILD_REQUIRED_MESSAGE,
+            fleet_local_state::REBUILD_REQUIRED_MESSAGE,
         );
     }
 
@@ -309,7 +316,7 @@ impl EventSink for PipelineSink {
 #[cfg(test)]
 mod tests {
     use super::FlowSystem;
-    use fleet_domain::health::OperationKind;
+    use fleet_domain::health::{AssessScope, LocalStateHealth, OperationKind};
     use fleet_flow::{FlowConfig, FlowEventKind, FlowResult, FlowSessionEvent};
     use tokio::sync::oneshot;
 
@@ -344,14 +351,16 @@ mod tests {
                 OperationKind::Sync,
                 move |_| async move {
                     let _ = rx.await;
-                    Ok(FlowResult::Sync(fleet_domain::sync::SyncSummary {
+                    Ok(FlowResult::Sync(fleet_domain::health::ProfileStateReport {
                         profile_id: "p1".to_string(),
-                        destination: String::new(),
-                        manifest_source: String::new(),
-                        duration_ms: 0,
-                        bytes_reused: 0,
-                        bytes_downloaded: 0,
-                        files_finalized: 0,
+                        local_health: LocalStateHealth::Ready,
+                        remote_freshness: Some(
+                            fleet_domain::health::RemoteFreshnessState::UpToDate,
+                        ),
+                        checked_at_unix_ms: 0,
+                        expected_missing_in_inventory_count: 0,
+                        inventory_unexpected_paths_count: 0,
+                        unexpected_delete_paths: Vec::new(),
                     }))
                 },
             )
@@ -362,11 +371,15 @@ mod tests {
             .spawn_operation(
                 FlowConfig::new_default(),
                 profile_id,
-                OperationKind::Repair,
+                OperationKind::Clean,
                 |_| async move { anyhow::bail!("not used") },
             )
             .await;
         assert!(duplicate.is_err());
+        assert!(duplicate
+            .expect_err("duplicate should fail")
+            .downcast_ref::<super::ProfileBusyError>()
+            .is_some());
 
         tx.send(()).expect("release");
         let _started = recv_matching(&mut first_rx, session_id).await;
@@ -405,7 +418,7 @@ mod tests {
             .spawn_operation(
                 test_cfg(),
                 "p3".to_string(),
-                OperationKind::Repair,
+                OperationKind::Clean,
                 |_| async move { anyhow::bail!("boom") },
             )
             .await
@@ -430,9 +443,9 @@ mod tests {
                 "p3".to_string(),
                 OperationKind::Sync,
                 |_| async move {
-                    Err(anyhow::Error::new(inventory::Error::CorruptedDatabase(
-                        "legacy inventory schema is no longer supported".to_string(),
-                    )))
+                    Err(anyhow::Error::new(
+                        fleet_local_state::LocalStateError::CorruptDatabase,
+                    ))
                 },
             )
             .await
@@ -444,7 +457,7 @@ mod tests {
             panic!("expected failed terminal event");
         };
         assert_eq!(error.code, "inventory_rebuild_required");
-        assert_eq!(error.message, inventory::REBUILD_REQUIRED_MESSAGE);
+        assert_eq!(error.message, fleet_local_state::REBUILD_REQUIRED_MESSAGE);
     }
 
     #[tokio::test]
@@ -458,15 +471,14 @@ mod tests {
             .spawn_operation(
                 cfg,
                 profile_id.clone(),
-                OperationKind::CheckLocal,
+                OperationKind::Assess(AssessScope::Local),
                 move |_| async move {
                     let _ = rx.await;
-                    Ok(FlowResult::Check(
-                        fleet_domain::health::ProfileAssessmentReport {
+                    Ok(FlowResult::Assess(
+                        fleet_domain::health::ProfileStateReport {
                             profile_id: "p4".to_string(),
-                            local_health: fleet_domain::health::LocalHealthState::Ready,
-                            remote_freshness:
-                                fleet_domain::health::RemoteFreshnessState::NotRelevant,
+                            local_health: fleet_domain::health::LocalStateHealth::Ready,
+                            remote_freshness: None,
                             checked_at_unix_ms: 0,
                             expected_missing_in_inventory_count: 0,
                             inventory_unexpected_paths_count: 0,
@@ -483,14 +495,13 @@ mod tests {
             .spawn_operation(
                 FlowConfig::new_default(),
                 profile_id,
-                OperationKind::CheckLocal,
+                OperationKind::Assess(AssessScope::Local),
                 |_| async move {
-                    Ok(FlowResult::Check(
-                        fleet_domain::health::ProfileAssessmentReport {
+                    Ok(FlowResult::Assess(
+                        fleet_domain::health::ProfileStateReport {
                             profile_id: "p4".to_string(),
-                            local_health: fleet_domain::health::LocalHealthState::Ready,
-                            remote_freshness:
-                                fleet_domain::health::RemoteFreshnessState::NotRelevant,
+                            local_health: fleet_domain::health::LocalStateHealth::Ready,
+                            remote_freshness: None,
                             checked_at_unix_ms: 0,
                             expected_missing_in_inventory_count: 0,
                             inventory_unexpected_paths_count: 0,
@@ -501,6 +512,10 @@ mod tests {
             )
             .await;
         assert!(second_session.is_err());
+        assert!(second_session
+            .expect_err("duplicate assess should fail")
+            .downcast_ref::<super::ProfileBusyError>()
+            .is_some());
 
         tx.send(()).expect("release first check");
     }

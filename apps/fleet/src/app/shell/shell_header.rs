@@ -1,14 +1,13 @@
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
-use fleet_domain::ThemeMode;
-use icondata::{
-    BsArrowLeft, BsFolder2Open, BsGearFill, BsPlusLg, BsSearch, BsX, FaEarthOceaniaSolid, Icon,
-    IoPlanet, WiMoonAltWaxingCrescent2,
+use fleet_style::{
+    AppIcon, Button, ButtonSize, ButtonVariant, IconSize, SearchField, ThemeCycleButton,
+    ThemeCycleButtonKind, ToolbarButton, ToolbarButtonLabelMode,
 };
+use icondata::{BsArrowLeft, BsGearFill, BsPlusLg};
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
-use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant};
 
 use super::shell_nav_state::{
     ShellNavActionStore, ShellNavEvent, ShellNavEventStore, ShellSaveAction,
@@ -74,19 +73,23 @@ fn profile_buttons_disabled(route: &Route, snapshot: &fleet_core::AppState) -> b
         .is_some_and(|operation| {
             matches!(
                 operation,
-                fleet_core::OperationKind::CheckLocal
+                fleet_core::OperationKind::Assess(fleet_core::AssessScope::Local)
                     | fleet_core::OperationKind::RebuildInventory
-                    | fleet_core::OperationKind::CheckRemote
+                    | fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote)
             )
         })
 }
 
-fn theme_cycle_icon(theme: ThemeMode) -> Icon {
-    match theme {
-        ThemeMode::Earth => FaEarthOceaniaSolid,
-        ThemeMode::Saturn | ThemeMode::Neptune => IoPlanet,
-        _ => WiMoonAltWaxingCrescent2,
-    }
+fn profile_back_disabled(route: &Route, snapshot: &fleet_core::AppState) -> bool {
+    let id = match route {
+        Route::ProfileView { id } | Route::ProfileEdit { id } => id,
+        _ => return false,
+    };
+    snapshot
+        .profile_runtime_by_id
+        .get(id.as_str())
+        .and_then(|runtime| runtime.active.as_ref().map(|active| active.operation))
+        .is_some_and(|operation| matches!(operation, fleet_core::OperationKind::Sync))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,6 +109,7 @@ pub(crate) fn render_shell_header(
     let right_action = nav_right_action(route);
     let disable_profile_buttons = profile_buttons_disabled(route, snapshot);
     let disable_back_button = disable_profile_buttons
+        || profile_back_disabled(route, snapshot)
         || (matches!(route, Route::ProfileView { .. } | Route::ProfileEdit { .. })
             && (shell_nav_actions.back_disabled)());
     let profile_nav_action =
@@ -123,9 +127,6 @@ pub(crate) fn render_shell_header(
     let mut home_search_active = shell_nav_actions.home_search_active;
     let home_search_enabled = shell_nav_actions.home_search_enabled;
     let current_theme = snapshot.settings.appearance.theme_mode;
-    let theme_name = current_theme.display_label();
-    let next_theme = current_theme.next();
-    let theme_icon = theme_cycle_icon(current_theme);
     let bridge_for_theme_click = bridge.clone();
 
     let nav_for_settings = *nav;
@@ -142,7 +143,7 @@ pub(crate) fn render_shell_header(
                         size: ButtonSize::Sm,
                         disabled: disable_back_button,
                         icon: Some(rsx! {
-                            AppIcon { icon: BsArrowLeft, class: "ico" }
+                            AppIcon { icon: BsArrowLeft }
                         }),
                         onclick: {
                             let nav = *nav;
@@ -156,57 +157,32 @@ pub(crate) fn render_shell_header(
                 }
 
                 if is_home {
-                    div { class: if home_search_active() { "shell-header__search shell-header__search--active" } else { "shell-header__search" },
-                        button {
-                            class: "shell-header__search-toggle",
-                            r#type: "button",
-                            aria_label: if home_search_active() { "Clear search" } else { "Search profiles" },
-                            disabled: !home_search_enabled(),
-                            onclick: move |_| {
-                                if !home_search_enabled() {
-                                    return;
-                                }
-                                if home_search_active() {
-                                    home_search_text.set(String::new());
-                                    home_search_active.set(false);
-                                } else {
-                                    home_search_active.set(true);
-                                }
-                            },
-                            AppIcon {
-                                icon: if home_search_active() { BsX } else { BsSearch },
-                                class: "shell-header__search-icon ico ico--sm",
+                    SearchField {
+                        active: home_search_active(),
+                        value: home_search_text(),
+                        disabled: !home_search_enabled(),
+                        on_toggle: move |_| {
+                            if !home_search_enabled() {
+                                return;
                             }
-                        }
-                        if home_search_active() {
-                            input {
-                                class: "shell-header__search-input",
-                                r#type: "text",
-                                value: home_search_text(),
-                                placeholder: "",
-                                autocomplete: "off",
-                                spellcheck: "false",
-                                disabled: !home_search_enabled(),
-                                autofocus: true,
-                                oninput: move |evt| home_search_text.set(evt.value()),
+                            if home_search_active() {
+                                home_search_text.set(String::new());
+                                home_search_active.set(false);
+                            } else {
+                                home_search_active.set(true);
                             }
-                        }
+                        },
+                        oninput: move |value| home_search_text.set(value),
                     }
                     if !home_search_active() {
-                        button {
-                            class: "shell-header__global-btn",
-                            r#type: "button",
-                            aria_label: "New Profile",
+                        ToolbarButton {
+                            aria_label: "New Profile".to_string(),
+                            label: Some("New Profile".to_string()),
+                            label_mode: ToolbarButtonLabelMode::RevealRight,
                             onclick: move |_| {
                                 let _ = nav_for_new.push(Route::NewProfile {});
                             },
-                            AppIcon {
-                                icon: BsPlusLg,
-                                class: "ico shell-header__global-icon",
-                            }
-                            span { class: "shell-header__global-label shell-header__global-label--static",
-                                "New Profile"
-                            }
+                            icon: rsx! { AppIcon { icon: BsPlusLg } },
                         }
                     }
                 }
@@ -217,27 +193,6 @@ pub(crate) fn render_shell_header(
             }
 
             div { class: "shell-header__right",
-                if matches!(route, Route::ProfileView { .. } | Route::ProfileEdit { .. })
-                    && (shell_nav_actions.profile_open_folder_enabled)()
-                {
-                    Button {
-                        key: "nav-profile-open-folder-{title}",
-                        variant: ButtonVariant::Secondary,
-                        size: ButtonSize::Sm,
-                        disabled: disable_profile_buttons || nav_handler().is_none(),
-                        icon: Some(rsx! {
-                            AppIcon { icon: BsFolder2Open, class: "ico" }
-                        }),
-                        onclick: {
-                            move |_| {
-                                if let Some(handler) = nav_handler() {
-                                    handler(ShellNavEvent::OpenFolder);
-                                }
-                            }
-                        },
-                        "Open Local Folder"
-                    }
-                }
                 if let Some(profile_action) = profile_nav_action {
                     Button {
                         key: "nav-profile-action-{profile_action.label}",
@@ -325,38 +280,24 @@ pub(crate) fn render_shell_header(
                     }
                 }
                 if is_home {
-                    button {
-                        class: "shell-header__global-btn",
-                        r#type: "button",
-                        aria_label: "Cycle theme",
-                        onclick: move |_| {
+                    ThemeCycleButton {
+                        theme: current_theme,
+                        kind: ThemeCycleButtonKind::Toolbar,
+                        onclick: move |next_theme| {
                             let bridge = bridge_for_theme_click.clone();
                             spawn(async move {
                                 let _ = bridge.core().settings_set_theme_mode(next_theme).await;
                             });
                         },
-                        span { class: "shell-header__global-label shell-header__global-label--left shell-header__global-label--hover-only",
-                            "{theme_name}"
-                        }
-                        AppIcon {
-                            icon: theme_icon,
-                            class: "ico shell-header__global-icon",
-                        }
                     }
-                    button {
-                        class: "shell-header__global-btn",
-                        r#type: "button",
-                        aria_label: "Open settings",
+                    ToolbarButton {
+                        aria_label: "Open settings".to_string(),
+                        label: Some("Settings".to_string()),
+                        label_mode: ToolbarButtonLabelMode::RevealRight,
                         onclick: move |_| {
                             let _ = nav_for_settings.push(Route::Settings {});
                         },
-                        AppIcon {
-                            icon: BsGearFill,
-                            class: "ico shell-header__global-icon",
-                        }
-                        span { class: "shell-header__global-label shell-header__global-label--static",
-                            "Settings"
-                        }
+                        icon: rsx! { AppIcon { icon: BsGearFill, size: IconSize::Md } },
                     }
                 }
             }

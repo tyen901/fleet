@@ -17,8 +17,8 @@ internal layers or shims inside core.
 ## Operation model (authoritative)
 
 Flow execution is operation-centric and keyed by a single shared type:
-`fleet_domain::health::OperationKind` (`Sync`, `Repair`, `CheckLocal`,
-`CheckRemote`, `Clean`).
+`fleet_domain::health::OperationKind`
+(`Assess(Local|Remote)`, `Sync`, `RebuildInventory`, `Clean`).
 
 - `fleet-core` owns operation lifecycle APIs:
   - `start_operation(profile_id, operation_kind) -> session_id`
@@ -29,11 +29,16 @@ Flow execution is operation-centric and keyed by a single shared type:
 - `FlowSessionEvent.operation` carries the domain `OperationKind` directly.
 - There is no compatibility alias `FlowOperationKind` and no duplicate
   operation-kind type in `fleet-flow`.
+- `Assess(Local)` validates local state and returns the canonical assessment.
+- `Assess(Remote)` extends that assessment with remote freshness.
+- `Sync` is the only non-destructive self-heal path.
+- `Clean` is the only destructive path for unexpected-file deletion.
+- `RebuildInventory` is reserved for inventory corruption recovery.
 
 Removed architectural paths that must stay deleted:
 
 - `crates/core/src/features/flow_ops.rs` shim layer
-- core retry/wait shim in `start_operation` for duplicate sessions
+- duplicate-session retry shims driven by error-string matching
 - `run_check_flow` wrapper in `flows/operation` (checks use assess runner directly)
 
 ## Sync pipeline boundaries
@@ -51,8 +56,8 @@ The sync pipeline is split into purpose-built crates with strict dependency rule
   - Emits progress through the canonical contract `fleet_domain::sync::SyncProgress` (no Flux-specific event wrapper types at the flow boundary).
 - `inventory`: storage + scanning only.
   - Flux-agnostic; no `flux-*` dependencies.
-  - Owns SQL schema access and exposes a public Flux inventory API boundary (`open_flux_inventory` + `FluxInventoryApi`).
-  - SQL-backed implementation details are internal to `inventory`; callers (including `fleet-flux`) must not use SQL implementation types directly.
+  - Owns SQL schema access, scan orchestration, and the inventory-neutral trusted index repository used by reconcile.
+  - SQL-backed implementation details remain behind `inventory::trusted_index`; callers must not use ad hoc SQL access directly.
 
 ### Dependency graph (enforced by convention)
 

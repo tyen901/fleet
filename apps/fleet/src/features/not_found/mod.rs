@@ -1,8 +1,8 @@
 use dioxus::prelude::*;
 use dioxus_router::use_navigator;
+use fleet_style::{Button, ButtonSize, ButtonVariant};
 
 use crate::app::router::Route;
-use crate::ui::components::{Button, ButtonSize, ButtonVariant};
 
 #[component]
 pub fn PageNotFound(route: Vec<String>) -> Element {

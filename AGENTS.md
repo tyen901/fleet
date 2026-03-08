@@ -20,7 +20,7 @@ Fleet is a Rust workspace with a native Dioxus desktop UI.
 - `cargo clippy --workspace --all-targets -- -D warnings`: lint Rust workspace (CI-style).
 - `npm run fmt:css`: format CSS with Prettier.
 - `npm run lint:css`: check CSS formatting with Prettier.
-- `cargo run -p fleet-cli -- <command>`: run CLI tasks (sync, repair, clean, profile, launch/join). Example: `cargo run -p fleet-cli -- profile check <profile_id>`.
+- `cargo run -p fleet-cli -- <command>`: run CLI tasks (sync, clean, profile, launch/join). Example: `cargo run -p fleet-cli -- profile check <profile_id>`.
 - `cargo run -p fleet`: run the native UI.
 - `cargo test`: run Rust unit tests across the workspace.
 
@@ -91,10 +91,14 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
   - `send_operation_input(session_id, FlowInput)`
   - `cancel_session(session_id)`
 - Runtime operation state is per-profile in `AppState.operations_by_profile`.
-- Keep remote checks (`CheckRemote`) supported.
+- Assess operations are unified under `OperationKind::Assess(Local|Remote)`.
+- `Sync` is the only non-destructive reconcile and self-heal path.
+- `Clean` is the only destructive unexpected-file deletion path.
+- `RebuildInventory` is the recovery path for inventory corruption.
+- Keep remote assessment supported through `Assess(Remote)`.
 - Keep both dashboard delete pathways (`PendingSync` and `UnexpectedReview`) unless explicitly changed.
 - Removed paths that should not be reintroduced:
   - `crates/core/src/features/flow_ops.rs`
   - `FlowOperationKind` alias exports
   - `flows/operation::run_check_flow` wrapper
-  - start-operation duplicate-session retry shims
+  - duplicate-session retry shims driven by parsed error strings

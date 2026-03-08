@@ -2,7 +2,6 @@ pub mod download;
 pub mod filesystem;
 pub mod hash;
 pub mod health;
-pub mod inventory;
 pub mod paths;
 pub mod progress_estimator;
 pub mod sync;
@@ -11,10 +10,13 @@ pub mod types;
 pub mod utils;
 
 pub use download::{DownloadEvent, DownloadPhase};
-pub use health::{LocalHealthState, OperationKind, ProfileAssessmentReport, RemoteFreshnessState};
-pub use inventory::{
-    default_inventory_ignore_rules, InventoryIgnoreRules, InventoryMetrics, InventoryScanProgress,
-    InventoryScanStage, InventorySessionId, InventoryStamp, InventoryStatus,
+pub use fleet_local_state::{
+    BaselineStamp, LocalStateMetrics, LocalStateProgress, LocalStateStage, LocalStateStatus,
+    REBUILD_REQUIRED_MESSAGE,
+};
+pub use health::{
+    AssessPhase, AssessScope, LocalStateHealth, OperationKind, ProfileStateReport,
+    RemoteFreshnessState,
 };
 pub use paths::{
     flux_cache_dir, flux_ws_dir, inventory_db_path, inventory_lock_path, normalize_rel_slashes,

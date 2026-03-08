@@ -1,25 +1,35 @@
 use crate::events::{EventSink, FlowEventKind, LogLevel};
-use crate::inventory_access::open_inventory_root;
 use crate::prune_policy;
 use crate::FlowConfig;
 use anyhow::Context;
 use fleet_domain::{
-    inventory::InventoryScanStage, Profile, ProfileSourceKind, ThroughputEstimator,
+    LocalStateProgress, LocalStateStage, LocalStateStatus, Profile, ProfileSourceKind,
+    ThroughputEstimator,
 };
+use fleet_local_state::LocalStateProgressSink;
 use flux_manifest::ManifestEntry;
-use inventory::{DirtyKind, ScannerConfig};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedProfile {
     pub(crate) dest_path: PathBuf,
     pub(crate) paths: fleet_domain::FleetPaths,
+}
+
+struct ProgressForwarder {
+    tx: mpsc::Sender<LocalStateProgress>,
+}
+
+impl LocalStateProgressSink for ProgressForwarder {
+    fn emit(&self, progress: LocalStateProgress) {
+        let _ = self.tx.blocking_send(progress);
+    }
 }
 
 pub(crate) fn ensure_not_canceled(cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -33,161 +43,105 @@ pub(crate) fn resolve_profile(
     cfg: &FlowConfig,
     profile: &Profile,
 ) -> anyhow::Result<ResolvedProfile> {
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "resolve_profile",
-        phase = "validating",
-        "resolving profile context"
-    );
     let dest_path = profile.dest_path()?;
     profile.validated_source_kind()?;
     let paths =
         fleet_domain::FleetPaths::for_profile(cfg.profile_state_root_dir.clone(), &profile.id);
-
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "resolve_profile",
-        phase = "validating",
-        outcome = "ok",
-        "profile context resolved"
-    );
     Ok(ResolvedProfile { dest_path, paths })
 }
 
-pub(crate) async fn scan_inventory(
+pub(crate) async fn scan_local_state(
     cfg: &FlowConfig,
     profile: &Profile,
     resolved: &ResolvedProfile,
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<()> {
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "scan_inventory",
-        phase = "scan",
-        "inventory scan step started"
-    );
     ensure_not_canceled(cancel)?;
 
     if !tokio::fs::try_exists(&resolved.dest_path).await? {
-        sink.emit(FlowEventKind::InventoryStatus {
-            status: fleet_domain::InventoryStatus::Missing,
+        sink.emit(FlowEventKind::LocalStateStatus {
+            status: LocalStateStatus::Missing,
         });
-        warn!(
-            flow_kind = "operation",
-            profile_id = %profile.id,
-            op = "scan_inventory",
-            outcome = "failed",
-            reason = "missing_destination",
-            "inventory scan destination missing"
-        );
         anyhow::bail!("destination path does not exist");
     }
 
-    tokio::fs::create_dir_all(&resolved.paths.state_dir)
+    tokio::fs::create_dir_all(&resolved.paths.profile.state_dir)
         .await
-        .with_context(|| format!("create {}", resolved.paths.state_dir.display()))?;
+        .with_context(|| format!("create {}", resolved.paths.profile.state_dir.display()))?;
 
-    sink.emit(FlowEventKind::InventoryStatus {
-        status: fleet_domain::InventoryStatus::Scanning,
+    sink.emit(FlowEventKind::LocalStateStatus {
+        status: LocalStateStatus::Scanning,
     });
 
     let (tx, mut rx) = mpsc::channel(256);
-
-    let mut scan_cfg: ScannerConfig = cfg.scanner_config.clone();
-
-    let cancel_for_cfg = cancel.clone();
-    scan_cfg.cancel = Some(Arc::new(move || cancel_for_cfg.is_cancelled()));
-
-    let tx_for_cfg = tx.clone();
-    scan_cfg.progress = Some(Arc::new(move |p| {
-        let _ = tx_for_cfg.blocking_send(p);
-    }));
-
+    let cfg_cloned = cfg.clone();
     let profile_id = profile.id.clone();
-    let root_path = resolved.dest_path.clone();
-    let inventory_db_path = resolved.paths.inventory_db.clone();
-    let flow_cfg = cfg.clone();
+    let dest_path = resolved.dest_path.clone();
+    let db_path = resolved.paths.profile.local_state.db.clone();
+    let mut scan_handle = tokio::task::spawn_blocking(move || {
+        cfg_cloned.local_state.scan(
+            &profile_id,
+            &dest_path,
+            &db_path,
+            &cfg_cloned.local_state_config,
+            Some(Arc::new(ProgressForwarder { tx })),
+        )
+    });
 
-    let mut scanner_handle =
-        tokio::task::spawn_blocking(move || -> anyhow::Result<inventory::SyncResult> {
-            let root = open_inventory_root(&flow_cfg, &inventory_db_path, &profile_id, &root_path)?;
-            Ok(root.scan(scan_cfg)?)
-        });
-
-    let mut last_stage: Option<InventoryScanStage> = None;
+    let mut last_stage: Option<LocalStateStage> = None;
     let mut last_bytes_scanned: u64 = 0;
     let mut throughput = ThroughputEstimator::new(Instant::now());
     let mut cancel_requested = false;
 
-    let sync_result: inventory::SyncResult = loop {
+    loop {
         tokio::select! {
             _ = cancel.cancelled(), if !cancel_requested => {
                 cancel_requested = true;
             }
             progress_opt = rx.recv() => {
-                if let Some(p) = progress_opt {
-                    let stage = map_scan_stage(p.stage);
+                if let Some(progress) = progress_opt {
+                    let stage = progress.stage;
                     let now = Instant::now();
                     if last_stage != Some(stage) {
                         if let Some(prev) = last_stage {
-                            if inventory_stage_rank(stage) < inventory_stage_rank(prev) {
+                            if local_state_stage_rank(stage) < local_state_stage_rank(prev) {
                                 throughput.reset(now);
                             }
                         }
                         last_stage = Some(stage);
-                        sink.emit(FlowEventKind::InventoryStageChanged { stage });
+                        sink.emit(FlowEventKind::LocalStateStageChanged { stage });
                     }
 
-                    if p.bytes_scanned < last_bytes_scanned {
+                    if progress.bytes_scanned < last_bytes_scanned {
                         throughput.reset(now);
                     }
-
-                    throughput.record(p.bytes_scanned, now);
+                    throughput.record(progress.bytes_scanned, now);
                     let rate_bps = throughput.bytes_per_sec(now);
-                    let eta_seconds = throughput.eta_seconds(p.bytes_scanned, p.bytes_total, now);
-                    last_bytes_scanned = p.bytes_scanned;
+                    let eta_seconds =
+                        throughput.eta_seconds(progress.bytes_scanned, progress.bytes_total, now);
+                    last_bytes_scanned = progress.bytes_scanned;
 
-                    sink.emit(FlowEventKind::InventoryProgress {
-                        progress: fleet_domain::inventory::InventoryScanProgress {
-                            stage,
-                            files_total: p.files_total,
-                            files_seen: p.files_seen,
-                            files_scanned: p.files_scanned,
-                            bytes_scanned: p.bytes_scanned,
-                            bytes_total: p.bytes_total,
-                        },
+                    sink.emit(FlowEventKind::LocalStateProgress {
+                        progress,
                         rate_bps,
                         eta_seconds,
                     });
                 }
             }
-            res = &mut scanner_handle => {
-                break match res {
-                    Ok(Ok(summary)) => summary,
-                    Ok(Err(e)) => return Err(e),
+            res = &mut scan_handle => {
+                match res {
+                    Ok(Ok(_)) => break,
+                    Ok(Err(err)) => return Err(anyhow::Error::new(err)),
                     Err(join_err) => return Err(anyhow::Error::new(join_err)),
-                };
+                }
             }
         }
-    };
+    }
 
-    sink.emit(FlowEventKind::InventoryStatus {
-        status: fleet_domain::InventoryStatus::Clean,
+    sink.emit(FlowEventKind::LocalStateStatus {
+        status: LocalStateStatus::Ready,
     });
-
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "scan_inventory",
-        phase = "scan",
-        outcome = "ok",
-        count = sync_result.files_scanned,
-        "inventory scan step finished"
-    );
     Ok(())
 }
 
@@ -198,57 +152,39 @@ pub(crate) async fn load_manifest(
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
 ) -> anyhow::Result<fleet_manifest::DesiredManifest> {
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "load_manifest",
-        phase = "manifest",
-        "manifest load step started"
-    );
     ensure_not_canceled(cancel)?;
 
     let ProfileSourceKind::Http(repo_url) = profile.validated_source_kind()?;
     let manifest = fleet_manifest::load_desired_manifest(
         repo_url,
-        &resolved.paths.repo_cache,
+        &resolved.paths.profile.repo_cache,
         &cfg.downloads,
         download_event_sink(sink),
     )
     .await?;
     let stats = fleet_manifest::manifest_stats(&manifest);
     info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "load_manifest",
-        phase = "manifest",
-        outcome = "ok",
         count = stats.total_download_bytes,
         "manifest load step finished"
     );
     Ok(manifest)
 }
 
-pub(crate) async fn run_flux_sync(
+pub(crate) async fn run_reconcile(
     profile: &Profile,
     resolved: &ResolvedProfile,
     manifest: fleet_manifest::DesiredManifest,
     cancel: &CancellationToken,
     sink: Arc<dyn EventSink>,
     enable_delete_plan: bool,
-) -> anyhow::Result<fleet_flux::FluxSyncReport> {
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile.id,
-        op = "run_flux_sync",
-        phase = "syncing",
-        "flux sync step started"
-    );
+) -> anyhow::Result<fleet_reconcile::FluxSyncReport> {
     ensure_not_canceled(cancel)?;
 
-    let flux_opts = fleet_flux::FluxSyncOptions {
+    let reconcile_opts = fleet_reconcile::FluxSyncOptions {
         enable_prune: enable_delete_plan,
     };
-    let flux_engine = fleet_flux::FluxEngine::new(resolved.paths.flux_cache.clone());
+    let reconcile_engine =
+        fleet_reconcile::FluxEngine::new(resolved.paths.profile.reconcile.cache.clone());
     let profile_id = profile.id.clone();
     let sink_for_progress = sink.clone();
     let progress_sink = Arc::new(move |progress: fleet_domain::sync::SyncProgress| {
@@ -260,40 +196,25 @@ pub(crate) async fn run_flux_sync(
         });
     });
 
-    let mut flux_fut = Box::pin(flux_engine.sync(
+    let mut reconcile_fut = Box::pin(reconcile_engine.sync(
         &resolved.dest_path,
-        &resolved.paths.inventory_db,
+        &resolved.paths.profile.local_state.db,
         &profile_id,
         manifest,
-        flux_opts,
+        reconcile_opts,
         cancel.clone(),
         Some(progress_sink),
     ));
 
     tokio::select! {
-        _ = cancel.cancelled() => {
-            anyhow::bail!("canceled");
-        }
-        result = &mut flux_fut => {
-            if let Ok(report) = &result {
-                info!(
-                    flow_kind = "operation",
-                    profile_id = %profile.id,
-                    op = "run_flux_sync",
-                    phase = "syncing",
-                    outcome = "ok",
-                    count = report.files_finalized,
-                    "flux sync step finished"
-                );
-            }
-            result
-        },
+        _ = cancel.cancelled() => anyhow::bail!("canceled"),
+        result = &mut reconcile_fut => result,
     }
 }
 
 pub(crate) fn plan_manifest_deletes(
     dest: &Path,
-    report: &fleet_flux::FluxSyncReport,
+    report: &fleet_reconcile::FluxSyncReport,
 ) -> Vec<PathBuf> {
     prune_policy::filter_prune_paths(dest, report.prune_paths.clone())
 }
@@ -303,40 +224,31 @@ pub(crate) fn collect_unexpected_deletes(
     profile: &Profile,
     resolved: &ResolvedProfile,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let root = open_inventory_root(
-        cfg,
-        &resolved.paths.inventory_db,
-        &profile.id,
-        &resolved.dest_path,
-    )?;
-    let mut out = BTreeSet::new();
-    for dirty in root.dirty_files(&cfg.scanner_config.policy)? {
-        if dirty.kind != DirtyKind::Added {
-            continue;
-        }
-        let rel = PathBuf::from(dirty.rel_path);
-        if prune_policy::is_protected_root_entry(&resolved.dest_path, &rel) {
-            continue;
-        }
-        out.insert(rel);
-    }
+    let assessment = cfg
+        .local_state
+        .assess(
+            &profile.id,
+            &resolved.dest_path,
+            &resolved.paths.profile.local_state.db,
+            &resolved.paths.profile.local_state.lock,
+            &cfg.local_state_config,
+            None,
+        )
+        .map_err(anyhow::Error::new)?;
+    let mut out = assessment
+        .unexpected_paths
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|rel| !prune_policy::is_protected_root_entry(&resolved.dest_path, rel))
+        .collect::<BTreeSet<_>>();
 
-    if let Some(expected_paths) = cached_expected_paths(profile, &resolved.paths.repo_cache) {
-        let mut filtered_out = BTreeSet::new();
-        for rel in out {
-            let rel_norm = fleet_domain::normalize_rel_slashes(rel.to_string_lossy().as_ref());
-            if !expected_paths.contains(&rel_norm) {
-                filtered_out.insert(PathBuf::from(rel_norm));
-            }
-        }
-        out = filtered_out;
-
-        let inventory_snapshot = root.snapshot()?;
-        for file in inventory_snapshot.files {
-            let rel_norm = fleet_domain::normalize_rel_slashes(&file.file.rel_path);
-            if expected_paths.contains(&rel_norm) {
-                continue;
-            }
+    if let Some(expected_paths) = cached_expected_paths(profile, &resolved.paths.profile.repo_cache)
+    {
+        let tracked = assessment
+            .tracked_paths
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for rel_norm in tracked.difference(&expected_paths) {
             let rel = PathBuf::from(rel_norm);
             if prune_policy::is_protected_root_entry(&resolved.dest_path, &rel) {
                 continue;
@@ -376,36 +288,21 @@ fn cached_expected_paths(profile: &Profile, repo_cache_dir: &Path) -> Option<BTr
 
 pub(crate) async fn apply_deletes(
     resolved: &ResolvedProfile,
-    profile_id: &str,
+    _profile_id: &str,
     delete_paths: Vec<PathBuf>,
     _sink: Arc<dyn EventSink>,
     remove_empty_parent_dirs: bool,
 ) -> anyhow::Result<()> {
     if delete_paths.is_empty() {
-        debug!(
-            flow_kind = "operation",
-            profile_id = %profile_id,
-            op = "apply_deletes",
-            outcome = "noop",
-            "delete apply skipped because plan is empty"
-        );
         return Ok(());
     }
-    info!(
-        flow_kind = "operation",
-        profile_id = %profile_id,
-        op = "apply_deletes",
-        count = delete_paths.len(),
-        "delete apply step started"
-    );
 
     let dest_path = resolved.dest_path.clone();
-    let flux_cache = resolved.paths.flux_cache.clone();
-    let db_path = resolved.paths.inventory_db.clone();
-    let profile_id_for_log = profile_id.to_string();
-    let profile_id_for_prune = profile_id_for_log.clone();
+    let reconcile_cache = resolved.paths.profile.reconcile.cache.clone();
+    let db_path = resolved.paths.profile.local_state.db.clone();
+    let profile_id_for_prune = resolved.paths.profile.state_dir.display().to_string();
     let prune_result = tokio::task::spawn_blocking(move || -> anyhow::Result<u64> {
-        let engine = fleet_flux::FluxEngine::new(flux_cache);
+        let engine = fleet_reconcile::FluxEngine::new(reconcile_cache);
         engine.prune_only(
             &dest_path,
             &db_path,
@@ -422,14 +319,7 @@ pub(crate) async fn apply_deletes(
 
     match prune_result {
         Ok(Ok(empty_dirs_removed)) => {
-            info!(
-                flow_kind = "operation",
-                profile_id = %profile_id_for_log,
-                op = "apply_deletes",
-                outcome = "ok",
-                empty_dirs_removed = empty_dirs_removed,
-                "delete apply step finished"
-            );
+            debug!(empty_dirs_removed, "delete apply step finished");
             Ok(())
         }
         Ok(Err(e)) => Err(e),
@@ -544,211 +434,14 @@ pub(crate) fn download_event_sink(
     }))
 }
 
-fn map_scan_stage(stage: inventory::ScanStage) -> InventoryScanStage {
+fn local_state_stage_rank(stage: LocalStateStage) -> u8 {
     match stage {
-        inventory::ScanStage::Planning => InventoryScanStage::Planning,
-        inventory::ScanStage::Walking => InventoryScanStage::Walking,
-        inventory::ScanStage::Scanning => InventoryScanStage::Scanning,
-        inventory::ScanStage::UpdatingDb => InventoryScanStage::UpdatingDb,
-        inventory::ScanStage::Finished => InventoryScanStage::Finished,
-        inventory::ScanStage::Cancelled => InventoryScanStage::Cancelled,
-    }
-}
-
-fn inventory_stage_rank(stage: InventoryScanStage) -> u8 {
-    match stage {
-        InventoryScanStage::Planning => 0,
-        InventoryScanStage::Walking => 1,
-        InventoryScanStage::Scanning => 2,
-        InventoryScanStage::UpdatingDb => 3,
-        InventoryScanStage::Verifying => 4,
-        InventoryScanStage::Finished => 5,
-        InventoryScanStage::Cancelled => 6,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::download_event_sink;
-    use crate::events::{EventSink, FlowEventKind, LogLevel};
-    use fleet_domain::{DownloadEvent, DownloadPhase};
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default)]
-    struct EventCollector {
-        events: Mutex<Vec<FlowEventKind>>,
-    }
-
-    impl EventSink for EventCollector {
-        fn emit(&self, event: FlowEventKind) {
-            self.events.lock().expect("collector lock").push(event);
-        }
-    }
-
-    impl EventCollector {
-        fn all(&self) -> Vec<FlowEventKind> {
-            self.events.lock().expect("collector lock").clone()
-        }
-    }
-
-    fn event(
-        id: &str,
-        phase: DownloadPhase,
-        bytes_downloaded: u64,
-        bytes_total: Option<u64>,
-        files_total: Option<u64>,
-        files_completed: Option<u64>,
-    ) -> DownloadEvent {
-        DownloadEvent {
-            id: id.to_string(),
-            url: format!("https://example.invalid/{id}"),
-            phase,
-            bytes_downloaded,
-            bytes_total,
-            files_total,
-            files_completed,
-            message: None,
-        }
-    }
-
-    fn sync_progresses(events: &[FlowEventKind]) -> Vec<fleet_domain::sync::SyncProgress> {
-        events
-            .iter()
-            .filter_map(|kind| match kind {
-                FlowEventKind::SyncProgress { progress, .. } => Some(progress.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn download_progress_aggregates_bytes_across_files() {
-        let collector = Arc::new(EventCollector::default());
-        let sink = download_event_sink(collector.clone()).expect("sink");
-
-        sink(event(
-            "a",
-            DownloadPhase::Started,
-            0,
-            Some(100),
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "a",
-            DownloadPhase::Progress,
-            60,
-            Some(100),
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "b",
-            DownloadPhase::Started,
-            0,
-            Some(50),
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "b",
-            DownloadPhase::Progress,
-            40,
-            Some(50),
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "a",
-            DownloadPhase::Finished,
-            100,
-            Some(100),
-            Some(2),
-            Some(1),
-        ));
-        sink(event(
-            "b",
-            DownloadPhase::Finished,
-            50,
-            Some(50),
-            Some(2),
-            Some(2),
-        ));
-
-        let all = collector.all();
-        let progresses = sync_progresses(&all);
-        let final_progress = progresses.last().expect("final progress");
-
-        assert_eq!(final_progress.bytes_done, Some(150));
-        assert_eq!(final_progress.bytes_total, Some(150));
-        assert_eq!(final_progress.files_total, Some(2));
-        assert_eq!(final_progress.files_finalized, Some(2));
-    }
-
-    #[test]
-    fn download_progress_falls_back_to_files_when_totals_unknown() {
-        let collector = Arc::new(EventCollector::default());
-        let sink = download_event_sink(collector.clone()).expect("sink");
-
-        sink(event(
-            "a",
-            DownloadPhase::Started,
-            0,
-            None,
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "a",
-            DownloadPhase::Progress,
-            60,
-            None,
-            Some(2),
-            Some(0),
-        ));
-        sink(event(
-            "a",
-            DownloadPhase::Finished,
-            60,
-            None,
-            Some(2),
-            Some(1),
-        ));
-        sink(event(
-            "b",
-            DownloadPhase::Started,
-            0,
-            None,
-            Some(2),
-            Some(1),
-        ));
-        sink(event(
-            "b",
-            DownloadPhase::Finished,
-            10,
-            None,
-            Some(2),
-            Some(2),
-        ));
-
-        let all = collector.all();
-        let progresses = sync_progresses(&all);
-        let final_progress = progresses.last().expect("final progress");
-
-        assert_eq!(final_progress.bytes_done, Some(70));
-        assert_eq!(final_progress.bytes_total, None);
-        assert_eq!(final_progress.files_total, Some(2));
-        assert_eq!(final_progress.files_finalized, Some(2));
-
-        let messages: Vec<_> = all
-            .iter()
-            .filter_map(|kind| match kind {
-                FlowEventKind::Message { level, text } => Some((level, text.as_str())),
-                _ => None,
-            })
-            .collect();
-        assert!(messages
-            .iter()
-            .any(|(level, text)| **level == LogLevel::Info && text.contains("Download a")));
+        LocalStateStage::Planning => 0,
+        LocalStateStage::Walking => 1,
+        LocalStateStage::Scanning => 2,
+        LocalStateStage::UpdatingDb => 3,
+        LocalStateStage::Verifying => 4,
+        LocalStateStage::Finished => 5,
+        LocalStateStage::Cancelled => 6,
     }
 }

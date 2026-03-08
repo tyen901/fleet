@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = { workspace = true }
+fleet-local-state = { workspace = true }
 serde = { workspace = true }
 specta = { workspace = true }
 url = { workspace = true }

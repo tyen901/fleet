@@ -16,8 +16,11 @@ fleet-core               = { path = "crates/core" }
 fleet-download           = { path = "crates/download" }
 fleet-domain             = { path = "crates/domain" }
 fleet-flow               = { path = "crates/flow" }
+fleet-local-state        = { path = "crates/local-state" }
+fleet-local-state-inventory = { path = "crates/local-state-inventory" }
 fleet-manifest           = { path = "crates/manifest" }
-fleet-flux               = { path = "crates/flux" }
+fleet-reconcile          = { path = "crates/reconcile" }
+fleet-style              = { path = "crates/fleet-style" }
 fleet                    = { path = "apps/fleet" }
 swifty-repo              = { path = "crates/swifty-repo" }
 inventory                = { path = "crates/inventory" }

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
-use icondata::{BsArrowClockwise, BsChevronDown, BsFolder2Open};
+use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant, ProgressBar};
+use icondata::BsChevronDown;
 
 use crate::app::router::Route;
 use crate::app::shell::{ShellNavActionStore, ShellNavEvent, ShellNavEventStore, ShellSaveAction};
@@ -10,10 +11,20 @@ use crate::features::profiles::common::{
     UNEXPECTED_PATH_PREVIEW_LIMIT,
 };
 use crate::services::bridge::FleetBridge;
+use crate::services::platform::open::open_path;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
-use crate::ui::components::{AppIcon, Button, ButtonSize, ButtonVariant, ConfirmModal};
-use crate::ui::platform::open_path;
+
+const ACTION_REBUILD_INVENTORY: &str = "rebuild_inventory";
+const ACTION_VALIDATE: &str = "assess_local";
+const ACTION_CHECK_UPDATES: &str = "assess_remote";
+const ACTION_SYNC: &str = "sync";
+const ACTION_PRESENTATION_PRIORITY: [&str; 4] = [
+    ACTION_CHECK_UPDATES,
+    ACTION_SYNC,
+    ACTION_VALIDATE,
+    ACTION_REBUILD_INVENTORY,
+];
 
 #[derive(Clone, Copy)]
 struct MainActionUi {
@@ -27,10 +38,17 @@ struct MainActionUi {
     running: bool,
 }
 
+#[derive(Default)]
+struct HeroActionPresentation {
+    primary: Option<MainActionUi>,
+    companion: Option<MainActionUi>,
+    tertiary: Vec<MainActionUi>,
+}
+
 fn load_inventory_metrics(
     bridge: FleetBridge,
     profile_id: String,
-    mut inventory_metrics: Signal<Option<fleet_core::InventoryMetrics>>,
+    mut inventory_metrics: Signal<Option<fleet_core::LocalStateMetrics>>,
     mut inventory_metrics_loading: Signal<bool>,
 ) {
     inventory_metrics_loading.set(true);
@@ -47,7 +65,6 @@ fn load_inventory_metrics(
 
 fn build_main_actions(
     profile_status: Option<&fleet_core::ProfileStatusState>,
-    repair_required: bool,
     rebuild_inventory_required: bool,
 ) -> Vec<MainActionUi> {
     let Some(status) = profile_status else {
@@ -59,32 +76,21 @@ fn build_main_actions(
         actions.push(MainActionUi {
             label: "Rebuild Inventory",
             operation: fleet_core::OperationKind::RebuildInventory,
-            action: "rebuild_inventory",
+            action: ACTION_REBUILD_INVENTORY,
             error_reason: "start_rebuild_inventory_failed",
             fail_title: "Rebuild inventory failed",
             recommended: fleet_core::ProfileRecommendedAction::RebuildInventory,
             enabled: status.actions.rebuild_inventory_enabled,
             running: status.actions.rebuild_inventory_running,
         });
-    } else if repair_required {
-        actions.push(MainActionUi {
-            label: "Repair",
-            operation: fleet_core::OperationKind::Repair,
-            action: "repair",
-            error_reason: "start_repair_failed",
-            fail_title: "Repair failed",
-            recommended: fleet_core::ProfileRecommendedAction::Repair,
-            enabled: status.actions.repair_enabled,
-            running: status.actions.repair_running,
-        });
     }
 
     actions.extend([
         MainActionUi {
             label: "Validate",
-            operation: fleet_core::OperationKind::CheckLocal,
-            action: "check_local",
-            error_reason: "start_check_local_failed",
+            operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Local),
+            action: ACTION_VALIDATE,
+            error_reason: "start_assess_local_failed",
             fail_title: "Validate failed",
             recommended: fleet_core::ProfileRecommendedAction::Validate,
             enabled: status.actions.validate_enabled,
@@ -92,10 +98,10 @@ fn build_main_actions(
         },
         MainActionUi {
             label: "Check for Updates",
-            operation: fleet_core::OperationKind::CheckRemote,
-            action: "check_remote",
-            error_reason: "start_check_failed",
-            fail_title: "Remote check failed",
+            operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote),
+            action: ACTION_CHECK_UPDATES,
+            error_reason: "start_assess_remote_failed",
+            fail_title: "Check for updates failed",
             recommended: fleet_core::ProfileRecommendedAction::CheckUpdates,
             enabled: status.actions.check_updates_enabled,
             running: status.actions.check_updates_running,
@@ -103,7 +109,7 @@ fn build_main_actions(
         MainActionUi {
             label: "Sync",
             operation: fleet_core::OperationKind::Sync,
-            action: "sync",
+            action: ACTION_SYNC,
             error_reason: "start_sync_failed",
             fail_title: "Sync failed",
             recommended: fleet_core::ProfileRecommendedAction::Sync,
@@ -113,6 +119,43 @@ fn build_main_actions(
     ]);
 
     actions
+}
+
+fn select_hero_actions(
+    main_actions: &[MainActionUi],
+    recommended_action: fleet_core::ProfileRecommendedAction,
+) -> HeroActionPresentation {
+    let primary = main_actions
+        .iter()
+        .copied()
+        .find(|action| action.recommended == recommended_action && action.enabled)
+        .or_else(|| main_actions.iter().copied().find(|action| action.enabled));
+    let Some(primary) = primary else {
+        return HeroActionPresentation::default();
+    };
+
+    let mut remaining = ACTION_PRESENTATION_PRIORITY
+        .into_iter()
+        .filter_map(|action_name| {
+            main_actions.iter().copied().find(|action| {
+                action.enabled && action.action != primary.action && action.action == action_name
+            })
+        })
+        .collect::<Vec<_>>();
+    remaining.extend(main_actions.iter().copied().filter(|action| {
+        action.enabled
+            && action.action != primary.action
+            && !ACTION_PRESENTATION_PRIORITY.contains(&action.action)
+    }));
+
+    let companion = remaining.first().copied();
+    let tertiary = remaining.into_iter().skip(1).collect();
+
+    HeroActionPresentation {
+        primary: Some(primary),
+        companion,
+        tertiary,
+    }
 }
 
 #[component]
@@ -139,10 +182,8 @@ pub fn ProfileView(id: String) -> Element {
 
     let profile_id = profile.id.clone();
     let mut clean_remove_empty_parent_dirs = use_signal(|| true);
-    let mut rebuild_inventory_modal_open = use_signal(|| false);
-    let mut advanced_actions_open = use_signal(|| false);
-    let advanced_options_enabled = snapshot.settings.ui.show_advanced_options;
-    let inventory_metrics = use_signal(|| Option::<fleet_core::InventoryMetrics>::None);
+    let inventory_metrics = use_signal(|| Option::<fleet_core::LocalStateMetrics>::None);
+    let mut details_open = use_signal(|| false);
     let inventory_metrics_loading = use_signal(|| false);
     let inventory_metrics_loaded_for = use_signal(String::new);
     let was_operation_active = use_signal(|| false);
@@ -154,10 +195,6 @@ pub fn ProfileView(id: String) -> Element {
         .and_then(|runtime| runtime.active.as_ref())
         .map(|active| active.operation);
     let operation_active = active_operation.is_some();
-    let rebuild_inventory_running = matches!(
-        active_operation,
-        Some(fleet_core::OperationKind::RebuildInventory)
-    );
     let cancel_session_id = profile_runtime
         .and_then(|runtime| runtime.active.as_ref())
         .map(|active| active.session_id);
@@ -223,9 +260,6 @@ pub fn ProfileView(id: String) -> Element {
         .map(|status| status.actions.clean_running)
         .unwrap_or(false);
     let show_unexpected_panel = show_unexpected_paths_panel(clean_available, clean_running);
-    let repair_required = profile_status
-        .map(|status| status.repair_required)
-        .unwrap_or(false);
     let rebuild_inventory_required = profile_status
         .map(|status| status.rebuild_inventory_required)
         .unwrap_or(false);
@@ -245,9 +279,6 @@ pub fn ProfileView(id: String) -> Element {
         })
         .unwrap_or_else(|| "Never".to_string());
     let modpack_size = modpack_size_text(inventory_metrics().as_ref(), inventory_metrics_loading());
-
-    let main_actions =
-        build_main_actions(profile_status, repair_required, rebuild_inventory_required);
     let progress_display = progress_ui.clone().or_else(|| {
         operation_active.then_some(fleet_core::ProfileProgressView {
             label: "Starting operation...".to_string(),
@@ -257,6 +288,25 @@ pub fn ProfileView(id: String) -> Element {
             indeterminate: true,
         })
     });
+
+    let main_actions = build_main_actions(profile_status, rebuild_inventory_required);
+    let hero_actions = select_hero_actions(&main_actions, recommended_action);
+    let primary_action = hero_actions.primary;
+    let companion_action = hero_actions.companion;
+    let tertiary_actions = hero_actions.tertiary;
+    let action_row_class = if companion_action.is_some() {
+        "profile-hero__action-row"
+    } else {
+        "profile-hero__action-row profile-hero__action-row--solo"
+    };
+
+    let hero_class = if operation_active {
+        "profile-hero profile-hero--active"
+    } else if clean_available || rebuild_inventory_required {
+        "profile-hero profile-hero--warn"
+    } else {
+        "profile-hero"
+    };
 
     let on_clean = {
         let bridge = bridge.clone();
@@ -284,52 +334,14 @@ pub fn ProfileView(id: String) -> Element {
         }
     };
 
-    let on_request_rebuild_inventory = move |_| {
-        if operation_active {
-            return;
-        }
-        rebuild_inventory_modal_open.set(true);
-    };
-
-    let on_cancel_rebuild_inventory = move |_: MouseEvent| {
-        if operation_active {
-            return;
-        }
-        rebuild_inventory_modal_open.set(false);
-    };
-
-    let on_confirm_rebuild_inventory = {
-        let bridge = bridge.clone();
-        let toasts = toasts.clone();
-        let profile_id = profile_id.clone();
-        move |_: MouseEvent| {
-            if operation_active {
-                return;
-            }
-            rebuild_inventory_modal_open.set(false);
-            start_profile_operation(
-                bridge.clone(),
-                toasts.clone(),
-                profile_id.clone(),
-                fleet_core::OperationKind::RebuildInventory,
-                "rebuild_inventory",
-                "rebuild_inventory_failed",
-                "Rebuild inventory failed",
-            );
-        }
-    };
-
     {
         let mut profile_action = shell_nav_actions.profile_action;
-        let mut profile_open_folder_enabled = shell_nav_actions.profile_open_folder_enabled;
         let mut save_action = shell_nav_actions.save_action;
         let mut back_disabled = shell_nav_actions.back_disabled;
-        let destination = profile.destination.clone();
         use_effect(use_reactive(
-            (&operation_active, &destination),
-            move |(operation_active, destination)| {
+            (&operation_active,),
+            move |(operation_active,)| {
                 profile_action.set(Some(ShellSaveAction::new("Edit", operation_active)));
-                profile_open_folder_enabled.set(!destination.trim().is_empty());
                 save_action.set(None);
                 back_disabled.set(false);
             },
@@ -339,10 +351,8 @@ pub fn ProfileView(id: String) -> Element {
     {
         let mut handler = nav_events.handler;
         let profile_id = profile.id.clone();
-        let destination = profile.destination.clone();
         use_effect(move || {
             let profile_id = profile_id.clone();
-            let destination = destination.clone();
             handler.set(Some(std::rc::Rc::new(move |event| match event {
                 ShellNavEvent::ProfileAction => {
                     if operation_active {
@@ -350,15 +360,6 @@ pub fn ProfileView(id: String) -> Element {
                     }
                     let _ = nav.push(Route::ProfileEdit {
                         id: profile_id.clone(),
-                    });
-                }
-                ShellNavEvent::OpenFolder => {
-                    let path = destination.trim().to_string();
-                    if path.is_empty() {
-                        return;
-                    }
-                    spawn(async move {
-                        open_path(path.into()).await;
                     });
                 }
                 ShellNavEvent::Save => {}
@@ -371,42 +372,52 @@ pub fn ProfileView(id: String) -> Element {
             div { class: "page__inner dash-page__inner",
                 div { class: "dash-layout",
                     div { class: "dash-layout__content",
-                        section { class: "panel-section panel-section--split dash-status",
-                            div { class: "panel-section__content",
-                                div { class: "panel-group dash-readonly",
-                                    div { class: "dash-metrics-columns",
-                                        div { class: "dash-metrics-col",
-                                            div { class: "dash-metrics-col__label",
-                                                AppIcon { icon: BsFolder2Open, class: "ico ico--sm dash-metrics-col__icon" }
-                                                span { "Modpack Size" }
-                                            }
-                                            div { class: "dash-metrics-col__value", "{modpack_size}" }
-                                        }
-                                        div { class: "dash-metrics-col",
-                                            div { class: "dash-metrics-col__label",
-                                                AppIcon { icon: BsArrowClockwise, class: "ico ico--sm dash-metrics-col__icon" }
-                                                span { "Last Check" }
-                                            }
-                                            div { class: "dash-metrics-col__value", "{last_check_text}" }
-                                        }
-                                        div { class: "dash-metrics-col",
-                                            div { class: "dash-metrics-col__label",
-                                                span { "Status" }
-                                            }
-                                            div { class: "dash-metrics-col__value", "{profile_status_label}" }
-                                        }
-                                    }
+                        section { class: "profile-view",
+                            section { class: "{hero_class}",
+                                div { class: "profile-hero__header",
+                                    h2 { class: "profile-hero__title", "{profile.name}" }
+                                    span { class: "profile-hero__badge", "{profile_status_label}" }
+                                }
 
-                                    div { class: "dash-sync-toolbar",
-                                        div { class: "dash-sync-actions",
-                                            for action in main_actions {
+                                p { class: "profile-hero__meta-line",
+                                    "{modpack_size} · Last checked {last_check_text}"
+                                }
+
+                                if !operation_active {
+                                    if primary_action.is_some() {
+                                        div { class: "{action_row_class}",
+                                            if let Some(action) = companion_action {
                                                 Button {
-                                                    variant: if recommended_action == action.recommended {
-                                                        ButtonVariant::Primary
-                                                    } else {
-                                                        ButtonVariant::Secondary
+                                                    key: "profile-secondary-{action.label}",
+                                                    variant: ButtonVariant::Secondary,
+                                                    size: ButtonSize::Lg,
+                                                    loading: action.running,
+                                                    disabled: !action.enabled || operation_active,
+                                                    onclick: {
+                                                        let bridge = bridge.clone();
+                                                        let toasts = toasts.clone();
+                                                        let profile_id = profile_id.clone();
+                                                        move |_| {
+                                                            start_profile_operation(
+                                                                bridge.clone(),
+                                                                toasts.clone(),
+                                                                profile_id.clone(),
+                                                                action.operation,
+                                                                action.action,
+                                                                action.error_reason,
+                                                                action.fail_title,
+                                                            );
+                                                        }
                                                     },
-                                                    size: ButtonSize::Md,
+                                                    "{action.label}"
+                                                }
+                                            }
+
+                                            if let Some(action) = primary_action {
+                                                Button {
+                                                    key: "profile-primary-{action.label}",
+                                                    variant: ButtonVariant::Primary,
+                                                    size: ButtonSize::Lg,
                                                     loading: action.running,
                                                     disabled: !action.enabled || operation_active,
                                                     onclick: {
@@ -431,125 +442,160 @@ pub fn ProfileView(id: String) -> Element {
                                         }
                                     }
 
-                                    if advanced_options_enabled {
-                                        div { class: "dash-advanced-actions",
-                                            button {
-                                                class: if advanced_actions_open() {
-                                                    "dash-advanced-actions__toggle dash-advanced-actions__toggle--open"
-                                                } else {
-                                                    "dash-advanced-actions__toggle"
-                                                },
-                                                onclick: move |_| advanced_actions_open.set(!advanced_actions_open()),
-                                                AppIcon {
-                                                    icon: BsChevronDown,
-                                                    class: "ico ico--sm dash-advanced-actions__chev",
-                                                }
-                                                span { class: "dash-advanced-actions__title", "Advanced Actions" }
-                                            }
-                                            if advanced_actions_open() {
-                                                div { class: "dash-advanced-actions__content",
-                                                    div { class: "dash-advanced-actions__buttons",
-                                                        Button {
-                                                            variant: ButtonVariant::Secondary,
-                                                            size: ButtonSize::Md,
-                                                            loading: rebuild_inventory_running,
-                                                            disabled: operation_active,
-                                                            onclick: on_request_rebuild_inventory,
-                                                            "Rebuild Inventory"
+                                    if !tertiary_actions.is_empty() {
+                                        div { class: "profile-hero__tertiary",
+                                            for action in tertiary_actions {
+                                                button {
+                                                    key: "profile-tertiary-{action.label}",
+                                                    class: "profile-hero__text-link",
+                                                    r#type: "button",
+                                                    disabled: !action.enabled || operation_active,
+                                                    onclick: {
+                                                        let bridge = bridge.clone();
+                                                        let toasts = toasts.clone();
+                                                        let profile_id = profile_id.clone();
+                                                        move |_| {
+                                                            start_profile_operation(
+                                                                bridge.clone(),
+                                                                toasts.clone(),
+                                                                profile_id.clone(),
+                                                                action.operation,
+                                                                action.action,
+                                                                action.error_reason,
+                                                                action.fail_title,
+                                                            );
                                                         }
-                                                    }
+                                                    },
+                                                    "{action.label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if operation_active {
+                                    if let Some(progress) = progress_display.clone() {
+                                        div { class: "profile-activity",
+                                            div { class: "profile-activity__head",
+                                                div { class: "profile-activity__copy",
+                                                    div { class: "profile-activity__label", "{progress.label}" }
+                                                    div { class: "profile-activity__detail", "{progress.detail}" }
+                                                }
+                                                if let Some(percent) = progress_percent(progress.done, progress.total) {
+                                                    div { class: "profile-activity__percent", "{percent}%" }
+                                                }
+                                            }
+
+                                            if progress.indeterminate {
+                                                ProgressBar { indeterminate: true }
+                                            } else {
+                                                ProgressBar {
+                                                    percent: progress_percent(progress.done, progress.total),
                                                 }
                                             }
                                         }
                                     }
 
-                                    div { class: "dash-section-divider" }
+                                    div { class: "profile-hero__tertiary",
+                                        Button {
+                                            variant: ButtonVariant::Secondary,
+                                            size: ButtonSize::Sm,
+                                            disabled: cancel_session_id.is_none(),
+                                            onclick: on_cancel_operation,
+                                            "Cancel"
+                                        }
+                                    }
+                                }
+                            }
 
-                                    if operation_active || clean_available || progress_ui.is_some() {
-                                        div { class: if show_unexpected_panel {
-                                            "dash-sync-content"
-                                        } else {
-                                            "dash-sync-content dash-sync-content--single"
-                                        },
-                                            if let Some(progress) = progress_display {
-                                                div { class: "dash-sync-content__main",
-                                                    div { class: "dash-progress",
-                                                        div { class: "dash-progress__top",
-                                                            div { class: "dash-progress__top-main",
-                                                                div { class: "dash-progress__phase", "{progress.label}" }
-                                                                div { class: "dash-progress__detail", "{progress.detail}" }
-                                                            }
-                                                            div { class: "dash-progress__top-actions",
-                                                                if let Some(percent) = progress_percent(progress.done, progress.total) {
-                                                                    div { class: "dash-progress__percent", "{percent}%" }
-                                                                }
-                                                                Button {
-                                                                    variant: ButtonVariant::Secondary,
-                                                                    size: ButtonSize::Sm,
-                                                                    disabled: cancel_session_id.is_none(),
-                                                                    onclick: on_cancel_operation,
-                                                                    "Cancel"
-                                                                }
-                                                            }
-                                                        }
-                                                        if progress.indeterminate {
-                                                            div { class: "dash-progress__track dash-progress__track--indeterminate",
-                                                                div { class: "dash-progress__fill" }
-                                                            }
-                                                        } else {
-                                                            div { class: "dash-progress__track",
-                                                                div {
-                                                                    class: "dash-progress__fill",
-                                                                    style: format!(
-                                                                        "width: {}%;",
-                                                                        progress_percent(progress.done, progress.total).unwrap_or(0)
-                                                                    ),
-                                                                }
-                                                            }
-                                                        }
-                                                        if operation_active {
-                                                            div { class: "dash-section-divider dash-section-divider--inset" }
-                                                        }
-                                                    }
-                                                }
+                            if show_unexpected_panel {
+                                article { class: "profile-card profile-card--danger",
+                                    div { class: "profile-card__header",
+                                        h3 { class: "profile-card__title", "Unexpected Local Paths" }
+                                        div { class: "profile-card__subtitle", "{unexpected_path_count} item(s)" }
+                                    }
+
+                                    div { class: "profile-issue__actions",
+                                        Button {
+                                            variant: ButtonVariant::Danger,
+                                            size: ButtonSize::Md,
+                                            loading: clean_running,
+                                            disabled: !clean_enabled || operation_active,
+                                            onclick: on_clean,
+                                            "Clean Unexpected Paths"
+                                        }
+                                    }
+
+                                    div { class: "profile-issue__toggle",
+                                        label { class: "dash-sync-option-toggle",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: clean_remove_empty_parent_dirs(),
+                                                disabled: operation_active,
+                                                onchange: move |evt| {
+                                                    clean_remove_empty_parent_dirs.set(evt.checked());
+                                                },
                                             }
+                                            span { "Remove empty parent folders on clean" }
+                                        }
+                                    }
 
-                                            if show_unexpected_panel {
-                                                div { class: "dash-sync-content__side",
-                                                    div { class: "dash-sync-unexpected",
-                                                        div { class: "dash-sync-unexpected__title", "Unexpected local paths ({unexpected_path_count})" }
-                                                        div { class: "dash-sync-unexpected__actions",
-                                                            Button {
-                                                                variant: ButtonVariant::Danger,
-                                                                size: ButtonSize::Md,
-                                                                loading: clean_running,
-                                                                disabled: !clean_enabled || operation_active,
-                                                                onclick: on_clean,
-                                                                "Clean Unexpected Paths"
+                                    ul { class: "profile-issue__list",
+                                        for path in unexpected_path_preview {
+                                            li { class: "profile-issue__item", "{path}" }
+                                        }
+                                    }
+
+                                    if hidden_path_count > 0 {
+                                        div { class: "profile-issue__more", "+{hidden_path_count} more" }
+                                    }
+                                }
+                            }
+
+                            article { class: "profile-card profile-card--utility",
+                                button {
+                                    class: if details_open() {
+                                        "profile-utility__toggle profile-utility__toggle--open"
+                                    } else {
+                                        "profile-utility__toggle"
+                                    },
+                                    r#type: "button",
+                                    onclick: move |_| details_open.set(!details_open()),
+                                    AppIcon {
+                                        icon: BsChevronDown,
+                                        size: fleet_style::IconSize::Sm,
+                                    }
+                                    span { class: "profile-utility__label", "Details" }
+                                }
+
+                                if details_open() {
+                                    div { class: "profile-utility__content",
+                                        div { class: "profile-fact",
+                                            div { class: "profile-fact__label", "Source" }
+                                            div { class: "profile-fact__value mono-sm", "{profile.source}" }
+                                        }
+                                        div { class: "profile-fact",
+                                            div { class: "profile-fact__label", "Destination" }
+                                            div { class: "profile-fact__value mono-sm", "{profile.destination}" }
+                                        }
+                                        if !profile.destination.trim().is_empty() {
+                                            div { class: "profile-utility__actions",
+                                                Button {
+                                                    variant: ButtonVariant::Secondary,
+                                                    size: ButtonSize::Sm,
+                                                    onclick: {
+                                                        let destination = profile.destination.clone();
+                                                        move |_| {
+                                                            let path = destination.trim().to_string();
+                                                            if path.is_empty() {
+                                                                return;
                                                             }
+                                                            spawn(async move {
+                                                                open_path(path.into()).await;
+                                                            });
                                                         }
-                                                        div { class: "dash-sync-options",
-                                                            label { class: "dash-sync-option-toggle",
-                                                                input {
-                                                                    r#type: "checkbox",
-                                                                    checked: clean_remove_empty_parent_dirs(),
-                                                                    disabled: operation_active,
-                                                                    onchange: move |evt| {
-                                                                        clean_remove_empty_parent_dirs.set(evt.checked());
-                                                                    },
-                                                                }
-                                                                span { "Remove empty parent folders on clean" }
-                                                            }
-                                                        }
-                                                        ul { class: "dash-sync-unexpected__list",
-                                                            for path in unexpected_path_preview {
-                                                                li { class: "dash-sync-unexpected__item", "{path}" }
-                                                            }
-                                                        }
-                                                        if hidden_path_count > 0 {
-                                                            div { class: "dash-sync-unexpected__more", "+{hidden_path_count} more" }
-                                                        }
-                                                    }
+                                                    },
+                                                    "Open Local Folder"
                                                 }
                                             }
                                         }
@@ -559,20 +605,210 @@ pub fn ProfileView(id: String) -> Element {
                         }
                     }
                 }
-
-                ConfirmModal {
-                    open: rebuild_inventory_modal_open(),
-                    title: "Rebuild Inventory".to_string(),
-                    message: "Rebuild only the local inventory database and then run Validate? This does not start sync.".to_string(),
-                    confirm_label: "Yes".to_string(),
-                    cancel_label: "No".to_string(),
-                    confirm_variant: ButtonVariant::Danger,
-                    loading: rebuild_inventory_running,
-                    disabled: operation_active,
-                    on_confirm: on_confirm_rebuild_inventory,
-                    on_cancel: on_cancel_rebuild_inventory,
-                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        select_hero_actions, MainActionUi, ACTION_CHECK_UPDATES, ACTION_REBUILD_INVENTORY,
+        ACTION_SYNC, ACTION_VALIDATE,
+    };
+
+    fn make_action(
+        label: &'static str,
+        action: &'static str,
+        recommended: fleet_core::ProfileRecommendedAction,
+        enabled: bool,
+    ) -> MainActionUi {
+        MainActionUi {
+            label,
+            operation: fleet_core::OperationKind::Sync,
+            action,
+            error_reason: "error",
+            fail_title: "failed",
+            recommended,
+            enabled,
+            running: false,
+        }
+    }
+
+    #[test]
+    fn validate_primary_keeps_sync_reachable() {
+        let actions = vec![
+            make_action(
+                "Validate",
+                ACTION_VALIDATE,
+                fleet_core::ProfileRecommendedAction::Validate,
+                true,
+            ),
+            make_action(
+                "Check for Updates",
+                ACTION_CHECK_UPDATES,
+                fleet_core::ProfileRecommendedAction::CheckUpdates,
+                true,
+            ),
+            make_action(
+                "Sync",
+                ACTION_SYNC,
+                fleet_core::ProfileRecommendedAction::Sync,
+                true,
+            ),
+        ];
+
+        let presentation =
+            select_hero_actions(&actions, fleet_core::ProfileRecommendedAction::Validate);
+
+        assert_eq!(
+            presentation.primary.map(|action| action.action),
+            Some(ACTION_VALIDATE)
+        );
+        assert_eq!(
+            presentation.companion.map(|action| action.action),
+            Some(ACTION_CHECK_UPDATES)
+        );
+        assert_eq!(
+            presentation
+                .tertiary
+                .iter()
+                .map(|action| action.action)
+                .collect::<Vec<_>>(),
+            vec![ACTION_SYNC]
+        );
+    }
+
+    #[test]
+    fn check_updates_primary_promotes_sync_to_companion() {
+        let actions = vec![
+            make_action(
+                "Validate",
+                ACTION_VALIDATE,
+                fleet_core::ProfileRecommendedAction::Validate,
+                true,
+            ),
+            make_action(
+                "Check for Updates",
+                ACTION_CHECK_UPDATES,
+                fleet_core::ProfileRecommendedAction::CheckUpdates,
+                true,
+            ),
+            make_action(
+                "Sync",
+                ACTION_SYNC,
+                fleet_core::ProfileRecommendedAction::Sync,
+                true,
+            ),
+        ];
+
+        let presentation =
+            select_hero_actions(&actions, fleet_core::ProfileRecommendedAction::CheckUpdates);
+
+        assert_eq!(
+            presentation.primary.map(|action| action.action),
+            Some(ACTION_CHECK_UPDATES)
+        );
+        assert_eq!(
+            presentation.companion.map(|action| action.action),
+            Some(ACTION_SYNC)
+        );
+        assert_eq!(
+            presentation
+                .tertiary
+                .iter()
+                .map(|action| action.action)
+                .collect::<Vec<_>>(),
+            vec![ACTION_VALIDATE]
+        );
+    }
+
+    #[test]
+    fn rebuild_primary_preserves_remaining_action_order() {
+        let actions = vec![
+            make_action(
+                "Rebuild Inventory",
+                ACTION_REBUILD_INVENTORY,
+                fleet_core::ProfileRecommendedAction::RebuildInventory,
+                true,
+            ),
+            make_action(
+                "Validate",
+                ACTION_VALIDATE,
+                fleet_core::ProfileRecommendedAction::Validate,
+                true,
+            ),
+            make_action(
+                "Check for Updates",
+                ACTION_CHECK_UPDATES,
+                fleet_core::ProfileRecommendedAction::CheckUpdates,
+                true,
+            ),
+            make_action(
+                "Sync",
+                ACTION_SYNC,
+                fleet_core::ProfileRecommendedAction::Sync,
+                true,
+            ),
+        ];
+
+        let presentation = select_hero_actions(
+            &actions,
+            fleet_core::ProfileRecommendedAction::RebuildInventory,
+        );
+
+        assert_eq!(
+            presentation.primary.map(|action| action.action),
+            Some(ACTION_REBUILD_INVENTORY)
+        );
+        assert_eq!(
+            presentation.companion.map(|action| action.action),
+            Some(ACTION_CHECK_UPDATES)
+        );
+        assert_eq!(
+            presentation
+                .tertiary
+                .iter()
+                .map(|action| action.action)
+                .collect::<Vec<_>>(),
+            vec![ACTION_SYNC, ACTION_VALIDATE]
+        );
+    }
+
+    #[test]
+    fn sync_becomes_companion_when_check_updates_is_disabled() {
+        let actions = vec![
+            make_action(
+                "Validate",
+                ACTION_VALIDATE,
+                fleet_core::ProfileRecommendedAction::Validate,
+                true,
+            ),
+            make_action(
+                "Check for Updates",
+                ACTION_CHECK_UPDATES,
+                fleet_core::ProfileRecommendedAction::CheckUpdates,
+                false,
+            ),
+            make_action(
+                "Sync",
+                ACTION_SYNC,
+                fleet_core::ProfileRecommendedAction::Sync,
+                true,
+            ),
+        ];
+
+        let presentation =
+            select_hero_actions(&actions, fleet_core::ProfileRecommendedAction::Validate);
+
+        assert_eq!(
+            presentation.primary.map(|action| action.action),
+            Some(ACTION_VALIDATE)
+        );
+        assert_eq!(
+            presentation.companion.map(|action| action.action),
+            Some(ACTION_SYNC)
+        );
+        assert!(presentation.tertiary.is_empty());
     }
 }
