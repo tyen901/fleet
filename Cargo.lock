@@ -172,18 +172,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -285,28 +273,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
-name = "async-stream"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
-dependencies = [
- "async-stream-impl",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.114",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -396,6 +362,17 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+]
+
+[[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+ "gloo-timers",
+ "tokio",
 ]
 
 [[package]]
@@ -1902,7 +1879,6 @@ dependencies = [
  "fleet-flow",
  "fleet-local-state",
  "fleet-local-state-inventory",
- "fleet-reconcile",
  "futures",
  "rand 0.8.5",
  "regex",
@@ -1988,8 +1964,6 @@ dependencies = [
  "fleet-domain",
  "fleet-local-state",
  "inventory",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2014,18 +1988,13 @@ name = "fleet-reconcile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "bytes",
  "fleet-domain",
  "flux-api",
  "flux-inventory-contract",
  "flux-manifest",
- "flux-provider",
  "flux-segment-cache",
  "flux-types",
- "futures-util",
  "inventory",
- "retriever",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2044,32 +2013,32 @@ dependencies = [
 [[package]]
 name = "flux-api"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
- "flux-finalize",
+ "flux-commit",
  "flux-inventory-contract",
  "flux-local-import",
  "flux-manifest",
  "flux-materialize",
  "flux-planner",
- "flux-provider",
  "flux-remote-fetch",
  "flux-scheduler",
  "flux-staging",
  "flux-types",
  "futures-util",
+ "retriever",
  "rustc-hash 2.1.1",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
-name = "flux-finalize"
+name = "flux-commit"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-inventory-contract",
@@ -2080,7 +2049,7 @@ dependencies = [
 [[package]]
 name = "flux-inventory-contract"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2089,11 +2058,13 @@ dependencies = [
 [[package]]
 name = "flux-local-import"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-staging",
  "flux-types",
+ "futures-util",
+ "retriever",
  "tokio",
  "tokio-util",
 ]
@@ -2101,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2112,7 +2083,7 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-staging",
@@ -2122,8 +2093,9 @@ dependencies = [
 [[package]]
 name = "flux-planner"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
+ "anyhow",
  "blake3",
  "flux-inventory-contract",
  "flux-manifest",
@@ -2131,42 +2103,32 @@ dependencies = [
  "ignore",
  "rayon",
  "rustc-hash 2.1.1",
+ "serde",
  "tracing",
-]
-
-[[package]]
-name = "flux-provider"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "flux-types",
- "futures-util",
 ]
 
 [[package]]
 name = "flux-remote-fetch"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "blake3",
  "bytes",
- "flux-provider",
  "flux-staging",
  "flux-types",
  "futures-util",
+ "retriever",
  "rustc-hash 2.1.1",
  "tokio",
  "tokio-util",
+ "url",
 ]
 
 [[package]]
 name = "flux-scheduler"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "flux-types",
  "rustc-hash 2.1.1",
@@ -2178,17 +2140,16 @@ dependencies = [
 [[package]]
 name = "flux-segment-cache"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
- "blake3",
  "flux-types",
 ]
 
 [[package]]
 name = "flux-staging"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2198,7 +2159,7 @@ dependencies = [
 [[package]]
 name = "flux-types"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?tag=v0.3.0#655e3f065046d5e8937da2d01b11b4001696fd9f"
+source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "serde",
@@ -2931,6 +2892,12 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-content-range"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cdb727cec723cee65912a74a7f9f0c3ad0c6f9df4f03d05a5c7a15398bbad1"
 
 [[package]]
 name = "httparse"
@@ -3786,16 +3753,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "metrics"
-version = "0.24.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d5312e9ba3771cfa961b585728215e3d972c950a3eed9252aa093d6301277e8"
-dependencies = [
- "ahash",
- "portable-atomic",
 ]
 
 [[package]]
@@ -5026,19 +4983,21 @@ dependencies = [
 [[package]]
 name = "retriever"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/retriever.git?tag=v0.1.0#8d164500c9718d00f197d790ba9853672ec3a59f"
+source = "git+https://github.com/tyen901/retriever.git?rev=1168a5a6f53aafca5f783292931edbd5c69298ce#1168a5a6f53aafca5f783292931edbd5c69298ce"
 dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
+ "backon",
  "bytes",
+ "futures-core",
  "futures-util",
  "governor",
- "metrics",
+ "http 1.4.0",
+ "http-content-range",
  "reqwest",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5838,8 +5797,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha1",
- "specta",
  "swifty_artifacts",
  "tempfile",
  "tokio",
