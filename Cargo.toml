@@ -26,17 +26,15 @@ swifty-repo              = { path = "crates/swifty-repo" }
 inventory                = { path = "crates/inventory" }
 fleet-arma3              = { path = "crates/arma3" }
 
-# Git dependencies 
-retriever              = { git = "https://github.com/tyen901/retriever.git", tag = "v0.1.0" }
+# Local dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", tag = "v1.1.0" }
 
-# Git dependencies (Flux)
-flux-api                    = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
-flux-inventory-contract     = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
-flux-manifest               = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
-flux-provider               = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
-flux-segment-cache          = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
-flux-types                  = { git = "https://github.com/tyen901/flux.git", tag = "v0.3.0" }
+# Local dependencies (Flux)
+flux-api                    = { git = "https://github.com/tyen901/flux.git", rev = "cd61c70a024a00f0fa45c62e26f7849d9204a09e", package = "flux-api" }
+flux-inventory-contract     = { git = "https://github.com/tyen901/flux.git", rev = "cd61c70a024a00f0fa45c62e26f7849d9204a09e", package = "flux-inventory-contract" }
+flux-manifest               = { git = "https://github.com/tyen901/flux.git", rev = "cd61c70a024a00f0fa45c62e26f7849d9204a09e", package = "flux-manifest" }
+flux-segment-cache          = { git = "https://github.com/tyen901/flux.git", rev = "cd61c70a024a00f0fa45c62e26f7849d9204a09e", package = "flux-segment-cache" }
+flux-types                  = { git = "https://github.com/tyen901/flux.git", rev = "cd61c70a024a00f0fa45c62e26f7849d9204a09e", package = "flux-types" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }

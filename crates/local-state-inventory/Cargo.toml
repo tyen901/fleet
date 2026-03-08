@@ -8,5 +8,3 @@ anyhow = { workspace = true }
 fleet-domain = { workspace = true }
 fleet-local-state = { workspace = true }
 inventory = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
