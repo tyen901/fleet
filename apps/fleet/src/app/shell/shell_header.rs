@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use dioxus_router::Navigator;
-use fleet_style::{
+use crate::style::{
     AppIcon, Button, ButtonSize, ButtonVariant, IconSize, SearchField, ThemeCycleButton,
     ThemeCycleButtonKind, ToolbarButton, ToolbarButtonLabelMode,
 };
+use dioxus::prelude::*;
+use dioxus_router::Navigator;
 use icondata::{BsArrowLeft, BsGearFill, BsPlusLg};
 
 use crate::app::router::Route;
@@ -73,8 +73,7 @@ fn profile_buttons_disabled(route: &Route, snapshot: &fleet_core::AppState) -> b
         .is_some_and(|operation| {
             matches!(
                 operation,
-                fleet_core::OperationKind::Assess(fleet_core::AssessScope::Local)
-                    | fleet_core::OperationKind::RebuildInventory
+                fleet_core::OperationKind::Sync
                     | fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote)
             )
         })
@@ -89,7 +88,13 @@ fn profile_back_disabled(route: &Route, snapshot: &fleet_core::AppState) -> bool
         .profile_runtime_by_id
         .get(id.as_str())
         .and_then(|runtime| runtime.active.as_ref().map(|active| active.operation))
-        .is_some_and(|operation| matches!(operation, fleet_core::OperationKind::Sync))
+        .is_some_and(|operation| {
+            matches!(
+                operation,
+                fleet_core::OperationKind::Sync
+                    | fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote)
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,6 +107,7 @@ pub(crate) fn render_shell_header(
     nav_events: ShellNavEventStore,
     save_action: Option<ShellSaveAction>,
     profile_action: Option<ShellSaveAction>,
+    profile_secondary_action: Option<ShellSaveAction>,
 ) -> Element {
     let title = nav_title_for_route(route, snapshot);
 
@@ -118,6 +124,11 @@ pub(crate) fn render_shell_header(
         } else {
             None
         };
+    let profile_secondary_nav_action = if matches!(route, Route::ProfileEdit { .. }) {
+        profile_secondary_action
+    } else {
+        None
+    };
     let nav_handler = nav_events.handler;
 
     let is_home = matches!(route, Route::Home {});
@@ -198,6 +209,7 @@ pub(crate) fn render_shell_header(
                         key: "nav-profile-action-{profile_action.label}",
                         variant: ButtonVariant::Secondary,
                         size: ButtonSize::Sm,
+                        loading: profile_action.loading,
                         disabled: profile_action.disabled || disable_profile_buttons || nav_handler().is_none(),
                         onclick: {
                             move |_| {
@@ -209,12 +221,30 @@ pub(crate) fn render_shell_header(
                         "{profile_action.label}"
                     }
                 }
-                if matches!(route, Route::ProfileView { .. } | Route::ProfileEdit { .. }) {
+                if let Some(profile_action) = profile_secondary_nav_action {
+                    Button {
+                        key: "nav-profile-action-secondary-{profile_action.label}",
+                        variant: ButtonVariant::Secondary,
+                        size: ButtonSize::Sm,
+                        loading: profile_action.loading,
+                        disabled: profile_action.disabled || disable_profile_buttons || nav_handler().is_none(),
+                        onclick: {
+                            move |_| {
+                                if let Some(handler) = nav_handler() {
+                                    handler(ShellNavEvent::ProfileSecondaryAction);
+                                }
+                            }
+                        },
+                        "{profile_action.label}"
+                    }
+                }
+                if matches!(route, Route::ProfileEdit { .. }) {
                     if let Some(save_action) = save_action.clone() {
                         Button {
                             key: "nav-profile-save-{save_action.label}",
                             variant: ButtonVariant::Primary,
                             size: ButtonSize::Sm,
+                            loading: save_action.loading,
                             disabled: save_action.disabled || disable_profile_buttons || nav_handler().is_none(),
                             onclick: {
                                 move |_| {
@@ -238,6 +268,7 @@ pub(crate) fn render_shell_header(
                                         key: "nav-save-{save_label}",
                                         variant: ButtonVariant::Primary,
                                         size: ButtonSize::Sm,
+                                        loading: save_action.loading,
                                         disabled: save_disabled || disable_profile_buttons || nav_handler().is_none(),
                                         onclick: {
                                             move |_| {

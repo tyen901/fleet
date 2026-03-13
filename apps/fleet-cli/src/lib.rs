@@ -26,14 +26,6 @@ pub enum Commands {
     /// Check profile health and list dirty/update status
     Check { profile_id: String },
 
-    /// Check for unexpected files and optionally delete them
-    Clean {
-        profile_id: String,
-        /// Auto-confirm cleanup without prompt
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-    },
-
     /// Run a sync oneshot and print live progress
     Sync {
         profile_id: String,

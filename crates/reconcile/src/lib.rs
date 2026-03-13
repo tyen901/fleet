@@ -1,4 +1,3 @@
-mod flux_sqlite;
 mod progress;
 mod runner;
 
@@ -34,7 +33,6 @@ impl FluxEngine {
         &self,
         dest: &std::path::Path,
         inventory_db_path: &std::path::Path,
-        inventory_name: &str,
         desired: flux_manifest::DesiredManifest,
         opts: FluxSyncOptions,
         cancel: tokio_util::sync::CancellationToken,
@@ -44,7 +42,6 @@ impl FluxEngine {
             self.flux_cache_dir.clone(),
             dest,
             inventory_db_path,
-            inventory_name,
             desired,
             opts,
             cancel,
@@ -57,14 +54,12 @@ impl FluxEngine {
         &self,
         dest: &std::path::Path,
         inventory_db_path: &std::path::Path,
-        inventory_name: &str,
         prune_paths: Vec<std::path::PathBuf>,
     ) -> anyhow::Result<()> {
         runner::prune_only(
             self.flux_cache_dir.clone(),
             dest,
             inventory_db_path,
-            inventory_name,
             prune_paths,
         )
         .map(|_| ())

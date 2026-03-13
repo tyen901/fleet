@@ -12,13 +12,13 @@ pub struct FleetPaths {
 #[derive(Debug, Clone)]
 pub struct ProfilePaths {
     pub state_dir: PathBuf,
-    pub local_state: LocalStatePaths,
+    pub inventory: InventoryPaths,
     pub reconcile: ReconcilePaths,
     pub repo_cache: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-pub struct LocalStatePaths {
+pub struct InventoryPaths {
     pub db: PathBuf,
     pub lock: PathBuf,
 }
@@ -44,7 +44,7 @@ impl FleetPaths {
             profile_id,
             profile: ProfilePaths {
                 state_dir,
-                local_state: LocalStatePaths {
+                inventory: InventoryPaths {
                     db: inventory_db,
                     lock: inventory_lock,
                 },

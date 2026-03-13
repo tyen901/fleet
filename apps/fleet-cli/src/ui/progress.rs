@@ -1,84 +1,34 @@
-use fleet_core::{FlowEventKind, FlowSessionEvent};
+use fleet_core::{PipelineEventKind, PipelineSessionEvent, ProgressUnit, StageState};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SyncBarMode {
-    Bytes,
-    Files,
-    FinalizingFiles,
-}
-
-fn sync_progress_counts(kind: &FlowEventKind) -> Option<(SyncBarMode, u64, u64)> {
-    match kind {
-        FlowEventKind::SyncProgress { progress, .. } => {
-            if let (Some(done), Some(total)) = (
-                progress.files_finalized,
-                progress.files_total.filter(|total| *total > 0),
-            ) {
-                let fetch_complete = matches!(
-                    (progress.bytes_done, progress.bytes_total.filter(|value| *value > 0)),
-                    (Some(bytes_done), Some(bytes_total)) if bytes_done >= bytes_total
-                );
-                if fetch_complete && done < total {
-                    return Some((SyncBarMode::FinalizingFiles, done, total));
-                }
-            }
-            if let (Some(done), Some(total)) = (
-                progress.bytes_done,
-                progress.bytes_total.filter(|total| *total > 0),
-            ) {
-                Some((SyncBarMode::Bytes, done, total))
-            } else if let (Some(done), Some(total)) = (
-                progress.files_finalized,
-                progress.files_total.filter(|total| *total > 0),
-            ) {
-                Some((SyncBarMode::Files, done, total))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-fn plain_event_line(ev: &FlowSessionEvent) -> Option<String> {
+fn plain_event_line(ev: &PipelineSessionEvent) -> Option<String> {
     match &ev.kind {
-        FlowEventKind::SyncPhaseChanged { phase } => Some(format!("Sync phase: {phase:?}")),
-        FlowEventKind::SyncProgress { .. } => {
-            sync_progress_counts(&ev.kind).map(|(mode, done, total)| match mode {
-                SyncBarMode::Bytes => format!("Progress: {done}/{total} bytes"),
-                SyncBarMode::Files => format!("Progress: {done}/{total} files"),
-                SyncBarMode::FinalizingFiles => {
-                    format!("Progress: {done}/{total} files finalized")
-                }
-            })
+        PipelineEventKind::StageChanged { stage, state } => {
+            Some(format!("Stage {state:?}: {stage:?}"))
         }
-        FlowEventKind::LocalStateStageChanged { stage } => {
-            Some(format!("Inventory stage: {stage:?}"))
+        PipelineEventKind::Progress { progress } => {
+            if let (Some(done), Some(total)) = (progress.primary.done, progress.primary.total) {
+                Some(match progress.primary.unit {
+                    ProgressUnit::Bytes => format!("Progress: {done}/{total} bytes"),
+                    ProgressUnit::Files => format!("Progress: {done}/{total} files"),
+                    ProgressUnit::Paths => format!("Progress: {done}/{total} paths"),
+                })
+            } else {
+                progress.status_text.clone()
+            }
         }
-        FlowEventKind::LocalStateProgress {
-            progress, rate_bps, ..
-        } => Some(format!(
-            "Inventory: stage={:?} files_scanned={} bytes_scanned={} ({} B/s)",
-            progress.stage,
-            progress.files_scanned,
-            progress.bytes_scanned,
-            rate_bps.unwrap_or(0.0) as u64
-        )),
-        FlowEventKind::AssessPhaseChanged { phase } => Some(format!("Check phase: {phase:?}")),
-        FlowEventKind::Message { text, .. } => Some(text.clone()),
-        FlowEventKind::LocalStateStatus { status } => Some(format!("Inventory: {status:?}")),
-        FlowEventKind::Finished { .. } => Some("finished".to_string()),
-        FlowEventKind::Failed { error } => {
+        PipelineEventKind::Notice { text, .. } => Some(text.clone()),
+        PipelineEventKind::Finished { .. } => Some("finished".to_string()),
+        PipelineEventKind::Failed { error } => {
             Some(format!("failed: {}: {}", error.code, error.message))
         }
-        FlowEventKind::Canceled => Some("canceled".to_string()),
-        FlowEventKind::Started => Some(format!("started: {:?}", ev.operation)),
+        PipelineEventKind::Canceled => Some("canceled".to_string()),
+        PipelineEventKind::Started => Some(format!("started: {:?}", ev.operation)),
     }
 }
 
 pub fn spawn_flow_printer(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<FlowSessionEvent>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineSessionEvent>,
     no_progress: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -92,7 +42,6 @@ pub fn spawn_flow_printer(
         }
 
         let mp = MultiProgress::new();
-
         let style_spinner = ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_spinner());
         let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {bytes}/{total_bytes}")
@@ -101,83 +50,56 @@ pub fn spawn_flow_printer(
             .unwrap_or_else(|_| ProgressStyle::default_bar());
 
         let phase_pb = mp.add(ProgressBar::new_spinner());
-        phase_pb.set_style(style_spinner.clone());
-        phase_pb.set_message("Phase: starting");
+        phase_pb.set_style(style_spinner);
+        phase_pb.set_message("Stage: starting");
         phase_pb.enable_steady_tick(std::time::Duration::from_millis(150));
 
-        let sync_pb = mp.add(ProgressBar::new(0));
-        sync_pb.set_style(style_bar.clone());
-        sync_pb.set_message("Sync");
-
-        let mut sync_bar_mode = SyncBarMode::Bytes;
+        let progress_pb = mp.add(ProgressBar::new(0));
+        progress_pb.set_style(style_bar.clone());
+        progress_pb.set_message("Operation");
 
         while let Some(ev) = rx.recv().await {
             match ev.kind {
-                FlowEventKind::SyncPhaseChanged { phase } => {
-                    phase_pb.set_message(format!("Sync phase: {phase:?}"));
+                PipelineEventKind::StageChanged {
+                    stage,
+                    state: StageState::Entered,
+                } => {
+                    phase_pb.set_message(format!("Stage: {stage:?}"));
                 }
-                FlowEventKind::Message { text, .. } => {
+                PipelineEventKind::Progress { progress } => {
+                    match progress.primary.unit {
+                        ProgressUnit::Bytes => progress_pb.set_style(style_bar.clone()),
+                        ProgressUnit::Files => progress_pb.set_style(style_file_bar.clone()),
+                        ProgressUnit::Paths => progress_pb.set_style(style_file_bar.clone()),
+                    }
+                    if let Some(message) = progress.status_text {
+                        progress_pb.set_message(message);
+                    }
+                    if let Some(total) = progress.primary.total {
+                        if progress_pb.length().unwrap_or(0) != total {
+                            progress_pb.set_length(total);
+                        }
+                    }
+                    if let Some(done) = progress.primary.done {
+                        progress_pb.set_position(done);
+                    }
+                }
+                PipelineEventKind::Notice { text, .. } => {
                     let _ = mp.println(text);
                 }
-                FlowEventKind::LocalStateStatus { status } => {
-                    let _ = mp.println(format!("Inventory: {status:?}"));
+                PipelineEventKind::Finished { .. } => {
+                    phase_pb.finish_with_message("Stage: done");
                 }
-                FlowEventKind::SyncProgress { .. } => {
-                    if let Some((mode, done, total)) = sync_progress_counts(&ev.kind) {
-                        if sync_bar_mode != mode {
-                            match mode {
-                                SyncBarMode::Bytes => {
-                                    sync_pb.set_style(style_bar.clone());
-                                    sync_pb.set_message("Sync");
-                                }
-                                SyncBarMode::Files => {
-                                    sync_pb.set_style(style_file_bar.clone());
-                                    sync_pb.set_message("Sync (files)");
-                                }
-                                SyncBarMode::FinalizingFiles => {
-                                    sync_pb.set_style(style_file_bar.clone());
-                                    sync_pb.set_message("Sync (finalizing)");
-                                }
-                            }
-                            sync_bar_mode = mode;
-                        }
-                        if sync_pb.length().unwrap_or(0) != total {
-                            sync_pb.set_length(total);
-                        }
-                        sync_pb.set_position(done);
-                    }
-                }
-                FlowEventKind::LocalStateProgress { progress, .. } => {
-                    if sync_bar_mode != SyncBarMode::Bytes {
-                        sync_pb.set_style(style_bar.clone());
-                        sync_pb.set_message("Sync");
-                        sync_bar_mode = SyncBarMode::Bytes;
-                    }
-                    if progress.bytes_total > 0
-                        && sync_pb.length().unwrap_or(0) != progress.bytes_total
-                    {
-                        sync_pb.set_length(progress.bytes_total);
-                    }
-                    sync_pb.set_position(progress.bytes_scanned);
-                }
-                FlowEventKind::LocalStateStageChanged { stage } => {
-                    phase_pb.set_message(format!("Inventory stage: {stage:?}"));
-                }
-                FlowEventKind::AssessPhaseChanged { phase } => {
-                    phase_pb.set_message(format!("Check phase: {phase:?}"));
-                }
-                FlowEventKind::Finished { .. } => {
-                    phase_pb.finish_with_message("Phase: done");
-                }
-                FlowEventKind::Failed { error } => {
+                PipelineEventKind::Failed { error } => {
                     let _ = mp.println(format!("failed: {}: {}", error.code, error.message));
                 }
-                FlowEventKind::Canceled => {
+                PipelineEventKind::Canceled => {
                     let _ = mp.println("canceled");
                 }
-                FlowEventKind::Started => {
+                PipelineEventKind::Started => {
                     let _ = mp.println(format!("started: {:?}", ev.operation));
                 }
+                PipelineEventKind::StageChanged { .. } => {}
             }
         }
     })
@@ -185,27 +107,42 @@ pub fn spawn_flow_printer(
 
 #[cfg(test)]
 mod tests {
-    use super::{sync_progress_counts, SyncBarMode};
-    use fleet_core::FlowEventKind;
+    use super::plain_event_line;
+    use fleet_core::{
+        OperationKind, PipelineEventKind, PipelineProgressEvent, PipelineSessionEvent,
+        ProgressScope, ProgressUnit,
+    };
 
     #[test]
-    fn sync_progress_prefers_file_finalization_after_bytes_complete() {
-        let kind = FlowEventKind::SyncProgress {
-            progress: fleet_core::SyncProgress {
-                bytes_done: Some(100),
-                bytes_total: Some(100),
-                files_finalized: Some(7),
-                files_total: Some(10),
-                ..Default::default()
+    fn progress_line_formats_files() {
+        let ev = PipelineSessionEvent {
+            session_id: 1,
+            profile_id: "p1".into(),
+            operation: OperationKind::Sync,
+            timestamp_ms: 1,
+            seq: 1,
+            kind: PipelineEventKind::Progress {
+                progress: PipelineProgressEvent {
+                    stage: fleet_core::OperationStage::Reconciling,
+                    scope: ProgressScope::ReconcileFiles,
+                    status_text: None,
+                    primary: fleet_core::ProgressMetric {
+                        label: None,
+                        done: Some(7),
+                        total: Some(10),
+                        unit: ProgressUnit::Files,
+                    },
+                    secondary: None,
+                    throughput_bytes_per_sec: None,
+                    eta_seconds: None,
+                    elapsed_ms: None,
+                },
             },
-            rate_bps: None,
-            eta_seconds: None,
-            message: None,
         };
 
         assert_eq!(
-            sync_progress_counts(&kind),
-            Some((SyncBarMode::FinalizingFiles, 7, 10))
+            plain_event_line(&ev).as_deref(),
+            Some("Progress: 7/10 files")
         );
     }
 }

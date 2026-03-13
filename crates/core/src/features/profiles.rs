@@ -4,8 +4,7 @@ use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
 use fleet_domain::LocalStateMetrics;
 use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
-use fleet_local_state::LocalStateEngine;
-use fleet_local_state_inventory::InventoryLocalStateEngine;
+use fleet_inventory::Inventory;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
@@ -577,13 +576,13 @@ fn load_profile_inventory_metrics(profile: &Profile) -> Result<LocalStateMetrics
         std::fs::create_dir_all(parent)
             .map_err(|e| crate::ApiError::new("inventory_store", e.to_string()))?;
     }
-    InventoryLocalStateEngine::new()
-        .load_metrics(&profile.id, &destination, &inventory_db)
+    Inventory::open(&inventory_db)
+        .and_then(|inventory| inventory.load_metrics(&destination))
         .map_err(|err| {
             if err.is_corrupted_database() {
                 crate::ApiError::new(
                     fleet_domain::INVENTORY_REBUILD_REQUIRED_CODE,
-                    fleet_local_state::REBUILD_REQUIRED_MESSAGE,
+                    fleet_domain::REBUILD_REQUIRED_MESSAGE,
                 )
             } else {
                 crate::ApiError::new("inventory_metrics", err.to_string())

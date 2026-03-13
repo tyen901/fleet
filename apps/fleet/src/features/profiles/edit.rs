@@ -1,5 +1,5 @@
+use crate::style::{Button, ButtonSize, ButtonVariant, ConfirmDialog, SelectField, SelectOption};
 use dioxus::prelude::*;
-use fleet_style::{Button, ButtonSize, ButtonVariant, ConfirmDialog, SelectField, SelectOption};
 use tracing::{error, info};
 
 use crate::app::router::Route;
@@ -146,8 +146,7 @@ pub fn ProfileEdit(id: String) -> Element {
     );
     let profile_dirty = next_profile != profile;
     let can_save = validation.is_valid() && profile_dirty;
-    let form_card_subtitle =
-        operation_active.then_some("Finish the active operation before saving.");
+    let form_message = operation_active.then_some("Finish the active operation before saving.");
 
     {
         let mut save_action = shell_nav_actions.save_action;
@@ -204,7 +203,7 @@ pub fn ProfileEdit(id: String) -> Element {
                     store,
                     toasts,
                     next,
-                    "Health re-check could not start. Use Validate.",
+                    "Health re-check could not start.",
                 )
                 .await
                 {
@@ -298,61 +297,89 @@ pub fn ProfileEdit(id: String) -> Element {
             div { class: "page__inner dash-page__inner",
                 div { class: "dash-layout",
                     div { class: "dash-layout__content",
-                        section { class: "profile-form-view",
-                            article { class: "profile-card",
-                                div { class: "profile-card__header",
-                                    h3 { class: "profile-card__title", "Profile Details" }
-                                    if let Some(form_card_subtitle) = form_card_subtitle {
-                                        div { class: "profile-card__subtitle", "{form_card_subtitle}" }
+                        section { class: "profile-page__layout",
+                            if let Some(form_message) = form_message {
+                                p { class: "profile-page__note",
+                                    "{form_message}"
+                                }
+                            }
+                            div { class: "panel-group dash-readonly profile-page__group",
+                                ProfileTextFieldRow {
+                                    title: "Name".to_string(),
+                                    class: Some(profile_row_class().to_string()),
+                                    value: name(),
+                                    placeholder: Some(crate::features::profiles::PROFILE_NAME_PLACEHOLDER.to_string()),
+                                    error: if !validation.name_ok && !name().trim().is_empty() {
+                                        Some("Name must be alphanumeric (spaces allowed).".to_string())
+                                    } else {
+                                        None
+                                    },
+                                    on_change: move |v| name.set(v),
+                                }
+                                ProfileTextFieldRow {
+                                    title: "URL".to_string(),
+                                    class: Some(profile_row_class().to_string()),
+                                    value: repo(),
+                                    placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
+                                    error: if !validation.repo_ok && !repo().trim().is_empty() {
+                                        Some("Repo URL must be http(s) and end with repo.json.".to_string())
+                                    } else {
+                                        None
+                                    },
+                                    on_change: move |v| repo.set(v),
+                                }
+
+                                ProfileTextFieldRow {
+                                    title: "Folder".to_string(),
+                                    class: Some(profile_folder_row_class().to_string()),
+                                    value: folder(),
+                                    placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
+                                    folder_select: true,
+                                    error: if !validation.folder_ok && !folder().trim().is_empty() {
+                                        Some("Folder is required and must be unique.".to_string())
+                                    } else {
+                                        None
+                                    },
+                                    on_change: move |v| folder.set(v),
+                                }
+
+                                div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit",
+                                    div { class: "panel-row__meta",
+                                        div { class: "panel-row__title", "Use Default Launch Args" }
+                                    }
+                                    div { class: "panel-row__control panel-row__control--inline",
+                                        input {
+                                            r#type: "checkbox",
+                                            class: "check",
+                                            checked: use_default_args(),
+                                            onchange: move |evt| {
+                                                let next = evt.checked();
+                                                use_default_args.set(next);
+                                                if !next {
+                                                    launch_params.set(default_args.clone());
+                                                }
+                                            },
+                                        }
                                     }
                                 }
-                                div { class: "panel-group dash-readonly",
-                                    ProfileTextFieldRow {
-                                        title: "Name".to_string(),
-                                        class: Some(profile_row_class().to_string()),
-                                        value: name(),
-                                        placeholder: Some(crate::features::profiles::PROFILE_NAME_PLACEHOLDER.to_string()),
-                                        error: if !validation.name_ok && !name().trim().is_empty() {
-                                            Some("Name must be alphanumeric (spaces allowed).".to_string())
-                                        } else {
-                                            None
-                                        },
-                                        on_change: move |v| name.set(v),
-                                    }
-                                    ProfileTextFieldRow {
-                                        title: "URL".to_string(),
-                                        class: Some(profile_row_class().to_string()),
-                                        value: repo(),
-                                        placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
-                                        error: if !validation.repo_ok && !repo().trim().is_empty() {
-                                            Some("Repo URL must be http(s) and end with repo.json.".to_string())
-                                        } else {
-                                            None
-                                        },
-                                        on_change: move |v| repo.set(v),
-                                    }
 
+                                if !use_default_args() {
                                     ProfileTextFieldRow {
-                                        title: "FOLDER".to_string(),
-                                        class: Some(profile_folder_row_class().to_string()),
-                                        value: folder(),
-                                        placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
-                                        folder_select: true,
-                                        error: if !validation.folder_ok && !folder().trim().is_empty() {
-                                            Some("Folder is required and must be unique.".to_string())
-                                        } else {
-                                            None
-                                        },
-                                        on_change: move |v| folder.set(v),
+                                        title: "Launch Parameters".to_string(),
+                                        class: Some(profile_row_class().to_string()),
+                                        value: launch_value,
+                                        on_change: move |v| launch_params.set(v),
                                     }
+                                }
 
+                                if display_repo_servers.len() > 1 {
                                     div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit",
                                         div { class: "panel-row__meta",
                                             div { class: "panel-row__title", "Join Server" }
                                         }
                                         div { class: "panel-row__control panel-row__control--stack",
                                             SelectField {
-                                                disabled: display_repo_servers.len() <= 1,
+                                                disabled: false,
                                                 value: join_server_value.clone(),
                                                 options: join_server_options.clone(),
                                                 onchange: move |value: String| {
@@ -361,54 +388,17 @@ pub fn ProfileEdit(id: String) -> Element {
                                             }
                                         }
                                     }
-
-                                    div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit",
-                                        div { class: "panel-row__meta",
-                                            div { class: "panel-row__title", "Use Default Launch Args" }
-                                        }
-                                        div { class: "panel-row__control panel-row__control--inline",
-                                            input {
-                                                r#type: "checkbox",
-                                                class: "check",
-                                                checked: use_default_args(),
-                                                onchange: move |evt| {
-                                                    let next = evt.checked();
-                                                    use_default_args.set(next);
-                                                    if !next {
-                                                        launch_params.set(default_args.clone());
-                                                    }
-                                                },
-                                            }
-                                        }
-                                    }
-
-                                    if !use_default_args() {
-                                        ProfileTextFieldRow {
-                                            title: "Launch Parameters".to_string(),
-                                            class: Some(profile_row_class().to_string()),
-                                            value: launch_value,
-                                            on_change: move |v| launch_params.set(v),
-                                        }
-                                    }
                                 }
                             }
 
-                            article { class: "profile-card profile-card--danger",
-                                div { class: "profile-card__header",
-                                    h3 { class: "profile-card__title", "Danger Zone" }
-                                }
-                                div { class: "profile-danger",
-                                    p { class: "profile-danger__summary",
-                                        "Remove this profile from Fleet. The destination folder and files on disk stay untouched."
-                                    }
-                                    div { class: "profile-danger__actions",
-                                        Button {
-                                            variant: ButtonVariant::Danger,
-                                            size: ButtonSize::Md,
-                                            disabled: operation_active,
-                                            onclick: on_request_delete,
-                                            "Delete Profile"
-                                        }
+                            section { class: "profile-page__section profile-page__section--danger",
+                                div { class: "profile-page__issue-panel",
+                                    Button {
+                                        variant: ButtonVariant::Danger,
+                                        size: ButtonSize::Md,
+                                        disabled: operation_active,
+                                        onclick: on_request_delete,
+                                        "Delete Profile"
                                     }
                                 }
                             }

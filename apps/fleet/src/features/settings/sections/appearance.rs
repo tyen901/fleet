@@ -1,7 +1,7 @@
+use crate::style::{FieldRow, FieldRowInline, FieldRowMeta, Section, SectionHeader, ThemeSelect};
 use dioxus::prelude::*;
 use fleet_core::SettingsField;
 use fleet_domain::ThemeMode;
-use fleet_style::{FieldRow, FieldRowInline, FieldRowMeta, Section, SectionHeader, ThemeSelect};
 
 use super::field_reset::PanelFieldResetButton;
 

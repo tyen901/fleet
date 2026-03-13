@@ -1,7 +1,7 @@
-use dioxus::prelude::*;
-use fleet_style::{
+use crate::style::{
     Button, ButtonSize, ButtonVariant, FieldRow, FieldRowMeta, Section, SectionHeader,
 };
+use dioxus::prelude::*;
 
 pub(crate) fn reset_section<FResetSettings, FFactoryReset>(
     mut on_reset_settings: FResetSettings,

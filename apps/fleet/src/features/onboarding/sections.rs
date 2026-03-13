@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use fleet_domain::ThemeMode;
-use fleet_style::{
+use crate::style::{
     Button, ButtonSize, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta, Section,
     ThemeCycleButton, ThemeCycleButtonKind, ThemeSelect,
 };
+use dioxus::prelude::*;
+use fleet_domain::ThemeMode;
 
 use crate::features::shared::browse_field::BrowseField;
 

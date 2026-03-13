@@ -3,9 +3,9 @@ use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use crate::stores::toast_view::ToastViewport;
+use crate::style::ThemeRoot;
 use dioxus::prelude::*;
 use fleet_core::{OperationKind, OperationTerminalStatus};
-use fleet_style::ThemeRoot;
 use tracing::{error, warn};
 
 #[component]

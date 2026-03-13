@@ -1828,7 +1828,6 @@ dependencies = [
  "dotenvy",
  "fleet-core",
  "fleet-domain",
- "fleet-style",
  "icondata",
  "open",
  "reqwest",
@@ -1876,9 +1875,8 @@ dependencies = [
  "fleet-arma3",
  "fleet-domain",
  "fleet-download",
- "fleet-flow",
- "fleet-local-state",
- "fleet-local-state-inventory",
+ "fleet-inventory",
+ "fleet-pipeline",
  "futures",
  "rand 0.8.5",
  "regex",
@@ -1901,7 +1899,6 @@ name = "fleet-domain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "fleet-local-state",
  "serde",
  "serde_json",
  "sha1",
@@ -1923,47 +1920,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet-flow"
+name = "fleet-inventory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
- "directories",
+ "blake3",
  "fleet-domain",
- "fleet-download",
- "fleet-local-state",
- "fleet-local-state-inventory",
- "fleet-manifest",
- "fleet-reconcile",
+ "flux-inventory-contract",
  "flux-manifest",
- "fs2",
- "serde",
- "serde_json",
- "swifty-repo",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "fleet-local-state"
-version = "0.1.0"
-dependencies = [
- "anyhow",
+ "flux-types",
+ "md5",
+ "rusqlite",
  "serde",
  "specta",
+ "tempfile",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "fleet-local-state-inventory"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fleet-domain",
- "fleet-local-state",
- "inventory",
+ "walkdir",
 ]
 
 [[package]]
@@ -1984,17 +1956,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "directories",
+ "fleet-domain",
+ "fleet-download",
+ "fleet-inventory",
+ "fleet-manifest",
+ "fleet-reconcile",
+ "flux-inventory-contract",
+ "flux-manifest",
+ "flux-types",
+ "fs2",
+ "md5",
+ "rayon",
+ "serde",
+ "serde_json",
+ "specta",
+ "swifty-repo",
+ "swifty_artifacts",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
 name = "fleet-reconcile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "fleet-domain",
+ "fleet-inventory",
  "flux-api",
  "flux-inventory-contract",
  "flux-manifest",
  "flux-segment-cache",
  "flux-types",
- "inventory",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -2002,18 +2007,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "fleet-style"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "fleet-domain",
- "icondata",
-]
-
-[[package]]
 name = "flux-api"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2038,7 +2033,6 @@ dependencies = [
 [[package]]
 name = "flux-commit"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-inventory-contract",
@@ -2049,7 +2043,6 @@ dependencies = [
 [[package]]
 name = "flux-inventory-contract"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2058,7 +2051,6 @@ dependencies = [
 [[package]]
 name = "flux-local-import"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-staging",
@@ -2072,7 +2064,6 @@ dependencies = [
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2083,7 +2074,6 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-staging",
@@ -2093,7 +2083,6 @@ dependencies = [
 [[package]]
 name = "flux-planner"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2110,7 +2099,6 @@ dependencies = [
 [[package]]
 name = "flux-remote-fetch"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2128,7 +2116,6 @@ dependencies = [
 [[package]]
 name = "flux-scheduler"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "flux-types",
  "rustc-hash 2.1.1",
@@ -2140,7 +2127,6 @@ dependencies = [
 [[package]]
 name = "flux-segment-cache"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2149,7 +2135,6 @@ dependencies = [
 [[package]]
 name = "flux-staging"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2159,7 +2144,6 @@ dependencies = [
 [[package]]
 name = "flux-types"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux.git?rev=cd61c70a024a00f0fa45c62e26f7849d9204a09e#cd61c70a024a00f0fa45c62e26f7849d9204a09e"
 dependencies = [
  "anyhow",
  "serde",
@@ -3241,21 +3225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory"
-version = "0.1.0"
-dependencies = [
- "crossbeam-channel",
- "fleet-domain",
- "rusqlite",
- "serde",
- "swifty_artifacts",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "walkdir",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3509,7 +3478,6 @@ version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95b4103cffefa72eb8428cb6b47d6627161e51c2739fc5e3b734584157bc642a"
 dependencies = [
- "cc",
  "pkg-config",
  "vcpkg",
 ]

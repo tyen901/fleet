@@ -1,13 +1,14 @@
 use fleet_domain::health::{
-    AssessPhase, AssessScope, LocalStateHealth, OperationKind, ProfileStateReport,
-    RemoteFreshnessState,
+    AssessScope, LocalStateHealth, OperationKind, ProfileStateReport, RemoteFreshnessState,
 };
-use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId};
-use fleet_domain::LocalStateStage;
+use fleet_domain::sync::SyncSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
+use fleet_pipeline::{
+    OperationOutput, OperationStage, PipelineProgressEvent, ProgressMetric, ProgressUnit,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, Type)]
 pub struct AppState {
@@ -65,13 +66,10 @@ impl ProfileRuntimeState {
 pub struct ActiveOperationState {
     pub session_id: SyncSessionId,
     pub operation: OperationKind,
-    pub phase: SyncPhase,
-    pub progress: SyncProgress,
+    pub progress: ProfileOperationProgressState,
+    #[serde(default)]
+    pub completed_stages: BTreeSet<OperationStage>,
     pub message: Option<String>,
-    #[serde(default)]
-    pub inventory_stage: Option<LocalStateStage>,
-    #[serde(default)]
-    pub check_phase: Option<AssessPhase>,
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
 }
@@ -81,11 +79,9 @@ impl ActiveOperationState {
         Self {
             session_id,
             operation,
-            phase: SyncPhase::Validating,
-            progress: SyncProgress::default(),
+            progress: ProfileOperationProgressState::new(operation, now_ms),
+            completed_stages: BTreeSet::new(),
             message: None,
-            inventory_stage: None,
-            check_phase: None,
             started_at_unix_ms: now_ms,
             updated_at_unix_ms: now_ms,
         }
@@ -100,21 +96,13 @@ pub enum OperationTerminalStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub enum OperationSummary {
-    Sync(ProfileStateReport),
-    Assess(ProfileStateReport),
-    RebuildInventory(ProfileStateReport),
-    Clean(ProfileStateReport),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct OperationOutcomeState {
     pub session_id: SyncSessionId,
     pub operation: OperationKind,
     pub status: OperationTerminalStatus,
     pub updated_at_unix_ms: u64,
     pub message: Option<String>,
-    pub summary: Option<OperationSummary>,
+    pub summary: Option<OperationOutput>,
     pub error: Option<ApiError>,
 }
 
@@ -170,8 +158,6 @@ pub enum ProfileStatusBadge {
 pub enum ProfileRecommendedAction {
     #[default]
     Sync,
-    Clean,
-    RebuildInventory,
     Validate,
     CheckUpdates,
 }
@@ -179,26 +165,79 @@ pub enum ProfileRecommendedAction {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
-    pub rebuild_inventory_enabled: bool,
     pub validate_enabled: bool,
     pub check_updates_enabled: bool,
-    pub clean_enabled: bool,
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
     pub validate_running: bool,
-    pub rebuild_inventory_running: bool,
     pub check_updates_running: bool,
-    pub clean_running: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct ProfileProgressView {
+pub struct UiProgressBarState {
+    pub determinate: bool,
+    pub percent: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct UiProgressMetric {
     pub label: String,
-    pub detail: String,
     pub done: Option<u64>,
     pub total: Option<u64>,
-    pub indeterminate: bool,
+    pub unit: ProgressUnit,
+    pub rendered: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub enum UiOperationStepStatus {
+    Pending,
+    Active,
+    Complete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct UiOperationStepState {
+    pub stage: OperationStage,
+    pub label: String,
+    pub status: UiOperationStepStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct ProfileOperationProgressState {
+    pub operation: OperationKind,
+    pub started_at_unix_ms: u64,
+    pub last_updated_at_unix_ms: u64,
+    pub elapsed_ms: u64,
+    pub active_stage: OperationStage,
+    pub steps: Vec<UiOperationStepState>,
+    pub stage: UiProgressBarState,
+    pub primary_metric: Option<UiProgressMetric>,
+    pub secondary_metric: Option<UiProgressMetric>,
+    pub throughput_bytes_per_sec: Option<u64>,
+    pub eta_seconds: Option<u64>,
+}
+
+impl ProfileOperationProgressState {
+    pub fn new(operation: OperationKind, now_ms: u64) -> Self {
+        let active_stage = OperationStage::Validating;
+        Self {
+            operation,
+            started_at_unix_ms: now_ms,
+            last_updated_at_unix_ms: now_ms,
+            elapsed_ms: 0,
+            active_stage,
+            steps: build_operation_steps(operation, Some(active_stage), &BTreeSet::new()),
+            stage: UiProgressBarState {
+                determinate: false,
+                percent: None,
+            },
+            primary_metric: None,
+            secondary_metric: None,
+            throughput_bytes_per_sec: None,
+            eta_seconds: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -210,12 +249,11 @@ pub struct ProfileStatusState {
     pub recommended_action: ProfileRecommendedAction,
     pub actions: ProfileActionAvailability,
     #[serde(default)]
-    pub progress: Option<ProfileProgressView>,
+    pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalStateHealth,
     pub remote_freshness: Option<RemoteFreshnessState>,
     pub has_error: bool,
-    pub rebuild_inventory_required: bool,
-    pub clean_candidate_count: u64,
+    pub unexpected_path_count: u64,
     pub last_check_ms: u64,
     pub can_launch: bool,
 }
@@ -237,8 +275,7 @@ impl ProfileStatusState {
             local_health: LocalStateHealth::Unknown,
             remote_freshness: None,
             has_error: false,
-            rebuild_inventory_required: false,
-            clean_candidate_count: 0,
+            unexpected_path_count: 0,
             last_check_ms: now_ms,
             can_launch: false,
         }
@@ -301,7 +338,7 @@ fn derive_profile_status(
         .as_ref()
         .map(|report| report.remote_freshness.clone())
         .unwrap_or(None);
-    let clean_candidate_count = runtime
+    let unexpected_path_count = runtime
         .assessment
         .as_ref()
         .map(|report| report.unexpected_delete_paths.len() as u64)
@@ -320,18 +357,11 @@ fn derive_profile_status(
         active_operation,
         Some(OperationKind::Assess(AssessScope::Local))
     );
-    let rebuild_inventory_running =
-        matches!(active_operation, Some(OperationKind::RebuildInventory));
     let check_updates_running = matches!(
         active_operation,
         Some(OperationKind::Assess(AssessScope::Remote))
     );
-    let clean_running = matches!(active_operation, Some(OperationKind::Clean));
-
-    let missing_destination = matches!(local_health, LocalStateHealth::MissingDestination);
     let can_run_actions = !operation_active;
-    let clean_available = clean_candidate_count > 0;
-    let rebuild_inventory_required = matches!(local_health, LocalStateHealth::InventoryCorrupt);
     let hard_blocked = matches!(
         local_health,
         LocalStateHealth::Blocked
@@ -344,9 +374,7 @@ fn derive_profile_status(
             | LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt
     );
-    let maintenance_blocked = missing_destination || hard_blocked;
     let has_error = matches!(
         local_health,
         LocalStateHealth::MissingDestination
@@ -362,12 +390,16 @@ fn derive_profile_status(
             | LocalStateHealth::MissingDestination
             | LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::InventoryCorrupt
             | LocalStateHealth::ProbeFailed
     ) {
         ProfileRecommendedAction::Validate
-    } else if clean_available {
-        ProfileRecommendedAction::Clean
+    } else if matches!(
+        local_health,
+        LocalStateHealth::LocalDrift
+            | LocalStateHealth::LocalStateMissing
+            | LocalStateHealth::InventoryCorrupt
+    ) {
+        ProfileRecommendedAction::Sync
     } else if has_repo_source
         && matches!(remote_freshness, None | Some(RemoteFreshnessState::Unknown))
     {
@@ -376,10 +408,8 @@ fn derive_profile_status(
         ProfileRecommendedAction::Sync
     };
 
-    let headline = if validate_running || rebuild_inventory_running || check_updates_running {
+    let headline = if validate_running || check_updates_running {
         ProfileStatusHeadline::Checking
-    } else if rebuild_inventory_required {
-        ProfileStatusHeadline::NeedsRecovery
     } else if has_error {
         ProfileStatusHeadline::ActionRequired
     } else if matches!(
@@ -435,18 +465,12 @@ fn derive_profile_status(
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
-        rebuild_inventory_enabled: can_run_actions
-            && !maintenance_blocked
-            && rebuild_inventory_required,
         validate_enabled: can_run_actions,
         check_updates_enabled: can_run_actions && !hard_blocked,
-        clean_enabled: can_run_actions && clean_available && !maintenance_blocked,
         cancel_enabled: operation_active,
         sync_running,
         validate_running,
-        rebuild_inventory_running,
         check_updates_running,
-        clean_running,
     };
     let can_launch = !operation_active
         && matches!(
@@ -460,226 +484,33 @@ fn derive_profile_status(
         badge,
         recommended_action,
         actions,
-        progress: runtime.active.as_ref().map(build_progress_view),
+        progress: runtime
+            .active
+            .as_ref()
+            .map(|active| active.progress.clone()),
         local_health,
         remote_freshness,
         has_error,
-        rebuild_inventory_required,
-        clean_candidate_count,
+        unexpected_path_count,
         last_check_ms,
         can_launch,
     }
 }
 
-fn build_progress_view(operation: &ActiveOperationState) -> ProfileProgressView {
-    if matches!(
-        operation.operation,
-        OperationKind::Assess(_) | OperationKind::RebuildInventory
-    ) {
-        return build_check_progress_view(operation);
-    }
-
-    let progress = &operation.progress;
-    let mut label = phase_label(&operation.phase).to_string();
-    if matches!(
-        operation.phase,
-        SyncPhase::EnsuringInventory | SyncPhase::Finalizing
-    ) {
-        if let Some(stage) = operation.inventory_stage {
-            label = format!("Inventory: {stage:?}");
+fn format_metric(metric: &ProgressMetric) -> String {
+    match (metric.done, metric.total, metric.unit) {
+        (Some(done), Some(total), ProgressUnit::Bytes) => {
+            format!("{} / {}", format_bytes(done), format_bytes(total))
         }
-    }
-
-    if let (Some(files_done), Some(files_total)) = (
-        progress.files_finalized,
-        progress.files_total.filter(|v| *v > 0),
-    ) {
-        let fetch_complete = matches!(
-            (progress.bytes_done, progress.bytes_total.filter(|v| *v > 0)),
-            (Some(bytes_done), Some(bytes_total)) if bytes_done >= bytes_total
-        );
-        if fetch_complete && files_done < files_total {
-            return ProfileProgressView {
-                label: if matches!(operation.phase, SyncPhase::Syncing) {
-                    "Finalizing files".to_string()
-                } else {
-                    label.clone()
-                },
-                detail: format!("{files_done} / {files_total} files"),
-                done: Some(files_done),
-                total: Some(files_total),
-                indeterminate: false,
-            };
-        }
-    }
-
-    if let (Some(done), Some(total)) =
-        (progress.bytes_done, progress.bytes_total.filter(|v| *v > 0))
-    {
-        return ProfileProgressView {
-            label,
-            detail: format!(
-                "{} / {} ({})",
-                format_bytes(done),
-                format_bytes(total),
-                format_rate(progress.bytes_per_sec)
-            ),
-            done: Some(done),
-            total: Some(total),
-            indeterminate: false,
-        };
-    }
-
-    if let (Some(done), Some(total)) = (
-        progress.files_finalized,
-        progress.files_total.filter(|v| *v > 0),
-    ) {
-        return ProfileProgressView {
-            label,
-            detail: format!("{done} / {total} files"),
-            done: Some(done),
-            total: Some(total),
-            indeterminate: false,
-        };
-    }
-
-    if let (Some(done), Some(total)) = (
-        progress.prune_files_done,
-        progress.prune_files_total.filter(|v| *v > 0),
-    ) {
-        return ProfileProgressView {
-            label,
-            detail: format!("{done} / {total} files pruned"),
-            done: Some(done),
-            total: Some(total),
-            indeterminate: false,
-        };
-    }
-
-    ProfileProgressView {
-        label,
-        detail: operation
-            .message
+        (Some(done), Some(total), ProgressUnit::Files) => format!("{done} / {total} files"),
+        (Some(done), Some(total), ProgressUnit::Paths) => format!("{done} / {total} paths"),
+        (Some(done), None, ProgressUnit::Bytes) => format!("{} processed", format_bytes(done)),
+        (Some(done), None, ProgressUnit::Files) => format!("{done} files"),
+        (Some(done), None, ProgressUnit::Paths) => format!("{done} paths"),
+        _ => metric
+            .label
             .clone()
-            .unwrap_or_else(|| "Waiting for totals...".to_string()),
-        done: None,
-        total: None,
-        indeterminate: true,
-    }
-}
-
-fn build_check_progress_view(operation: &ActiveOperationState) -> ProfileProgressView {
-    if let (Some(done), Some(total)) = (
-        operation.progress.bytes_done,
-        operation.progress.bytes_total.filter(|v| *v > 0),
-    ) {
-        let label = operation
-            .inventory_stage
-            .map(|stage| format!("Inventory: {stage:?}"))
-            .unwrap_or_else(|| "Scan Local".to_string());
-        return ProfileProgressView {
-            label,
-            detail: format!(
-                "{} / {} ({})",
-                format_bytes(done),
-                format_bytes(total),
-                format_rate(operation.progress.bytes_per_sec)
-            ),
-            done: Some(done),
-            total: Some(total),
-            indeterminate: false,
-        };
-    }
-
-    if let (Some(done), Some(total)) = (
-        operation.progress.files_finalized,
-        operation.progress.files_total.filter(|v| *v > 0),
-    ) {
-        let label = operation
-            .inventory_stage
-            .map(|stage| format!("Inventory: {stage:?}"))
-            .unwrap_or_else(|| "Scan Local".to_string());
-        return ProfileProgressView {
-            label,
-            detail: format!("{done} / {total} files"),
-            done: Some(done),
-            total: Some(total),
-            indeterminate: false,
-        };
-    }
-
-    let phase = operation
-        .check_phase
-        .unwrap_or(AssessPhase::ValidatingContext);
-    let detail = operation
-        .message
-        .clone()
-        .unwrap_or_else(|| default_check_phase_detail(phase).to_string());
-    let (done, total) = check_phase_progress(operation.operation, phase);
-
-    ProfileProgressView {
-        label: check_phase_label(phase).to_string(),
-        detail,
-        done,
-        total,
-        indeterminate: false,
-    }
-}
-
-fn default_check_phase_detail(phase: AssessPhase) -> &'static str {
-    match phase {
-        AssessPhase::ValidatingContext => "Validating profile context...",
-        AssessPhase::ScanningLocal => "Scanning local files...",
-        AssessPhase::EvaluatingLocal => "Evaluating local state...",
-        AssessPhase::LoadingRemoteManifest => "Loading remote manifest...",
-        AssessPhase::ComparingExpectedState => "Comparing local and expected state...",
-        AssessPhase::Finalizing => "Finalizing check report...",
-    }
-}
-
-fn check_phase_progress(
-    operation: OperationKind,
-    phase: AssessPhase,
-) -> (Option<u64>, Option<u64>) {
-    let total: u64 = if matches!(operation, OperationKind::Assess(AssessScope::Remote)) {
-        6
-    } else {
-        4
-    };
-    let done: u64 = match (operation, phase) {
-        (_, AssessPhase::ValidatingContext) => 0,
-        (_, AssessPhase::ScanningLocal) => 1,
-        (_, AssessPhase::EvaluatingLocal) => 2,
-        (OperationKind::Assess(AssessScope::Remote), AssessPhase::LoadingRemoteManifest) => 3,
-        (OperationKind::Assess(AssessScope::Remote), AssessPhase::ComparingExpectedState) => 4,
-        (OperationKind::Assess(AssessScope::Remote), AssessPhase::Finalizing) => total,
-        (_, AssessPhase::Finalizing) => total,
-        _ => 0,
-    };
-    (Some(done), Some(total))
-}
-
-fn check_phase_label(phase: AssessPhase) -> &'static str {
-    match phase {
-        AssessPhase::ValidatingContext => "Validate Context",
-        AssessPhase::ScanningLocal => "Scan Local",
-        AssessPhase::EvaluatingLocal => "Evaluate Local",
-        AssessPhase::LoadingRemoteManifest => "Load Remote",
-        AssessPhase::ComparingExpectedState => "Compare State",
-        AssessPhase::Finalizing => "Finalize",
-    }
-}
-
-fn phase_label(phase: &SyncPhase) -> &'static str {
-    match phase {
-        SyncPhase::Validating => "Validating",
-        SyncPhase::EnsuringInventory => "Ensuring inventory",
-        SyncPhase::LoadingManifest => "Loading manifest",
-        SyncPhase::Planning => "Planning",
-        SyncPhase::Syncing => "Syncing files",
-        SyncPhase::Deleting => "Deleting files",
-        SyncPhase::Finalizing => "Finalizing",
-        SyncPhase::Done => "Done",
+            .unwrap_or_else(|| "Working".to_string()),
     }
 }
 
@@ -687,8 +518,170 @@ fn format_bytes(bytes: u64) -> String {
     fleet_domain::utils::format_bytes(bytes)
 }
 
-fn format_rate(rate_bps: Option<u64>) -> String {
-    rate_bps
-        .map(|v| format!("{}/s", format_bytes(v)))
-        .unwrap_or_else(|| "-".to_string())
+pub fn stage_label(stage: OperationStage) -> &'static str {
+    match stage {
+        OperationStage::Validating => "Validating",
+        OperationStage::LoadingExpectedState => "Loading expected state",
+        OperationStage::ScanningDisk => "Scanning disk",
+        OperationStage::VerifyingInventory => "Verifying inventory",
+        OperationStage::PreparingInventory => "Preparing inventory",
+        OperationStage::Reconciling => "Reconciling",
+        OperationStage::Pruning => "Pruning",
+        OperationStage::Auditing => "Auditing",
+        OperationStage::Finalizing => "Finalizing",
+    }
+}
+
+const ASSESS_LOCAL_PLAN: &[OperationStage] = &[
+    OperationStage::Validating,
+    OperationStage::LoadingExpectedState,
+    OperationStage::ScanningDisk,
+    OperationStage::VerifyingInventory,
+    OperationStage::Finalizing,
+];
+const ASSESS_REMOTE_PLAN: &[OperationStage] = &[
+    OperationStage::Validating,
+    OperationStage::LoadingExpectedState,
+    OperationStage::ScanningDisk,
+    OperationStage::VerifyingInventory,
+    OperationStage::Finalizing,
+];
+const SYNC_PLAN: &[OperationStage] = &[
+    OperationStage::Validating,
+    OperationStage::LoadingExpectedState,
+    OperationStage::PreparingInventory,
+    OperationStage::Reconciling,
+    OperationStage::Pruning,
+    OperationStage::Auditing,
+    OperationStage::Finalizing,
+];
+
+pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
+    match operation {
+        OperationKind::Assess(AssessScope::Local) => ASSESS_LOCAL_PLAN,
+        OperationKind::Assess(AssessScope::Remote) => ASSESS_REMOTE_PLAN,
+        OperationKind::Sync => SYNC_PLAN,
+    }
+}
+
+pub fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
+    let metric = metric?;
+    let (Some(done), Some(total)) = (metric.done, metric.total) else {
+        return None;
+    };
+    if total == 0 {
+        return Some(0.0);
+    }
+    Some((done as f64 / total as f64).clamp(0.0, 1.0))
+}
+
+pub fn build_operation_steps(
+    operation: OperationKind,
+    active_stage: Option<OperationStage>,
+    completed_stages: &BTreeSet<OperationStage>,
+) -> Vec<UiOperationStepState> {
+    stage_plan(operation)
+        .iter()
+        .copied()
+        .map(|stage| {
+            let status = if active_stage == Some(stage) {
+                UiOperationStepStatus::Active
+            } else if completed_stages.contains(&stage) {
+                UiOperationStepStatus::Complete
+            } else {
+                UiOperationStepStatus::Pending
+            };
+
+            UiOperationStepState {
+                stage,
+                label: stage_label(stage).to_string(),
+                status,
+            }
+        })
+        .collect()
+}
+
+pub fn metric_from_progress(metric: &ProgressMetric) -> UiProgressMetric {
+    UiProgressMetric {
+        label: metric.label.clone().unwrap_or_else(|| match metric.unit {
+            ProgressUnit::Bytes => "Bytes".to_string(),
+            ProgressUnit::Files => "Files".to_string(),
+            ProgressUnit::Paths => "Paths".to_string(),
+        }),
+        done: metric.done,
+        total: metric.total,
+        unit: metric.unit,
+        rendered: format_metric(metric),
+    }
+}
+
+pub fn apply_pipeline_progress(
+    progress_state: &mut ProfileOperationProgressState,
+    completed_stages: &BTreeSet<OperationStage>,
+    progress: &PipelineProgressEvent,
+    now_ms: u64,
+) {
+    progress_state.last_updated_at_unix_ms = now_ms;
+    progress_state.elapsed_ms = progress
+        .elapsed_ms
+        .unwrap_or_else(|| now_ms.saturating_sub(progress_state.started_at_unix_ms));
+    progress_state.active_stage = progress.stage;
+    progress_state.primary_metric = Some(metric_from_progress(&progress.primary));
+    progress_state.secondary_metric = progress.secondary.as_ref().map(metric_from_progress);
+    let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
+    progress_state.steps = build_operation_steps(
+        progress_state.operation,
+        Some(progress.stage),
+        completed_stages,
+    );
+    progress_state.stage = UiProgressBarState {
+        determinate: active_fraction.is_some(),
+        percent: active_fraction.map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u64),
+    };
+    progress_state.throughput_bytes_per_sec = progress.throughput_bytes_per_sec;
+    progress_state.eta_seconds = progress.eta_seconds;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        derive_profile_status, ensure_profile_runtime_mut, AppState, ProfileStatusHeadline,
+    };
+    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
+    use fleet_domain::Profile;
+    #[test]
+    fn unexpected_files_recommend_sync() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.assessment = Some(ProfileStateReport {
+            profile_id: "p1".to_string(),
+            local_health: LocalStateHealth::LocalDrift,
+            remote_freshness: Some(RemoteFreshnessState::Unknown),
+            checked_at_unix_ms: 1,
+            expected_missing_in_inventory_count: 0,
+            inventory_unexpected_paths_count: 1,
+            unexpected_delete_paths: vec!["extra.txt".to_string()],
+        });
+
+        let status = derive_profile_status(
+            state.profile_runtime_by_id.get("p1").expect("runtime"),
+            true,
+        );
+        assert_eq!(status.headline, ProfileStatusHeadline::NeedsSync);
+        assert_eq!(
+            status.recommended_action,
+            super::ProfileRecommendedAction::Sync
+        );
+    }
 }
