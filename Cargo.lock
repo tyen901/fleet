@@ -2009,6 +2009,7 @@ dependencies = [
 [[package]]
 name = "flux-api"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2033,6 +2034,7 @@ dependencies = [
 [[package]]
 name = "flux-commit"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-inventory-contract",
@@ -2043,6 +2045,7 @@ dependencies = [
 [[package]]
 name = "flux-inventory-contract"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2051,6 +2054,7 @@ dependencies = [
 [[package]]
 name = "flux-local-import"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-staging",
@@ -2064,6 +2068,7 @@ dependencies = [
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2074,6 +2079,7 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-staging",
@@ -2083,6 +2089,7 @@ dependencies = [
 [[package]]
 name = "flux-planner"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2099,6 +2106,7 @@ dependencies = [
 [[package]]
 name = "flux-remote-fetch"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2116,6 +2124,7 @@ dependencies = [
 [[package]]
 name = "flux-scheduler"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "flux-types",
  "rustc-hash 2.1.1",
@@ -2127,6 +2136,7 @@ dependencies = [
 [[package]]
 name = "flux-segment-cache"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2135,6 +2145,7 @@ dependencies = [
 [[package]]
 name = "flux-staging"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "flux-types",
@@ -2144,6 +2155,7 @@ dependencies = [
 [[package]]
 name = "flux-types"
 version = "0.1.0"
+source = "git+https://github.com/tyen901/flux4.git?rev=9e69c5ebaae63bc058bd5949d2c1cc944fd0555b#9e69c5ebaae63bc058bd5949d2c1cc944fd0555b"
 dependencies = [
  "anyhow",
  "serde",
@@ -2967,7 +2979,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -4631,7 +4643,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4668,7 +4680,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
