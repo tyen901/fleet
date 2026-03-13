@@ -5,12 +5,57 @@ use crate::support::locking::{acquire_lock, check_lock_state, InventoryLockState
 use crate::support::repo_cache::{restore_repo_cache_blob, snapshot_repo_cache_blob};
 use anyhow::Context;
 use fleet_domain::health::{ProfileStateReport, RemoteFreshnessState};
-use fleet_domain::{ProfileSourceKind, SyncProgress};
+use fleet_domain::{ProfileSourceKind, SyncProgress, ThroughputEstimator};
 use fleet_inventory::Inventory;
 use flux_manifest::ManifestEntry;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InventoryRefreshPhase {
+    Walking,
+    MatchingTrusted,
+    Rescanning,
+    Finalizing,
+}
+
+struct InventoryRefreshRateState {
+    phase: Option<InventoryRefreshPhase>,
+    estimator: ThroughputEstimator,
+}
+
+impl InventoryRefreshRateState {
+    fn new() -> Self {
+        Self {
+            phase: None,
+            estimator: ThroughputEstimator::new(Instant::now()),
+        }
+    }
+
+    fn update(
+        &mut self,
+        phase: InventoryRefreshPhase,
+        bytes_done: u64,
+        bytes_total: Option<u64>,
+    ) -> (Option<u64>, Option<u64>) {
+        let now = Instant::now();
+        if self.phase != Some(phase) {
+            self.phase = Some(phase);
+            self.estimator = ThroughputEstimator::new(now);
+        }
+        self.estimator.record(bytes_done, now);
+        let throughput_bytes_per_sec = self
+            .estimator
+            .bytes_per_sec(now)
+            .map(|rate| rate.round() as u64)
+            .filter(|rate| *rate > 0);
+        let eta_seconds =
+            bytes_total.and_then(|total| self.estimator.eta_seconds(bytes_done, total, now));
+        (throughput_bytes_per_sec, eta_seconds)
+    }
+}
 
 pub(crate) async fn run_sync(mut ctx: OperationContext) -> anyhow::Result<OperationContext> {
     ensure_not_canceled(&ctx)?;
@@ -170,80 +215,97 @@ fn refresh_inventory_before_sync(
     manifest: &fleet_manifest::DesiredManifest,
 ) -> anyhow::Result<()> {
     let emitter = ctx.emitter.clone();
+    let rate_state = Arc::new(Mutex::new(InventoryRefreshRateState::new()));
     let _ = local_state::refresh_trusted_inventory_from_disk(
         inventory,
         &resolved.dest_path,
         manifest,
         &ctx.config.inventory_ignore_rules_text,
-        Some(Arc::new(move |progress| match progress {
-            local_state::InventoryRefreshProgress::Walking {
-                files_done,
-                files_total,
-            } => emitter.progress_metric(
+        Some(Arc::new(move |progress| {
+            let (phase, status_text, files_done, files_total, bytes_done, bytes_total) =
+                match progress {
+                    local_state::InventoryRefreshProgress::Walking {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                    } => (
+                        InventoryRefreshPhase::Walking,
+                        "Reading file metadata".to_string(),
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                    ),
+                    local_state::InventoryRefreshProgress::MatchingTrusted {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                    } => (
+                        InventoryRefreshPhase::MatchingTrusted,
+                        "Matching trusted inventory against disk".to_string(),
+                        files_done,
+                        Some(files_total),
+                        bytes_done,
+                        Some(bytes_total),
+                    ),
+                    local_state::InventoryRefreshProgress::Rescanning {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                    } => (
+                        InventoryRefreshPhase::Rescanning,
+                        "Rescanning changed trusted files".to_string(),
+                        files_done,
+                        Some(files_total),
+                        bytes_done,
+                        Some(bytes_total),
+                    ),
+                    local_state::InventoryRefreshProgress::Finalizing {
+                        files_done,
+                        files_total,
+                        bytes_done,
+                        bytes_total,
+                    } => (
+                        InventoryRefreshPhase::Finalizing,
+                        "Finalizing trusted inventory refresh".to_string(),
+                        files_done,
+                        Some(files_total),
+                        bytes_done,
+                        Some(bytes_total),
+                    ),
+                };
+
+            let (throughput_bytes_per_sec, eta_seconds) = match rate_state.lock() {
+                Ok(mut state) => state.update(phase, bytes_done, bytes_total),
+                Err(_) => (None, None),
+            };
+
+            emitter.progress_metric(
                 OperationStage::PreparingInventory,
                 ProgressScope::InventoryRefresh,
-                Some("Walking local managed files".to_string()),
+                Some(status_text),
                 ProgressMetric {
                     label: Some("Files".to_string()),
                     done: Some(files_done),
                     total: files_total,
                     unit: ProgressUnit::Files,
                 },
-                None,
-                None,
-                None,
-            ),
-            local_state::InventoryRefreshProgress::MatchingTrusted {
-                files_done,
-                files_total,
-            } => emitter.progress_metric(
-                OperationStage::PreparingInventory,
-                ProgressScope::InventoryRefresh,
-                Some("Matching trusted inventory against disk".to_string()),
-                ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
+                if bytes_done > 0 || bytes_total.is_some() {
+                    Some(ProgressMetric {
+                        label: Some("Bytes".to_string()),
+                        done: Some(bytes_done),
+                        total: bytes_total,
+                        unit: ProgressUnit::Bytes,
+                    })
+                } else {
+                    None
                 },
-                None,
-                None,
-                None,
-            ),
-            local_state::InventoryRefreshProgress::Rescanning {
-                files_done,
-                files_total,
-            } => emitter.progress_metric(
-                OperationStage::PreparingInventory,
-                ProgressScope::InventoryRefresh,
-                Some("Rescanning changed trusted files".to_string()),
-                ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
-                },
-                None,
-                None,
-                None,
-            ),
-            local_state::InventoryRefreshProgress::Finalizing {
-                files_done,
-                files_total,
-            } => emitter.progress_metric(
-                OperationStage::PreparingInventory,
-                ProgressScope::InventoryRefresh,
-                Some("Finalizing trusted inventory refresh".to_string()),
-                ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
-                },
-                None,
-                None,
-                None,
-            ),
+                throughput_bytes_per_sec,
+                eta_seconds,
+            );
         })),
     )?;
     Ok(())
@@ -368,6 +430,8 @@ fn emit_audit_progress(
         local_state::AuditProgress::Scan(local_state::WalkProgress::Metadata {
             files_done,
             files_total,
+            bytes_done: _,
+            bytes_total: _,
         }) => emitter.progress_metric(
             OperationStage::Auditing,
             ProgressScope::AuditEnumerate,

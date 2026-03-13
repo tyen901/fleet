@@ -111,7 +111,7 @@ fn normalize_rel(path: impl AsRef<Path>) -> String {
 mod tests {
     use super::audit::assess_snapshot;
     use super::parallel::{chunk_progress_reporter, execute_chunked};
-    use super::refresh::refresh_trusted_inventory_from_disk;
+    use super::refresh::{refresh_trusted_inventory_from_disk, InventoryRefreshProgress};
     use super::scan::scan_local_file;
     use super::walk::WalkItem;
     use super::{normalize_rel, StaleTrustedPaths};
@@ -300,6 +300,92 @@ mod tests {
         assert_eq!(result.rescanned_paths, vec!["mods/promoted.pbo"]);
         assert_eq!(result.stale_paths, StaleTrustedPaths::default());
         assert_eq!(fixture.finalized_paths(), vec!["mods/promoted.pbo"]);
+    }
+
+    #[test]
+    fn refresh_progress_streams_walking_updates_for_multi_chunk_scan() {
+        let fixture = TestFixture::new();
+        let mut rel_paths = Vec::new();
+        for idx in 0..300 {
+            let rel_path = format!("mods/file-{idx:03}.pbo");
+            fixture.write_file(&rel_path, b"x");
+            rel_paths.push(rel_path);
+        }
+        let manifest_refs = rel_paths.iter().map(String::as_str).collect::<Vec<_>>();
+        let manifest = fixture.manifest_for(&manifest_refs);
+        let events = Arc::new(Mutex::new(Vec::<InventoryRefreshProgress>::new()));
+        let sink_events = Arc::clone(&events);
+
+        refresh_trusted_inventory_from_disk(
+            &fixture.inventory,
+            fixture.dest(),
+            &manifest,
+            "",
+            Some(Arc::new(move |progress| {
+                sink_events.lock().expect("lock").push(progress);
+            })),
+        )
+        .expect("refresh trusted inventory");
+
+        let walking = events
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter_map(|progress| match progress {
+                InventoryRefreshProgress::Walking {
+                    files_done,
+                    files_total: Some(files_total),
+                    ..
+                } => Some((*files_done, *files_total)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            walking.len() >= 2,
+            "expected multiple walking metadata updates for multi-chunk scans"
+        );
+        assert!(walking.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert_eq!(walking.last(), Some(&(300, 300)));
+    }
+
+    #[test]
+    fn refresh_progress_counts_rescanned_candidates_even_when_not_reinserted() {
+        let fixture = TestFixture::new();
+        fixture.write_file("mods/changed.pbo", b"before");
+        fixture.seed_inventory(&["mods/changed.pbo"]);
+        let manifest = fixture.manifest_for(&["mods/changed.pbo"]);
+        fixture.write_file("mods/changed.pbo", b"after-after");
+        let events = Arc::new(Mutex::new(Vec::<InventoryRefreshProgress>::new()));
+        let sink_events = Arc::clone(&events);
+
+        let result = refresh_trusted_inventory_from_disk(
+            &fixture.inventory,
+            fixture.dest(),
+            &manifest,
+            "",
+            Some(Arc::new(move |progress| {
+                sink_events.lock().expect("lock").push(progress);
+            })),
+        )
+        .expect("refresh trusted inventory");
+
+        assert_eq!(result.rescanned_paths, vec!["mods/changed.pbo"]);
+        assert_eq!(result.stale_paths.modified, vec!["mods/changed.pbo"]);
+
+        let rescanning = events
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter_map(|progress| match progress {
+                InventoryRefreshProgress::Rescanning {
+                    files_done,
+                    files_total,
+                    ..
+                } => Some((*files_done, *files_total)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rescanning.last(), Some(&(1, 1)));
     }
 
     fn setup_mixed_refresh_fixture() -> (TestFixture, DesiredManifest) {

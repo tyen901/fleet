@@ -43,6 +43,8 @@ fn select_current_step(
 fn load_inventory_metrics(
     bridge: FleetBridge,
     profile_id: String,
+    seq: u64,
+    request_seq: Signal<u64>,
     mut inventory_metrics: Signal<Option<fleet_core::LocalStateMetrics>>,
     mut inventory_metrics_loading: Signal<bool>,
 ) {
@@ -53,6 +55,9 @@ fn load_inventory_metrics(
             .profile_inventory_metrics(&profile_id)
             .await
             .ok();
+        if request_seq() != seq {
+            return;
+        }
         inventory_metrics.set(metrics);
         inventory_metrics_loading.set(false);
     });
@@ -113,6 +118,7 @@ pub fn ProfileView(id: String) -> Element {
     let inventory_metrics = use_signal(|| Option::<fleet_core::LocalStateMetrics>::None);
     let inventory_metrics_loading = use_signal(|| false);
     let inventory_metrics_loaded_for = use_signal(String::new);
+    let inventory_metrics_request_seq = use_signal(|| 0_u64);
     let was_operation_active = use_signal(|| false);
 
     let profile_runtime = snapshot.profile_runtime_by_id.get(&profile.id);
@@ -144,15 +150,20 @@ pub fn ProfileView(id: String) -> Element {
         let mut metrics_sig = inventory_metrics;
         let metrics_loading_sig = inventory_metrics_loading;
         let mut metrics_loaded_for_sig = inventory_metrics_loaded_for;
+        let mut request_seq_sig = inventory_metrics_request_seq;
         use_effect(move || {
             if metrics_loaded_for_sig() == profile_id {
                 return;
             }
             metrics_loaded_for_sig.set(profile_id.clone());
             metrics_sig.set(None);
+            let seq = request_seq_sig().wrapping_add(1);
+            request_seq_sig.set(seq);
             load_inventory_metrics(
                 bridge.clone(),
                 profile_id.clone(),
+                seq,
+                request_seq_sig,
                 metrics_sig,
                 metrics_loading_sig,
             );
@@ -164,6 +175,7 @@ pub fn ProfileView(id: String) -> Element {
         let profile_id = profile.id.clone();
         let metrics_sig = inventory_metrics;
         let metrics_loading_sig = inventory_metrics_loading;
+        let mut request_seq_sig = inventory_metrics_request_seq;
         let mut was_operation_active = was_operation_active;
         use_effect(move || {
             if operation_active {
@@ -174,9 +186,13 @@ pub fn ProfileView(id: String) -> Element {
                 return;
             }
             was_operation_active.set(false);
+            let seq = request_seq_sig().wrapping_add(1);
+            request_seq_sig.set(seq);
             load_inventory_metrics(
                 bridge.clone(),
                 profile_id.clone(),
+                seq,
+                request_seq_sig,
                 metrics_sig,
                 metrics_loading_sig,
             );

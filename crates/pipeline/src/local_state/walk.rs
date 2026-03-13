@@ -1,5 +1,5 @@
 use super::metadata_mtime_ns;
-use super::parallel::{execute_chunked, worker_count, DEFAULT_CHUNK_SIZE};
+use super::parallel::{execute_chunked_streaming, worker_count, DEFAULT_CHUNK_SIZE};
 use anyhow::Context;
 use fleet_inventory::InventoryError;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ pub(crate) enum WalkProgress {
     Metadata {
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: Option<u64>,
     },
 }
 
@@ -45,40 +47,56 @@ pub(super) fn walk_managed_files(
 ) -> Result<Vec<WalkItem>, InventoryError> {
     let candidates = enumerate_candidates(dest, ignore_rules_text, progress.clone())?;
     let total = candidates.len() as u64;
-    let chunked = execute_chunked(&candidates, worker_count(), DEFAULT_CHUNK_SIZE, |chunk| {
-        chunk
-            .iter()
-            .map(|candidate| {
-                let metadata = std::fs::symlink_metadata(&candidate.fs_path)
-                    .with_context(|| format!("read metadata {}", candidate.fs_path.display()))
-                    .map_err(InventoryError::Other)?;
-                Ok::<_, InventoryError>((
-                    candidate.index,
-                    WalkItem {
-                        fs_path: candidate.fs_path.clone(),
-                        rel_path: candidate.rel_path.clone(),
-                        size_bytes: metadata.len(),
-                        mtime_ns: metadata_mtime_ns(&metadata),
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()
-    })?;
+    let mut files_done = 0_u64;
+    let mut bytes_done = 0_u64;
+    let chunked = execute_chunked_streaming(
+        &candidates,
+        worker_count(),
+        DEFAULT_CHUNK_SIZE,
+        |chunk| {
+            chunk
+                .iter()
+                .map(|candidate| {
+                    let metadata = std::fs::symlink_metadata(&candidate.fs_path)
+                        .with_context(|| format!("read metadata {}", candidate.fs_path.display()))
+                        .map_err(InventoryError::Other)?;
+                    Ok::<_, InventoryError>((
+                        candidate.index,
+                        WalkItem {
+                            fs_path: candidate.fs_path.clone(),
+                            rel_path: candidate.rel_path.clone(),
+                            size_bytes: metadata.len(),
+                            mtime_ns: metadata_mtime_ns(&metadata),
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        },
+        |chunk| {
+            files_done = files_done.saturating_add(chunk.len() as u64);
+            bytes_done = bytes_done
+                .saturating_add(chunk.iter().map(|(_, item)| item.size_bytes).sum::<u64>());
+            if let Some(sink) = progress.as_ref() {
+                sink(WalkProgress::Metadata {
+                    files_done,
+                    files_total: total,
+                    bytes_done,
+                    bytes_total: None,
+                });
+            }
+        },
+    )?;
 
     let mut hydrated = Vec::with_capacity(candidates.len());
     for chunk in chunked {
-        if let Some(sink) = progress.as_ref() {
-            sink(WalkProgress::Metadata {
-                files_done: (hydrated.len() + chunk.len()) as u64,
-                files_total: total,
-            });
-        }
         hydrated.extend(chunk);
     }
     if let Some(sink) = progress.as_ref() {
         sink(WalkProgress::Metadata {
             files_done: total,
             files_total: total,
+            bytes_done,
+            bytes_total: Some(bytes_done),
         });
     }
 

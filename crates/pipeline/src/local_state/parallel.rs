@@ -4,6 +4,10 @@ use fleet_inventory::InventoryError;
 use rayon::prelude::*;
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    mpsc,
+};
 
 pub(crate) const DEFAULT_CHUNK_SIZE: usize = 256;
 const MAX_WORKERS: usize = 8;
@@ -50,6 +54,86 @@ where
             .collect::<Vec<_>>()
             .into_iter()
             .collect()
+    })
+}
+
+pub(crate) fn execute_chunked_streaming<T, R, F, G>(
+    items: &[T],
+    workers: usize,
+    chunk_size: usize,
+    process_chunk: F,
+    mut on_chunk_complete: G,
+) -> Result<Vec<R>, InventoryError>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&[T]) -> Result<R, InventoryError> + Sync + Send,
+    G: FnMut(&R),
+{
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let chunks = items.chunks(chunk_size).collect::<Vec<_>>();
+    if workers <= 1 || items.len() <= chunk_size {
+        let mut results = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let result = process_chunk(chunk)?;
+            on_chunk_complete(&result);
+            results.push(result);
+        }
+        return Ok(results);
+    }
+
+    let worker_total = workers.min(chunks.len()).max(1);
+    let next_index = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel::<(usize, Result<R, InventoryError>)>();
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_total {
+            let tx = tx.clone();
+            let next_index = &next_index;
+            let chunks = &chunks;
+            let process_chunk = &process_chunk;
+            scope.spawn(move || loop {
+                let index = next_index.fetch_add(1, Ordering::Relaxed);
+                if index >= chunks.len() {
+                    break;
+                }
+                let result = process_chunk(chunks[index]);
+                let _ = tx.send((index, result));
+            });
+        }
+        drop(tx);
+
+        let mut results = Vec::with_capacity(chunks.len());
+        results.resize_with(chunks.len(), || None);
+        let mut first_err = None;
+        for _ in 0..chunks.len() {
+            let (index, result) = rx
+                .recv()
+                .map_err(|err| InventoryError::Other(anyhow::Error::new(err)))?;
+            match result {
+                Ok(value) => {
+                    on_chunk_complete(&value);
+                    results[index] = Some(value);
+                }
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+
+        if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Ok(results
+                .into_iter()
+                .map(|result| result.expect("chunk result"))
+                .collect())
+        }
     })
 }
 
