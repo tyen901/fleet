@@ -321,6 +321,8 @@ fn emit_scan_progress(ctx: &OperationContext, progress: local_state::WalkProgres
         local_state::WalkProgress::Metadata {
             files_done,
             files_total,
+            bytes_done: _,
+            bytes_total: _,
         } => ctx.emitter.progress_metric(
             OperationStage::ScanningDisk,
             ProgressScope::InventoryMetadata,
