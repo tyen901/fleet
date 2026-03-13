@@ -8,7 +8,7 @@ mod stores;
 mod style;
 
 use app::root::AppRoot;
-use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+use dioxus::desktop::{tao::window::Icon, Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
 use services::bridge::FleetBridge;
 use style::StyleAssets;
@@ -21,6 +21,13 @@ static HOME_CSS: Asset = asset!(
     "/assets/css/pages/home.css",
     CssAssetOptions::new().with_minify(false)
 );
+
+fn load_window_icon() -> anyhow::Result<Icon> {
+    let image = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height)
+        .map_err(|err| anyhow::anyhow!("invalid window icon: {err}"))
+}
 
 fn main() -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
@@ -41,17 +48,21 @@ fn main() -> anyhow::Result<()> {
 
         let args: Vec<String> = std::env::args().collect();
         info!(?args, "fleet launched");
+        let window_icon = load_window_icon()?;
 
         dioxus::LaunchBuilder::desktop()
             .with_context(bridge)
             .with_cfg(
-                Config::new().with_menu(None).with_window(
-                    WindowBuilder::new()
-                        .with_title("Fleet")
-                        .with_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
-                        .with_min_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
-                        .with_resizable(true),
-                ),
+                Config::new()
+                    .with_icon(window_icon)
+                    .with_menu(None)
+                    .with_window(
+                        WindowBuilder::new()
+                            .with_title("Fleet")
+                            .with_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
+                            .with_min_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
+                            .with_resizable(true),
+                    ),
             )
             .launch(App);
 
