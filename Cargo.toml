@@ -107,7 +107,7 @@ winreg       = "0.55.0"
 fs2          = "0.4.3"
 
 # Database
-rusqlite = "0.38.0"
+rusqlite = { version = "0.38.0", features = ["bundled-windows"] }
 
 # Time
 chrono = "0.4.43"
