@@ -1,12 +1,12 @@
 use super::{publish_state, Core};
 use crate::state::{
-    ensure_profile_runtime_mut, recompute_profile_status, ActiveOperationState, AppState,
-    OperationOutcomeState, OperationSummary, OperationTerminalStatus,
+    apply_pipeline_progress, build_operation_steps, ensure_profile_runtime_mut,
+    recompute_profile_status, ActiveOperationState, AppState, OperationOutcomeState,
+    OperationTerminalStatus, UiProgressBarState,
 };
 use crate::storage::config_root_dir;
 use fleet_domain::health::{AssessScope, OperationKind};
-use fleet_domain::sync::{SyncPhase, SyncProgress};
-use fleet_flow::{FlowEventKind, FlowResult, FlowSessionEvent};
+use fleet_pipeline::{OperationOutput, PipelineEventKind, PipelineSessionEvent, StageState};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -54,7 +54,7 @@ async fn run_core_loop(core: Core) {
         dispatch_auto_check(&core, &mut auto_check).await;
     }
 
-    let mut rx = core.flow().subscribe();
+    let mut rx = core.pipeline().subscribe();
 
     loop {
         let ev = match rx.recv().await {
@@ -90,9 +90,9 @@ async fn dispatch_auto_check(core: &Core, auto_check: &mut AutoCheckCoalescer) {
                 continue;
             };
 
-            let (profile, active_operation) = core.read_state(|state| {
+            let (profile_exists, active_operation) = core.read_state(|state| {
                 (
-                    state.profiles.get(&profile_id).cloned(),
+                    state.profiles.contains_key(&profile_id),
                     state
                         .profile_runtime_by_id
                         .get(&profile_id)
@@ -100,19 +100,17 @@ async fn dispatch_auto_check(core: &Core, auto_check: &mut AutoCheckCoalescer) {
                 )
             });
 
-            let Some(profile) = profile else {
+            if !profile_exists {
                 auto_check.drop_profile(&profile_id);
                 continue;
-            };
+            }
 
             if active_operation.is_some() {
                 continue;
             }
 
-            let cfg = core.current_flow_config();
             let spawn_result = core
-                .flow()
-                .spawn_operation_with_config(cfg, profile, operation_kind)
+                .start_operation(profile_id.clone(), operation_kind)
                 .await;
 
             match spawn_result {
@@ -120,7 +118,10 @@ async fn dispatch_auto_check(core: &Core, auto_check: &mut AutoCheckCoalescer) {
                     auto_check.mark_running(&profile_id, session_id, operation_kind);
                     launched_any = true;
                 }
-                Err(_) => {
+                Err(err) => {
+                    if err.code == "profile_busy" {
+                        continue;
+                    }
                     auto_check.mark_terminal(&profile_id);
                     return;
                 }
@@ -147,21 +148,14 @@ impl AutoCheckCoalescer {
         Self::enqueue_kind(queue, OperationKind::Assess(AssessScope::Remote));
     }
 
-    fn observe_event(&mut self, ev: &FlowSessionEvent) {
+    fn observe_event(&mut self, ev: &PipelineSessionEvent) {
         match &ev.kind {
-            FlowEventKind::Finished { result } => {
-                match result {
-                    FlowResult::Sync(_) | FlowResult::Clean(_) => {
-                        self.enqueue(ev.profile_id.clone());
-                    }
-                    FlowResult::Assess(_) | FlowResult::RebuildInventory(_) => {}
-                }
-
+            PipelineEventKind::Finished { .. } => {
                 if let Some((profile_id, _kind)) = self.auto_sessions.remove(&ev.session_id) {
                     self.mark_terminal(&profile_id);
                 }
             }
-            FlowEventKind::Failed { .. } | FlowEventKind::Canceled => {
+            PipelineEventKind::Failed { .. } | PipelineEventKind::Canceled => {
                 if let Some((profile_id, _kind)) = self.auto_sessions.remove(&ev.session_id) {
                     self.drop_profile(&profile_id);
                 }
@@ -214,28 +208,9 @@ impl AutoCheckCoalescer {
     }
 }
 
-fn is_progress_operation(operation: OperationKind) -> bool {
-    matches!(operation, OperationKind::Sync | OperationKind::Clean)
-}
-
-fn supports_inventory_progress(operation: OperationKind) -> bool {
-    is_progress_operation(operation)
-        || matches!(
-            operation,
-            OperationKind::Assess(_) | OperationKind::RebuildInventory
-        )
-}
-
-fn is_check_operation(operation: OperationKind) -> bool {
-    matches!(
-        operation,
-        OperationKind::Assess(_) | OperationKind::RebuildInventory
-    )
-}
-
 fn active_operation_mut<'a>(
     state: &'a mut AppState,
-    ev: &FlowSessionEvent,
+    ev: &PipelineSessionEvent,
 ) -> Option<&'a mut ActiveOperationState> {
     let runtime = state.profile_runtime_by_id.get_mut(&ev.profile_id)?;
     let active = runtime.active.as_mut()?;
@@ -255,98 +230,85 @@ fn active_message(state: &AppState, profile_id: &str, session_id: u64) -> Option
         .and_then(|active| active.message.clone())
 }
 
-fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
+fn apply_event(state: &mut AppState, ev: &PipelineSessionEvent, now: u64) {
     match &ev.kind {
-        FlowEventKind::Started => {
-            let runtime = ensure_profile_runtime_mut(state, &ev.profile_id, now);
-            runtime.active = Some(ActiveOperationState::new(ev.session_id, ev.operation, now));
-        }
-
-        FlowEventKind::SyncPhaseChanged { phase } => {
-            if is_progress_operation(ev.operation) {
-                if let Some(operation) = active_operation_mut(state, ev) {
-                    operation.phase = phase.clone();
-                    if !matches!(phase, SyncPhase::EnsuringInventory | SyncPhase::Finalizing) {
-                        operation.inventory_stage = None;
-                    }
-                    operation.updated_at_unix_ms = now;
-                    operation.progress = SyncProgress::default();
-                }
+        PipelineEventKind::Started => {
+            if let Some(operation) = active_operation_mut(state, ev) {
+                operation.updated_at_unix_ms = now;
             }
         }
 
-        FlowEventKind::SyncProgress {
-            progress,
-            rate_bps,
-            eta_seconds: _,
-            message,
+        PipelineEventKind::StageChanged {
+            stage,
+            state: StageState::Entered,
         } => {
-            if is_progress_operation(ev.operation) {
-                if let Some(operation) = active_operation_mut(state, ev) {
-                    operation.progress = progress.clone();
-                    if let Some(bps) = rate_bps {
-                        operation.progress.bytes_per_sec = Some(*bps as u64);
-                    }
-                    operation.updated_at_unix_ms = now;
-                    operation.message = message.clone();
-                }
+            if let Some(operation) = active_operation_mut(state, ev) {
+                operation.progress.active_stage = *stage;
+                operation.progress.steps = build_operation_steps(
+                    operation.operation,
+                    Some(*stage),
+                    &operation.completed_stages,
+                );
+                operation.progress.primary_metric = None;
+                operation.progress.secondary_metric = None;
+                operation.progress.stage = UiProgressBarState {
+                    determinate: false,
+                    percent: None,
+                };
+                operation.progress.throughput_bytes_per_sec = None;
+                operation.progress.eta_seconds = None;
+                operation.progress.last_updated_at_unix_ms = now;
+                operation.progress.elapsed_ms =
+                    now.saturating_sub(operation.progress.started_at_unix_ms);
+                operation.updated_at_unix_ms = now;
             }
         }
 
-        FlowEventKind::Message { level: _, text } => {
+        PipelineEventKind::StageChanged {
+            stage,
+            state: StageState::Exited,
+        } => {
+            if let Some(operation) = active_operation_mut(state, ev) {
+                operation.completed_stages.insert(*stage);
+                operation.progress.active_stage = *stage;
+                operation.progress.steps =
+                    build_operation_steps(operation.operation, None, &operation.completed_stages);
+                operation.progress.last_updated_at_unix_ms = now;
+                operation.progress.elapsed_ms =
+                    now.saturating_sub(operation.progress.started_at_unix_ms);
+                operation.progress.stage = UiProgressBarState {
+                    determinate: false,
+                    percent: None,
+                };
+                operation.progress.primary_metric = None;
+                operation.progress.secondary_metric = None;
+                operation.updated_at_unix_ms = now;
+            }
+        }
+
+        PipelineEventKind::Progress { progress } => {
+            if let Some(operation) = active_operation_mut(state, ev) {
+                apply_pipeline_progress(
+                    &mut operation.progress,
+                    &operation.completed_stages,
+                    progress,
+                    now,
+                );
+                operation.message = progress.status_text.clone();
+                operation.updated_at_unix_ms = now;
+            }
+        }
+
+        PipelineEventKind::Notice { text, .. } => {
             if let Some(operation) = active_operation_mut(state, ev) {
                 operation.message = Some(text.clone());
                 operation.updated_at_unix_ms = now;
             }
         }
 
-        FlowEventKind::AssessPhaseChanged { phase } => {
-            if is_check_operation(ev.operation) {
-                if let Some(operation) = active_operation_mut(state, ev) {
-                    operation.check_phase = Some(*phase);
-                    operation.updated_at_unix_ms = now;
-                }
-            }
-        }
-
-        FlowEventKind::LocalStateStageChanged { stage } => {
-            if supports_inventory_progress(ev.operation) {
-                if let Some(operation) = active_operation_mut(state, ev) {
-                    operation.inventory_stage = Some(*stage);
-                    operation.updated_at_unix_ms = now;
-                }
-            }
-        }
-
-        FlowEventKind::LocalStateProgress {
-            progress,
-            rate_bps,
-            eta_seconds: _,
-        } => {
-            if supports_inventory_progress(ev.operation) {
-                if let Some(operation) = active_operation_mut(state, ev) {
-                    operation.progress.bytes_done = Some(progress.bytes_scanned);
-                    operation.progress.bytes_total = Some(progress.bytes_total);
-                    operation.progress.files_total = Some(progress.files_total);
-                    operation.progress.files_finalized = Some(progress.files_scanned);
-                    operation.progress.bytes_per_sec = rate_bps.map(|r| r as u64);
-                    operation.inventory_stage = Some(progress.stage);
-                    operation.updated_at_unix_ms = now;
-                }
-            }
-        }
-
-        FlowEventKind::Finished { result } => {
+        PipelineEventKind::Finished { output } => {
             let message = active_message(state, &ev.profile_id, ev.session_id);
-            let result = result.clone();
-            let summary = match &result {
-                FlowResult::Sync(_) => None,
-                FlowResult::Assess(report) => Some(OperationSummary::Assess(report.clone())),
-                FlowResult::RebuildInventory(report) => {
-                    Some(OperationSummary::RebuildInventory(report.clone()))
-                }
-                FlowResult::Clean(report) => Some(OperationSummary::Clean(report.clone())),
-            };
+            let output = output.clone();
 
             let runtime = ensure_profile_runtime_mut(state, &ev.profile_id, now);
             runtime.last_operation = Some(OperationOutcomeState {
@@ -355,24 +317,12 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
                 status: OperationTerminalStatus::Succeeded,
                 updated_at_unix_ms: now,
                 message,
-                summary,
+                summary: Some(output.clone()),
                 error: None,
             });
 
-            match result {
-                FlowResult::RebuildInventory(report) => {
-                    runtime.assessment = Some(report);
-                    runtime.last_error = None;
-                }
-                FlowResult::Clean(report) => {
-                    runtime.assessment = Some(report);
-                    runtime.last_error = None;
-                }
-                FlowResult::Assess(report) => {
-                    runtime.assessment = Some(report);
-                    runtime.last_error = None;
-                }
-                FlowResult::Sync(report) => {
+            match output {
+                OperationOutput::Assess(report) | OperationOutput::Sync(report) => {
                     runtime.assessment = Some(report);
                     runtime.last_error = None;
                 }
@@ -381,7 +331,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
             runtime.active = None;
         }
 
-        FlowEventKind::Failed { error } => {
+        PipelineEventKind::Failed { error } => {
             let message = active_message(state, &ev.profile_id, ev.session_id);
             let runtime = ensure_profile_runtime_mut(state, &ev.profile_id, now);
             runtime.last_operation = Some(OperationOutcomeState {
@@ -397,7 +347,7 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
             runtime.last_error = Some(error.clone());
         }
 
-        FlowEventKind::Canceled => {
+        PipelineEventKind::Canceled => {
             let message = active_message(state, &ev.profile_id, ev.session_id);
             let runtime = ensure_profile_runtime_mut(state, &ev.profile_id, now);
             runtime.last_operation = Some(OperationOutcomeState {
@@ -412,19 +362,17 @@ fn apply_event(state: &mut AppState, ev: &FlowSessionEvent, now: u64) {
             runtime.active = None;
             runtime.last_error = None;
         }
-
-        _ => {}
     }
 
     recompute_profile_status(state, &ev.profile_id);
 }
 
-fn should_refresh_profile_repo_cache(ev: &FlowSessionEvent) -> bool {
+fn should_refresh_profile_repo_cache(ev: &PipelineSessionEvent) -> bool {
     matches!(
         (&ev.operation, &ev.kind),
         (
             OperationKind::Sync | OperationKind::Assess(AssessScope::Remote),
-            FlowEventKind::Finished { .. }
+            PipelineEventKind::Finished { .. }
         )
     )
 }
@@ -465,132 +413,189 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{OperationTerminalStatus, ProfileStatusBadge, ProfileStatusHeadline};
-    use crate::storage::ProfilesConfig;
-    use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-    use fleet_domain::health::{AssessPhase, AssessScope, LocalStateHealth, RemoteFreshnessState};
-    use fleet_domain::ApiError;
-    use fleet_domain::{AppSettings, Profile};
+    use crate::state::{OperationTerminalStatus, UiOperationStepStatus};
+    use fleet_domain::health::{AssessScope, LocalStateHealth};
+    use fleet_domain::Profile;
+    use fleet_pipeline::{
+        OperationOutput, OperationStage, PipelineEventKind, PipelineProgressEvent,
+        PipelineSessionEvent, ProgressMetric, ProgressScope, ProgressUnit, StageState,
+    };
 
-    #[test]
-    fn load_initial_state_sets_selected_profile_to_none() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let core = Core::new_default().expect("core");
-            let profile = Profile {
-                id: "p1".to_string(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            };
-            let profiles_cfg = ProfilesConfig {
-                profiles: vec![profile],
-            };
-            super::super::run_config_blocking(core.config_repo(), move |repo| {
-                repo.save_profiles(&profiles_cfg)?;
-                repo.save_settings(&AppSettings::default())?;
-                Ok::<_, anyhow::Error>(())
-            })
-            .await
-            .expect("seed config");
-
-            let state = load_initial_state(&core).await.expect("load initial state");
-            assert_eq!(state.selected_profile_id, None);
-            assert!(state.profile_runtime_by_id.contains_key("p1"));
-        });
-    }
-
-    #[test]
-    fn apply_event_started_creates_active_operation() {
+    fn seeded_state(profile_id: &str) -> AppState {
         let mut state = AppState::default();
-        let profile_id = "p1".to_string();
-
         state.profiles.insert(
-            profile_id.clone(),
+            profile_id.to_string(),
             Profile {
-                id: profile_id.clone(),
+                id: profile_id.to_string(),
                 name: "Profile".to_string(),
                 source: "https://example.com/repo.json".to_string(),
                 destination: "/tmp/destination".to_string(),
                 ..Default::default()
             },
         );
-
-        let ev_started = FlowSessionEvent::new(
+        let runtime = ensure_profile_runtime_mut(&mut state, profile_id, 1);
+        runtime.active = Some(ActiveOperationState::new(
+            7,
+            OperationKind::Assess(AssessScope::Local),
             1,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &ev_started, 1_000);
+        ));
+        state
+    }
 
-        let runtime = state
+    fn event(profile_id: &str, kind: PipelineEventKind) -> PipelineSessionEvent {
+        PipelineSessionEvent {
+            session_id: 7,
+            profile_id: profile_id.to_string(),
+            operation: OperationKind::Assess(AssessScope::Local),
+            timestamp_ms: 10,
+            seq: 1,
+            kind,
+        }
+    }
+
+    #[test]
+    fn stage_events_update_active_operation_stage() {
+        let mut state = seeded_state("p1");
+        apply_event(
+            &mut state,
+            &event(
+                "p1",
+                PipelineEventKind::StageChanged {
+                    stage: OperationStage::ScanningDisk,
+                    state: StageState::Entered,
+                },
+            ),
+            10,
+        );
+
+        let active = state
             .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("profile runtime");
-        let active = runtime.active.as_ref().expect("active operation");
-        assert_eq!(active.session_id, 1);
-        assert_eq!(active.operation, OperationKind::Sync);
+            .get("p1")
+            .and_then(|runtime| runtime.active.as_ref())
+            .expect("active");
+        assert_eq!(active.progress.active_stage, OperationStage::ScanningDisk);
+        assert_eq!(
+            active.progress.steps[2].status,
+            UiOperationStepStatus::Active
+        );
+
+        apply_event(
+            &mut state,
+            &event(
+                "p1",
+                PipelineEventKind::Progress {
+                    progress: PipelineProgressEvent {
+                        stage: OperationStage::ScanningDisk,
+                        scope: ProgressScope::InventoryEnumerate,
+                        status_text: Some("Reading file metadata".to_string()),
+                        primary: ProgressMetric {
+                            label: Some("Files".to_string()),
+                            done: Some(4),
+                            total: Some(12),
+                            unit: ProgressUnit::Files,
+                        },
+                        secondary: None,
+                        throughput_bytes_per_sec: None,
+                        eta_seconds: None,
+                        elapsed_ms: Some(10),
+                    },
+                },
+            ),
+            11,
+        );
+
+        let active = state
+            .profile_runtime_by_id
+            .get("p1")
+            .and_then(|runtime| runtime.active.as_ref())
+            .expect("active");
+        assert_eq!(
+            active.progress.steps[2].status,
+            UiOperationStepStatus::Active
+        );
+
+        apply_event(
+            &mut state,
+            &event(
+                "p1",
+                PipelineEventKind::StageChanged {
+                    stage: OperationStage::ScanningDisk,
+                    state: StageState::Exited,
+                },
+            ),
+            12,
+        );
+
+        let active = state
+            .profile_runtime_by_id
+            .get("p1")
+            .and_then(|runtime| runtime.active.as_ref())
+            .expect("active");
+        assert_eq!(
+            active.progress.steps[2].status,
+            UiOperationStepStatus::Complete
+        );
+
+        apply_event(
+            &mut state,
+            &event(
+                "p1",
+                PipelineEventKind::StageChanged {
+                    stage: OperationStage::VerifyingInventory,
+                    state: StageState::Entered,
+                },
+            ),
+            13,
+        );
+
+        let active = state
+            .profile_runtime_by_id
+            .get("p1")
+            .and_then(|runtime| runtime.active.as_ref())
+            .expect("active");
+        assert_eq!(
+            active.progress.steps[2].status,
+            UiOperationStepStatus::Complete
+        );
+        assert_eq!(
+            active.progress.steps[3].status,
+            UiOperationStepStatus::Active
+        );
     }
 
     #[test]
-    fn apply_event_finished_sync_updates_runtime_outcome() {
-        let mut state = AppState::default();
-        let profile_id = "p1".to_string();
-
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let ev_started = FlowSessionEvent::new(
-            1,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &ev_started, 1_000);
-
+    fn finished_event_projects_summary_and_assessment() {
+        let mut state = seeded_state("p1");
         let report = fleet_domain::health::ProfileStateReport {
-            profile_id: profile_id.clone(),
+            profile_id: "p1".to_string(),
             local_health: LocalStateHealth::Ready,
-            remote_freshness: Some(RemoteFreshnessState::UpToDate),
-            checked_at_unix_ms: 2_000,
+            remote_freshness: None,
+            checked_at_unix_ms: 11,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 0,
             unexpected_delete_paths: Vec::new(),
         };
-
-        let ev_finished = FlowSessionEvent::new(
-            1,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::Finished {
-                result: FlowResult::Sync(report.clone()),
-            },
+        apply_event(
+            &mut state,
+            &event(
+                "p1",
+                PipelineEventKind::Finished {
+                    output: OperationOutput::Assess(report.clone()),
+                },
+            ),
+            12,
         );
-        apply_event(&mut state, &ev_finished, 2_000);
 
-        let runtime = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("profile runtime");
+        let runtime = state.profile_runtime_by_id.get("p1").expect("runtime");
         assert!(runtime.active.is_none());
+        assert_eq!(
+            runtime
+                .assessment
+                .as_ref()
+                .expect("assessment")
+                .local_health,
+            LocalStateHealth::Ready
+        );
         assert_eq!(
             runtime
                 .last_operation
@@ -599,361 +604,34 @@ mod tests {
                 .status,
             OperationTerminalStatus::Succeeded
         );
-        assert!(runtime
-            .last_operation
-            .as_ref()
-            .and_then(|outcome| outcome.summary.as_ref())
-            .is_none());
-        assert_eq!(
-            runtime
-                .assessment
-                .as_ref()
-                .map(|assessment| assessment.local_health.clone()),
-            Some(LocalStateHealth::Ready)
-        );
-        assert_eq!(
-            runtime
-                .assessment
-                .as_ref()
-                .and_then(|assessment| assessment.remote_freshness.clone()),
-            Some(RemoteFreshnessState::UpToDate)
-        );
     }
 
     #[test]
-    fn local_assess_stores_flow_report_without_preserving_remote_freshness() {
-        let mut state = AppState::default();
-        let profile_id = "p-local".to_string();
+    fn auto_check_does_not_requeue_after_sync_finish() {
+        let profile_id = "p1".to_string();
+        let mut auto_check = AutoCheckCoalescer::default();
+        auto_check.mark_running(&profile_id, 1, OperationKind::Sync);
 
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let runtime = ensure_profile_runtime_mut(&mut state, &profile_id, 10);
-        runtime.assessment = Some(fleet_domain::health::ProfileStateReport {
+        auto_check.observe_event(&PipelineSessionEvent {
+            session_id: 1,
             profile_id: profile_id.clone(),
-            local_health: LocalStateHealth::Ready,
-            remote_freshness: Some(RemoteFreshnessState::UpdateAvailable),
-            checked_at_unix_ms: 10,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
-        });
-
-        let started = FlowSessionEvent::new(
-            1,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Local),
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &started, 1_000);
-
-        let finished = FlowSessionEvent::new(
-            1,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Local),
-            FlowEventKind::Finished {
-                result: FlowResult::Assess(fleet_domain::health::ProfileStateReport {
+            operation: OperationKind::Sync,
+            timestamp_ms: 1,
+            seq: 1,
+            kind: PipelineEventKind::Finished {
+                output: OperationOutput::Sync(fleet_domain::health::ProfileStateReport {
                     profile_id: profile_id.clone(),
-                    local_health: LocalStateHealth::LocalDrift,
+                    local_health: LocalStateHealth::Ready,
                     remote_freshness: None,
-                    checked_at_unix_ms: 20,
-                    expected_missing_in_inventory_count: 3,
-                    inventory_unexpected_paths_count: 1,
-                    unexpected_delete_paths: vec!["extra.txt".to_string()],
+                    checked_at_unix_ms: 1,
+                    expected_missing_in_inventory_count: 0,
+                    inventory_unexpected_paths_count: 0,
+                    unexpected_delete_paths: Vec::new(),
                 }),
             },
-        );
-        apply_event(&mut state, &finished, 2_000);
-
-        let assessment = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .and_then(|runtime| runtime.assessment.as_ref())
-            .expect("assessment");
-        assert_eq!(assessment.local_health, LocalStateHealth::LocalDrift);
-        assert_eq!(assessment.remote_freshness, None);
-        assert_eq!(
-            assessment.unexpected_delete_paths,
-            vec!["extra.txt".to_string()]
-        );
-    }
-
-    #[test]
-    fn update_available_sets_badge() {
-        let mut state = AppState::default();
-        let profile_id = "p-status".to_string();
-
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let runtime = ensure_profile_runtime_mut(&mut state, &profile_id, 10);
-        runtime.assessment = Some(fleet_domain::health::ProfileStateReport {
-            profile_id: profile_id.clone(),
-            local_health: LocalStateHealth::Ready,
-            remote_freshness: Some(RemoteFreshnessState::UpdateAvailable),
-            checked_at_unix_ms: 10,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
         });
-        recompute_profile_status(&mut state, &profile_id);
 
-        let status = &state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("runtime")
-            .status;
-        assert_eq!(status.headline, ProfileStatusHeadline::UpdateAvailable);
-        assert_eq!(status.badge, Some(ProfileStatusBadge::UpdateAvailable));
-    }
-
-    #[test]
-    fn check_phase_events_create_linear_profile_progress() {
-        let mut state = AppState::default();
-        let profile_id = "p-check-progress".to_string();
-
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let started = FlowSessionEvent::new(
-            11,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Remote),
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &started, 1_000);
-
-        let phase = FlowSessionEvent::new(
-            11,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Remote),
-            FlowEventKind::AssessPhaseChanged {
-                phase: AssessPhase::ScanningLocal,
-            },
-        );
-        apply_event(&mut state, &phase, 1_100);
-
-        let message = FlowSessionEvent::new(
-            11,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Remote),
-            FlowEventKind::Message {
-                level: fleet_flow::LogLevel::Info,
-                text: "Scanning local files...".to_string(),
-            },
-        );
-        apply_event(&mut state, &message, 1_200);
-
-        let runtime = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("profile runtime");
-        let view = runtime
-            .status
-            .progress
-            .as_ref()
-            .expect("status progress view");
-        assert_eq!(view.label, "Scan Local");
-        assert_eq!(view.done, Some(1));
-        assert_eq!(view.total, Some(6));
-        assert_eq!(view.detail, "Scanning local files...");
-
-        let finalizing = FlowSessionEvent::new(
-            11,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Remote),
-            FlowEventKind::AssessPhaseChanged {
-                phase: AssessPhase::Finalizing,
-            },
-        );
-        apply_event(&mut state, &finalizing, 1_300);
-
-        let final_view = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .and_then(|runtime| runtime.status.progress.as_ref())
-            .expect("finalizing progress view");
-        assert_eq!(final_view.label, "Finalize");
-        assert_eq!(final_view.done, Some(6));
-        assert_eq!(final_view.total, Some(6));
-    }
-
-    #[test]
-    fn sync_progress_switches_to_file_finalization_after_fetch_completes() {
-        let mut state = AppState::default();
-        let profile_id = "p-sync-progress".to_string();
-
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let started = FlowSessionEvent::new(
-            15,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &started, 1_000);
-
-        let phase = FlowSessionEvent::new(
-            15,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::SyncPhaseChanged {
-                phase: SyncPhase::Syncing,
-            },
-        );
-        apply_event(&mut state, &phase, 1_100);
-
-        let progress = FlowSessionEvent::new(
-            15,
-            profile_id.clone(),
-            OperationKind::Sync,
-            FlowEventKind::SyncProgress {
-                progress: SyncProgress {
-                    bytes_done: Some(100),
-                    bytes_total: Some(100),
-                    files_total: Some(10),
-                    files_finalized: Some(7),
-                    bytes_per_sec: Some(12_345),
-                    ..Default::default()
-                },
-                rate_bps: None,
-                eta_seconds: None,
-                message: None,
-            },
-        );
-        apply_event(&mut state, &progress, 1_200);
-
-        let runtime = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("profile runtime");
-        let view = runtime
-            .status
-            .progress
-            .as_ref()
-            .expect("sync progress view");
-        assert_eq!(view.label, "Finalizing files");
-        assert_eq!(view.detail, "7 / 10 files");
-        assert_eq!(view.done, Some(7));
-        assert_eq!(view.total, Some(10));
-    }
-
-    #[test]
-    fn auto_check_failure_drops_profile_instead_of_requeueing() {
-        let mut auto_check = AutoCheckCoalescer::default();
-        let profile_id = "p-auto".to_string();
-        auto_check.enqueue(profile_id.clone());
-        auto_check.mark_running(&profile_id, 21, OperationKind::Assess(AssessScope::Local));
-
-        auto_check.observe_event(&FlowSessionEvent::new(
-            21,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Local),
-            FlowEventKind::Failed {
-                error: ApiError::new(
-                    "inventory_rebuild_required",
-                    fleet_local_state::REBUILD_REQUIRED_MESSAGE,
-                ),
-            },
-        ));
-
+        assert_eq!(auto_check.peek_next(&profile_id), None);
         assert!(!auto_check.is_running(&profile_id));
-        assert!(auto_check.peek_next(&profile_id).is_none());
-        assert!(auto_check.pending_entries().is_empty());
-    }
-
-    #[test]
-    fn failed_check_preserves_last_error_without_rebuild_status() {
-        let mut state = AppState::default();
-        let profile_id = "p-check-failed".to_string();
-
-        state.profiles.insert(
-            profile_id.clone(),
-            Profile {
-                id: profile_id.clone(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/destination".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let started = FlowSessionEvent::new(
-            21,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Local),
-            FlowEventKind::Started,
-        );
-        apply_event(&mut state, &started, 1_000);
-
-        let failed = FlowSessionEvent::new(
-            21,
-            profile_id.clone(),
-            OperationKind::Assess(AssessScope::Local),
-            FlowEventKind::Failed {
-                error: ApiError::new(
-                    "inventory_rebuild_required",
-                    fleet_local_state::REBUILD_REQUIRED_MESSAGE,
-                ),
-            },
-        );
-        apply_event(&mut state, &failed, 2_000);
-
-        let runtime = state
-            .profile_runtime_by_id
-            .get(&profile_id)
-            .expect("profile runtime");
-        let last_operation = runtime.last_operation.as_ref().expect("last operation");
-        let op_error = last_operation.error.as_ref().expect("operation error");
-        assert_eq!(op_error.code, "inventory_rebuild_required");
-        assert_eq!(
-            op_error.message,
-            fleet_local_state::REBUILD_REQUIRED_MESSAGE
-        );
-
-        let last_error = runtime.last_error.as_ref().expect("last error");
-        assert_eq!(last_error.code, "inventory_rebuild_required");
-        assert_eq!(
-            last_error.message,
-            fleet_local_state::REBUILD_REQUIRED_MESSAGE
-        );
-        assert_eq!(
-            runtime.status.recommended_action,
-            crate::state::ProfileRecommendedAction::Validate
-        );
-        assert!(!runtime.status.rebuild_inventory_required);
     }
 }

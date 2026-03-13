@@ -15,7 +15,6 @@ icondata = { version = "0.7.0", default-features = false, features = ["bootstrap
 
 fleet-core = { workspace = true }
 fleet-domain = { workspace = true }
-fleet-style = { workspace = true }
 swifty-repo = { workspace = true }
 velopack = { workspace = true }
 reqwest = { workspace = true }

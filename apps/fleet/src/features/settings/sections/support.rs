@@ -1,10 +1,10 @@
-use dioxus::prelude::*;
-use fleet_core::SettingsField;
-use fleet_domain::ReleaseChannel;
-use fleet_style::{
+use crate::style::{
     AppIcon, Button, ButtonSize, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta,
     FieldRowStack, Section, SectionHeader, SelectField, SelectOption,
 };
+use dioxus::prelude::*;
+use fleet_core::SettingsField;
+use fleet_domain::ReleaseChannel;
 
 use super::field_reset::PanelFieldResetButton;
 use icondata::BsFolder2Open;

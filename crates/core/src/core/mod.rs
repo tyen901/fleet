@@ -1,16 +1,14 @@
 mod await_session;
 pub(crate) mod flow_logging;
-mod flow_system;
 mod runtime;
 
 use crate::state::AppState;
 use crate::storage::{profile_state_root_dir, ConfigRepo};
 use fleet_domain::AppSettings;
-use fleet_flow::FlowConfig;
+use fleet_pipeline::{PipelineConfig, PipelineRuntime, PipelineSessionEvent};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
-
-pub use flow_system::FlowSystem;
 
 #[derive(Clone)]
 pub struct Core {
@@ -18,7 +16,8 @@ pub struct Core {
 }
 
 struct CoreInner {
-    flow: FlowSystem,
+    pipeline: PipelineRuntime,
+    next_session_id: AtomicU64,
     config: Arc<ConfigRepo>,
     state: Mutex<AppState>,
     state_tx: watch::Sender<AppState>,
@@ -48,12 +47,12 @@ impl Core {
         self.inner.state_tx.subscribe()
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<fleet_flow::FlowSessionEvent> {
-        self.inner.flow.subscribe()
+    pub fn subscribe_events(&self) -> broadcast::Receiver<PipelineSessionEvent> {
+        self.inner.pipeline.subscribe()
     }
 
-    pub(crate) fn flow(&self) -> FlowSystem {
-        self.inner.flow.clone()
+    pub(crate) fn pipeline(&self) -> PipelineRuntime {
+        self.inner.pipeline.clone()
     }
 
     pub(crate) fn config_repo(&self) -> Arc<ConfigRepo> {
@@ -83,19 +82,32 @@ impl Core {
         publish_state(&mut guard, &self.inner.state_tx);
     }
 
+    pub(crate) fn update_state_result<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut AppState) -> (R, bool),
+    {
+        let mut guard = self.inner.state.lock().unwrap();
+        let (result, should_publish) = f(&mut guard);
+        if should_publish {
+            publish_state(&mut guard, &self.inner.state_tx);
+        }
+        result
+    }
+
     fn new_default() -> anyhow::Result<Self> {
         Self::new_default_with_startup_checks(true)
     }
 
     fn new_default_with_startup_checks(startup_auto_check_enabled: bool) -> anyhow::Result<Self> {
         let config = Arc::new(ConfigRepo::new_default()?);
-        let flow = FlowSystem::new();
+        let pipeline = PipelineRuntime::new(PipelineConfig::new_default());
         let (state_tx, _state_rx) = watch::channel(AppState::default());
         let state = Mutex::new(AppState::default());
 
         Ok(Self {
             inner: Arc::new(CoreInner {
-                flow,
+                pipeline,
+                next_session_id: AtomicU64::new(1),
                 config,
                 state,
                 state_tx,
@@ -104,17 +116,17 @@ impl Core {
         })
     }
 
-    pub(crate) fn flow_config_from_settings(settings: &AppSettings) -> FlowConfig {
-        let mut cfg = FlowConfig::new_default();
+    pub(crate) fn allocate_session_id(&self) -> u64 {
+        self.inner.next_session_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn pipeline_config_from_settings(settings: &AppSettings) -> PipelineConfig {
+        let mut cfg = PipelineConfig::new_default();
         if let Ok(root) = profile_state_root_dir() {
             cfg.profile_state_root_dir = root;
         }
-        cfg.local_state_config.ignore_rules_text = settings.sync.local_state_ignore_rules.clone();
+        cfg.inventory_ignore_rules_text = settings.sync.local_state_ignore_rules.clone();
         cfg
-    }
-
-    pub(crate) fn current_flow_config(&self) -> FlowConfig {
-        self.read_state(|state| Self::flow_config_from_settings(&state.settings))
     }
 }
 

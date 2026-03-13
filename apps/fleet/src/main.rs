@@ -5,12 +5,13 @@ mod app;
 mod features;
 mod services;
 mod stores;
+mod style;
 
 use app::root::AppRoot;
 use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
-use fleet_style::StyleAssets;
 use services::bridge::FleetBridge;
+use style::StyleAssets;
 use tracing::{error, info};
 
 const APP_MIN_WIDTH: f64 = 700.0;

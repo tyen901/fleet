@@ -1,9 +1,8 @@
+use crate::style::{AppIcon, Button, ButtonSize, ButtonVariant, IconSize};
 use base64::Engine as _;
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
-use fleet_core::ProfileStatusBadge;
-use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant};
-use icondata::{BsArrowClockwise, BsExclamationTriangleFill, BsPersonFill};
+use icondata::{BsArrowClockwise, BsPersonFill};
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
@@ -34,8 +33,12 @@ fn profile_icon_src(
 }
 
 pub(crate) struct ProfileCardActions {
+    pub on_update: std::rc::Rc<dyn Fn()>,
     pub on_launch: std::rc::Rc<dyn Fn()>,
     pub on_join: std::rc::Rc<dyn Fn()>,
+    pub update_visible: bool,
+    pub update_disabled: bool,
+    pub update_loading: bool,
     pub launch_disabled: bool,
     pub launch_loading: bool,
     pub join_disabled: bool,
@@ -62,30 +65,22 @@ pub(crate) fn build_profile_items(
                 .is_some_and(|selected| selected == &profile_id);
             let bridge_for_select = bridge.clone();
             let bridge_for_edit = bridge.clone();
-            let status = snapshot
-                .profile_runtime_by_id
-                .get(&profile_id)
-                .map(|runtime| runtime.status.headline.label())
-                .unwrap_or("Status unknown");
-            let badge = snapshot
-                .profile_runtime_by_id
-                .get(&profile_id)
-                .and_then(|runtime| runtime.status.badge);
             let check_running = snapshot
                 .profile_runtime_by_id
                 .get(&profile_id)
-                .map(|runtime| {
-                    runtime.status.actions.validate_running
-                        || runtime.status.actions.check_updates_running
-                })
+                .map(|runtime| runtime.status.actions.check_updates_running)
                 .unwrap_or(false);
             let icon_src = snapshot
                 .profiles
                 .get(&profile_id)
                 .and_then(|profile| profile_icon_src(&snapshot.settings, profile));
 
+            let on_update = actions.on_update.clone();
             let on_launch = actions.on_launch.clone();
             let on_join = actions.on_join.clone();
+            let update_visible = actions.update_visible;
+            let update_disabled = actions.update_disabled;
+            let update_loading = actions.update_loading;
             let launch_disabled = actions.launch_disabled;
             let launch_loading = actions.launch_loading;
             let join_disabled = actions.join_disabled;
@@ -119,60 +114,58 @@ pub(crate) fn build_profile_items(
                             }
                             if check_running {
                                 div { class: "home-card__icon-check",
-                                    AppIcon { icon: BsArrowClockwise, size: fleet_style::IconSize::Sm, spin: true }
+                                    AppIcon { icon: BsArrowClockwise, size: IconSize::Sm, spin: true }
                                 }
                             }
                         }
                         div { class: "home-card__content",
                             h3 { class: "home-card__name", "{profile_name}" }
                         }
-                        span { class: "profile-hero__badge home-card__badge", "{status}" }
-                    }
-                    if matches!(badge, Some(ProfileStatusBadge::Error)) {
-                        span {
-                            class: "home-card__notice home-card__notice--error",
-                            title: "Error detected",
-                            AppIcon { icon: BsExclamationTriangleFill }
-                            span { class: "home-card__notice-label", "Issue" }
-                        }
                     }
                     if is_selected {
                         div { class: "home-card__actions",
-                            div { class: "home-card__actions-left",
+                            Button {
+                                key: "card-open",
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Sm,
+                                onclick: move |_| {
+                                    let profile_id = profile_id_for_edit.clone();
+                                    let bridge = bridge_for_edit.clone();
+                                    spawn(async move {
+                                        let _ = bridge.core().profile_set_selected(Some(profile_id.clone())).await;
+                                    });
+                                    let _ = nav.push(Route::ProfileView { id: profile_id_for_edit.clone() });
+                                },
+                                "Open"
+                            }
+                            if update_visible {
                                 Button {
-                                    key: "card-open",
-                                    variant: ButtonVariant::Secondary,
+                                    key: "card-update-{profile_id}",
+                                    variant: ButtonVariant::Primary,
                                     size: ButtonSize::Sm,
-                                    onclick: move |_| {
-                                        let profile_id = profile_id_for_edit.clone();
-                                        let bridge = bridge_for_edit.clone();
-                                        spawn(async move {
-                                            let _ = bridge.core().profile_set_selected(Some(profile_id.clone())).await;
-                                        });
-                                        let _ = nav.push(Route::ProfileView { id: profile_id_for_edit.clone() });
-                                    },
-                                    "Open"
+                                    loading: update_loading,
+                                    disabled: update_disabled,
+                                    onclick: move |_| { on_update(); },
+                                    "Update"
                                 }
                             }
-                            div { class: "home-card__actions-right",
-                                Button {
-                                    key: "card-launch",
-                                    variant: ButtonVariant::Secondary,
-                                    size: ButtonSize::Sm,
-                                    loading: launch_loading,
-                                    disabled: launch_disabled,
-                                    onclick: move |_| { on_launch(); },
-                                    "Launch"
-                                }
-                                Button {
-                                    key: "card-join",
-                                    variant: ButtonVariant::Secondary,
-                                    size: ButtonSize::Sm,
-                                    loading: join_loading,
-                                    disabled: join_disabled,
-                                    onclick: move |_| { on_join(); },
-                                    "Join"
-                                }
+                            Button {
+                                key: "card-launch",
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Sm,
+                                loading: launch_loading,
+                                disabled: launch_disabled,
+                                onclick: move |_| { on_launch(); },
+                                "Launch"
+                            }
+                            Button {
+                                key: "card-join",
+                                variant: ButtonVariant::Secondary,
+                                size: ButtonSize::Sm,
+                                loading: join_loading,
+                                disabled: join_disabled,
+                                onclick: move |_| { on_join(); },
+                                "Join"
                             }
                         }
                     }

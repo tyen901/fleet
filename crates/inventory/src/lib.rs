@@ -1,30 +1,9 @@
-#![forbid(unsafe_code)]
+//! Inventory is the authoritative finalized local file index used for trust and segment lookup.
+//! It persists only finalized on-disk file facts and their segments.
 
-mod api;
-mod db;
-mod error;
-mod hash;
-mod model;
-mod policy;
-mod stamp;
-pub mod trusted_index;
+mod flux_view;
+mod inventory;
+mod store;
 
-mod sqlite;
-mod sqlite_conn;
-
-pub mod scanner;
-
-pub use api::{Inventory, InventoryState, RootInventory};
-pub use db::{InventoryDb, UpdateSession};
-pub use error::{Error, Result, REBUILD_REQUIRED_MESSAGE};
-pub use model::{
-    DirtyFile, DirtyKind, FileEntry, FileWithSegments, FolderStamp, InventoryId, InventorySnapshot,
-    LocalStateMetrics, RootId, SegmentEntry,
-};
-pub use policy::{NonAsciiPolicy, ScanPolicy};
-pub use stamp::compute_stamp;
-
-pub use scanner::{
-    ScanError, ScanProgress, ScanStage, Scanner, ScannerConfig, SyncMode, SyncRequest, SyncResult,
-};
-pub use sqlite::SqliteStore;
+pub use flux_view::open_flux_inventory;
+pub use inventory::{FinalizedFileRow, Inventory, InventoryError};

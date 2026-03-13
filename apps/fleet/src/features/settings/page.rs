@@ -1,7 +1,7 @@
+use crate::style::{ButtonVariant, ConfirmDialog};
 use dioxus::prelude::*;
 use directories::ProjectDirs;
 use fleet_domain::{ReleaseChannel, TelemetryPreference, ThemeMode};
-use fleet_style::{ButtonVariant, ConfirmDialog};
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;

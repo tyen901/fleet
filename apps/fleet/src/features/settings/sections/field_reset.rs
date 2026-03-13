@@ -1,6 +1,6 @@
+use crate::style::{AppIcon, Button, ButtonSize, ButtonVariant};
 use dioxus::prelude::*;
 use fleet_core::SettingsField;
-use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant};
 use icondata::BsArrowClockwise;
 
 use crate::services::bridge::FleetBridge;

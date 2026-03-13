@@ -1,10 +1,10 @@
+use crate::style::{
+    Button, ButtonSize, ButtonVariant, FieldRow, FieldRowMeta, FieldRowStack, TextField,
+};
 use chrono::{Local, TimeZone};
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
 use fleet_core::LocalStateMetrics;
-use fleet_style::{
-    Button, ButtonSize, ButtonVariant, FieldRow, FieldRowMeta, FieldRowStack, TextField,
-};
 use tracing::{error, info};
 
 use crate::app::router::Route;
@@ -26,6 +26,10 @@ pub(crate) struct ProfileTextFieldRowProps {
     #[props(default)]
     pub folder_select: bool,
     #[props(default)]
+    pub disabled: bool,
+    #[props(default)]
+    pub open_folder_when_disabled: bool,
+    #[props(default)]
     pub error: Option<String>,
     pub on_change: EventHandler<String>,
 }
@@ -43,7 +47,9 @@ pub(crate) fn ProfileTextFieldRow(props: ProfileTextFieldRowProps) -> Element {
                         BrowseField {
                             value: props.value,
                             placeholder: props.placeholder,
+                            disabled: props.disabled,
                             folder_select: true,
+                            open_folder_when_disabled: props.open_folder_when_disabled,
                             invalid: props.error.is_some(),
                             on_change: move |v| props.on_change.call(v),
                         }
@@ -51,6 +57,7 @@ pub(crate) fn ProfileTextFieldRow(props: ProfileTextFieldRowProps) -> Element {
                         TextField {
                             value: props.value,
                             placeholder: props.placeholder,
+                            disabled: props.disabled,
                             invalid: props.error.is_some(),
                             on_change: move |v| props.on_change.call(v),
                         }
@@ -129,18 +136,22 @@ pub(crate) async fn save_profile_and_update_state(
     Ok(saved)
 }
 
-pub(crate) fn progress_percent(done: Option<u64>, total: Option<u64>) -> Option<u64> {
-    let (Some(done), Some(total)) = (done, total) else {
-        return None;
-    };
-    if total == 0 {
-        return Some(0);
+pub(crate) fn format_progress_metric(metric: &fleet_core::UiProgressMetric) -> String {
+    metric.rendered.clone()
+}
+
+pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
+    format!("{}/s", fleet_domain::utils::format_bytes(bytes_per_sec))
+}
+
+pub(crate) fn format_eta(eta_seconds: u64) -> String {
+    let minutes = eta_seconds / 60;
+    let seconds = eta_seconds % 60;
+    if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
     }
-    Some(
-        ((done as f64 / total as f64) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u64,
-    )
 }
 
 pub(crate) fn format_absolute_timestamp(ms: u64) -> String {
@@ -149,6 +160,60 @@ pub(crate) fn format_absolute_timestamp(ms: u64) -> String {
         .single()
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "Unknown".to_string())
+}
+
+pub(crate) fn overall_status_presenter(
+    status: &fleet_core::ProfileStatusState,
+    has_repo_source: bool,
+) -> (&'static str, &'static str) {
+    if status.actions.sync_running {
+        return ("Syncing", "info");
+    }
+
+    if status.actions.check_updates_running {
+        return ("Checking", "info");
+    }
+
+    match status.local_health {
+        fleet_core::LocalStateHealth::Ready => {
+            if has_repo_source
+                && matches!(
+                    status.remote_freshness,
+                    Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
+                )
+            {
+                ("Update available", "warn")
+            } else if has_repo_source
+                && matches!(
+                    status.remote_freshness,
+                    Some(fleet_core::RemoteFreshnessState::Error)
+                )
+            {
+                ("Check failed", "error")
+            } else {
+                ("In sync", "ok")
+            }
+        }
+        fleet_core::LocalStateHealth::LocalDrift => ("Needs sync", "warn"),
+        fleet_core::LocalStateHealth::LocalStateMissing => ("Inventory missing", "warn"),
+        fleet_core::LocalStateHealth::InventoryCorrupt => ("Inventory corrupt", "error"),
+        fleet_core::LocalStateHealth::MissingDestination => ("Destination missing", "error"),
+        fleet_core::LocalStateHealth::Blocked => ("Access blocked", "error"),
+        fleet_core::LocalStateHealth::InvalidProfile => ("Profile invalid", "error"),
+        fleet_core::LocalStateHealth::ProbeFailed => ("Check failed", "error"),
+        fleet_core::LocalStateHealth::Unknown => {
+            if has_repo_source
+                && matches!(
+                    status.remote_freshness,
+                    Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
+                )
+            {
+                ("Update available", "warn")
+            } else {
+                ("Not checked", "muted")
+            }
+        }
+    }
 }
 
 pub(crate) fn modpack_size_text(metrics: Option<&LocalStateMetrics>, loading: bool) -> String {
@@ -172,8 +237,8 @@ pub(crate) fn preview_unexpected_paths(paths: &[String], limit: usize) -> (Vec<S
     (preview, remaining)
 }
 
-pub(crate) fn show_unexpected_paths_panel(clean_available: bool, clean_running: bool) -> bool {
-    clean_available && !clean_running
+pub(crate) fn show_unexpected_paths_panel(unexpected_available: bool, sync_running: bool) -> bool {
+    unexpected_available && !sync_running
 }
 
 pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> String {
@@ -205,6 +270,9 @@ pub(crate) fn start_profile_operation(
             .start_operation(profile_id.clone(), operation)
             .await
         {
+            if err.code == "profile_busy" {
+                return;
+            }
             error!(
                 op = "profile_action",
                 profile_id = %profile_id,
@@ -215,39 +283,6 @@ pub(crate) fn start_profile_operation(
                 "profile operation failed"
             );
             toasts.push_api_error(fail_title, &err);
-        }
-    });
-}
-
-pub(crate) fn start_clean_operation(
-    bridge: FleetBridge,
-    toasts: ToastStore,
-    profile_id: String,
-    remove_empty_parent_dirs: bool,
-) {
-    spawn(async move {
-        info!(
-            op = "profile_action",
-            profile_id = %profile_id,
-            action = "clean",
-            remove_empty_parent_dirs = remove_empty_parent_dirs,
-            "profile clean requested"
-        );
-        if let Err(err) = bridge
-            .core()
-            .start_clean_operation(profile_id.clone(), remove_empty_parent_dirs)
-            .await
-        {
-            error!(
-                op = "profile_action",
-                profile_id = %profile_id,
-                action = "clean",
-                outcome = "failed",
-                code = %err.code,
-                reason = "start_clean_failed",
-                "profile clean failed"
-            );
-            toasts.push_api_error("Clean failed", &err);
         }
     });
 }
@@ -342,7 +377,7 @@ pub(crate) fn profile_folder_row_class() -> &'static str {
 mod tests {
     use super::{
         build_profile_edit_candidate, format_absolute_timestamp, modpack_size_text,
-        preview_unexpected_paths,
+        overall_status_presenter, preview_unexpected_paths,
     };
 
     #[test]
@@ -405,5 +440,32 @@ mod tests {
         };
         let text = modpack_size_text(Some(&metrics), false);
         assert!(text.contains("20"));
+    }
+
+    #[test]
+    fn overall_status_uses_needs_sync_for_local_drift() {
+        let status = fleet_core::ProfileStatusState {
+            local_health: fleet_core::LocalStateHealth::LocalDrift,
+            ..fleet_core::ProfileStatusState::unknown(0)
+        };
+
+        assert_eq!(
+            overall_status_presenter(&status, true),
+            ("Needs sync", "warn")
+        );
+    }
+
+    #[test]
+    fn overall_status_uses_update_available_when_present() {
+        let status = fleet_core::ProfileStatusState {
+            local_health: fleet_core::LocalStateHealth::Ready,
+            remote_freshness: Some(fleet_core::RemoteFreshnessState::UpdateAvailable),
+            ..fleet_core::ProfileStatusState::unknown(0)
+        };
+
+        assert_eq!(
+            overall_status_presenter(&status, true),
+            ("Update available", "warn")
+        );
     }
 }

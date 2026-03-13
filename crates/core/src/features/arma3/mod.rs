@@ -135,16 +135,12 @@ impl Core {
             return Ok(report);
         }
 
-        let profile = self
-            .load_profile(profile_id)
-            .await
-            .map_err(|e| ApiError::new("not_found", e.to_string()))?;
-        let cfg = self.current_flow_config();
         let session_id = self
-            .flow()
-            .spawn_operation_with_config(cfg, profile, OperationKind::Assess(AssessScope::Local))
-            .await
-            .map_err(|e| ApiError::new("pipeline_error", e.to_string()))?;
+            .start_operation(
+                profile_id.clone(),
+                OperationKind::Assess(AssessScope::Local),
+            )
+            .await?;
 
         self.await_assessment(session_id).await
     }

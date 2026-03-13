@@ -20,6 +20,7 @@ pub struct SyncProgress {
     pub bytes_done: Option<u64>,
     pub bytes_total: Option<u64>,
     pub bytes_per_sec: Option<u64>,
+    pub eta_seconds: Option<u64>,
 
     // Plan / completion
     pub files_total: Option<u64>,

@@ -6,8 +6,9 @@ use super::flow_run::{run_assess_session, FlowOutput, FlowRunOptions};
 use super::{load_profile, start_operation};
 
 pub(crate) async fn run(core: &Core, profile_id: &str) -> anyhow::Result<()> {
+    let profile = load_profile(core, profile_id).await?;
     let report = run_check_report(core, profile_id, true).await?;
-    print_check_report(&report);
+    print_check_report(&report, !profile.source.trim().is_empty());
     Ok(())
 }
 
@@ -40,7 +41,7 @@ pub(crate) async fn run_check_report(
     .await
 }
 
-pub(crate) fn print_check_report(report: &ProfileStateReport) {
+pub(crate) fn print_check_report(report: &ProfileStateReport, has_repo_source: bool) {
     println!(
         "profile check: local={:?} remote={:?} (checked_at_unix_ms={})",
         report.local_health, report.remote_freshness, report.checked_at_unix_ms
@@ -64,11 +65,23 @@ pub(crate) fn print_check_report(report: &ProfileStateReport) {
         println!("dirty_unexpected_files: 0");
     }
 
+    if matches!(
+        report.local_health,
+        LocalStateHealth::LocalStateMissing | LocalStateHealth::InventoryCorrupt
+    ) && has_repo_source
+    {
+        println!("sync_repair_required: true (run sync to repair inventory and reconcile)");
+    }
+
     if report.local_health == LocalStateHealth::LocalDrift
         && report.unexpected_delete_paths.is_empty()
     {
         println!(
             "local_drift_detected: true (modified/missing files likely; run sync to reconcile)"
         );
+    }
+
+    if has_repo_source && !report.unexpected_delete_paths.is_empty() {
+        println!("sync_can_remove_unexpected_files: true");
     }
 }

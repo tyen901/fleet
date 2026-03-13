@@ -1,6 +1,6 @@
+use crate::style::{Button, ButtonSize, ButtonVariant};
 use dioxus::prelude::*;
 use dioxus_router::use_navigator;
-use fleet_style::{Button, ButtonSize, ButtonVariant};
 
 use crate::app::router::Route;
 

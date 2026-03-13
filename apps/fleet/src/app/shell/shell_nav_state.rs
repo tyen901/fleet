@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 pub struct ShellSaveAction {
     pub label: String,
     pub disabled: bool,
+    pub loading: bool,
 }
 
 impl ShellSaveAction {
@@ -11,6 +12,7 @@ impl ShellSaveAction {
         Self {
             label: label.into(),
             disabled,
+            loading: false,
         }
     }
 }
@@ -19,6 +21,7 @@ impl ShellSaveAction {
 pub struct ShellNavActionStore {
     pub save_action: Signal<Option<ShellSaveAction>>,
     pub profile_action: Signal<Option<ShellSaveAction>>,
+    pub profile_secondary_action: Signal<Option<ShellSaveAction>>,
     pub back_disabled: Signal<bool>,
     pub home_search_text: Signal<String>,
     pub home_search_active: Signal<bool>,
@@ -29,6 +32,7 @@ pub struct ShellNavActionStore {
 pub enum ShellNavEvent {
     Save,
     ProfileAction,
+    ProfileSecondaryAction,
 }
 
 pub(crate) type NavEventHandler = std::rc::Rc<dyn Fn(ShellNavEvent)>;
@@ -45,6 +49,7 @@ pub(crate) fn reset_nav_state(
 ) {
     let mut save_action = actions.save_action;
     let mut profile_action = actions.profile_action;
+    let mut profile_secondary_action = actions.profile_secondary_action;
     let mut back_disabled = actions.back_disabled;
     let mut home_search_text = actions.home_search_text;
     let mut home_search_active = actions.home_search_active;
@@ -53,6 +58,7 @@ pub(crate) fn reset_nav_state(
     use_effect(use_reactive((&route_key,), move |_| {
         save_action.set(None);
         profile_action.set(None);
+        profile_secondary_action.set(None);
         back_disabled.set(false);
         home_search_text.set(String::new());
         home_search_active.set(false);
