@@ -1,4 +1,4 @@
-use super::parallel::{execute_chunked, worker_count, DEFAULT_CHUNK_SIZE};
+use super::parallel::{execute_chunked_streaming, worker_count, DEFAULT_CHUNK_SIZE};
 use super::scan::scan_local_file;
 use super::walk::{walk_managed_files, WalkItem};
 use super::{manifest_files, DesiredFile, StaleTrustedPaths, TrustRefreshResult};
@@ -14,18 +14,26 @@ pub enum InventoryRefreshProgress {
     Walking {
         files_done: u64,
         files_total: Option<u64>,
+        bytes_done: u64,
+        bytes_total: Option<u64>,
     },
     MatchingTrusted {
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
     Rescanning {
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
     Finalizing {
         files_done: u64,
         files_total: u64,
+        bytes_done: u64,
+        bytes_total: u64,
     },
 }
 
@@ -33,6 +41,12 @@ pub enum InventoryRefreshProgress {
 struct RefreshScanCandidate {
     item: WalkItem,
     desired: DesiredFile,
+}
+
+struct RescanChunkResult {
+    upserts: Vec<CommittedFileRecord>,
+    files_processed: u64,
+    bytes_processed: u64,
 }
 
 pub(crate) fn refresh_trusted_inventory_from_disk(
@@ -54,13 +68,19 @@ pub(crate) fn refresh_trusted_inventory_from_disk(
                 } => sink(InventoryRefreshProgress::Walking {
                     files_done: files_matched,
                     files_total: None,
+                    bytes_done: 0,
+                    bytes_total: None,
                 }),
                 super::WalkProgress::Metadata {
                     files_done,
                     files_total,
+                    bytes_done,
+                    bytes_total,
                 } => sink(InventoryRefreshProgress::Walking {
                     files_done,
                     files_total: Some(files_total),
+                    bytes_done,
+                    bytes_total,
                 }),
             }) as Arc<_>
         }),
@@ -78,6 +98,7 @@ pub(crate) fn refresh_trusted_inventory_from_disk(
         .map_err(InventoryError::Other)?;
     let existing_rows = inventory.finalized_rows()?;
     let desired_files = manifest_files(manifest);
+    let walked_total_bytes = walked.iter().map(|item| item.size_bytes).sum::<u64>();
 
     let mut keep_paths = BTreeSet::new();
     let mut reused_paths = Vec::new();
@@ -85,11 +106,15 @@ pub(crate) fn refresh_trusted_inventory_from_disk(
     let mut scan_candidates = Vec::new();
 
     let walked_total = walked.len() as u64;
+    let mut matched_bytes_done = 0_u64;
     for (index, (item, trusted_record)) in walked.into_iter().zip(trusted.into_iter()).enumerate() {
+        matched_bytes_done = matched_bytes_done.saturating_add(item.size_bytes);
         if let Some(sink) = progress.as_ref() {
             sink(InventoryRefreshProgress::MatchingTrusted {
                 files_done: (index + 1) as u64,
                 files_total: walked_total,
+                bytes_done: matched_bytes_done,
+                bytes_total: walked_total_bytes,
             });
         }
         if let Some(record) = trusted_record {
@@ -111,46 +136,59 @@ pub(crate) fn refresh_trusted_inventory_from_disk(
         });
     }
 
-    let chunked = execute_chunked(
+    let rescanned_total = scan_candidates.len() as u64;
+    let rescanned_total_bytes = scan_candidates
+        .iter()
+        .map(|candidate| candidate.item.size_bytes)
+        .sum::<u64>();
+    let mut rescanned_done = 0_u64;
+    let mut rescanned_bytes_done = 0_u64;
+    let chunked = execute_chunked_streaming(
         &scan_candidates,
         worker_count(),
         DEFAULT_CHUNK_SIZE,
         |chunk| {
-            chunk
-                .iter()
-                .filter_map(|candidate| {
-                    let scanned = match scan_local_file(&candidate.item) {
-                        Ok(scanned) => scanned,
-                        Err(err) => return Some(Err(err)),
-                    };
-                    if scanned.size_bytes == candidate.desired.size_bytes
-                        && scanned.segments == candidate.desired.segments
-                    {
-                        return Some(Ok(CommittedFileRecord {
-                            rel_path: PathBuf::from(candidate.item.rel_path.as_str()),
-                            size_bytes: scanned.size_bytes,
-                            mtime_ns: scanned.mtime_ns,
-                            segments: scanned.segments,
-                        }));
-                    }
-                    None
-                })
-                .collect::<Result<Vec<_>, _>>()
+            let mut upserts = Vec::new();
+            let mut files_processed = 0_u64;
+            let mut bytes_processed = 0_u64;
+            for candidate in chunk {
+                files_processed = files_processed.saturating_add(1);
+                bytes_processed = bytes_processed.saturating_add(candidate.item.size_bytes);
+                let scanned = scan_local_file(&candidate.item)?;
+                if scanned.size_bytes == candidate.desired.size_bytes
+                    && scanned.segments == candidate.desired.segments
+                {
+                    upserts.push(CommittedFileRecord {
+                        rel_path: PathBuf::from(candidate.item.rel_path.as_str()),
+                        size_bytes: scanned.size_bytes,
+                        mtime_ns: scanned.mtime_ns,
+                        segments: scanned.segments,
+                    });
+                }
+            }
+            Ok(RescanChunkResult {
+                upserts,
+                files_processed,
+                bytes_processed,
+            })
+        },
+        |chunk| {
+            rescanned_done = rescanned_done.saturating_add(chunk.files_processed);
+            rescanned_bytes_done = rescanned_bytes_done.saturating_add(chunk.bytes_processed);
+            if let Some(sink) = progress.as_ref() {
+                sink(InventoryRefreshProgress::Rescanning {
+                    files_done: rescanned_done,
+                    files_total: rescanned_total,
+                    bytes_done: rescanned_bytes_done,
+                    bytes_total: rescanned_total_bytes,
+                });
+            }
         },
     )?;
 
-    let mut rescanned_done = 0_u64;
-    let rescanned_total = scan_candidates.len() as u64;
     let mut upserts = Vec::new();
     for chunk in chunked {
-        rescanned_done = rescanned_done.saturating_add(chunk.len() as u64);
-        upserts.extend(chunk);
-        if let Some(sink) = progress.as_ref() {
-            sink(InventoryRefreshProgress::Rescanning {
-                files_done: rescanned_done,
-                files_total: rescanned_total,
-            });
-        }
+        upserts.extend(chunk.upserts);
     }
     for record in &upserts {
         keep_paths.insert(record.rel_path.to_string_lossy().replace('\\', "/"));
@@ -180,6 +218,8 @@ pub(crate) fn refresh_trusted_inventory_from_disk(
         sink(InventoryRefreshProgress::Finalizing {
             files_done: keep_paths.len() as u64,
             files_total: keep_paths.len() as u64,
+            bytes_done: walked_total_bytes,
+            bytes_total: walked_total_bytes,
         });
     }
 
