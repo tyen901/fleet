@@ -22,6 +22,7 @@ serde = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 semver = "1.0.27"
 base64 = "0.22.1"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
 
 # Dioxus
 dioxus = { version = "0.7.3", features = ["desktop", "router"] }
