@@ -6,12 +6,12 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 fleet-domain = { workspace = true }
+fleet-inventory = { workspace = true }
 flux-api = { workspace = true }
 flux-inventory-contract = { workspace = true }
 flux-manifest = { workspace = true }
 flux-segment-cache = { workspace = true }
 flux-types = { workspace = true }
-inventory = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

@@ -45,6 +45,27 @@ Always run a build and at least one validation step (tests and/or lint) before r
 - UI policy: never add container wrapper elements for UI content unless explicitly requested.
 - UI policy: never add background fill to UI panels/sections unless explicitly requested.
 
+## Inventory Enforcement Rules
+
+- The inventory is authoritative finalized local file truth only.
+- Persist only finalized on-disk file facts and segment metadata required for trust and retrieval.
+- Do not persist transient run state, sync progress, staging state, commit state, delete plans, audit history, recovery journals, manifest intent, or future desired state in the inventory.
+- Do not add run tables, audit tables, heartbeat metadata, generations, pending-delete markers, staging paths, or similar operational bookkeeping back into the inventory schema.
+- Do not treat the inventory as a general runtime state store, workflow cache, or dumping ground for convenience data.
+- If a value is derived from the current manifest, current disk scan, or current in-memory operation, it does not belong in the inventory unless it becomes finalized trusted file truth.
+- Operational decisions such as delete candidates, reconcile planning, remote comparisons, and temporary progress belong in flow/reconcile/runtime layers and must be recomputed, not persisted in inventory.
+- Flux integration must go through a narrow inventory-owned bridge. Do not expose broad public adapter types or public low-level writeback helpers just because another crate might use them.
+- Keep SQL implementation details private to `crates/inventory`. Callers must not use ad hoc SQL access, schema-coupled logic, or inventory-internal helper types.
+- When changing inventory APIs, prefer making the public surface smaller. Do not preserve legacy exports, pass-through re-exports, or compatibility wrappers without explicit instruction.
+
+### Inventory Refactor Checklist
+
+- Confirm new persisted fields are finalized-truth fields, not operational state.
+- Delete superseded schema columns/tables in the same change; do not leave dormant compatibility data behind.
+- Search for callers attempting to store manifest/planning/run/audit data in inventory and move that logic outward.
+- Confirm inventory docs and architecture docs still describe finalized-only ownership accurately.
+- Confirm no unused public exports remain after the change.
+
 ### Enforcement Checklist (Required For Refactors)
 
 - Search for old identifiers/classes and remove remaining references.
@@ -84,17 +105,17 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
 
 ## Operation Flow Notes
 
-- Flow execution is operation-centric and uses one shared kind type:
+- Pipeline execution is operation-centric and uses one shared kind type:
   `fleet_domain::health::OperationKind`.
 - Core operation APIs are:
   - `start_operation(profile_id, operation_kind)`
-  - `send_operation_input(session_id, FlowInput)`
   - `cancel_session(session_id)`
-- Runtime operation state is per-profile in `AppState.operations_by_profile`.
+- Runtime operation state is per-profile in `AppState.profile_runtime_by_id`.
 - Assess operations are unified under `OperationKind::Assess(Local|Remote)`.
-- `Sync` is the only non-destructive reconcile and self-heal path.
-- `Clean` is the only destructive unexpected-file deletion path.
-- `RebuildInventory` is the recovery path for inventory corruption.
+- `Assess` is read-only and should stay fast. It reports local state and whether sync or recovery is required.
+- `Sync` is the primary reconcile and self-heal path, and may delete truly unexpected residue after manifest-aware inventory stabilization and audit.
+- Inventory corruption is surfaced by `Assess` and repaired by `Sync`.
+- Assess and sync logic may read finalized inventory truth, but must not push operational state back into inventory.
 - Keep remote assessment supported through `Assess(Remote)`.
 - Keep both dashboard delete pathways (`PendingSync` and `UnexpectedReview`) unless explicitly changed.
 - Removed paths that should not be reintroduced:

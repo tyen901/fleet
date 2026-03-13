@@ -87,6 +87,15 @@ pub(crate) fn spawn_bridge(
                         .bytes_per_sec(now)
                         .map(|rate| rate.round() as u64)
                         .filter(|rate| *rate > 0);
+                    let eta_seconds = match (
+                        planned_total.checked_sub(s.bytes.bytes_downloaded),
+                        bytes_per_sec,
+                    ) {
+                        (Some(remaining), Some(rate)) if rate > 0 && remaining > 0 => {
+                            Some(remaining / rate)
+                        }
+                        _ => None,
+                    };
 
                     if let Ok(mut l) = last_bridge.lock() {
                         l.files_finalized = s.execution.files_committed;
@@ -98,6 +107,7 @@ pub(crate) fn spawn_bridge(
                             bytes_downloaded: Some(s.bytes.bytes_downloaded),
                             bytes_total: Some(planned_total),
                             bytes_per_sec,
+                            eta_seconds,
                             files_total: Some(plan_files_total),
                             files_finalized: Some(s.execution.files_committed),
                             ..Default::default()

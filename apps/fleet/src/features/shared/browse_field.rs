@@ -1,5 +1,5 @@
+use crate::style::{AppIcon, IconSize};
 use dioxus::prelude::*;
-use fleet_style::{AppIcon, IconSize};
 use icondata::BsFolder2Open;
 
 use crate::services::platform::open::open_path;

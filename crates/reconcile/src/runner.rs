@@ -7,7 +7,6 @@ use flux_api::{PrunePolicy, SyncConfig, SyncEnvironment};
 use flux_types::Verifier;
 use tokio_util::sync::CancellationToken;
 
-use crate::flux_sqlite::SqliteFluxInventory;
 use crate::progress;
 use crate::{FluxProgressSink, FluxSyncOptions, FluxSyncReport};
 
@@ -16,7 +15,6 @@ pub(crate) async fn sync(
     flux_cache_dir: std::path::PathBuf,
     dest: &Path,
     inventory_db_path: &Path,
-    inventory_name: &str,
     desired: flux_manifest::DesiredManifest,
     opts: FluxSyncOptions,
     cancel: CancellationToken,
@@ -30,7 +28,6 @@ pub(crate) async fn sync(
     let cancel_clone = cancel.clone();
     let dest = dest.to_path_buf();
     let inventory_db_path = inventory_db_path.to_path_buf();
-    let inventory_name = inventory_name.to_string();
 
     let (progress_tx, progress_rx) = std::sync::mpsc::channel::<flux_api::SyncEvent>();
     let (bridge, totals, last) =
@@ -41,10 +38,8 @@ pub(crate) async fn sync(
             anyhow::bail!("canceled");
         }
 
-        let inventory = Arc::new(
-            SqliteFluxInventory::open_sqlite(&inventory_db_path, &inventory_name, &dest)
-                .context("open fleet_inventory for flux")?,
-        );
+        let inventory = fleet_inventory::open_flux_inventory(&inventory_db_path, &dest)
+            .context("open fleet_inventory for flux")?;
 
         let have = SyncEnvironment {
             target_root: dest.clone(),
@@ -97,13 +92,10 @@ pub(crate) fn prune_only(
     flux_cache_dir: std::path::PathBuf,
     dest: &Path,
     inventory_db_path: &Path,
-    inventory_name: &str,
     prune_paths: Vec<std::path::PathBuf>,
 ) -> Result<flux_api::PruneReport> {
-    let inventory = Arc::new(
-        SqliteFluxInventory::open_sqlite(inventory_db_path, inventory_name, dest)
-            .context("open fleet_inventory for flux")?,
-    );
+    let inventory = fleet_inventory::open_flux_inventory(inventory_db_path, dest)
+        .context("open fleet_inventory for flux")?;
 
     let local_store: Arc<dyn flux_types::SegmentStore> =
         Arc::new(flux_segment_cache::SegmentCache::new(flux_cache_dir));

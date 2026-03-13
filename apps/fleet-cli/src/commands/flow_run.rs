@@ -1,5 +1,5 @@
 use crate::ui::progress::spawn_flow_printer;
-use fleet_core::{Core, FlowResult, FlowSessionEvent, ProfileStateReport};
+use fleet_core::{Core, OperationOutput, PipelineSessionEvent, ProfileStateReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOutput {
@@ -16,12 +16,12 @@ pub(crate) async fn run_flow_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<FlowResult> {
+) -> anyhow::Result<OperationOutput> {
     let mut terminal_rx = core.subscribe_events();
 
     let (progress_tx, progress_handle) = match options.output {
         FlowOutput::Progress { no_progress } => {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<FlowSessionEvent>();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PipelineSessionEvent>();
             let handle = spawn_flow_printer(rx, no_progress);
             (Some(tx), Some(handle))
         }
@@ -75,7 +75,7 @@ pub(crate) async fn run_sync_session(
     options: FlowRunOptions,
 ) -> anyhow::Result<ProfileStateReport> {
     match run_flow_session(core, session_id, options).await? {
-        FlowResult::Sync(report) => Ok(report),
+        OperationOutput::Sync(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected sync result")),
     }
 }
@@ -86,18 +86,7 @@ pub(crate) async fn run_assess_session(
     options: FlowRunOptions,
 ) -> anyhow::Result<ProfileStateReport> {
     match run_flow_session(core, session_id, options).await? {
-        FlowResult::Assess(report) => Ok(report),
+        OperationOutput::Assess(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected assess result")),
-    }
-}
-
-pub(crate) async fn run_clean_session(
-    core: &Core,
-    session_id: u64,
-    options: FlowRunOptions,
-) -> anyhow::Result<ProfileStateReport> {
-    match run_flow_session(core, session_id, options).await? {
-        FlowResult::Clean(report) => Ok(report),
-        _ => Err(anyhow::anyhow!("internal: expected clean result")),
     }
 }

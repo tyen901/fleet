@@ -18,7 +18,7 @@ pub use state::*;
 pub use storage::{profile_state_root_dir, ProfilesConfig};
 
 pub use fleet_domain::health::{
-    AssessPhase, AssessScope, CancelResult, LocalStateHealth, OperationKind, ProfileStateReport,
+    AssessScope, CancelResult, LocalStateHealth, OperationKind, ProfileStateReport,
     RemoteFreshnessState,
 };
 pub use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId, SyncSummary};
@@ -30,7 +30,10 @@ pub use fleet_domain::{
 pub use fleet_domain::{
     BaselineStamp, LocalStateMetrics, LocalStateProgress, LocalStateStage, LocalStateStatus,
 };
-pub use fleet_flow::{FlowEventKind, FlowResult, FlowSessionEvent, LogLevel};
+pub use fleet_pipeline::{
+    OperationOutput, OperationStage, PipelineEventKind, PipelineNoticeLevel, PipelineProgressEvent,
+    PipelineSessionEvent, ProgressMetric, ProgressScope, ProgressUnit, StageState,
+};
 
 pub mod download {
     pub use fleet_domain::{DownloadEvent, DownloadPhase};

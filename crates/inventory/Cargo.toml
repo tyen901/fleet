@@ -1,27 +1,21 @@
 [package]
-name = "inventory"
+name = "fleet-inventory"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
-
-[lib]
-name = "inventory"
-
-[features]
-default = []
-serde = []
 
 [dependencies]
+anyhow = { workspace = true }
+fleet-domain = { workspace = true }
+flux-manifest = { workspace = true }
+flux-inventory-contract = { workspace = true }
+flux-types = { workspace = true }
+blake3 = { workspace = true }
+md5 = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+specta = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
-tracing = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-rusqlite = { workspace = true, features = ["bundled"] }
-crossbeam-channel = { workspace = true }
-
-# workspace dep used by the scanner
-swifty_artifacts = { workspace = true }
-fleet-domain = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

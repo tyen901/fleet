@@ -1,9 +1,9 @@
-use dioxus::prelude::*;
-use fleet_core::{Arma3LaunchMethod, SettingsField};
-use fleet_style::{
+use crate::style::{
     AppIcon, Button, ButtonSize, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta,
     FieldRowStack, Section, SectionHeader, SelectField, SelectOption, TextField,
 };
+use dioxus::prelude::*;
+use fleet_core::{Arma3LaunchMethod, SettingsField};
 use icondata::BsFolder2Open;
 
 use super::field_reset::PanelFieldResetButton;

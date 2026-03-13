@@ -1,8 +1,7 @@
 use crate::types::ProfileId;
+pub use crate::{AssessScope, LocalStateHealth};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-
-pub use fleet_local_state::{AssessScope, LocalStateHealth};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum RemoteFreshnessState {
@@ -16,8 +15,6 @@ pub enum RemoteFreshnessState {
 pub enum OperationKind {
     Assess(AssessScope),
     Sync,
-    RebuildInventory,
-    Clean,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]

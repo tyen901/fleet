@@ -4,6 +4,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::app::shell::ShellNavActionStore;
+use crate::features::profiles::common::start_profile_operation;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
@@ -70,7 +71,7 @@ pub fn Home() -> Element {
         .and_then(|runtime| runtime.active.as_ref())
         .is_some();
     let quick_check_ui_blocked = selected_status
-        .map(|status| status.actions.validate_running || status.actions.check_updates_running)
+        .map(|status| status.actions.check_updates_running)
         .unwrap_or(false);
     let launch_disabled = selected_profile_id.is_none()
         || quick_check_ui_blocked
@@ -86,6 +87,22 @@ pub fn Home() -> Element {
             .map(|status| status.can_launch)
             .unwrap_or(false)
         || join_waiting();
+    let update_visible = selected_status
+        .map(|status| {
+            matches!(
+                status.remote_freshness,
+                Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
+            )
+        })
+        .unwrap_or(false);
+    let update_disabled = selected_profile_id.is_none()
+        || selected_operation_active
+        || !selected_status
+            .map(|status| status.actions.sync_enabled)
+            .unwrap_or(false);
+    let update_loading = selected_status
+        .map(|status| status.actions.sync_running)
+        .unwrap_or(false);
 
     use_select_initial_profile(
         bridge.clone(),
@@ -181,11 +198,33 @@ pub fn Home() -> Element {
         });
     });
 
+    let bridge_for_update = bridge.clone();
+    let toasts_for_update = toasts.clone();
+    let selected_profile_id_for_update = selected_profile_id.clone();
+    let on_update_action = std::rc::Rc::new(move || {
+        let Some(profile_id) = selected_profile_id_for_update.clone() else {
+            return;
+        };
+        start_profile_operation(
+            bridge_for_update.clone(),
+            toasts_for_update.clone(),
+            profile_id,
+            fleet_core::OperationKind::Sync,
+            "sync",
+            "start_sync_failed",
+            "Sync failed",
+        );
+    });
+
     use_home_nav_flags(shell_nav_actions.clone(), has_profiles);
 
     let card_actions = ProfileCardActions {
+        on_update: on_update_action,
         on_launch: on_launch_action,
         on_join: on_join_action,
+        update_visible,
+        update_disabled,
+        update_loading,
         launch_disabled: launch_disabled_val,
         launch_loading: launch_waiting_val,
         join_disabled: join_disabled_val,
@@ -225,86 +264,5 @@ pub fn Home() -> Element {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use fleet_core::{
-        ensure_profile_runtime_mut, recompute_profile_status, AppState, LocalStateHealth,
-        ProfileStatusBadge, RemoteFreshnessState,
-    };
-    use fleet_domain::health::ProfileStateReport;
-
-    fn snapshot_with_status(
-        local_health: LocalStateHealth,
-        remote_freshness: RemoteFreshnessState,
-    ) -> AppState {
-        let mut snapshot = AppState::default();
-        snapshot.profiles.insert(
-            "p1".to_string(),
-            fleet_domain::Profile {
-                id: "p1".to_string(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/profile".to_string(),
-                ..Default::default()
-            },
-        );
-        let runtime = ensure_profile_runtime_mut(&mut snapshot, "p1", 1);
-        runtime.assessment = Some(ProfileStateReport {
-            profile_id: "p1".to_string(),
-            local_health,
-            remote_freshness: Some(remote_freshness),
-            checked_at_unix_ms: 1,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
-        });
-        recompute_profile_status(&mut snapshot, "p1");
-        snapshot
-    }
-
-    #[test]
-    fn badge_prefers_update_available() {
-        let snapshot = snapshot_with_status(
-            LocalStateHealth::LocalDrift,
-            RemoteFreshnessState::UpdateAvailable,
-        );
-        assert_eq!(
-            snapshot
-                .profile_runtime_by_id
-                .get("p1")
-                .and_then(|runtime| runtime.status.badge),
-            Some(ProfileStatusBadge::UpdateAvailable)
-        );
-    }
-
-    #[test]
-    fn badge_marks_error_for_local_issues() {
-        let snapshot = snapshot_with_status(
-            LocalStateHealth::LocalStateMissing,
-            RemoteFreshnessState::Unknown,
-        );
-        assert_eq!(
-            snapshot
-                .profile_runtime_by_id
-                .get("p1")
-                .and_then(|runtime| runtime.status.badge),
-            None
-        );
-    }
-
-    #[test]
-    fn badge_is_none_for_ready_up_to_date() {
-        let snapshot =
-            snapshot_with_status(LocalStateHealth::Ready, RemoteFreshnessState::UpToDate);
-        assert_eq!(
-            snapshot
-                .profile_runtime_by_id
-                .get("p1")
-                .and_then(|runtime| runtime.status.badge),
-            None
-        );
     }
 }

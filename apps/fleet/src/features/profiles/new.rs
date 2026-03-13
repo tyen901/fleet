@@ -31,27 +31,6 @@ pub fn NewProfile() -> Element {
     let draft = ProfileDraft::from_fields(name(), repo(), folder());
     let validation = draft.validate(&(store.state)(), None);
     let can_save = validation.is_valid();
-    let draft_title = if name().trim().is_empty() {
-        "New Profile".to_string()
-    } else {
-        name().trim().to_string()
-    };
-    let draft_repo_summary = if repo().trim().is_empty() {
-        "Repository not set".to_string()
-    } else {
-        repo().trim().to_string()
-    };
-    let draft_folder_summary = if folder().trim().is_empty() {
-        "Folder not set".to_string()
-    } else {
-        folder().trim().to_string()
-    };
-    let draft_state_summary = if can_save {
-        "Ready to save from the shell header."
-    } else {
-        "Complete the required fields to save."
-    };
-
     {
         let mut save_action = shell_nav_actions.save_action;
         let mut profile_action = shell_nav_actions.profile_action;
@@ -130,28 +109,6 @@ pub fn NewProfile() -> Element {
                 div { class: "dash-layout",
                     div { class: "dash-layout__content",
                         section { class: "profile-form-view",
-                            section { class: "profile-hero",
-                                div { class: "profile-hero__header",
-                                    h2 { class: "profile-hero__title", "{draft_title}" }
-                                    span { class: "profile-hero__badge", "Draft" }
-                                }
-                                p { class: "profile-hero__meta-line", "Create a profile by setting a name, repository URL, and target folder." }
-                                div { class: "profile-summary-facts",
-                                    div { class: "profile-fact",
-                                        div { class: "profile-fact__label", "Source" }
-                                        div { class: "profile-fact__value mono-sm", "{draft_repo_summary}" }
-                                    }
-                                    div { class: "profile-fact",
-                                        div { class: "profile-fact__label", "Destination" }
-                                        div { class: "profile-fact__value mono-sm", "{draft_folder_summary}" }
-                                    }
-                                    div { class: "profile-fact",
-                                        div { class: "profile-fact__label", "Save State" }
-                                        div { class: "profile-fact__value", "{draft_state_summary}" }
-                                    }
-                                }
-                            }
-
                             article { class: "profile-card",
                                 div { class: "profile-card__header",
                                     h3 { class: "profile-card__title", "Profile Details" }

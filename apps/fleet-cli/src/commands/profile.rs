@@ -13,8 +13,9 @@ pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
             }
         }
         ProfileCommands::Check { profile_id } => {
+            let profile = core.load_profile(&profile_id).await?;
             let report = run_check_report(core, &profile_id, true).await?;
-            print_check_report(&report);
+            print_check_report(&report, !profile.source.trim().is_empty());
         }
         ProfileCommands::Add {
             id,

@@ -1,5 +1,5 @@
+use crate::style::{AppIcon, Button, ButtonSize, ButtonVariant, Notice, NoticeTone};
 use dioxus::prelude::*;
-use fleet_style::{AppIcon, Button, ButtonSize, ButtonVariant, Notice, NoticeTone};
 use icondata::{BsArrowClockwise, BsCheckCircle};
 
 use crate::features::settings::state::UpdateState;

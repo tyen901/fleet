@@ -22,6 +22,7 @@ pub fn ShellLayout() -> Element {
     let shell_nav_actions = ShellNavActionStore {
         save_action: use_signal(|| None::<ShellSaveAction>),
         profile_action: use_signal(|| None::<ShellSaveAction>),
+        profile_secondary_action: use_signal(|| None::<ShellSaveAction>),
         back_disabled: use_signal(|| false),
         home_search_text: use_signal(String::new),
         home_search_active: use_signal(|| false),
@@ -39,6 +40,7 @@ pub fn ShellLayout() -> Element {
     let snapshot = (store.state)();
     let current_shell_save_action = (shell_nav_actions.save_action)();
     let current_profile_action = (shell_nav_actions.profile_action)();
+    let current_profile_secondary_action = (shell_nav_actions.profile_secondary_action)();
 
     rsx! {
         div { class: "app-shell",
@@ -52,6 +54,7 @@ pub fn ShellLayout() -> Element {
                     nav_events.clone(),
                     current_shell_save_action.clone(),
                     current_profile_action.clone(),
+                    current_profile_secondary_action.clone(),
                 )
             }
             main { class: "route-stage",
