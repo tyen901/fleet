@@ -63,6 +63,17 @@ fn load_inventory_metrics(
     });
 }
 
+fn latest_inventory_refresh_at(profile_runtime: Option<&fleet_core::ProfileRuntimeState>) -> u64 {
+    profile_runtime
+        .and_then(|runtime| runtime.last_operation.as_ref())
+        .map(|operation| operation.updated_at_unix_ms)
+        .unwrap_or(0)
+}
+
+fn inventory_metrics_refresh_key(profile_id: &str, refresh_at: u64) -> String {
+    format!("{profile_id}:{refresh_at}")
+}
+
 fn build_main_actions(
     profile_status: Option<&fleet_core::ProfileStatusState>,
 ) -> Vec<MainActionUi> {
@@ -117,11 +128,11 @@ pub fn ProfileView(id: String) -> Element {
     let profile_id = profile.id.clone();
     let inventory_metrics = use_signal(|| Option::<fleet_core::LocalStateMetrics>::None);
     let inventory_metrics_loading = use_signal(|| false);
-    let inventory_metrics_loaded_for = use_signal(String::new);
     let inventory_metrics_request_seq = use_signal(|| 0_u64);
-    let was_operation_active = use_signal(|| false);
+    let inventory_metrics_loaded_key = use_signal(String::new);
 
     let profile_runtime = snapshot.profile_runtime_by_id.get(&profile.id);
+    let inventory_refresh_at = latest_inventory_refresh_at(profile_runtime);
     let assessment = profile_runtime.and_then(|runtime| runtime.assessment.as_ref());
     let profile_status = profile_runtime.map(|runtime| &runtime.status);
     let repo_servers = profile_runtime
@@ -149,43 +160,15 @@ pub fn ProfileView(id: String) -> Element {
         let profile_id = profile.id.clone();
         let mut metrics_sig = inventory_metrics;
         let metrics_loading_sig = inventory_metrics_loading;
-        let mut metrics_loaded_for_sig = inventory_metrics_loaded_for;
         let mut request_seq_sig = inventory_metrics_request_seq;
+        let mut loaded_key_sig = inventory_metrics_loaded_key;
         use_effect(move || {
-            if metrics_loaded_for_sig() == profile_id {
+            let refresh_key = inventory_metrics_refresh_key(&profile_id, inventory_refresh_at);
+            if loaded_key_sig() == refresh_key {
                 return;
             }
-            metrics_loaded_for_sig.set(profile_id.clone());
+            loaded_key_sig.set(refresh_key);
             metrics_sig.set(None);
-            let seq = request_seq_sig().wrapping_add(1);
-            request_seq_sig.set(seq);
-            load_inventory_metrics(
-                bridge.clone(),
-                profile_id.clone(),
-                seq,
-                request_seq_sig,
-                metrics_sig,
-                metrics_loading_sig,
-            );
-        });
-    }
-
-    {
-        let bridge = bridge.clone();
-        let profile_id = profile.id.clone();
-        let metrics_sig = inventory_metrics;
-        let metrics_loading_sig = inventory_metrics_loading;
-        let mut request_seq_sig = inventory_metrics_request_seq;
-        let mut was_operation_active = was_operation_active;
-        use_effect(move || {
-            if operation_active {
-                was_operation_active.set(true);
-                return;
-            }
-            if !was_operation_active() {
-                return;
-            }
-            was_operation_active.set(false);
             let seq = request_seq_sig().wrapping_add(1);
             request_seq_sig.set(seq);
             load_inventory_metrics(
@@ -621,5 +604,59 @@ pub fn ProfileView(id: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inventory_metrics_refresh_key, latest_inventory_refresh_at};
+
+    #[test]
+    fn latest_inventory_refresh_at_uses_latest_terminal_timestamp() {
+        let runtime = fleet_core::ProfileRuntimeState {
+            profile_id: "p1".to_string(),
+            assessment: None,
+            active: None,
+            last_operation: Some(fleet_core::OperationOutcomeState {
+                session_id: 7,
+                operation: fleet_core::OperationKind::Sync,
+                status: fleet_core::OperationTerminalStatus::Succeeded,
+                updated_at_unix_ms: 42,
+                message: None,
+                summary: None,
+                error: None,
+            }),
+            last_error: None,
+            repo_servers: Vec::new(),
+            repo_servers_loaded: false,
+            status: fleet_core::ProfileStatusState::unknown(0),
+        };
+
+        assert_eq!(latest_inventory_refresh_at(Some(&runtime)), 42);
+
+        let remote_assess = fleet_core::ProfileRuntimeState {
+            last_operation: Some(fleet_core::OperationOutcomeState {
+                operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Local),
+                ..runtime.last_operation.clone().expect("last operation")
+            }),
+            ..runtime
+        };
+
+        assert_eq!(latest_inventory_refresh_at(Some(&remote_assess)), 42);
+        assert_eq!(latest_inventory_refresh_at(None), 0);
+    }
+
+    #[test]
+    fn inventory_metrics_refresh_key_changes_only_when_profile_or_sync_completion_changes() {
+        assert_eq!(inventory_metrics_refresh_key("p1", 0), "p1:0");
+        assert_eq!(inventory_metrics_refresh_key("p1", 42), "p1:42");
+        assert_ne!(
+            inventory_metrics_refresh_key("p1", 42),
+            inventory_metrics_refresh_key("p1", 43)
+        );
+        assert_ne!(
+            inventory_metrics_refresh_key("p1", 42),
+            inventory_metrics_refresh_key("p2", 42)
+        );
     }
 }
