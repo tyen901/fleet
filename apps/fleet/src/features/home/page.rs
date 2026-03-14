@@ -8,9 +8,27 @@ use crate::features::profiles::common::start_profile_operation;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
+use crate::style::{ButtonVariant, ChoiceDialog};
 
 use super::cards::{build_profile_items, ProfileCardActions};
 use super::hooks::{use_home_nav_flags, use_select_initial_profile};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingStartAction {
+    Launch,
+    Join,
+}
+
+fn selected_profile_requires_sync(status: Option<&fleet_core::ProfileStatusState>) -> bool {
+    matches!(
+        status.map(|status| status.local_health.clone()),
+        Some(
+            fleet_core::LocalStateHealth::LocalDrift
+                | fleet_core::LocalStateHealth::LocalStateMissing
+                | fleet_core::LocalStateHealth::InventoryCorrupt
+        )
+    )
+}
 
 #[component]
 pub fn Home() -> Element {
@@ -23,6 +41,7 @@ pub fn Home() -> Element {
     let search = shell_nav_actions.home_search_text;
     let launch_waiting = use_signal(|| false);
     let join_waiting = use_signal(|| false);
+    let pending_start_action = use_signal(|| None::<PendingStartAction>);
 
     let snapshot = (store.state)();
     let mut profiles = snapshot
@@ -95,6 +114,7 @@ pub fn Home() -> Element {
             )
         })
         .unwrap_or(false);
+    let sync_required = selected_profile_requires_sync(selected_status);
     let update_disabled = selected_profile_id.is_none()
         || selected_operation_active
         || !selected_status
@@ -119,7 +139,7 @@ pub fn Home() -> Element {
     let toasts_for_launch = toasts.clone();
     let selected_profile_id_for_launch = selected_profile_id.clone();
     let mut launch_waiting_for_launch = launch_waiting;
-    let on_launch_action = std::rc::Rc::new(move || {
+    let execute_launch = std::rc::Rc::new(move || {
         let Some(profile_id) = selected_profile_id_for_launch.clone() else {
             return;
         };
@@ -152,7 +172,7 @@ pub fn Home() -> Element {
     let saved_server_for_join = selected_profile_saved_server.clone();
     let saved_server_present_in_cache_for_join = selected_saved_server_present_in_cache;
     let mut join_waiting_for_join = join_waiting;
-    let on_join_action = std::rc::Rc::new(move || {
+    let execute_join = std::rc::Rc::new(move || {
         let Some(profile_id) = selected_profile_id_for_join.clone() else {
             return;
         };
@@ -198,6 +218,28 @@ pub fn Home() -> Element {
         });
     });
 
+    let pending_start_action_for_launch = pending_start_action;
+    let execute_launch_for_action = execute_launch.clone();
+    let on_launch_action = std::rc::Rc::new(move || {
+        if sync_required {
+            let mut pending_start_action = pending_start_action_for_launch;
+            pending_start_action.set(Some(PendingStartAction::Launch));
+            return;
+        }
+        execute_launch_for_action();
+    });
+
+    let pending_start_action_for_join = pending_start_action;
+    let execute_join_for_action = execute_join.clone();
+    let on_join_action = std::rc::Rc::new(move || {
+        if sync_required {
+            let mut pending_start_action = pending_start_action_for_join;
+            pending_start_action.set(Some(PendingStartAction::Join));
+            return;
+        }
+        execute_join_for_action();
+    });
+
     let bridge_for_update = bridge.clone();
     let toasts_for_update = toasts.clone();
     let selected_profile_id_for_update = selected_profile_id.clone();
@@ -215,6 +257,45 @@ pub fn Home() -> Element {
             "Sync failed",
         );
     });
+
+    let mut pending_start_action_for_primary = pending_start_action;
+    let execute_launch_for_primary = execute_launch.clone();
+    let execute_join_for_primary = execute_join.clone();
+    let on_start_anyway = move |_: MouseEvent| {
+        let pending = pending_start_action_for_primary();
+        pending_start_action_for_primary.set(None);
+        match pending {
+            Some(PendingStartAction::Launch) => execute_launch_for_primary(),
+            Some(PendingStartAction::Join) => execute_join_for_primary(),
+            None => {}
+        }
+    };
+
+    let selected_profile_id_for_sync = selected_profile_id.clone();
+    let mut pending_start_action_for_sync = pending_start_action;
+    let bridge_for_sync = bridge.clone();
+    let toasts_for_sync = toasts.clone();
+    let on_start_sync = move |_: MouseEvent| {
+        let Some(profile_id) = selected_profile_id_for_sync.clone() else {
+            pending_start_action_for_sync.set(None);
+            return;
+        };
+        pending_start_action_for_sync.set(None);
+        start_profile_operation(
+            bridge_for_sync.clone(),
+            toasts_for_sync.clone(),
+            profile_id,
+            fleet_core::OperationKind::Sync,
+            "sync",
+            "start_sync_failed",
+            "Sync failed",
+        );
+    };
+
+    let mut pending_start_action_for_cancel = pending_start_action;
+    let on_cancel_pending_start = move |_: MouseEvent| {
+        pending_start_action_for_cancel.set(None);
+    };
 
     use_home_nav_flags(shell_nav_actions.clone(), has_profiles);
 
@@ -263,6 +344,54 @@ pub fn Home() -> Element {
                     }
                 }
             }
+
+            ChoiceDialog {
+                open: pending_start_action().is_some(),
+                title: "Sync Required".to_string(),
+                message: "Fleet already knows this profile needs a sync before launch. You can start anyway, run sync now, or cancel.".to_string(),
+                primary_label: "Start Anyway".to_string(),
+                secondary_label: "Start Sync".to_string(),
+                cancel_label: "Cancel".to_string(),
+                primary_variant: ButtonVariant::Danger,
+                secondary_variant: ButtonVariant::Primary,
+                on_primary: on_start_anyway,
+                on_secondary: on_start_sync,
+                on_cancel: on_cancel_pending_start,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_profile_requires_sync;
+
+    #[test]
+    fn selected_profile_requires_sync_for_local_repair_states() {
+        for local_health in [
+            fleet_core::LocalStateHealth::LocalDrift,
+            fleet_core::LocalStateHealth::LocalStateMissing,
+            fleet_core::LocalStateHealth::InventoryCorrupt,
+        ] {
+            let status = fleet_core::ProfileStatusState {
+                local_health,
+                ..fleet_core::ProfileStatusState::unknown(0)
+            };
+            assert!(selected_profile_requires_sync(Some(&status)));
+        }
+    }
+
+    #[test]
+    fn selected_profile_does_not_require_sync_for_ready_or_unknown() {
+        for local_health in [
+            fleet_core::LocalStateHealth::Ready,
+            fleet_core::LocalStateHealth::Unknown,
+        ] {
+            let status = fleet_core::ProfileStatusState {
+                local_health,
+                ..fleet_core::ProfileStatusState::unknown(0)
+            };
+            assert!(!selected_profile_requires_sync(Some(&status)));
         }
     }
 }

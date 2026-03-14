@@ -3,7 +3,7 @@ use crate::state::{
     ensure_profile_runtime_mut, ActiveOperationState, OperationOutcomeState,
     OperationTerminalStatus,
 };
-use fleet_domain::health::{AssessScope, OperationKind};
+use fleet_domain::health::OperationKind;
 use fleet_domain::ApiError;
 use fleet_pipeline::{PipelineEventKind, PipelineSessionEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -18,12 +18,6 @@ pub(super) struct AutoCheckCoalescer {
 }
 
 impl AutoCheckCoalescer {
-    pub(super) fn enqueue(&mut self, profile_id: String) {
-        let queue = self.pending_auto_check.entry(profile_id).or_default();
-        Self::enqueue_kind(queue, OperationKind::Assess(AssessScope::Local));
-        Self::enqueue_kind(queue, OperationKind::Assess(AssessScope::Remote));
-    }
-
     pub(super) fn observe_event(&mut self, ev: &PipelineSessionEvent) {
         match &ev.kind {
             PipelineEventKind::Finished { .. } => {
@@ -75,12 +69,6 @@ impl AutoCheckCoalescer {
         self.running_check.remove(profile_id);
         self.auto_sessions
             .retain(|_, (running_profile_id, _)| running_profile_id != profile_id);
-    }
-
-    fn enqueue_kind(queue: &mut VecDeque<OperationKind>, kind: OperationKind) {
-        if !queue.iter().any(|queued| *queued == kind) {
-            queue.push_back(kind);
-        }
     }
 }
 
@@ -214,7 +202,7 @@ mod tests {
     use fleet_pipeline::{OperationOutput, PipelineEventKind, PipelineSessionEvent};
 
     fn test_core() -> Core {
-        Core::new_in_current_runtime_without_startup_checks().expect("core")
+        Core::new_in_current_runtime_default().expect("core")
     }
 
     fn seeded_state() -> AppState {
