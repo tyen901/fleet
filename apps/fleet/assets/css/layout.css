@@ -17,6 +17,52 @@
   overflow: hidden;
 }
 
+.shell-footer-badge {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.shell-footer-badge__content {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(560px, calc(100vw - 120px));
+  border: 1px solid var(--clr-border-emphasis);
+  border-radius: var(--radius-3);
+  background: var(--clr-surface-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  padding: 10px 12px;
+}
+
+.shell-footer-badge__text {
+  color: var(--clr-text-primary);
+  font-size: var(--font-size-sm);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.shell-footer-badge__action {
+  border: 0;
+  background: transparent;
+  color: var(--clr-link);
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+  text-decoration: underline;
+}
+
+.shell-footer-badge__action:focus-visible {
+  outline: 2px solid var(--clr-focus);
+  outline-offset: 2px;
+}
+
 .shell-header {
   position: fixed;
   top: 0;

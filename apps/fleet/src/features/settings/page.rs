@@ -9,65 +9,44 @@ use crate::services::platform::open::open_path;
 use crate::services::updates;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
+use crate::stores::update_store::{
+    apply_update, check_for_updates_status, AppUpdateStatus, UpdateStore,
+};
 use fleet_core::Arma3LaunchMethod;
 
 use super::actions::{spawn_debounced_settings_save, spawn_settings_task, spawn_settings_update};
 use super::sections::{
     about_section, appearance_section, arma_section, reset_section, support_section,
 };
-use super::state::UpdateState;
 
 #[component]
 pub fn Settings() -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
     let toasts = use_context::<ToastStore>();
+    let update_store = use_context::<UpdateStore>();
     let nav = dioxus_router::use_navigator();
 
-    let update_state = use_signal(|| UpdateState::Idle);
     let installed_version = use_signal(updates::installed_version_string);
 
     let snap = (store.state)();
 
     let on_check_updates = move || {
         let channel = store.state.read().settings.updates.release_channel;
-        let mut us = update_state;
+        let mut status = update_store.status;
         spawn(async move {
-            us.set(UpdateState::Checking);
-
-            let result = tokio::task::spawn_blocking(move || {
-                let feed = updates::resolve_feed_url(channel)?;
-                updates::check_for_updates(&feed, channel)
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
-
-            match result {
-                Ok(Some(version)) => us.set(UpdateState::UpdateAvailable { version }),
-                Ok(None) => us.set(UpdateState::UpToDate),
-                Err(e) => us.set(UpdateState::Error(e)),
-            }
+            status.set(AppUpdateStatus::Checking);
+            status.set(check_for_updates_status(channel).await);
         });
     };
 
     let on_apply_update = move || {
         let channel = store.state.read().settings.updates.release_channel;
-        let mut us = update_state;
+        let mut status = update_store.status;
         spawn(async move {
-            us.set(UpdateState::Downloading);
-
-            let result = tokio::task::spawn_blocking(move || {
-                let feed = updates::resolve_feed_url(channel)?;
-                updates::download_apply_and_restart(&feed, channel)
-            })
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r);
-
-            match result {
-                Ok(()) => {}
-                Err(e) => us.set(UpdateState::Error(e)),
+            status.set(AppUpdateStatus::Downloading);
+            if let Err(err) = apply_update(channel).await {
+                status.set(AppUpdateStatus::Error(err));
             }
         });
     };
@@ -88,9 +67,9 @@ pub fn Settings() -> Element {
     let on_set_channel = move |next: ReleaseChannel| {
         let bridge = bridge_for_channel.clone();
         let toasts = toasts_for_channel.clone();
-        let mut us = update_state;
+        let mut status = update_store.status;
         spawn_settings_task(toasts, "Set update channel", async move {
-            us.set(UpdateState::Idle);
+            status.set(AppUpdateStatus::Idle);
             let mut settings = bridge.get_snapshot().settings.clone();
             settings.updates.release_channel = next;
             bridge.core().settings_save(settings).await
@@ -179,6 +158,11 @@ pub fn Settings() -> Element {
         &snap.settings,
         &defaults,
     );
+    let is_auto_assess_on_startup_non_default = fleet_core::settings_field_is_non_default(
+        fleet_core::SettingsField::AutoAssessOnStartup,
+        &snap.settings,
+        &defaults,
+    );
     let is_show_profile_icons_non_default = fleet_core::settings_field_is_non_default(
         fleet_core::SettingsField::ShowProfileIcons,
         &snap.settings,
@@ -202,6 +186,7 @@ pub fn Settings() -> Element {
         local_state_ignore_draft.set(snap.settings.sync.local_state_ignore_rules.clone());
     }
     let bridge_for_telemetry = bridge.clone();
+    let bridge_for_auto_assess_on_startup = bridge.clone();
     let bridge_for_auto_check_on_startup = bridge.clone();
     let bridge_for_show_profile_icons = bridge.clone();
     let bridge_for_reset_settings = bridge.clone();
@@ -339,6 +324,17 @@ pub fn Settings() -> Element {
     };
 
     let toasts_for_auto_check = toasts.clone();
+    let on_toggle_auto_assess_on_startup = move |next: bool| {
+        spawn_settings_update(
+            bridge_for_auto_assess_on_startup.clone(),
+            toasts_for_auto_check.clone(),
+            move |settings| {
+                settings.startup.auto_assess_on_startup = next;
+            },
+        );
+    };
+
+    let toasts_for_auto_check = toasts.clone();
     let on_toggle_auto_check_on_startup = move |next: bool| {
         spawn_settings_update(
             bridge_for_auto_check_on_startup.clone(),
@@ -407,7 +403,7 @@ pub fn Settings() -> Element {
                         section { class: "settings-view",
                             {about_section(
                                 installed_version,
-                                update_state,
+                                update_store.status,
                                 on_check_updates,
                                 on_apply_update,
                             )}
@@ -447,6 +443,9 @@ pub fn Settings() -> Element {
                                 snap.settings.privacy.telemetry_consent.is_enabled(),
                                 is_telemetry_non_default,
                                 on_toggle_telemetry,
+                                snap.settings.startup.auto_assess_on_startup,
+                                is_auto_assess_on_startup_non_default,
+                                on_toggle_auto_assess_on_startup,
                                 snap.settings.updates.auto_check_on_startup,
                                 is_auto_check_on_startup_non_default,
                                 on_toggle_auto_check_on_startup,

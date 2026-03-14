@@ -506,8 +506,23 @@ pub struct RuntimeSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct StartupSettings {
+    /// If true, automatically assess the selected profile once after app startup.
+    #[serde(default = "default_true")]
+    pub auto_assess_on_startup: bool,
+}
+
+impl Default for StartupSettings {
+    fn default() -> Self {
+        Self {
+            auto_assess_on_startup: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct UpdateSettings {
-    /// If true, queue startup profile checks when the app boots.
+    /// If true, automatically check for Fleet app updates once after app startup.
     #[serde(default = "default_true")]
     pub auto_check_on_startup: bool,
     #[serde(default)]
@@ -550,6 +565,8 @@ pub struct AppSettings {
     pub privacy: PrivacySettings,
     #[serde(flatten)]
     pub runtime: RuntimeSettings,
+    #[serde(flatten)]
+    pub startup: StartupSettings,
     #[serde(flatten)]
     pub updates: UpdateSettings,
     #[serde(flatten)]
