@@ -1,4 +1,4 @@
-use anyhow::Result;
+use fleet_inventory::InventoryError;
 use fs2::FileExt;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -44,7 +44,7 @@ struct LockMetadata {
     age_seconds: Option<u64>,
 }
 
-pub async fn check_lock_state(lock_path: &Path) -> Result<InventoryLockState> {
+pub async fn check_lock_state(lock_path: &Path) -> Result<InventoryLockState, InventoryError> {
     if !lock_path.exists() {
         return Ok(InventoryLockState::NotLocked);
     }
@@ -61,7 +61,7 @@ pub async fn check_lock_state(lock_path: &Path) -> Result<InventoryLockState> {
     let file = match OpenOptions::new().read(true).write(true).open(lock_path) {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(InventoryLockState::NotLocked),
-        Err(err) => return Err(anyhow::Error::new(err)),
+        Err(err) => return Err(InventoryError::Other(anyhow::Error::new(err))),
     };
 
     match file.try_lock_exclusive() {
@@ -76,18 +76,19 @@ pub async fn check_lock_state(lock_path: &Path) -> Result<InventoryLockState> {
                 age_seconds: meta.age_seconds,
             })
         }
-        Err(err) => Err(anyhow::Error::new(err)),
+        Err(err) => Err(InventoryError::Other(anyhow::Error::new(err))),
     }
 }
 
-pub async fn acquire_lock(lock_path: PathBuf) -> Result<FileLockGuard> {
+pub async fn acquire_lock(lock_path: PathBuf) -> Result<FileLockGuard, InventoryError> {
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| InventoryError::Other(anyhow::Error::new(err)))?;
     }
 
     let key = normalized_lock_key(&lock_path);
     if held_locks().lock().unwrap().contains(&key) {
-        anyhow::bail!("inventory lock is currently held by another running operation");
+        return Err(InventoryError::Locked);
     }
 
     let mut file = OpenOptions::new()
@@ -95,21 +96,22 @@ pub async fn acquire_lock(lock_path: PathBuf) -> Result<FileLockGuard> {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&lock_path)?;
+        .open(&lock_path)
+        .map_err(|err| InventoryError::Other(anyhow::Error::new(err)))?;
 
     match file.try_lock_exclusive() {
         Ok(()) => {}
         Err(err) if err.kind() == ErrorKind::WouldBlock => {
-            anyhow::bail!("inventory lock is currently held by another running operation");
+            return Err(InventoryError::Locked);
         }
-        Err(err) => return Err(anyhow::Error::new(err)),
+        Err(err) => return Err(InventoryError::Other(anyhow::Error::new(err))),
     }
 
     {
         let mut locks = held_locks().lock().unwrap();
         if !locks.insert(key.clone()) {
             let _ = file.unlock();
-            anyhow::bail!("inventory lock is currently held by another running operation");
+            return Err(InventoryError::Locked);
         }
     }
 
@@ -117,7 +119,7 @@ pub async fn acquire_lock(lock_path: PathBuf) -> Result<FileLockGuard> {
         let _ = file.unlock();
         let mut locks = held_locks().lock().unwrap();
         locks.remove(&key);
-        return Err(err);
+        return Err(InventoryError::Other(err));
     }
 
     Ok(FileLockGuard {
@@ -138,7 +140,7 @@ fn normalized_lock_key(path: &Path) -> PathBuf {
     })
 }
 
-fn read_lock_metadata(path: &Path) -> Result<LockMetadata> {
+fn read_lock_metadata(path: &Path) -> anyhow::Result<LockMetadata> {
     let mut file = match OpenOptions::new().read(true).open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(LockMetadata::default()),
@@ -172,7 +174,7 @@ fn read_lock_metadata(path: &Path) -> Result<LockMetadata> {
     })
 }
 
-fn write_lock_metadata(file: &mut File) -> Result<()> {
+fn write_lock_metadata(file: &mut File) -> anyhow::Result<()> {
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     let body = format!(

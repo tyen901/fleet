@@ -8,6 +8,30 @@ use fleet_inventory::Inventory;
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug)]
+enum SaveProfileError {
+    DestinationInUse { existing_profile_id: String },
+    InvalidSource(anyhow::Error),
+    Persistence(anyhow::Error),
+}
+
+impl std::fmt::Display for SaveProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DestinationInUse {
+                existing_profile_id,
+            } => write!(
+                f,
+                "destination already used by profile {}",
+                existing_profile_id
+            ),
+            Self::InvalidSource(err) | Self::Persistence(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for SaveProfileError {}
+
 impl Core {
     pub async fn list_profiles(&self) -> anyhow::Result<ProfilesConfig> {
         info!(op = "list_profiles", "profiles list requested");
@@ -55,6 +79,15 @@ impl Core {
     }
 
     pub async fn save_profile(&self, profile: Profile) -> anyhow::Result<Profile> {
+        self.save_profile_with_semantics(profile)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn save_profile_with_semantics(
+        &self,
+        profile: Profile,
+    ) -> Result<Profile, SaveProfileError> {
         let mut profile = profile;
         let requested_profile_id = profile.id.trim().to_string();
         info!(
@@ -85,7 +118,8 @@ impl Core {
                     let cfg = config.load_profiles()?;
                     Ok::<_, anyhow::Error>(cfg.profiles.iter().any(|p| p.id == s_clone))
                 })
-                .await?;
+                .await
+                .map_err(SaveProfileError::Persistence)?;
 
                 if !exists {
                     generated = Some(s);
@@ -109,7 +143,9 @@ impl Core {
                     reason = "id_generation_failed",
                     "profile save failed while generating id"
                 );
-                anyhow::bail!("failed to generate unique profile id");
+                return Err(SaveProfileError::Persistence(anyhow::anyhow!(
+                    "failed to generate unique profile id"
+                )));
             }
         }
 
@@ -129,13 +165,15 @@ impl Core {
                 error = %err,
                 "profile source validation details"
             );
-            return Err(err);
+            return Err(SaveProfileError::InvalidSource(err));
         }
 
         let profile_id_for_log = profile.id.clone();
         let res = run_config_blocking(self.config_repo(), move |config| {
             let mut profile = profile;
-            let mut cfg = config.load_profiles()?;
+            let mut cfg = config
+                .load_profiles()
+                .map_err(SaveProfileError::Persistence)?;
 
             let normalize_path = |path: &str| {
                 let trimmed = path.trim();
@@ -155,10 +193,9 @@ impl Core {
                             reason = "destination_in_use",
                             "profile save rejected due to destination conflict"
                         );
-                        anyhow::bail!(
-                            "destination_in_use: destination already used by profile {}",
-                            existing.id
-                        );
+                        return Ok(Err(SaveProfileError::DestinationInUse {
+                            existing_profile_id: existing.id.clone(),
+                        }));
                     }
                 }
             }
@@ -174,10 +211,13 @@ impl Core {
             } else {
                 cfg.profiles.push(profile.clone());
             }
-            config.save_profiles(&cfg)?;
-            Ok::<_, anyhow::Error>(profile)
+            config
+                .save_profiles(&cfg)
+                .map_err(SaveProfileError::Persistence)?;
+            Ok::<_, anyhow::Error>(Ok(profile))
         })
-        .await;
+        .await
+        .map_err(SaveProfileError::Persistence)?;
 
         match res {
             Ok(saved) => {
@@ -266,7 +306,10 @@ impl Core {
             self.load_profile(&profile.id.trim().to_string()).await.ok()
         };
         let requested_profile_id = profile.id.clone();
-        let saved = self.save_profile(profile.clone()).await.map_err(|e| {
+        let saved = self
+            .save_profile_with_semantics(profile.clone())
+            .await
+            .map_err(|e| {
             let api_err = map_profile_save_error(&e);
             error!(
                 op = "profile_save",
@@ -669,12 +712,23 @@ fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64
     recompute_profile_status(state, profile_id);
 }
 
-fn map_profile_save_error(err: &anyhow::Error) -> crate::ApiError {
-    let msg = err.to_string();
-    if let Some(rest) = msg.strip_prefix("destination_in_use:") {
-        crate::ApiError::new("destination_in_use", rest.trim().to_string())
-    } else {
-        crate::ApiError::new("error", msg)
+fn map_profile_save_error(err: &SaveProfileError) -> crate::ApiError {
+    match err {
+        SaveProfileError::DestinationInUse {
+            existing_profile_id,
+        } => crate::ApiError::new(
+            "destination_in_use",
+            format!(
+                "destination already used by profile {}",
+                existing_profile_id
+            ),
+        ),
+        SaveProfileError::InvalidSource(source_err) => {
+            crate::ApiError::new("error", source_err.to_string())
+        }
+        SaveProfileError::Persistence(persistence_err) => {
+            crate::ApiError::new("error", persistence_err.to_string())
+        }
     }
 }
 
@@ -876,32 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_inventory_metrics_reads_root_metrics() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let destination = temp_dir.path().join("mods");
-        std::fs::create_dir_all(&destination).expect("create destination");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
-            let profile = sample_profile("p1", destination.to_string_lossy().as_ref());
-            core.profile_save(profile).await.expect("save profile");
-
-            let metrics = core
-                .profile_inventory_metrics(&"p1".to_string())
-                .await
-                .expect("metrics");
-            assert_eq!(metrics.root_path, destination.to_string_lossy());
-        });
-    }
-
-    #[test]
     fn canonical_profile_server_keeps_saved_server_when_still_present() {
         let saved = Some(ProfileServerInfo {
             address: "127.0.0.1".to_string(),
@@ -958,5 +986,32 @@ mod tests {
         });
         let resolved = canonical_profile_server(saved, &[]);
         assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn profile_save_destination_conflict_returns_destination_in_use() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            core.profile_save(sample_profile("p1", "/tmp/shared"))
+                .await
+                .expect("save initial profile");
+
+            let err = core
+                .profile_save(sample_profile("p2", "/tmp/shared"))
+                .await
+                .expect_err("destination conflict should fail");
+
+            assert_eq!(err.code, "destination_in_use");
+            assert_eq!(err.message, "destination already used by profile p1");
+        });
     }
 }

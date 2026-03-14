@@ -1,6 +1,8 @@
 mod await_session;
 pub(crate) mod flow_logging;
+pub(crate) mod operation_scheduler;
 mod runtime;
+pub(crate) mod state_projection;
 
 use crate::state::AppState;
 use crate::storage::{profile_state_root_dir, ConfigRepo};

@@ -34,7 +34,10 @@ pub async fn run_operation(
             }
         }
         Err(err) => {
-            if ctx_cancelled(&err) {
+            if matches!(
+                operations::find_operation_error(&err),
+                Some(operations::OperationError::Canceled)
+            ) {
                 emitter.emit(PipelineEventKind::Canceled);
             } else {
                 let error = operations::map_error(&err);
@@ -50,6 +53,54 @@ pub async fn run_operation(
     Ok(())
 }
 
-fn ctx_cancelled(err: &anyhow::Error) -> bool {
-    err.to_string().contains("canceled")
+#[cfg(test)]
+mod tests {
+    use super::run_operation;
+    use crate::api::PipelineEventKind;
+    use crate::config::PipelineConfig;
+    use crate::engine::{EventEmitter, SessionControl};
+    use fleet_domain::health::{AssessScope, OperationKind};
+    use fleet_domain::Profile;
+    use tokio::sync::broadcast;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn canceled_operation_emits_canceled_event() {
+        let (tx, mut rx) = broadcast::channel(32);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let control = SessionControl {
+            cancel,
+            emitter: EventEmitter::new(
+                tx,
+                7,
+                "p1".to_string(),
+                OperationKind::Assess(AssessScope::Local),
+            ),
+        };
+
+        run_operation(
+            PipelineConfig::new_default(),
+            7,
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+            OperationKind::Assess(AssessScope::Local),
+            control,
+        )
+        .await
+        .expect("run operation");
+
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event.kind, PipelineEventKind::Canceled) {
+                return;
+            }
+        }
+
+        panic!("expected canceled terminal event");
+    }
 }
