@@ -1,6 +1,7 @@
 use crate::api::{OperationStage, ProgressMetric, ProgressScope, ProgressUnit};
 use crate::engine::{OperationContext, ResolvedProfile};
 use crate::local_state;
+use crate::operations::OperationError;
 use crate::support::locking::{check_lock_state, InventoryLockState};
 use fleet_domain::health::{
     AssessScope, LocalStateHealth, ProfileStateReport, RemoteFreshnessState,
@@ -478,7 +479,7 @@ fn invalid_report(
 
 fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {
     if ctx.cancel.is_cancelled() {
-        anyhow::bail!("canceled");
+        return Err(anyhow::Error::new(OperationError::Canceled));
     }
     Ok(())
 }

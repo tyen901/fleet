@@ -77,7 +77,9 @@ Always run a build and at least one validation step (tests and/or lint) before r
 
 - Unit tests live alongside Rust modules (e.g., `crates/app/...` with `mod tests`).
 - Name test functions descriptively to match behavior (e.g., `repairs_corrupt_inventory`).
+- Project tests must never exist solely to verify external crate, standard library, or framework behavior.
 - Do not add tests that only verify third-party/library behavior (e.g., serde roundtrips without app-specific logic, std `trim`, basic boolean operators, direct assignment/match passthroughs).
+- If a test would still be valid in the same form after replacing Fleet code with a direct call to an external crate API, it does not belong in this project.
 - Prefer behavior-focused tests that cover Fleet-specific logic, regressions, invariants, integration boundaries, or previously broken paths.
 - Delete or avoid legacy/coincidental tests that pass without asserting current behavior.
 
