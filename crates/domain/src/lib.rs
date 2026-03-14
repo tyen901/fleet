@@ -2,6 +2,7 @@ pub mod download;
 pub mod filesystem;
 pub mod hash;
 pub mod health;
+mod inventory;
 mod inventory_types;
 pub mod paths;
 pub mod progress_estimator;
@@ -12,6 +13,9 @@ pub mod utils;
 
 pub use download::{DownloadEvent, DownloadPhase};
 pub use health::{AssessPhase, OperationKind, ProfileStateReport, RemoteFreshnessState};
+pub use inventory::{
+    default_inventory_ignore_rules, InventoryIgnoreRules, DEFAULT_INVENTORY_IGNORE_RULES,
+};
 pub use inventory_types::{
     AssessScope, BaselineStamp, LocalStateHealth, LocalStateMetrics, LocalStateProgress,
     LocalStateStage, LocalStateStatus, REBUILD_REQUIRED_MESSAGE,

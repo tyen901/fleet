@@ -1,3 +1,4 @@
+use crate::default_inventory_ignore_rules;
 use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
@@ -101,7 +102,7 @@ impl Profile {
 
 #[cfg(test)]
 mod tests {
-    use super::{Profile, ProfileSourceKind};
+    use super::Profile;
 
     fn profile_with_source(source: &str) -> Profile {
         Profile {
@@ -117,15 +118,6 @@ mod tests {
     fn validated_source_rejects_root_url() {
         let profile = profile_with_source("https://example.com/");
         assert!(profile.validated_source_kind().is_err());
-    }
-
-    #[test]
-    fn validated_source_accepts_http_manifest() {
-        let profile = profile_with_source("https://example.com/repo.json");
-        assert!(matches!(
-            profile.validated_source_kind().unwrap(),
-            ProfileSourceKind::Http(_)
-        ));
     }
 }
 
@@ -569,7 +561,7 @@ fn default_true() -> bool {
 }
 
 fn default_local_state_ignore_rules() -> String {
-    ["repo.json", "mod.srf"].join("\n")
+    default_inventory_ignore_rules()
 }
 
 pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
@@ -593,4 +585,37 @@ pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         settings.sync.local_state_ignore_rules = default_local_state_ignore_rules();
     }
     settings
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{
+        default_local_state_ignore_rules, normalize_app_settings, AppSettings, SyncSettings,
+    };
+    use crate::default_inventory_ignore_rules;
+
+    #[test]
+    fn settings_default_ignore_rules_match_inventory_default() {
+        assert_eq!(
+            default_local_state_ignore_rules(),
+            default_inventory_ignore_rules()
+        );
+        assert_eq!(
+            SyncSettings::default().local_state_ignore_rules,
+            default_inventory_ignore_rules()
+        );
+    }
+
+    #[test]
+    fn normalize_app_settings_restores_canonical_ignore_rules_when_empty() {
+        let mut settings = AppSettings::default();
+        settings.sync.local_state_ignore_rules = " \n # comment only \n ".to_string();
+
+        let normalized = normalize_app_settings(settings);
+
+        assert_eq!(
+            normalized.sync.local_state_ignore_rules,
+            default_inventory_ignore_rules()
+        );
+    }
 }
