@@ -5,6 +5,7 @@ use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 
+use super::shell_footer_badge::ShellFooterBadge;
 use super::shell_header::render_shell_header;
 use super::shell_nav_state::{reset_nav_state, NavEventHandler};
 
@@ -64,6 +65,7 @@ pub fn ShellLayout() -> Element {
                     }
                 }
             }
+            ShellFooterBadge {}
         }
     }
 }

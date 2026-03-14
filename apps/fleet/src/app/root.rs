@@ -3,9 +3,10 @@ use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use crate::stores::toast_view::ToastViewport;
+use crate::stores::update_store::{check_for_updates_status, AppUpdateStatus, UpdateStore};
 use crate::style::ThemeRoot;
 use dioxus::prelude::*;
-use fleet_core::{OperationKind, OperationTerminalStatus};
+use fleet_core::{AssessScope, OperationKind, OperationTerminalStatus};
 use tracing::{error, warn};
 
 #[component]
@@ -17,10 +18,17 @@ pub fn AppRoot() -> Element {
     let app_store = AppStore { state: app_state };
     provide_context(app_store.clone());
 
+    let update_status = use_signal(|| AppUpdateStatus::Idle);
+    provide_context(UpdateStore {
+        status: update_status,
+    });
+
     let toasts = use_signal(Vec::new);
     provide_context(ToastStore { toasts });
     let last_sync_toast_at = use_signal(|| 0_u64);
     let last_rebuild_required_toast_at = use_signal(|| 0_u64);
+    let startup_update_check_dispatched = use_signal(|| false);
+    let startup_assess_dispatched = use_signal(|| false);
 
     let rx_root = bridge.state_rx.clone();
     use_future(move || {
@@ -159,6 +167,75 @@ pub fn AppRoot() -> Element {
                     last_rebuild_required_toast_at.set(info.updated_at_unix_ms);
                 }
             }
+        });
+    }
+
+    {
+        let app_state = app_state;
+        let mut startup_update_check_dispatched = startup_update_check_dispatched;
+        let mut update_status = update_status;
+        use_effect(move || {
+            let snapshot = (app_state)();
+            if startup_update_check_dispatched() || snapshot.version == 0 {
+                return;
+            }
+
+            startup_update_check_dispatched.set(true);
+            if !snapshot.settings.ui.onboarding_completed
+                || !snapshot.settings.updates.auto_check_on_startup
+            {
+                return;
+            }
+
+            update_status.set(AppUpdateStatus::Checking);
+
+            let channel = snapshot.settings.updates.release_channel;
+            spawn(async move {
+                let status = check_for_updates_status(channel).await;
+                update_status.set(status);
+            });
+        });
+    }
+
+    {
+        let bridge = bridge.clone();
+        let app_state = app_state;
+        let mut startup_assess_dispatched = startup_assess_dispatched;
+        use_effect(move || {
+            let snapshot = (app_state)();
+            if startup_assess_dispatched() || snapshot.version == 0 {
+                return;
+            }
+
+            startup_assess_dispatched.set(true);
+            if !snapshot.settings.ui.onboarding_completed
+                || !snapshot.settings.startup.auto_assess_on_startup
+            {
+                return;
+            }
+
+            let Some(profile_id) = snapshot
+                .selected_profile_id
+                .clone()
+                .filter(|profile_id| snapshot.profiles.contains_key(profile_id))
+            else {
+                return;
+            };
+
+            let Some(runtime) = snapshot.profile_runtime_by_id.get(&profile_id) else {
+                return;
+            };
+            if runtime.active.is_some() {
+                return;
+            }
+
+            let bridge = bridge.clone();
+            spawn(async move {
+                let _ = bridge
+                    .core()
+                    .start_operation(profile_id, OperationKind::Assess(AssessScope::Remote))
+                    .await;
+            });
         });
     }
 

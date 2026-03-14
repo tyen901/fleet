@@ -11,6 +11,7 @@ pub enum SettingsField {
     Arma3CustomLaunchTemplate,
     Arma3DefaultArgs,
     TelemetryConsent,
+    AutoAssessOnStartup,
     AutoCheckOnStartup,
     ShowProfileIcons,
 }
@@ -82,6 +83,14 @@ fn settings_field_spec(field: SettingsField) -> SettingsFieldSpec {
             },
             is_non_default: |settings, defaults| {
                 settings.privacy.telemetry_consent != defaults.privacy.telemetry_consent
+            },
+        },
+        SettingsField::AutoAssessOnStartup => SettingsFieldSpec {
+            apply_default: |settings, defaults| {
+                settings.startup.auto_assess_on_startup = defaults.startup.auto_assess_on_startup;
+            },
+            is_non_default: |settings, defaults| {
+                settings.startup.auto_assess_on_startup != defaults.startup.auto_assess_on_startup
             },
         },
         SettingsField::AutoCheckOnStartup => SettingsFieldSpec {
@@ -232,6 +241,7 @@ fn settings_changed_after_normalize(before: &AppSettings, after: &AppSettings) -
         SettingsField::Arma3CustomLaunchTemplate,
         SettingsField::Arma3DefaultArgs,
         SettingsField::TelemetryConsent,
+        SettingsField::AutoAssessOnStartup,
         SettingsField::AutoCheckOnStartup,
         SettingsField::ShowProfileIcons,
     ]
@@ -242,9 +252,9 @@ fn settings_changed_after_normalize(before: &AppSettings, after: &AppSettings) -
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_settings_defaults, normalize_settings};
+    use super::{effective_settings_defaults, normalize_settings, settings_field_is_non_default};
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-    use crate::Core;
+    use crate::{Core, SettingsField};
     use fleet_domain::{AppSettings, ReleaseChannel, TelemetryPreference, ThemeMode};
 
     #[test]
@@ -370,6 +380,51 @@ mod tests {
                     | TelemetryPreference::Allowed
                     | TelemetryPreference::Denied
             ));
+        });
+    }
+
+    #[test]
+    fn auto_assess_on_startup_reports_non_default() {
+        let defaults = effective_settings_defaults();
+        let mut settings = defaults.clone();
+        settings.startup.auto_assess_on_startup = !defaults.startup.auto_assess_on_startup;
+
+        assert!(settings_field_is_non_default(
+            SettingsField::AutoAssessOnStartup,
+            &settings,
+            &defaults,
+        ));
+    }
+
+    #[test]
+    fn reset_field_restores_auto_assess_on_startup_default() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::spawn_threaded_default().expect("core");
+            let defaults = effective_settings_defaults();
+
+            let mut settings = core.load_settings().await.expect("load settings");
+            settings.startup.auto_assess_on_startup = !defaults.startup.auto_assess_on_startup;
+            core.settings_save(settings).await.expect("save settings");
+
+            core.settings_reset_field(SettingsField::AutoAssessOnStartup)
+                .await
+                .expect("reset field");
+
+            let settings = core.load_settings().await.expect("load settings");
+            assert_eq!(
+                settings.startup.auto_assess_on_startup,
+                defaults.startup.auto_assess_on_startup
+            );
         });
     }
 }

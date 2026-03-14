@@ -15,6 +15,7 @@ pub(crate) fn support_section<
     FSetInventoryIgnore,
     FResetInventoryIgnore,
     FToggleTelemetry,
+    FToggleAutoAssessOnStartup,
     FToggleAutoCheckOnStartup,
     FOpenLogs,
     FRestartSetup,
@@ -29,6 +30,9 @@ pub(crate) fn support_section<
     telemetry_checked: bool,
     is_telemetry_non_default: bool,
     on_toggle_telemetry: FToggleTelemetry,
+    auto_assess_on_startup_checked: bool,
+    is_auto_assess_on_startup_non_default: bool,
+    on_toggle_auto_assess_on_startup: FToggleAutoAssessOnStartup,
     auto_check_on_startup_checked: bool,
     is_auto_check_on_startup_non_default: bool,
     on_toggle_auto_check_on_startup: FToggleAutoCheckOnStartup,
@@ -40,6 +44,7 @@ where
     FSetInventoryIgnore: FnMut(String) + Clone + 'static,
     FResetInventoryIgnore: FnMut() + Clone + 'static,
     FToggleTelemetry: Fn(bool) + Clone + 'static,
+    FToggleAutoAssessOnStartup: Fn(bool) + Clone + 'static,
     FToggleAutoCheckOnStartup: Fn(bool) + Clone + 'static,
     FOpenLogs: Fn() + Clone + 'static,
     FRestartSetup: Fn() + Clone + 'static,
@@ -92,7 +97,25 @@ where
                 }
 
                 FieldRow {
-                    FieldRowMeta { title: "Auto Check On Startup".to_string() }
+                    FieldRowMeta { title: "Auto Assess Profiles On Startup".to_string() }
+                    FieldRowInline {
+                        input {
+                            r#type: "checkbox",
+                            class: "check",
+                            checked: auto_assess_on_startup_checked,
+                            onchange: move |evt| {
+                                on_toggle_auto_assess_on_startup(evt.checked());
+                            },
+                        }
+                        PanelFieldResetButton {
+                            field: SettingsField::AutoAssessOnStartup,
+                            show: is_auto_assess_on_startup_non_default,
+                        }
+                    }
+                }
+
+                FieldRow {
+                    FieldRowMeta { title: "Auto Check App Updates On Startup".to_string() }
                     FieldRowInline {
                         input {
                             r#type: "checkbox",

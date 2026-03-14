@@ -2,11 +2,11 @@ use crate::style::{AppIcon, Button, ButtonSize, ButtonVariant, Notice, NoticeTon
 use dioxus::prelude::*;
 use icondata::{BsArrowClockwise, BsCheckCircle};
 
-use crate::features::settings::state::UpdateState;
+use crate::stores::update_store::AppUpdateStatus;
 
 pub(crate) fn about_section<FCheck, FApply>(
     installed_version: Signal<String>,
-    update_state: Signal<UpdateState>,
+    update_state: Signal<AppUpdateStatus>,
     on_check_updates: FCheck,
     on_apply_update: FApply,
 ) -> Element
@@ -15,9 +15,12 @@ where
     FApply: Fn() + Clone + 'static,
 {
     let status = update_state();
-    let controls_locked = matches!(&status, UpdateState::Checking | UpdateState::Downloading);
-    let check_loading = matches!(&status, UpdateState::Checking);
-    let apply_loading = matches!(&status, UpdateState::Downloading);
+    let controls_locked = matches!(
+        &status,
+        AppUpdateStatus::Checking | AppUpdateStatus::Downloading
+    );
+    let check_loading = matches!(&status, AppUpdateStatus::Checking);
+    let apply_loading = matches!(&status, AppUpdateStatus::Downloading);
     let check_label = if check_loading {
         "Checking..."
     } else {
@@ -43,7 +46,10 @@ where
                         onclick: move |_| on_check_updates(),
                         "{check_label}"
                     }
-                    if matches!(&status, UpdateState::UpdateAvailable { .. } | UpdateState::Downloading) {
+                    if matches!(
+                        &status,
+                        AppUpdateStatus::UpdateAvailable { .. } | AppUpdateStatus::Downloading
+                    ) {
                         Button {
                             variant: ButtonVariant::Primary,
                             size: ButtonSize::Sm,
@@ -56,13 +62,13 @@ where
                 }
             }
             match &status {
-                UpdateState::UpToDate => rsx! {
+                AppUpdateStatus::UpToDate => rsx! {
                     Notice { tone: NoticeTone::Success,
                         AppIcon { icon: BsCheckCircle }
                         div { "You're up to date." }
                     }
                 },
-                UpdateState::UpdateAvailable { version } => rsx! {
+                AppUpdateStatus::UpdateAvailable { version } => rsx! {
                     Notice {
                         div {
                             "Update available: "
@@ -70,7 +76,7 @@ where
                         }
                     }
                 },
-                UpdateState::Error(msg) => rsx! {
+                AppUpdateStatus::Error(msg) => rsx! {
                     Notice { tone: NoticeTone::Danger, "{msg}" }
                 },
                 _ => rsx! {
