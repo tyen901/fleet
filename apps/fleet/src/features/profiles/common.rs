@@ -157,12 +157,20 @@ pub(crate) fn inventory_out_of_sync(status: &fleet_core::ProfileStatusState) -> 
     matches!(
         status.local_health,
         fleet_core::LocalStateHealth::LocalDrift
+            | fleet_core::LocalStateHealth::MissingDestination
             | fleet_core::LocalStateHealth::LocalStateMissing
             | fleet_core::LocalStateHealth::InventoryCorrupt
     )
 }
 
-pub(crate) fn modpack_size_text(metrics: Option<&LocalStateMetrics>, loading: bool) -> String {
+pub(crate) fn modpack_size_text(
+    metrics: Option<&LocalStateMetrics>,
+    loading: bool,
+    local_folder_missing: bool,
+) -> String {
+    if local_folder_missing {
+        return "Unknown".to_string();
+    }
     if loading && metrics.is_none() {
         return "Loading...".to_string();
     }
@@ -375,7 +383,7 @@ mod tests {
                 total_bytes: 20,
             }),
         };
-        let text = modpack_size_text(Some(&metrics), false);
+        let text = modpack_size_text(Some(&metrics), false, false);
         assert!(text.contains("20"));
     }
 
@@ -392,7 +400,19 @@ mod tests {
                 total_bytes: 20,
             }),
         };
-        let text = modpack_size_text(Some(&metrics), true);
+        let text = modpack_size_text(Some(&metrics), true, false);
         assert!(text.contains("20"));
+    }
+
+    #[test]
+    fn modpack_size_is_unknown_when_local_folder_missing() {
+        let metrics = fleet_core::LocalStateMetrics {
+            root_path: "/tmp/x".to_string(),
+            files_count: 1,
+            files_bytes: 10,
+            last_stamp: None,
+        };
+        let text = modpack_size_text(Some(&metrics), false, true);
+        assert_eq!(text, "Unknown");
     }
 }

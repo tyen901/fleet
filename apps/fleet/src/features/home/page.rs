@@ -364,6 +364,7 @@ mod tests {
     fn selected_profile_requires_sync_for_local_repair_states() {
         for local_health in [
             fleet_core::LocalStateHealth::LocalDrift,
+            fleet_core::LocalStateHealth::MissingDestination,
             fleet_core::LocalStateHealth::LocalStateMissing,
             fleet_core::LocalStateHealth::InventoryCorrupt,
         ] {

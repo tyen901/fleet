@@ -136,7 +136,7 @@ impl ProfileStatusHeadline {
             Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
             Self::NeedsSync => "Needs sync",
-            Self::MissingDestination => "Missing destination",
+            Self::MissingDestination => "Local folder missing",
             Self::NeedsRecovery => "Needs recovery",
             Self::ActionRequired => "Action required",
             Self::InSync => "In sync",
@@ -382,15 +382,13 @@ fn derive_profile_status(
     );
     let sync_blocked = matches!(
         local_health,
-        LocalStateHealth::MissingDestination
-            | LocalStateHealth::Blocked
+        LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
     );
     let has_error = matches!(
         local_health,
-        LocalStateHealth::MissingDestination
-            | LocalStateHealth::Blocked
+        LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
             | LocalStateHealth::InventoryCorrupt
@@ -399,7 +397,6 @@ fn derive_profile_status(
     let recommended_action = if matches!(
         local_health,
         LocalStateHealth::Unknown
-            | LocalStateHealth::MissingDestination
             | LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
@@ -408,6 +405,7 @@ fn derive_profile_status(
     } else if matches!(
         local_health,
         LocalStateHealth::LocalDrift
+            | LocalStateHealth::MissingDestination
             | LocalStateHealth::LocalStateMissing
             | LocalStateHealth::InventoryCorrupt
     ) {
@@ -456,10 +454,10 @@ fn derive_profile_status(
         | ProfileStatusHeadline::Checking
         | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
+        | ProfileStatusHeadline::MissingDestination
         | ProfileStatusHeadline::UpdateAvailable
         | ProfileStatusHeadline::StatusUnknown => ProfileStatusSeverity::Warning,
-        ProfileStatusHeadline::MissingDestination
-        | ProfileStatusHeadline::NeedsRecovery
+        ProfileStatusHeadline::NeedsRecovery
         | ProfileStatusHeadline::ActionRequired
         | ProfileStatusHeadline::UpdateCheckFailed => ProfileStatusSeverity::Error,
     };
@@ -709,6 +707,44 @@ mod tests {
             status.recommended_action,
             super::ProfileRecommendedAction::Sync
         );
+    }
+
+    #[test]
+    fn missing_destination_recommends_sync_and_keeps_launch_blocked() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.inventory_check = Some(InventoryCheckReport {
+            profile_id: "p1".to_string(),
+            local_health: LocalStateHealth::MissingDestination,
+            checked_at_unix_ms: 1,
+            expected_missing_in_inventory_count: 0,
+            inventory_unexpected_paths_count: 0,
+            unexpected_delete_paths: Vec::new(),
+        });
+
+        let status = derive_profile_status(
+            state.profile_runtime_by_id.get("p1").expect("runtime"),
+            true,
+        );
+        assert_eq!(status.headline, ProfileStatusHeadline::MissingDestination);
+        assert_eq!(
+            status.recommended_action,
+            super::ProfileRecommendedAction::Sync
+        );
+        assert!(status.actions.sync_enabled);
+        assert!(!status.can_launch);
+        assert!(!status.has_error);
     }
 
     #[test]

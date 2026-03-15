@@ -89,6 +89,16 @@ pub(crate) fn build_profile_items(
                 .get(&profile_id)
                 .map(|runtime| inventory_out_of_sync(&runtime.status))
                 .unwrap_or(false);
+            let show_missing_folder_badge = snapshot
+                .profile_runtime_by_id
+                .get(&profile_id)
+                .map(|runtime| {
+                    matches!(
+                        runtime.status.local_health,
+                        fleet_core::LocalStateHealth::MissingDestination
+                    )
+                })
+                .unwrap_or(false);
             let icon_src = snapshot
                 .profiles
                 .get(&profile_id)
@@ -145,7 +155,13 @@ pub(crate) fn build_profile_items(
                                         div { class: "home-card__status home-card__status--update", "Update" }
                                     }
                                     if show_inventory_badge {
-                                        div { class: "home-card__status home-card__status--sync", "Out of sync" }
+                                        div { class: "home-card__status home-card__status--sync",
+                                            if show_missing_folder_badge {
+                                                "Folder missing"
+                                            } else {
+                                                "Out of sync"
+                                            }
+                                        }
                                     }
                                 }
                             }
