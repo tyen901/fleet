@@ -31,6 +31,12 @@ pub struct ProfileRuntimeState {
     #[serde(default)]
     pub inventory_check: Option<InventoryCheckReport>,
     #[serde(default)]
+    pub inventory_metrics: Option<crate::LocalStateMetrics>,
+    #[serde(default)]
+    pub inventory_metrics_loading: bool,
+    #[serde(default)]
+    pub inventory_metrics_refresh_seq: u64,
+    #[serde(default)]
     pub active: Option<ActiveOperationState>,
     #[serde(default)]
     pub last_operation: Option<OperationOutcomeState>,
@@ -49,6 +55,9 @@ impl ProfileRuntimeState {
             profile_id,
             repo_check: None,
             inventory_check: None,
+            inventory_metrics: None,
+            inventory_metrics_loading: false,
+            inventory_metrics_refresh_seq: 0,
             active: None,
             last_operation: None,
             last_error: None,

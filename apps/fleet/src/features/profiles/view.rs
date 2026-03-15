@@ -41,62 +41,6 @@ fn select_current_step(
         .find(|step| step.status == fleet_core::UiOperationStepStatus::Active)
 }
 
-fn load_inventory_metrics(
-    bridge: FleetBridge,
-    profile_id: String,
-    seq: u64,
-    request_seq: Signal<u64>,
-    mut inventory_metrics: Signal<Option<fleet_core::LocalStateMetrics>>,
-    mut inventory_metrics_loading: Signal<bool>,
-) {
-    inventory_metrics_loading.set(true);
-    spawn(async move {
-        let metrics = bridge
-            .core()
-            .profile_inventory_metrics(&profile_id)
-            .await
-            .ok();
-        if request_seq() != seq {
-            return;
-        }
-        inventory_metrics.set(metrics);
-        inventory_metrics_loading.set(false);
-    });
-}
-
-fn latest_inventory_refresh_at(profile_runtime: Option<&fleet_core::ProfileRuntimeState>) -> u64 {
-    let Some(runtime) = profile_runtime else {
-        return 0;
-    };
-
-    runtime
-        .last_operation
-        .as_ref()
-        .map(|operation| operation.updated_at_unix_ms)
-        .unwrap_or(0)
-}
-
-fn active_inventory_refresh_tick(profile_runtime: Option<&fleet_core::ProfileRuntimeState>) -> u64 {
-    profile_runtime
-        .and_then(|runtime| runtime.active.as_ref())
-        .filter(|active| {
-            matches!(
-                active.operation,
-                fleet_core::OperationKind::Sync | fleet_core::OperationKind::Delete
-            )
-        })
-        .map(|active| active.updated_at_unix_ms / 1_000)
-        .unwrap_or(0)
-}
-
-fn inventory_metrics_refresh_key(
-    profile_id: &str,
-    terminal_refresh_at: u64,
-    active_refresh_tick: u64,
-) -> String {
-    format!("{profile_id}:{terminal_refresh_at}:{active_refresh_tick}")
-}
-
 fn build_main_actions(
     profile_status: Option<&fleet_core::ProfileStatusState>,
 ) -> Vec<MainActionUi> {
@@ -158,14 +102,11 @@ pub fn ProfileView(id: String) -> Element {
     }
 
     let profile_id = profile.id.clone();
-    let inventory_metrics = use_signal(|| Option::<fleet_core::LocalStateMetrics>::None);
-    let inventory_metrics_loading = use_signal(|| false);
-    let inventory_metrics_request_seq = use_signal(|| 0_u64);
-    let inventory_metrics_loaded_key = use_signal(String::new);
-
     let profile_runtime = snapshot.profile_runtime_by_id.get(&profile.id);
-    let inventory_terminal_refresh_at = latest_inventory_refresh_at(profile_runtime);
-    let inventory_active_refresh_tick = active_inventory_refresh_tick(profile_runtime);
+    let inventory_metrics = profile_runtime.and_then(|runtime| runtime.inventory_metrics.as_ref());
+    let inventory_metrics_loading = profile_runtime
+        .map(|runtime| runtime.inventory_metrics_loading)
+        .unwrap_or(false);
     let inventory_check = profile_runtime.and_then(|runtime| runtime.inventory_check.as_ref());
     let profile_status = profile_runtime.map(|runtime| &runtime.status);
     let repo_servers = profile_runtime
@@ -188,37 +129,6 @@ pub fn ProfileView(id: String) -> Element {
     let cancel_session_id = profile_runtime
         .and_then(|runtime| runtime.active.as_ref())
         .map(|active| active.session_id);
-
-    {
-        let bridge = bridge.clone();
-        let profile_id = profile.id.clone();
-        let mut metrics_sig = inventory_metrics;
-        let metrics_loading_sig = inventory_metrics_loading;
-        let mut request_seq_sig = inventory_metrics_request_seq;
-        let mut loaded_key_sig = inventory_metrics_loaded_key;
-        use_effect(move || {
-            let refresh_key = inventory_metrics_refresh_key(
-                &profile_id,
-                inventory_terminal_refresh_at,
-                inventory_active_refresh_tick,
-            );
-            if loaded_key_sig() == refresh_key {
-                return;
-            }
-            loaded_key_sig.set(refresh_key);
-            metrics_sig.set(None);
-            let seq = request_seq_sig().wrapping_add(1);
-            request_seq_sig.set(seq);
-            load_inventory_metrics(
-                bridge.clone(),
-                profile_id.clone(),
-                seq,
-                request_seq_sig,
-                metrics_sig,
-                metrics_loading_sig,
-            );
-        });
-    }
 
     let unexpected_paths = inventory_check
         .map(|report| report.unexpected_delete_paths.clone())
@@ -251,8 +161,8 @@ pub fn ProfileView(id: String) -> Element {
         })
         .unwrap_or(false);
     let modpack_size = modpack_size_text(
-        inventory_metrics().as_ref(),
-        inventory_metrics_loading(),
+        inventory_metrics,
+        inventory_metrics_loading,
         profile_status
             .map(|status| {
                 matches!(
@@ -666,104 +576,5 @@ pub fn ProfileView(id: String) -> Element {
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        active_inventory_refresh_tick, inventory_metrics_refresh_key, latest_inventory_refresh_at,
-    };
-
-    #[test]
-    fn latest_inventory_refresh_at_uses_latest_terminal_timestamp() {
-        let runtime = fleet_core::ProfileRuntimeState {
-            profile_id: "p1".to_string(),
-            repo_check: None,
-            inventory_check: None,
-            active: None,
-            last_operation: Some(fleet_core::OperationOutcomeState {
-                session_id: 7,
-                operation: fleet_core::OperationKind::Sync,
-                status: fleet_core::OperationTerminalStatus::Succeeded,
-                updated_at_unix_ms: 42,
-                message: None,
-                summary: None,
-                error: None,
-            }),
-            last_error: None,
-            repo_servers: Vec::new(),
-            repo_servers_loaded: false,
-            status: fleet_core::ProfileStatusState::unknown(0),
-        };
-
-        assert_eq!(latest_inventory_refresh_at(Some(&runtime)), 42);
-
-        let local_assess = fleet_core::ProfileRuntimeState {
-            last_operation: Some(fleet_core::OperationOutcomeState {
-                operation: fleet_core::OperationKind::CheckInventory,
-                ..runtime.last_operation.clone().expect("last operation")
-            }),
-            ..runtime
-        };
-
-        assert_eq!(latest_inventory_refresh_at(Some(&local_assess)), 42);
-        assert_eq!(latest_inventory_refresh_at(None), 0);
-    }
-
-    #[test]
-    fn active_inventory_refresh_tick_only_tracks_sync_operations() {
-        let runtime = fleet_core::ProfileRuntimeState {
-            profile_id: "p1".to_string(),
-            repo_check: None,
-            inventory_check: None,
-            active: Some(fleet_core::ActiveOperationState {
-                session_id: 9,
-                operation: fleet_core::OperationKind::Sync,
-                progress: fleet_core::ProfileOperationProgressState::new(
-                    fleet_core::OperationKind::Sync,
-                    0,
-                ),
-                completed_stages: std::collections::BTreeSet::new(),
-                message: None,
-                started_at_unix_ms: 0,
-                updated_at_unix_ms: 2_500,
-            }),
-            last_operation: None,
-            last_error: None,
-            repo_servers: Vec::new(),
-            repo_servers_loaded: false,
-            status: fleet_core::ProfileStatusState::unknown(0),
-        };
-
-        assert_eq!(active_inventory_refresh_tick(Some(&runtime)), 2);
-
-        let unrelated_active = fleet_core::ProfileRuntimeState {
-            active: Some(fleet_core::ActiveOperationState {
-                operation: fleet_core::OperationKind::CheckRepo,
-                ..runtime.active.clone().expect("active")
-            }),
-            ..runtime.clone()
-        };
-        assert_eq!(active_inventory_refresh_tick(Some(&unrelated_active)), 0);
-        assert_eq!(active_inventory_refresh_tick(None), 0);
-    }
-
-    #[test]
-    fn inventory_metrics_refresh_key_changes_with_profile_terminal_or_active_refresh() {
-        assert_eq!(inventory_metrics_refresh_key("p1", 0, 0), "p1:0:0");
-        assert_eq!(inventory_metrics_refresh_key("p1", 42, 0), "p1:42:0");
-        assert_ne!(
-            inventory_metrics_refresh_key("p1", 42, 0),
-            inventory_metrics_refresh_key("p1", 43, 0)
-        );
-        assert_ne!(
-            inventory_metrics_refresh_key("p1", 42, 0),
-            inventory_metrics_refresh_key("p1", 42, 1)
-        );
-        assert_ne!(
-            inventory_metrics_refresh_key("p1", 42, 0),
-            inventory_metrics_refresh_key("p2", 42, 0)
-        );
     }
 }
