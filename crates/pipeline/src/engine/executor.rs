@@ -1,4 +1,4 @@
-use crate::api::{OperationOutput, PipelineEventKind, PipelineNoticeLevel};
+use crate::api::{PipelineEventKind, PipelineNoticeLevel};
 use crate::config::PipelineConfig;
 use crate::engine::{layers, OperationContext, SessionControl};
 use crate::operations;
@@ -19,11 +19,7 @@ pub async fn run_operation(
     let service = layers::operation_service(operation);
     match service.oneshot(ctx).await {
         Ok(ctx) => {
-            if let Some(report) = ctx.final_report {
-                let output = match operation {
-                    OperationKind::Assess(_) => OperationOutput::Assess(report),
-                    OperationKind::Sync => OperationOutput::Sync(report),
-                };
+            if let Some(output) = ctx.final_output {
                 emitter.emit(PipelineEventKind::Finished { output });
             } else if ctx.cancel.is_cancelled() {
                 emitter.emit(PipelineEventKind::Canceled);
@@ -59,7 +55,7 @@ mod tests {
     use crate::api::PipelineEventKind;
     use crate::config::PipelineConfig;
     use crate::engine::{EventEmitter, SessionControl};
-    use fleet_domain::health::{AssessScope, OperationKind};
+    use fleet_domain::health::OperationKind;
     use fleet_domain::Profile;
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
@@ -71,12 +67,7 @@ mod tests {
         cancel.cancel();
         let control = SessionControl {
             cancel,
-            emitter: EventEmitter::new(
-                tx,
-                7,
-                "p1".to_string(),
-                OperationKind::Assess(AssessScope::Local),
-            ),
+            emitter: EventEmitter::new(tx, 7, "p1".to_string(), OperationKind::CheckInventory),
         };
 
         run_operation(
@@ -89,7 +80,7 @@ mod tests {
                 destination: "/tmp/profile".to_string(),
                 ..Default::default()
             },
-            OperationKind::Assess(AssessScope::Local),
+            OperationKind::CheckInventory,
             control,
         )
         .await

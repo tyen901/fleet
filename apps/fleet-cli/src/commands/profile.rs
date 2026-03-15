@@ -1,7 +1,7 @@
 use crate::ProfileCommands;
 use fleet_core::Core;
 
-use super::check::{print_check_report, run_check_report};
+use super::check::{print_check_report, run_inventory_check_report, run_repo_check_report};
 
 pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
     match command {
@@ -14,8 +14,13 @@ pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
         }
         ProfileCommands::Check { profile_id } => {
             let profile = core.load_profile(&profile_id).await?;
-            let report = run_check_report(core, &profile_id, true).await?;
-            print_check_report(&report, !profile.source.trim().is_empty());
+            let repo_report = run_repo_check_report(core, &profile_id).await?;
+            let inventory_report = run_inventory_check_report(core, &profile_id).await?;
+            print_check_report(
+                &repo_report,
+                &inventory_report,
+                !profile.source.trim().is_empty(),
+            );
         }
         ProfileCommands::Add {
             id,

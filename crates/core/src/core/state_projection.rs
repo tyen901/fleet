@@ -3,7 +3,7 @@ use crate::state::{
     recompute_profile_status, ActiveOperationState, AppState, OperationOutcomeState,
     OperationTerminalStatus, UiProgressBarState,
 };
-use fleet_domain::health::{AssessScope, OperationKind};
+use fleet_domain::health::OperationKind;
 use fleet_pipeline::{OperationOutput, PipelineEventKind, PipelineSessionEvent, StageState};
 
 pub(super) fn apply_event(state: &mut AppState, ev: &PipelineSessionEvent, now: u64) {
@@ -98,8 +98,17 @@ pub(super) fn apply_event(state: &mut AppState, ev: &PipelineSessionEvent, now: 
             });
 
             match output {
-                OperationOutput::Assess(report) | OperationOutput::Sync(report) => {
-                    runtime.assessment = Some(report);
+                OperationOutput::CheckRepo(report) => {
+                    runtime.repo_check = Some(report);
+                    runtime.last_error = None;
+                }
+                OperationOutput::CheckInventory(report) => {
+                    runtime.inventory_check = Some(report);
+                    runtime.last_error = None;
+                }
+                OperationOutput::Sync(report) => {
+                    runtime.repo_check = Some(report.repo);
+                    runtime.inventory_check = Some(report.inventory);
                     runtime.last_error = None;
                 }
             }
@@ -146,10 +155,7 @@ pub(super) fn apply_event(state: &mut AppState, ev: &PipelineSessionEvent, now: 
 pub(super) fn should_refresh_profile_repo_cache(ev: &PipelineSessionEvent) -> bool {
     matches!(
         (&ev.operation, &ev.kind),
-        (
-            OperationKind::Sync | OperationKind::Assess(AssessScope::Remote),
-            PipelineEventKind::Finished { .. }
-        )
+        (OperationKind::Sync, PipelineEventKind::Finished { .. })
     )
 }
 
@@ -180,7 +186,7 @@ mod tests {
     use super::apply_event;
     use crate::state::{ensure_profile_runtime_mut, ActiveOperationState, AppState};
     use crate::state::{OperationTerminalStatus, UiOperationStepStatus};
-    use fleet_domain::health::{AssessScope, LocalStateHealth, OperationKind};
+    use fleet_domain::health::{InventoryCheckReport, LocalStateHealth, OperationKind};
     use fleet_domain::Profile;
     use fleet_pipeline::{
         OperationOutput, OperationStage, PipelineEventKind, PipelineProgressEvent,
@@ -202,7 +208,7 @@ mod tests {
         let runtime = ensure_profile_runtime_mut(&mut state, profile_id, 1);
         runtime.active = Some(ActiveOperationState::new(
             7,
-            OperationKind::Assess(AssessScope::Local),
+            OperationKind::CheckInventory,
             1,
         ));
         state
@@ -212,7 +218,7 @@ mod tests {
         PipelineSessionEvent {
             session_id: 7,
             profile_id: profile_id.to_string(),
-            operation: OperationKind::Assess(AssessScope::Local),
+            operation: OperationKind::CheckInventory,
             timestamp_ms: 10,
             seq: 1,
             kind,
@@ -330,12 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn finished_event_projects_summary_and_assessment() {
+    fn finished_event_projects_summary_and_inventory_check() {
         let mut state = seeded_state("p1");
-        let report = fleet_domain::health::ProfileStateReport {
+        let report = InventoryCheckReport {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::Ready,
-            remote_freshness: None,
             checked_at_unix_ms: 11,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 0,
@@ -346,7 +351,7 @@ mod tests {
             &event(
                 "p1",
                 PipelineEventKind::Finished {
-                    output: OperationOutput::Assess(report.clone()),
+                    output: OperationOutput::CheckInventory(report.clone()),
                 },
             ),
             12,
@@ -356,9 +361,9 @@ mod tests {
         assert!(runtime.active.is_none());
         assert_eq!(
             runtime
-                .assessment
+                .inventory_check
                 .as_ref()
-                .expect("assessment")
+                .expect("inventory check")
                 .local_health,
             LocalStateHealth::Ready
         );

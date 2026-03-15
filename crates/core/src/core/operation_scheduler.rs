@@ -18,6 +18,16 @@ pub(super) struct AutoCheckCoalescer {
 }
 
 impl AutoCheckCoalescer {
+    pub(super) fn enqueue(&mut self, profile_id: &str, operation: OperationKind) {
+        let queue = self
+            .pending_auto_check
+            .entry(profile_id.to_string())
+            .or_default();
+        if !queue.contains(&operation) {
+            queue.push_back(operation);
+        }
+    }
+
     pub(super) fn observe_event(&mut self, ev: &PipelineSessionEvent) {
         match &ev.kind {
             PipelineEventKind::Finished { .. } => {
@@ -27,7 +37,7 @@ impl AutoCheckCoalescer {
             }
             PipelineEventKind::Failed { .. } | PipelineEventKind::Canceled => {
                 if let Some((profile_id, _kind)) = self.auto_sessions.remove(&ev.session_id) {
-                    self.drop_profile(&profile_id);
+                    self.mark_terminal(&profile_id);
                 }
             }
             _ => {}
@@ -197,7 +207,7 @@ mod tests {
     };
     use crate::state::AppState;
     use crate::Core;
-    use fleet_domain::health::{AssessScope, LocalStateHealth, OperationKind};
+    use fleet_domain::health::{InventoryCheckReport, OperationKind};
     use fleet_domain::{ApiError, AppSettings, Profile};
     use fleet_pipeline::{OperationOutput, PipelineEventKind, PipelineSessionEvent};
 
@@ -227,6 +237,7 @@ mod tests {
     fn auto_check_does_not_requeue_after_sync_finish() {
         let profile_id = "p1".to_string();
         let mut auto_check = AutoCheckCoalescer::default();
+        auto_check.enqueue(&profile_id, OperationKind::CheckInventory);
         auto_check.mark_running(&profile_id, 1, OperationKind::Sync);
 
         auto_check.observe_event(&PipelineSessionEvent {
@@ -236,19 +247,54 @@ mod tests {
             timestamp_ms: 1,
             seq: 1,
             kind: PipelineEventKind::Finished {
-                output: OperationOutput::Sync(fleet_domain::health::ProfileStateReport {
+                output: OperationOutput::Sync(fleet_domain::health::SyncReport {
                     profile_id: profile_id.clone(),
-                    local_health: LocalStateHealth::Ready,
-                    remote_freshness: None,
-                    checked_at_unix_ms: 1,
-                    expected_missing_in_inventory_count: 0,
-                    inventory_unexpected_paths_count: 0,
-                    unexpected_delete_paths: Vec::new(),
+                    repo: fleet_domain::health::RepoCheckReport {
+                        profile_id: profile_id.clone(),
+                        local_revision: None,
+                        remote_revision: None,
+                        freshness: fleet_domain::health::RepoCheckFreshness::UpToDate,
+                        checked_at_unix_ms: 1,
+                    },
+                    inventory: InventoryCheckReport {
+                        profile_id: profile_id.clone(),
+                        local_health: fleet_domain::LocalStateHealth::Ready,
+                        checked_at_unix_ms: 1,
+                        expected_missing_in_inventory_count: 0,
+                        inventory_unexpected_paths_count: 0,
+                        unexpected_delete_paths: Vec::new(),
+                    },
                 }),
             },
         });
 
         assert_eq!(auto_check.peek_next(&profile_id), None);
+        assert!(!auto_check.is_running(&profile_id));
+    }
+
+    #[test]
+    fn auto_check_failure_keeps_next_queued_check() {
+        let profile_id = "p1".to_string();
+        let mut auto_check = AutoCheckCoalescer::default();
+        auto_check.enqueue(&profile_id, OperationKind::CheckRepo);
+        auto_check.enqueue(&profile_id, OperationKind::CheckInventory);
+        auto_check.mark_running(&profile_id, 1, OperationKind::CheckRepo);
+
+        auto_check.observe_event(&PipelineSessionEvent {
+            session_id: 1,
+            profile_id: profile_id.clone(),
+            operation: OperationKind::CheckRepo,
+            timestamp_ms: 1,
+            seq: 1,
+            kind: PipelineEventKind::Failed {
+                error: ApiError::new("probe_failed", "probe failed"),
+            },
+        });
+
+        assert_eq!(
+            auto_check.peek_next(&profile_id),
+            Some(OperationKind::CheckInventory)
+        );
         assert!(!auto_check.is_running(&profile_id));
     }
 
@@ -258,13 +304,9 @@ mod tests {
         core.replace_state(seeded_state());
 
         let session_id = core.allocate_session_id();
-        let _reserved = reserve_profile_operation(
-            &core,
-            "p1",
-            OperationKind::Assess(AssessScope::Local),
-            session_id,
-        )
-        .expect("reserve operation");
+        let _reserved =
+            reserve_profile_operation(&core, "p1", OperationKind::CheckInventory, session_id)
+                .expect("reserve operation");
 
         let (active, status) = core.read_state(|state| {
             let runtime = state.profile_runtime_by_id.get("p1").expect("runtime");
@@ -272,9 +314,9 @@ mod tests {
         });
         let active = active.expect("active operation");
         assert_eq!(active.session_id, session_id);
-        assert_eq!(active.operation, OperationKind::Assess(AssessScope::Local));
+        assert_eq!(active.operation, OperationKind::CheckInventory);
         assert!(!status.actions.sync_enabled);
-        assert!(!status.actions.validate_enabled);
+        assert!(!status.actions.check_inventory_enabled);
         assert!(status.actions.cancel_enabled);
     }
 
@@ -284,13 +326,9 @@ mod tests {
         core.replace_state(seeded_state());
 
         let first_session_id = core.allocate_session_id();
-        let _reserved = reserve_profile_operation(
-            &core,
-            "p1",
-            OperationKind::Assess(AssessScope::Local),
-            first_session_id,
-        )
-        .expect("reserve first");
+        let _reserved =
+            reserve_profile_operation(&core, "p1", OperationKind::CheckInventory, first_session_id)
+                .expect("reserve first");
 
         let second_session_id = core.allocate_session_id();
         let err = reserve_profile_operation(&core, "p1", OperationKind::Sync, second_session_id)

@@ -1,6 +1,6 @@
 use crate::ApiError;
 use crate::Core;
-use fleet_domain::health::ProfileStateReport;
+use fleet_domain::health::InventoryCheckReport;
 use fleet_pipeline::{OperationOutput, PipelineEventKind, PipelineSessionEvent};
 use tokio::sync::broadcast::Receiver;
 
@@ -60,12 +60,15 @@ impl Core {
         }
     }
 
-    pub async fn await_assessment(&self, session_id: u64) -> Result<ProfileStateReport, ApiError> {
+    pub async fn await_inventory_check(
+        &self,
+        session_id: u64,
+    ) -> Result<InventoryCheckReport, ApiError> {
         match self.await_finished(session_id).await? {
-            OperationOutput::Assess(report) => Ok(report),
-            OperationOutput::Sync(_) => Err(ApiError::new(
+            OperationOutput::CheckInventory(report) => Ok(report),
+            OperationOutput::CheckRepo(_) | OperationOutput::Sync(_) => Err(ApiError::new(
                 "internal",
-                "unexpected non-assessment result",
+                "unexpected non-inventory-check result",
             )),
         }
     }

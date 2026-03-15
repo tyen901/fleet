@@ -4,12 +4,6 @@ use specta::Type;
 pub const REBUILD_REQUIRED_MESSAGE: &str =
     "Local inventory database is corrupted. Run Sync to repair inventory.";
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum AssessScope {
-    Local,
-    Remote,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum LocalStateHealth {
     Unknown,

@@ -8,7 +8,8 @@ pub fn operation_service(
 ) -> BoxCloneService<OperationContext, OperationContext, anyhow::Error> {
     service_fn(move |ctx: OperationContext| async move {
         match operation {
-            OperationKind::Assess(scope) => operations::run_assess(ctx, scope).await,
+            OperationKind::CheckRepo => operations::run_check_repo(ctx).await,
+            OperationKind::CheckInventory => operations::run_check_inventory(ctx).await,
             OperationKind::Sync => operations::run_sync(ctx).await,
         }
     })

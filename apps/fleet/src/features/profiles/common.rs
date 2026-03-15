@@ -153,58 +153,13 @@ pub(crate) fn format_eta(eta_seconds: u64) -> String {
     }
 }
 
-pub(crate) fn overall_status_presenter(
-    status: &fleet_core::ProfileStatusState,
-    has_repo_source: bool,
-) -> (&'static str, &'static str) {
-    if status.actions.sync_running {
-        return ("Syncing", "info");
-    }
-
-    if status.actions.check_updates_running {
-        return ("Checking", "info");
-    }
-
-    match status.local_health {
-        fleet_core::LocalStateHealth::Ready => {
-            if has_repo_source
-                && matches!(
-                    status.remote_freshness,
-                    Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
-                )
-            {
-                ("Update available", "warn")
-            } else if has_repo_source
-                && matches!(
-                    status.remote_freshness,
-                    Some(fleet_core::RemoteFreshnessState::Error)
-                )
-            {
-                ("Check failed", "error")
-            } else {
-                ("In sync", "ok")
-            }
-        }
-        fleet_core::LocalStateHealth::LocalDrift => ("Needs sync", "warn"),
-        fleet_core::LocalStateHealth::LocalStateMissing => ("Inventory missing", "warn"),
-        fleet_core::LocalStateHealth::InventoryCorrupt => ("Inventory corrupt", "error"),
-        fleet_core::LocalStateHealth::MissingDestination => ("Destination missing", "error"),
-        fleet_core::LocalStateHealth::Blocked => ("Access blocked", "error"),
-        fleet_core::LocalStateHealth::InvalidProfile => ("Profile invalid", "error"),
-        fleet_core::LocalStateHealth::ProbeFailed => ("Check failed", "error"),
-        fleet_core::LocalStateHealth::Unknown => {
-            if has_repo_source
-                && matches!(
-                    status.remote_freshness,
-                    Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
-                )
-            {
-                ("Update available", "warn")
-            } else {
-                ("Not checked", "muted")
-            }
-        }
-    }
+pub(crate) fn inventory_out_of_sync(status: &fleet_core::ProfileStatusState) -> bool {
+    matches!(
+        status.local_health,
+        fleet_core::LocalStateHealth::LocalDrift
+            | fleet_core::LocalStateHealth::LocalStateMissing
+            | fleet_core::LocalStateHealth::InventoryCorrupt
+    )
 }
 
 pub(crate) fn modpack_size_text(metrics: Option<&LocalStateMetrics>, loading: bool) -> String {
@@ -366,10 +321,7 @@ pub(crate) fn profile_folder_row_class() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_profile_edit_candidate, modpack_size_text, overall_status_presenter,
-        preview_unexpected_paths,
-    };
+    use super::{build_profile_edit_candidate, modpack_size_text, preview_unexpected_paths};
 
     #[test]
     fn unexpected_path_preview_truncates() {
@@ -442,32 +394,5 @@ mod tests {
         };
         let text = modpack_size_text(Some(&metrics), true);
         assert!(text.contains("20"));
-    }
-
-    #[test]
-    fn overall_status_uses_needs_sync_for_local_drift() {
-        let status = fleet_core::ProfileStatusState {
-            local_health: fleet_core::LocalStateHealth::LocalDrift,
-            ..fleet_core::ProfileStatusState::unknown(0)
-        };
-
-        assert_eq!(
-            overall_status_presenter(&status, true),
-            ("Needs sync", "warn")
-        );
-    }
-
-    #[test]
-    fn overall_status_uses_update_available_when_present() {
-        let status = fleet_core::ProfileStatusState {
-            local_health: fleet_core::LocalStateHealth::Ready,
-            remote_freshness: Some(fleet_core::RemoteFreshnessState::UpdateAvailable),
-            ..fleet_core::ProfileStatusState::unknown(0)
-        };
-
-        assert_eq!(
-            overall_status_presenter(&status, true),
-            ("Update available", "warn")
-        );
     }
 }
