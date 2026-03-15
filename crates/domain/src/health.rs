@@ -15,6 +15,7 @@ pub enum RepoCheckFreshness {
 pub enum OperationKind {
     CheckRepo,
     CheckInventory,
+    Delete,
     Sync,
 }
 

@@ -106,6 +106,10 @@ pub(super) fn apply_event(state: &mut AppState, ev: &PipelineSessionEvent, now: 
                     runtime.inventory_check = Some(report);
                     runtime.last_error = None;
                 }
+                OperationOutput::Delete(report) => {
+                    runtime.inventory_check = Some(report);
+                    runtime.last_error = None;
+                }
                 OperationOutput::Sync(report) => {
                     runtime.repo_check = Some(report.repo);
                     runtime.inventory_check = Some(report.inventory);

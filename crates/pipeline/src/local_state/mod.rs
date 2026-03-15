@@ -22,8 +22,6 @@ pub(crate) struct LocalStateAssessment {
     pub profile_id: String,
     pub health: LocalStateHealth,
     pub checked_at_unix_ms: u64,
-    pub expected_missing_count: u64,
-    pub unexpected_count: u64,
     pub unexpected_paths: Vec<String>,
 }
 
@@ -191,8 +189,6 @@ mod tests {
             .expect("assess snapshot");
 
         assert_eq!(actual.assessment.health, LocalStateHealth::Ready);
-        assert_eq!(actual.assessment.expected_missing_count, 0);
-        assert_eq!(actual.assessment.unexpected_count, 0);
         assert_eq!(actual.assessment.unexpected_paths, Vec::<String>::new());
         assert_eq!(actual.tracked_paths, vec!["mods/a.pbo", "mods/b.pbo"]);
     }
@@ -212,8 +208,7 @@ mod tests {
             actual.assessment.unexpected_paths,
             vec!["mods/unexpected.pbo"]
         );
-        assert_eq!(actual.assessment.unexpected_count, 1);
-        assert_eq!(actual.assessment.expected_missing_count, 0);
+        assert_eq!(actual.assessment.unexpected_paths.len(), 1);
         assert_eq!(actual.tracked_paths, vec!["mods/a.pbo"]);
     }
 
@@ -229,8 +224,8 @@ mod tests {
             .expect("assess snapshot");
 
         assert_eq!(actual.assessment.health, LocalStateHealth::LocalDrift);
-        assert_eq!(actual.assessment.expected_missing_count, 1);
-        assert_eq!(actual.assessment.unexpected_count, 0);
+        assert_eq!(actual.missing_tracked_paths.len(), 1);
+        assert!(actual.assessment.unexpected_paths.is_empty());
         assert_eq!(actual.tracked_paths, vec!["mods/a.pbo"]);
     }
 
@@ -245,8 +240,8 @@ mod tests {
             .expect("assess snapshot");
 
         assert_eq!(actual.assessment.health, LocalStateHealth::LocalDrift);
-        assert_eq!(actual.assessment.expected_missing_count, 0);
-        assert_eq!(actual.assessment.unexpected_count, 0);
+        assert!(actual.missing_tracked_paths.is_empty());
+        assert!(actual.assessment.unexpected_paths.is_empty());
         assert_eq!(actual.tracked_paths, Vec::<String>::new());
     }
 

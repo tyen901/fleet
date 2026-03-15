@@ -4,6 +4,7 @@ pub(crate) fn operation_kind_label(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::CheckInventory => "check_inventory",
         OperationKind::CheckRepo => "check_repo",
+        OperationKind::Delete => "delete",
         OperationKind::Sync => "sync",
     }
 }
