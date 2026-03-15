@@ -213,16 +213,21 @@ pub fn AppRoot() -> Element {
             {
                 return;
             }
+            if snapshot.profiles.is_empty() {
+                return;
+            }
 
             let Some(profile_id) = snapshot
                 .selected_profile_id
                 .clone()
                 .filter(|profile_id| snapshot.profiles.contains_key(profile_id))
             else {
+                startup_assess_dispatched.set(false);
                 return;
             };
 
             let Some(runtime) = snapshot.profile_runtime_by_id.get(&profile_id) else {
+                startup_assess_dispatched.set(false);
                 return;
             };
             if runtime.active.is_some() {
