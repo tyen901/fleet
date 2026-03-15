@@ -106,10 +106,18 @@ pub(crate) fn print_check_report(
 
     if matches!(
         inventory_report.local_health,
-        LocalStateHealth::LocalStateMissing | LocalStateHealth::InventoryCorrupt
+        LocalStateHealth::MissingDestination
+            | LocalStateHealth::LocalStateMissing
+            | LocalStateHealth::InventoryCorrupt
     ) && has_repo_source
     {
-        println!("sync_repair_required: true (run sync to repair inventory and reconcile)");
+        let repair_reason = match &inventory_report.local_health {
+            LocalStateHealth::MissingDestination => {
+                "local folder missing; run sync to recreate it and reconcile"
+            }
+            _ => "run sync to repair inventory and reconcile",
+        };
+        println!("sync_repair_required: true ({repair_reason})");
     }
 
     if inventory_report.local_health == LocalStateHealth::LocalDrift

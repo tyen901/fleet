@@ -92,10 +92,15 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
     let now = fleet_domain::time::now_unix_ms();
     let mut profile_runtime_by_id = BTreeMap::new();
     for (profile_id, profile) in profiles.iter() {
-        let runtime = crate::state::ProfileRuntimeState::new(
+        let mut runtime = crate::state::ProfileRuntimeState::new(
             profile_id.clone(),
             now,
             !profile.source.trim().is_empty(),
+        );
+        crate::features::profiles::seed_missing_destination_inventory_hint(
+            &mut runtime,
+            profile,
+            now,
         );
         profile_runtime_by_id.insert(profile_id.clone(), runtime);
     }

@@ -335,6 +335,10 @@ fn refresh_inventory_before_sync(
     resolved: &ResolvedProfile,
     manifest: &fleet_manifest::DesiredManifest,
 ) -> anyhow::Result<()> {
+    if !resolved.dest_path.exists() {
+        return Ok(());
+    }
+
     let emitter = ctx.emitter.clone();
     let rate_state = Arc::new(Mutex::new(InventoryRefreshRateState::new()));
     let _ = local_state::refresh_trusted_inventory_from_disk(
@@ -666,10 +670,11 @@ pub(crate) fn map_inventory_error(err: InventoryError) -> anyhow::Error {
 mod tests {
     use super::{
         audit_and_clean_unexpected, open_inventory_for_sync, plan_and_apply_prune,
-        resolve_and_lock_sync_context, ExpectedState, PreparedInventory,
+        refresh_inventory_before_sync, resolve_and_lock_sync_context, ExpectedState,
+        PreparedInventory,
     };
     use crate::config::PipelineConfig;
-    use crate::engine::{EventEmitter, OperationContext, SessionControl};
+    use crate::engine::{EventEmitter, OperationContext, ResolvedProfile, SessionControl};
     use crate::local_state;
     use fleet_domain::health::OperationKind;
     use fleet_domain::{inventory_db_path, Profile};
@@ -872,5 +877,30 @@ mod tests {
             .expect("finalized paths")
             .is_empty());
         assert!(db_path.exists());
+    }
+
+    #[test]
+    fn refresh_inventory_before_sync_skips_missing_destination() {
+        let fixture = SyncTestFixture::new();
+        fixture.write_file("mods/tracked.pbo", b"tracked");
+        fixture.seed_inventory(&["mods/tracked.pbo"]);
+        std::fs::remove_dir_all(&fixture.dest).expect("remove dest");
+
+        let ctx = fixture.context();
+        let resolved = ResolvedProfile {
+            dest_path: fixture.dest.clone(),
+            paths: fleet_domain::FleetPaths::for_profile(
+                fixture.config.profile_state_root_dir.clone(),
+                &fixture.profile.id,
+            ),
+        };
+        let manifest = flux_manifest::DesiredManifest {
+            version: flux_manifest::ManifestVersion::V1,
+            entries: Vec::new(),
+            prune_paths: Vec::new(),
+        };
+
+        refresh_inventory_before_sync(&fixture.inventory, &ctx, &resolved, &manifest)
+            .expect("skip refresh");
     }
 }

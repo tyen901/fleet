@@ -2,7 +2,8 @@ use crate::core::run_config_blocking;
 use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
-use fleet_domain::LocalStateMetrics;
+use fleet_domain::health::InventoryCheckReport;
+use fleet_domain::{LocalStateHealth, LocalStateMetrics};
 use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
 use fleet_inventory::Inventory;
 use std::path::PathBuf;
@@ -629,10 +630,42 @@ pub(crate) fn set_profile_repo_servers_runtime(
     runtime.repo_servers_loaded = loaded;
 }
 
+pub(crate) fn seed_missing_destination_inventory_hint(
+    runtime: &mut crate::state::ProfileRuntimeState,
+    profile: &Profile,
+    now_ms: u64,
+) {
+    if runtime.inventory_check.is_some() {
+        return;
+    }
+
+    let Ok(destination) = profile.dest_path() else {
+        return;
+    };
+    if destination.exists() {
+        return;
+    }
+
+    runtime.inventory_check = Some(InventoryCheckReport {
+        profile_id: profile.id.clone(),
+        local_health: LocalStateHealth::MissingDestination,
+        checked_at_unix_ms: now_ms,
+        expected_missing_in_inventory_count: 0,
+        inventory_unexpected_paths_count: 0,
+        unexpected_delete_paths: Vec::new(),
+    });
+}
+
 fn load_profile_inventory_metrics(profile: &Profile) -> Result<LocalStateMetrics, crate::ApiError> {
     let destination = profile
         .dest_path()
         .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
+    if !destination.exists() {
+        return Err(crate::ApiError::new(
+            "missing_destination",
+            "local folder is missing",
+        ));
+    }
     let state_root =
         profile_state_root_dir().map_err(|e| crate::ApiError::new("state_root", e.to_string()))?;
     let inventory_db = fleet_domain::inventory_db_path(&state_root, &profile.id);
@@ -726,11 +759,15 @@ fn normalize_source_for_compare(value: &str) -> String {
 }
 
 fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64) {
+    let profile = state.profiles.get(profile_id).cloned();
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
     runtime.repo_check = None;
     runtime.inventory_check = None;
     runtime.last_error = None;
     runtime.active = None;
+    if let Some(profile) = profile.as_ref() {
+        seed_missing_destination_inventory_hint(runtime, profile, now_ms);
+    }
     recompute_profile_status(state, profile_id);
 }
 
@@ -758,7 +795,7 @@ fn map_profile_save_error(err: &SaveProfileError) -> crate::ApiError {
 mod tests {
     use super::{
         canonical_profile_server, clear_profile_check_state, normalize_destination_for_compare,
-        profile_path_context_changed,
+        profile_path_context_changed, seed_missing_destination_inventory_hint,
     };
     use crate::state::AppState;
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
@@ -785,6 +822,22 @@ mod tests {
             normalize_destination_for_compare("  /Tmp/Fleet/Mods/// "),
             normalize_destination_for_compare("/tmp/fleet/mods")
         );
+    }
+
+    #[test]
+    fn seed_missing_destination_inventory_hint_sets_repairable_health() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let profile = sample_profile("p1", &tempdir.path().join("missing").to_string_lossy());
+        let mut runtime = crate::state::ProfileRuntimeState::new(profile.id.clone(), 5, true);
+
+        seed_missing_destination_inventory_hint(&mut runtime, &profile, 5);
+
+        let report = runtime
+            .inventory_check
+            .as_ref()
+            .expect("missing destination hint");
+        assert_eq!(report.local_health, LocalStateHealth::MissingDestination);
+        assert_eq!(report.checked_at_unix_ms, 5);
     }
 
     #[test]
@@ -824,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_profile_check_state_removes_stale_checks_and_error() {
+    fn clear_profile_check_state_removes_stale_checks_and_reseeds_missing_destination_hint() {
         let mut state = AppState::default();
         let profile_id = "p1".to_string();
 
@@ -877,10 +930,16 @@ mod tests {
             .get(&profile_id)
             .expect("profile runtime");
         assert!(updated.repo_check.is_none());
-        assert!(updated.inventory_check.is_none());
+        assert_eq!(
+            updated
+                .inventory_check
+                .as_ref()
+                .map(|report| &report.local_health),
+            Some(&LocalStateHealth::MissingDestination)
+        );
         assert!(updated.last_error.is_none());
         assert!(updated.active.is_none());
-        assert_eq!(updated.status.last_check_ms, 0);
+        assert_eq!(updated.status.last_check_ms, 42);
     }
 
     #[test]
