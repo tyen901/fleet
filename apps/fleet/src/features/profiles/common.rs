@@ -1,7 +1,6 @@
 use crate::style::{
     Button, ButtonSize, ButtonVariant, FieldRow, FieldRowMeta, FieldRowStack, TextField,
 };
-use chrono::{Local, TimeZone};
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
 use fleet_core::LocalStateMetrics;
@@ -154,14 +153,6 @@ pub(crate) fn format_eta(eta_seconds: u64) -> String {
     }
 }
 
-pub(crate) fn format_absolute_timestamp(ms: u64) -> String {
-    Local
-        .timestamp_millis_opt(ms as i64)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| "Unknown".to_string())
-}
-
 pub(crate) fn overall_status_presenter(
     status: &fleet_core::ProfileStatusState,
     has_repo_source: bool,
@@ -217,7 +208,7 @@ pub(crate) fn overall_status_presenter(
 }
 
 pub(crate) fn modpack_size_text(metrics: Option<&LocalStateMetrics>, loading: bool) -> String {
-    if loading {
+    if loading && metrics.is_none() {
         return "Loading...".to_string();
     }
     let Some(metrics) = metrics else {
@@ -376,8 +367,8 @@ pub(crate) fn profile_folder_row_class() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_profile_edit_candidate, format_absolute_timestamp, modpack_size_text,
-        overall_status_presenter, preview_unexpected_paths,
+        build_profile_edit_candidate, modpack_size_text, overall_status_presenter,
+        preview_unexpected_paths,
     };
 
     #[test]
@@ -420,12 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn format_absolute_timestamp_is_stable_for_epoch() {
-        let s = format_absolute_timestamp(0);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
     fn modpack_size_prefers_stamp_total_bytes() {
         let metrics = fleet_core::LocalStateMetrics {
             root_path: "/tmp/x".to_string(),
@@ -439,6 +424,23 @@ mod tests {
             }),
         };
         let text = modpack_size_text(Some(&metrics), false);
+        assert!(text.contains("20"));
+    }
+
+    #[test]
+    fn modpack_size_keeps_existing_metrics_visible_while_refreshing() {
+        let metrics = fleet_core::LocalStateMetrics {
+            root_path: "/tmp/x".to_string(),
+            files_count: 1,
+            files_bytes: 10,
+            last_stamp: Some(fleet_core::BaselineStamp {
+                algo: "quick-v1".to_string(),
+                hash64: 1,
+                file_count: 1,
+                total_bytes: 20,
+            }),
+        };
+        let text = modpack_size_text(Some(&metrics), true);
         assert!(text.contains("20"));
     }
 
