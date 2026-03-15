@@ -1,5 +1,7 @@
 use crate::ui::progress::spawn_flow_printer;
-use fleet_core::{Core, OperationOutput, PipelineSessionEvent, ProfileStateReport};
+use fleet_core::{
+    Core, InventoryCheckReport, OperationOutput, PipelineSessionEvent, RepoCheckReport, SyncReport,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOutput {
@@ -73,20 +75,31 @@ pub(crate) async fn run_sync_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<ProfileStateReport> {
+) -> anyhow::Result<SyncReport> {
     match run_flow_session(core, session_id, options).await? {
         OperationOutput::Sync(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected sync result")),
     }
 }
 
-pub(crate) async fn run_assess_session(
+pub(crate) async fn run_inventory_check_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<ProfileStateReport> {
+) -> anyhow::Result<InventoryCheckReport> {
     match run_flow_session(core, session_id, options).await? {
-        OperationOutput::Assess(report) => Ok(report),
-        _ => Err(anyhow::anyhow!("internal: expected assess result")),
+        OperationOutput::CheckInventory(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected inventory check result")),
+    }
+}
+
+pub(crate) async fn run_repo_check_session(
+    core: &Core,
+    session_id: u64,
+    options: FlowRunOptions,
+) -> anyhow::Result<RepoCheckReport> {
+    match run_flow_session(core, session_id, options).await? {
+        OperationOutput::CheckRepo(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected repo check result")),
     }
 }

@@ -105,29 +105,27 @@
   gap: 0;
 }
 
-.profile-page__stats {
+.profile-page__state-list {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 6px;
   width: 100%;
 }
 
-.profile-page__stat {
+.profile-page__state-row {
   display: grid;
-  justify-items: center;
-  align-content: start;
-  gap: 4px;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
   min-width: 0;
-  text-align: center;
 }
 
-.profile-page__stat-label {
+.profile-page__state-key {
   font-size: var(--text-size-label);
   letter-spacing: 0.01em;
   color: var(--clr-text-secondary);
 }
 
-.profile-page__stat-value {
+.profile-page__state-value {
   min-width: 0;
   font-size: var(--text-size-emphasis);
   color: var(--clr-text-primary);

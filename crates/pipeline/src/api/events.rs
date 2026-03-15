@@ -1,4 +1,4 @@
-use fleet_domain::health::{OperationKind, ProfileStateReport};
+use fleet_domain::health::{InventoryCheckReport, OperationKind, RepoCheckReport, SyncReport};
 use fleet_domain::{ApiError, ProfileId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -105,6 +105,7 @@ pub struct ProgressMetric {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub enum OperationOutput {
-    Assess(ProfileStateReport),
-    Sync(ProfileStateReport),
+    CheckRepo(RepoCheckReport),
+    CheckInventory(InventoryCheckReport),
+    Sync(SyncReport),
 }

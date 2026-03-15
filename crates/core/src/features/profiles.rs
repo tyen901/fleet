@@ -343,6 +343,27 @@ impl Core {
             recompute_profile_status(state, &pid);
         });
         self.spawn_profile_repo_cache_refresh(saved.id.clone(), false);
+        if path_context_changed {
+            let core = self.clone();
+            let profile_id = saved.id.clone();
+            tokio::spawn(async move {
+                let repo_session = core
+                    .start_operation(
+                        profile_id.clone(),
+                        fleet_domain::health::OperationKind::CheckRepo,
+                    )
+                    .await;
+                if let Ok(session_id) = repo_session {
+                    let _ = core.await_finished(session_id).await;
+                }
+                let _ = core
+                    .start_operation(
+                        profile_id,
+                        fleet_domain::health::OperationKind::CheckInventory,
+                    )
+                    .await;
+            });
+        }
         info!(
             op = "profile_save",
             profile_id = %saved.id,
@@ -706,7 +727,8 @@ fn normalize_source_for_compare(value: &str) -> String {
 
 fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64) {
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
-    runtime.assessment = None;
+    runtime.repo_check = None;
+    runtime.inventory_check = None;
     runtime.last_error = None;
     runtime.active = None;
     recompute_profile_status(state, profile_id);
@@ -741,7 +763,9 @@ mod tests {
     use crate::state::AppState;
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use crate::Core;
-    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
+    use fleet_domain::health::{
+        InventoryCheckReport, LocalStateHealth, RepoCheckFreshness, RepoCheckReport,
+    };
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{ApiError, Profile};
 
@@ -800,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_profile_check_state_removes_stale_assessment_and_error() {
+    fn clear_profile_check_state_removes_stale_checks_and_error() {
         let mut state = AppState::default();
         let profile_id = "p1".to_string();
 
@@ -818,10 +842,16 @@ mod tests {
             profile_id.clone(),
             crate::state::ProfileRuntimeState {
                 profile_id: profile_id.clone(),
-                assessment: Some(ProfileStateReport {
+                repo_check: Some(RepoCheckReport {
+                    profile_id: profile_id.clone(),
+                    local_revision: Some("local".to_string()),
+                    remote_revision: None,
+                    freshness: RepoCheckFreshness::Unknown,
+                    checked_at_unix_ms: 10,
+                }),
+                inventory_check: Some(InventoryCheckReport {
                     profile_id: profile_id.clone(),
                     local_health: LocalStateHealth::ProbeFailed,
-                    remote_freshness: Some(RemoteFreshnessState::Unknown),
                     checked_at_unix_ms: 10,
                     expected_missing_in_inventory_count: 0,
                     inventory_unexpected_paths_count: 0,
@@ -829,9 +859,7 @@ mod tests {
                 }),
                 active: Some(crate::state::ActiveOperationState::new(
                     7,
-                    fleet_domain::health::OperationKind::Assess(
-                        fleet_domain::health::AssessScope::Local,
-                    ),
+                    fleet_domain::health::OperationKind::CheckInventory,
                     10,
                 )),
                 last_operation: None,
@@ -848,7 +876,8 @@ mod tests {
             .profile_runtime_by_id
             .get(&profile_id)
             .expect("profile runtime");
-        assert!(updated.assessment.is_none());
+        assert!(updated.repo_check.is_none());
+        assert!(updated.inventory_check.is_none());
         assert!(updated.last_error.is_none());
         assert!(updated.active.is_none());
         assert_eq!(updated.status.last_check_ms, 0);

@@ -1,10 +1,10 @@
 use crate::types::ProfileId;
-pub use crate::{AssessScope, LocalStateHealth};
+pub use crate::LocalStateHealth;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum RemoteFreshnessState {
+pub enum RepoCheckFreshness {
     Unknown,
     UpToDate,
     UpdateAvailable,
@@ -13,7 +13,8 @@ pub enum RemoteFreshnessState {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum OperationKind {
-    Assess(AssessScope),
+    CheckRepo,
+    CheckInventory,
     Sync,
 }
 
@@ -25,10 +26,20 @@ pub enum CancelResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub struct ProfileStateReport {
+pub struct RepoCheckReport {
+    pub profile_id: ProfileId,
+    #[serde(default)]
+    pub local_revision: Option<String>,
+    #[serde(default)]
+    pub remote_revision: Option<String>,
+    pub freshness: RepoCheckFreshness,
+    pub checked_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct InventoryCheckReport {
     pub profile_id: ProfileId,
     pub local_health: LocalStateHealth,
-    pub remote_freshness: Option<RemoteFreshnessState>,
     pub checked_at_unix_ms: u64,
     #[serde(default)]
     pub expected_missing_in_inventory_count: u64,
@@ -38,12 +49,9 @@ pub struct ProfileStateReport {
     pub unexpected_delete_paths: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum AssessPhase {
-    ValidatingContext,
-    ScanningLocal,
-    EvaluatingLocal,
-    LoadingRemoteManifest,
-    ComparingExpectedState,
-    Finalizing,
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct SyncReport {
+    pub profile_id: ProfileId,
+    pub repo: RepoCheckReport,
+    pub inventory: InventoryCheckReport,
 }

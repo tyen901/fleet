@@ -1,5 +1,5 @@
 use fleet_domain::health::{
-    AssessScope, LocalStateHealth, OperationKind, ProfileStateReport, RemoteFreshnessState,
+    InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
 use fleet_domain::sync::SyncSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
@@ -27,7 +27,9 @@ pub struct AppState {
 pub struct ProfileRuntimeState {
     pub profile_id: ProfileId,
     #[serde(default)]
-    pub assessment: Option<ProfileStateReport>,
+    pub repo_check: Option<RepoCheckReport>,
+    #[serde(default)]
+    pub inventory_check: Option<InventoryCheckReport>,
     #[serde(default)]
     pub active: Option<ActiveOperationState>,
     #[serde(default)]
@@ -45,7 +47,8 @@ impl ProfileRuntimeState {
     pub fn new(profile_id: ProfileId, now_ms: u64, has_repo_source: bool) -> Self {
         let mut state = Self {
             profile_id,
-            assessment: None,
+            repo_check: None,
+            inventory_check: None,
             active: None,
             last_operation: None,
             last_error: None,
@@ -108,6 +111,7 @@ pub struct OperationOutcomeState {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
+    Syncing,
     Checking,
     UpdateAvailable,
     ReadyToPlay,
@@ -125,8 +129,9 @@ pub enum ProfileStatusHeadline {
 impl ProfileStatusHeadline {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Syncing => "Syncing",
             Self::Checking => "Checking",
-            Self::UpdateAvailable => "Update available",
+            Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
             Self::NeedsSync => "Needs sync",
             Self::MissingDestination => "Missing destination",
@@ -158,20 +163,20 @@ pub enum ProfileStatusBadge {
 pub enum ProfileRecommendedAction {
     #[default]
     Sync,
-    Validate,
-    CheckUpdates,
+    CheckInventory,
+    CheckRepo,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
-    pub validate_enabled: bool,
-    pub check_updates_enabled: bool,
+    pub check_inventory_enabled: bool,
+    pub check_repo_enabled: bool,
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
-    pub validate_running: bool,
-    pub check_updates_running: bool,
+    pub check_inventory_running: bool,
+    pub check_repo_running: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -251,7 +256,7 @@ pub struct ProfileStatusState {
     #[serde(default)]
     pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalStateHealth,
-    pub remote_freshness: Option<RemoteFreshnessState>,
+    pub repo_freshness: Option<RepoCheckFreshness>,
     pub has_error: bool,
     pub unexpected_path_count: u64,
     pub last_check_ms: u64,
@@ -264,16 +269,16 @@ impl ProfileStatusState {
             headline: ProfileStatusHeadline::StatusUnknown,
             severity: ProfileStatusSeverity::Warning,
             badge: None,
-            recommended_action: ProfileRecommendedAction::Validate,
+            recommended_action: ProfileRecommendedAction::CheckInventory,
             actions: ProfileActionAvailability {
-                validate_enabled: true,
-                check_updates_enabled: true,
+                check_inventory_enabled: true,
+                check_repo_enabled: true,
                 sync_enabled: true,
                 ..ProfileActionAvailability::default()
             },
             progress: None,
             local_health: LocalStateHealth::Unknown,
-            remote_freshness: None,
+            repo_freshness: None,
             has_error: false,
             unexpected_path_count: 0,
             last_check_ms: now_ms,
@@ -329,38 +334,39 @@ fn derive_profile_status(
     has_repo_source: bool,
 ) -> ProfileStatusState {
     let local_health = runtime
-        .assessment
+        .inventory_check
         .as_ref()
         .map(|report| report.local_health.clone())
         .unwrap_or(LocalStateHealth::Unknown);
-    let remote_freshness = runtime
-        .assessment
+    let repo_freshness = runtime
+        .repo_check
         .as_ref()
-        .map(|report| report.remote_freshness.clone())
-        .unwrap_or(None);
+        .map(|report| report.freshness.clone());
     let unexpected_path_count = runtime
-        .assessment
+        .inventory_check
         .as_ref()
         .map(|report| report.unexpected_delete_paths.len() as u64)
         .unwrap_or(0);
     let last_check_ms = runtime
-        .assessment
+        .repo_check
         .as_ref()
         .map(|report| report.checked_at_unix_ms)
+        .into_iter()
+        .chain(
+            runtime
+                .inventory_check
+                .as_ref()
+                .map(|report| report.checked_at_unix_ms),
+        )
+        .max()
         .unwrap_or(0);
 
     let active_operation = runtime.active.as_ref().map(|operation| operation.operation);
     let operation_active = active_operation.is_some();
 
     let sync_running = matches!(active_operation, Some(OperationKind::Sync));
-    let validate_running = matches!(
-        active_operation,
-        Some(OperationKind::Assess(AssessScope::Local))
-    );
-    let check_updates_running = matches!(
-        active_operation,
-        Some(OperationKind::Assess(AssessScope::Remote))
-    );
+    let check_inventory_running = matches!(active_operation, Some(OperationKind::CheckInventory));
+    let check_repo_running = matches!(active_operation, Some(OperationKind::CheckRepo));
     let can_run_actions = !operation_active;
     let hard_blocked = matches!(
         local_health,
@@ -382,7 +388,7 @@ fn derive_profile_status(
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
             | LocalStateHealth::InventoryCorrupt
-    ) || matches!(remote_freshness, Some(RemoteFreshnessState::Error));
+    ) || matches!(repo_freshness, Some(RepoCheckFreshness::Error));
 
     let recommended_action = if matches!(
         local_health,
@@ -392,7 +398,7 @@ fn derive_profile_status(
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
     ) {
-        ProfileRecommendedAction::Validate
+        ProfileRecommendedAction::CheckInventory
     } else if matches!(
         local_health,
         LocalStateHealth::LocalDrift
@@ -400,22 +406,20 @@ fn derive_profile_status(
             | LocalStateHealth::InventoryCorrupt
     ) {
         ProfileRecommendedAction::Sync
-    } else if has_repo_source
-        && matches!(remote_freshness, None | Some(RemoteFreshnessState::Unknown))
+    } else if has_repo_source && matches!(repo_freshness, None | Some(RepoCheckFreshness::Unknown))
     {
-        ProfileRecommendedAction::CheckUpdates
+        ProfileRecommendedAction::CheckRepo
     } else {
         ProfileRecommendedAction::Sync
     };
 
-    let headline = if validate_running || check_updates_running {
+    let headline = if sync_running {
+        ProfileStatusHeadline::Syncing
+    } else if check_inventory_running || check_repo_running {
         ProfileStatusHeadline::Checking
     } else if has_error {
         ProfileStatusHeadline::ActionRequired
-    } else if matches!(
-        remote_freshness,
-        Some(RemoteFreshnessState::UpdateAvailable)
-    ) {
+    } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
         ProfileStatusHeadline::UpdateAvailable
     } else {
         match local_health {
@@ -427,13 +431,11 @@ fn derive_profile_status(
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
             | LocalStateHealth::InventoryCorrupt => ProfileStatusHeadline::ActionRequired,
-            LocalStateHealth::Unknown => match remote_freshness {
-                Some(RemoteFreshnessState::UpToDate) => ProfileStatusHeadline::InSync,
-                Some(RemoteFreshnessState::Error) => ProfileStatusHeadline::UpdateCheckFailed,
-                Some(RemoteFreshnessState::Unknown) | None => ProfileStatusHeadline::StatusUnknown,
-                Some(RemoteFreshnessState::UpdateAvailable) => {
-                    ProfileStatusHeadline::UpdateAvailable
-                }
+            LocalStateHealth::Unknown => match repo_freshness {
+                Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::InSync,
+                Some(RepoCheckFreshness::Error) => ProfileStatusHeadline::UpdateCheckFailed,
+                Some(RepoCheckFreshness::Unknown) | None => ProfileStatusHeadline::StatusUnknown,
+                Some(RepoCheckFreshness::UpdateAvailable) => ProfileStatusHeadline::UpdateAvailable,
             },
         }
     };
@@ -442,7 +444,8 @@ fn derive_profile_status(
         ProfileStatusHeadline::ReadyToPlay
         | ProfileStatusHeadline::InSync
         | ProfileStatusHeadline::SyncNotRequired
-        | ProfileStatusHeadline::Checking => ProfileStatusSeverity::Info,
+        | ProfileStatusHeadline::Checking
+        | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
         | ProfileStatusHeadline::UpdateAvailable
         | ProfileStatusHeadline::StatusUnknown => ProfileStatusSeverity::Warning,
@@ -454,10 +457,7 @@ fn derive_profile_status(
 
     let badge = if has_error {
         Some(ProfileStatusBadge::Error)
-    } else if matches!(
-        remote_freshness,
-        Some(RemoteFreshnessState::UpdateAvailable)
-    ) {
+    } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
         Some(ProfileStatusBadge::UpdateAvailable)
     } else {
         None
@@ -465,12 +465,12 @@ fn derive_profile_status(
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
-        validate_enabled: can_run_actions,
-        check_updates_enabled: can_run_actions && !hard_blocked,
+        check_inventory_enabled: can_run_actions,
+        check_repo_enabled: can_run_actions && !hard_blocked,
         cancel_enabled: operation_active,
         sync_running,
-        validate_running,
-        check_updates_running,
+        check_inventory_running,
+        check_repo_running,
     };
     let can_launch = !operation_active
         && matches!(
@@ -489,7 +489,7 @@ fn derive_profile_status(
             .as_ref()
             .map(|active| active.progress.clone()),
         local_health,
-        remote_freshness,
+        repo_freshness,
         has_error,
         unexpected_path_count,
         last_check_ms,
@@ -532,18 +532,16 @@ pub fn stage_label(stage: OperationStage) -> &'static str {
     }
 }
 
-const ASSESS_LOCAL_PLAN: &[OperationStage] = &[
+const CHECK_INVENTORY_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
     OperationStage::ScanningDisk,
     OperationStage::VerifyingInventory,
     OperationStage::Finalizing,
 ];
-const ASSESS_REMOTE_PLAN: &[OperationStage] = &[
+const CHECK_REPO_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
-    OperationStage::ScanningDisk,
-    OperationStage::VerifyingInventory,
     OperationStage::Finalizing,
 ];
 const SYNC_PLAN: &[OperationStage] = &[
@@ -558,8 +556,8 @@ const SYNC_PLAN: &[OperationStage] = &[
 
 pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
     match operation {
-        OperationKind::Assess(AssessScope::Local) => ASSESS_LOCAL_PLAN,
-        OperationKind::Assess(AssessScope::Remote) => ASSESS_REMOTE_PLAN,
+        OperationKind::CheckInventory => CHECK_INVENTORY_PLAN,
+        OperationKind::CheckRepo => CHECK_REPO_PLAN,
         OperationKind::Sync => SYNC_PLAN,
     }
 }
@@ -647,7 +645,9 @@ mod tests {
     use super::{
         derive_profile_status, ensure_profile_runtime_mut, AppState, ProfileStatusHeadline,
     };
-    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
+    use fleet_domain::health::{
+        InventoryCheckReport, LocalStateHealth, RepoCheckFreshness, RepoCheckReport,
+    };
     use fleet_domain::Profile;
     #[test]
     fn unexpected_files_recommend_sync() {
@@ -664,14 +664,20 @@ mod tests {
         );
 
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
-        runtime.assessment = Some(ProfileStateReport {
+        runtime.inventory_check = Some(InventoryCheckReport {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::LocalDrift,
-            remote_freshness: Some(RemoteFreshnessState::Unknown),
             checked_at_unix_ms: 1,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 1,
             unexpected_delete_paths: vec!["extra.txt".to_string()],
+        });
+        runtime.repo_check = Some(RepoCheckReport {
+            profile_id: "p1".to_string(),
+            local_revision: Some("abc".to_string()),
+            remote_revision: Some("abc".to_string()),
+            freshness: RepoCheckFreshness::UpToDate,
+            checked_at_unix_ms: 1,
         });
 
         let status = derive_profile_status(
@@ -683,5 +689,71 @@ mod tests {
             status.recommended_action,
             super::ProfileRecommendedAction::Sync
         );
+    }
+
+    #[test]
+    fn update_available_prioritizes_update_headline_even_with_inventory_drift() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.inventory_check = Some(InventoryCheckReport {
+            profile_id: "p1".to_string(),
+            local_health: LocalStateHealth::LocalDrift,
+            checked_at_unix_ms: 1,
+            expected_missing_in_inventory_count: 0,
+            inventory_unexpected_paths_count: 0,
+            unexpected_delete_paths: Vec::new(),
+        });
+        runtime.repo_check = Some(RepoCheckReport {
+            profile_id: "p1".to_string(),
+            local_revision: Some("old".to_string()),
+            remote_revision: Some("new".to_string()),
+            freshness: RepoCheckFreshness::UpdateAvailable,
+            checked_at_unix_ms: 1,
+        });
+
+        let status = derive_profile_status(
+            state.profile_runtime_by_id.get("p1").expect("runtime"),
+            true,
+        );
+        assert_eq!(status.headline, ProfileStatusHeadline::UpdateAvailable);
+    }
+
+    #[test]
+    fn sync_running_uses_syncing_headline() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.active = Some(super::ActiveOperationState::new(
+            1,
+            fleet_domain::health::OperationKind::Sync,
+            1,
+        ));
+
+        let status = derive_profile_status(
+            state.profile_runtime_by_id.get("p1").expect("runtime"),
+            true,
+        );
+        assert_eq!(status.headline, ProfileStatusHeadline::Syncing);
     }
 }

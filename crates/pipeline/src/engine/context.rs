@@ -1,5 +1,5 @@
 use crate::api::{
-    OperationStage, PipelineEventKind, PipelineNoticeLevel, PipelineProgressEvent,
+    OperationOutput, OperationStage, PipelineEventKind, PipelineNoticeLevel, PipelineProgressEvent,
     PipelineSessionEvent, ProgressMetric, ProgressScope, StageState,
 };
 use crate::config::PipelineConfig;
@@ -125,8 +125,8 @@ pub struct OperationContext {
     pub resolved: Option<ResolvedProfile>,
     pub manifest: Option<fleet_manifest::DesiredManifest>,
     pub inventory: Option<fleet_inventory::Inventory>,
-    pub repo_cache_snapshot: Option<crate::support::repo_cache::RepoCacheSnapshot>,
-    pub final_report: Option<fleet_domain::health::ProfileStateReport>,
+    pub repo_cache_stage: Option<crate::support::repo_cache::RepoCacheStage>,
+    pub final_output: Option<OperationOutput>,
     pub tracked_paths: Vec<String>,
 }
 
@@ -146,8 +146,8 @@ impl OperationContext {
             resolved: None,
             manifest: None,
             inventory: None,
-            repo_cache_snapshot: None,
-            final_report: None,
+            repo_cache_stage: None,
+            final_output: None,
             tracked_paths: Vec::new(),
         }
     }

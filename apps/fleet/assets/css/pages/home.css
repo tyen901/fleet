@@ -171,6 +171,33 @@
   min-width: 0;
 }
 
+.home-card__status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.home-card__status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-size-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.home-card__status--update {
+  border: 1px solid var(--clr-warning-border);
+  color: var(--clr-warning-text);
+}
+
+.home-card__status--sync {
+  border: 1px solid color-mix(in oklab, var(--clr-accent) 42%, var(--clr-border));
+  color: color-mix(in oklab, var(--clr-accent) 72%, var(--clr-text-primary));
+}
+
 .home-card__name {
   margin: 0;
   font-size: var(--text-size-emphasis);

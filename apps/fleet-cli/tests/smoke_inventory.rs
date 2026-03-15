@@ -151,7 +151,7 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("profile check: local="),
+        out.contains("repo_check:") && out.contains("inventory_check:"),
         "expected profile check output, got: {out}"
     );
 

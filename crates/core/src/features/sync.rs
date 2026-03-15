@@ -6,7 +6,7 @@ use crate::core::operation_scheduler::{
 };
 use crate::state::ensure_profile_runtime_mut;
 use crate::Core;
-use fleet_domain::health::{AssessScope, CancelResult, OperationKind};
+use fleet_domain::health::{CancelResult, OperationKind};
 use fleet_domain::{ApiError, ProfileId};
 
 impl Core {
@@ -164,7 +164,7 @@ impl Core {
 fn operation_start_label(operation: OperationKind) -> &'static str {
     match operation {
         OperationKind::Sync => "start_sync",
-        OperationKind::Assess(AssessScope::Remote) => "start_assess_remote",
-        OperationKind::Assess(AssessScope::Local) => "start_assess_local",
+        OperationKind::CheckRepo => "start_check_repo",
+        OperationKind::CheckInventory => "start_check_inventory",
     }
 }

@@ -1,11 +1,11 @@
-use crate::api::{OperationStage, ProgressMetric, ProgressScope, ProgressUnit};
+use crate::api::{OperationOutput, OperationStage, ProgressMetric, ProgressScope, ProgressUnit};
 use crate::engine::{OperationContext, ResolvedProfile};
 use crate::local_state;
 use crate::operations::OperationError;
 use crate::support::locking::FileLockGuard;
 use crate::support::locking::{acquire_lock, check_lock_state, InventoryLockState};
-use crate::support::repo_cache::{restore_repo_cache_blob, snapshot_repo_cache_blob};
-use fleet_domain::health::{ProfileStateReport, RemoteFreshnessState};
+use crate::support::repo_cache::{commit_staged_repo_cache, prepare_staged_repo_cache};
+use fleet_domain::health::{InventoryCheckReport, RepoCheckFreshness, RepoCheckReport, SyncReport};
 use fleet_domain::{ProfileSourceKind, SyncProgress, ThroughputEstimator};
 use fleet_inventory::{Inventory, InventoryError};
 use flux_manifest::ManifestEntry;
@@ -85,7 +85,7 @@ pub(crate) async fn run_sync(mut ctx: OperationContext) -> anyhow::Result<Operat
 
     let run_result = async {
         let expected_state =
-            load_expected_state_with_repo_cache_snapshot(&mut ctx, &resolved_ctx).await?;
+            load_expected_state_with_staged_repo_cache(&mut ctx, &resolved_ctx).await?;
         let prepared_inventory =
             open_and_prepare_inventory(&mut ctx, &resolved_ctx, &expected_state)?;
         run_reconcile_phase(&ctx, &resolved_ctx, &expected_state).await?;
@@ -93,14 +93,13 @@ pub(crate) async fn run_sync(mut ctx: OperationContext) -> anyhow::Result<Operat
         let _prune_plan =
             plan_and_apply_prune(&ctx, &resolved_ctx, &expected_state, &prepared_inventory).await?;
         audit_and_clean_unexpected(&ctx, &resolved_ctx, &prepared_inventory).await?;
+        commit_repo_cache_after_sync(&mut ctx)?;
         finalize_sync_report(&mut ctx, &resolved_ctx).await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
 
-    if let Err(err) = run_result {
-        return Err(restore_repo_cache_after_failure(ctx.repo_cache_snapshot.clone(), err).await);
-    }
+    run_result?;
 
     Ok(ctx)
 }
@@ -139,17 +138,15 @@ fn resolve_profile(ctx: &OperationContext) -> anyhow::Result<ResolvedProfile> {
     })
 }
 
-async fn load_expected_state_with_repo_cache_snapshot(
+async fn load_expected_state_with_staged_repo_cache(
     ctx: &mut OperationContext,
     resolved_ctx: &ResolvedSyncContext,
 ) -> anyhow::Result<ExpectedState> {
     ctx.emitter
         .enter_stage(OperationStage::LoadingExpectedState);
-    ctx.repo_cache_snapshot = snapshot_repo_cache_blob(
+    ctx.repo_cache_stage = Some(prepare_staged_repo_cache(
         &resolved_ctx.resolved.paths.profile.repo_cache,
-        &ctx.profile,
-    )
-    .await?;
+    )?);
     let manifest = load_manifest(ctx, &resolved_ctx.resolved).await?;
     let expected_paths = manifest_expected_file_paths(&manifest);
     ctx.manifest = Some(manifest.clone());
@@ -170,11 +167,21 @@ async fn load_manifest(
         .map_err(|_| anyhow::Error::new(OperationError::InvalidProfile))?;
     fleet_manifest::load_desired_manifest(
         repo_url,
-        &resolved.paths.profile.repo_cache,
+        ctx.repo_cache_stage
+            .as_ref()
+            .map(|stage| stage.stage_dir())
+            .unwrap_or(&resolved.paths.profile.repo_cache),
         &ctx.config.downloads,
         None,
     )
     .await
+}
+
+fn commit_repo_cache_after_sync(ctx: &mut OperationContext) -> anyhow::Result<()> {
+    let Some(stage) = ctx.repo_cache_stage.take() else {
+        return Ok(());
+    };
+    commit_staged_repo_cache(stage)
 }
 
 fn open_and_prepare_inventory(
@@ -316,9 +323,8 @@ async fn finalize_sync_report(
     resolved_ctx: &ResolvedSyncContext,
 ) -> anyhow::Result<()> {
     ctx.emitter.enter_stage(OperationStage::Finalizing);
-    let mut report = assess_after_sync(ctx, &resolved_ctx.resolved).await?;
-    report.remote_freshness = Some(RemoteFreshnessState::UpToDate);
-    ctx.final_report = Some(report);
+    let report = assess_after_sync(ctx, &resolved_ctx.resolved).await?;
+    ctx.final_output = Some(OperationOutput::Sync(report));
     ctx.emitter.exit_stage(OperationStage::Finalizing);
     Ok(())
 }
@@ -589,7 +595,7 @@ fn emit_audit_progress(
 async fn assess_after_sync(
     ctx: &OperationContext,
     resolved: &ResolvedProfile,
-) -> anyhow::Result<ProfileStateReport> {
+) -> anyhow::Result<SyncReport> {
     let inventory =
         Inventory::open(&resolved.paths.profile.inventory.db).map_err(map_inventory_error)?;
     let snapshot = local_state::assess_snapshot(
@@ -600,14 +606,34 @@ async fn assess_after_sync(
         None,
     )
     .map_err(map_inventory_error)?;
-    Ok(ProfileStateReport {
-        profile_id: ctx.profile.id.clone(),
+    let repo_revision = match ctx.profile.validated_source_kind() {
+        Ok(ProfileSourceKind::Http(repo_url)) => {
+            swifty_repo::load_cached_repo_blocking(&resolved.paths.profile.repo_cache, repo_url)
+                .ok()
+                .flatten()
+                .and_then(|cache| swifty_repo::repo_blob_revision(&cache))
+        }
+        Err(_) => None,
+    };
+    let inventory = InventoryCheckReport {
         local_health: snapshot.assessment.health,
-        remote_freshness: Some(RemoteFreshnessState::UpToDate),
+        profile_id: ctx.profile.id.clone(),
         checked_at_unix_ms: snapshot.assessment.checked_at_unix_ms,
         expected_missing_in_inventory_count: snapshot.assessment.expected_missing_count,
         inventory_unexpected_paths_count: snapshot.assessment.unexpected_count,
         unexpected_delete_paths: snapshot.assessment.unexpected_paths,
+    };
+    let repo = RepoCheckReport {
+        profile_id: ctx.profile.id.clone(),
+        local_revision: repo_revision.clone(),
+        remote_revision: repo_revision,
+        freshness: RepoCheckFreshness::UpToDate,
+        checked_at_unix_ms: inventory.checked_at_unix_ms,
+    };
+    Ok(SyncReport {
+        profile_id: ctx.profile.id.clone(),
+        repo,
+        inventory,
     })
 }
 
@@ -629,18 +655,6 @@ fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {
         return Err(anyhow::Error::new(OperationError::Canceled));
     }
     Ok(())
-}
-
-async fn restore_repo_cache_after_failure(
-    snapshot: Option<crate::support::repo_cache::RepoCacheSnapshot>,
-    err: anyhow::Error,
-) -> anyhow::Error {
-    if let Err(restore_err) = restore_repo_cache_blob(snapshot).await {
-        return restore_err.context(format!(
-            "sync failed and repo cache restore also failed after error: {err:#}"
-        ));
-    }
-    err
 }
 
 fn map_inventory_error(err: InventoryError) -> anyhow::Error {

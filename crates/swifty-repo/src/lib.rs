@@ -220,6 +220,31 @@ pub enum RepoFreshness {
     UpdateAvailable,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoProbeResult {
+    pub local_revision: Option<String>,
+    pub remote_revision: Option<String>,
+    pub freshness: RepoFreshness,
+}
+
+pub fn repo_blob_revision(cache: &RepoCacheBlob) -> Option<String> {
+    if let Some(revision) = cache
+        .repo_json_checksum
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(revision.to_string());
+    }
+
+    let checksum = cache.repo.checksum.trim();
+    if !checksum.is_empty() {
+        return Some(checksum.to_string());
+    }
+
+    None
+}
+
 fn collect_enabled_mod_names(repo: swifty_artifacts::RepoSpec) -> Vec<String> {
     let mut names: Vec<String> = repo
         .required_mods
@@ -495,6 +520,58 @@ pub async fn sync_repo_metadata(
         reused_mods,
         freshness,
     })
+}
+
+pub async fn probe_repo_freshness(
+    repo_url: &str,
+    store: &dyn RepoCacheStore,
+    downloads: &DownloadService,
+    sink: Option<DownloadEventSink>,
+) -> Result<RepoProbeResult> {
+    let cache_opt = store.load_repo_cache(repo_url).await?;
+    let local_revision = cache_opt.as_ref().and_then(repo_blob_revision);
+    let repo_headers =
+        build_conditional_headers(cache_opt.as_ref().and_then(|c| c.repo_http.as_ref()))?;
+    let repo_id = repo_manifest_id(repo_url);
+    let repo_fetch = fetch_repo_json(
+        downloads,
+        repo_id.as_str(),
+        repo_url,
+        repo_headers,
+        sink,
+        repo_id.as_str(),
+        "probe repo manifest",
+    )
+    .await?;
+
+    match (cache_opt, repo_fetch) {
+        (Some(cache), RepoJsonFetch::NotModified) => Ok(RepoProbeResult {
+            local_revision,
+            remote_revision: cache.repo_json_checksum.or_else(|| {
+                let checksum = cache.repo.checksum.trim();
+                (!checksum.is_empty()).then(|| checksum.to_string())
+            }),
+            freshness: RepoFreshness::UpToDate,
+        }),
+        (cache_opt, RepoJsonFetch::Downloaded { bytes, .. }) => {
+            let remote_revision = Some(fleet_domain::hash::sha1_hex(&bytes));
+            let freshness = match cache_opt.as_ref().and_then(repo_blob_revision).as_deref() {
+                Some(local) if Some(local.to_string()) == remote_revision => {
+                    RepoFreshness::UpToDate
+                }
+                Some(_) => RepoFreshness::UpdateAvailable,
+                None => RepoFreshness::Unknown,
+            };
+            Ok(RepoProbeResult {
+                local_revision,
+                remote_revision,
+                freshness,
+            })
+        }
+        (None, RepoJsonFetch::NotModified) => {
+            anyhow::bail!("received 304 for repo.json but no cache exists")
+        }
+    }
 }
 
 async fn sync_repo_assets(
@@ -1028,6 +1105,72 @@ mod tests {
 
         assert_eq!(result.freshness, RepoFreshness::Unknown);
         assert_eq!(store.save_calls(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_repo_freshness_is_read_only_for_not_modified_repo() {
+        let repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let (repo_url, server) = spawn_repo_server(&repo, "\"etag-v1\"", true).await;
+        let checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&repo).expect("serialize").as_bytes(),
+        );
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            repo,
+            Some(checksum.clone()),
+            Some("\"etag-v1\""),
+            BTreeMap::new(),
+        ));
+
+        let result = probe_repo_freshness(&repo_url, &store, &DownloadService::new_default(), None)
+            .await
+            .expect("probe freshness");
+
+        assert_eq!(result.local_revision.as_deref(), Some(checksum.as_str()));
+        assert_eq!(result.remote_revision.as_deref(), Some(checksum.as_str()));
+        assert_eq!(result.freshness, RepoFreshness::UpToDate);
+        assert_eq!(store.save_calls(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_repo_freshness_detects_update_without_writing_cache() {
+        let old_repo = empty_repo_spec("0000000000000000000000000000000000000000");
+        let new_repo = empty_repo_spec("1111111111111111111111111111111111111111");
+        let (repo_url, server) = spawn_repo_server(&new_repo, "\"etag-v2\"", false).await;
+        let old_checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&old_repo)
+                .expect("serialize old repo")
+                .as_bytes(),
+        );
+        let new_checksum = fleet_domain::hash::sha1_hex(
+            serde_json::to_string(&new_repo)
+                .expect("serialize new repo")
+                .as_bytes(),
+        );
+        let store = MockStore::with_cache(make_cache_blob(
+            &repo_url,
+            old_repo,
+            Some(old_checksum.clone()),
+            None,
+            BTreeMap::new(),
+        ));
+
+        let result = probe_repo_freshness(&repo_url, &store, &DownloadService::new_default(), None)
+            .await
+            .expect("probe freshness");
+
+        assert_eq!(
+            result.local_revision.as_deref(),
+            Some(old_checksum.as_str())
+        );
+        assert_eq!(
+            result.remote_revision.as_deref(),
+            Some(new_checksum.as_str())
+        );
+        assert_eq!(result.freshness, RepoFreshness::UpdateAvailable);
+        assert_eq!(store.save_calls(), 0);
         server.abort();
     }
 }
