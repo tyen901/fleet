@@ -344,6 +344,7 @@ impl Core {
             recompute_profile_status(state, &pid);
         });
         self.spawn_profile_repo_cache_refresh(saved.id.clone(), false);
+        self.spawn_profile_inventory_metrics_refresh(saved.id.clone());
         if path_context_changed {
             let core = self.clone();
             let profile_id = saved.id.clone();
@@ -424,6 +425,41 @@ impl Core {
                     "failed to refresh profile repo cache state"
                 );
             }
+        });
+    }
+
+    pub(crate) fn spawn_profile_inventory_metrics_refresh(&self, profile_id: ProfileId) {
+        let seq = self.update_state_result(|state| {
+            let now = fleet_domain::time::now_unix_ms();
+            let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
+            runtime.inventory_metrics_loading = true;
+            runtime.inventory_metrics_refresh_seq =
+                runtime.inventory_metrics_refresh_seq.wrapping_add(1);
+            (runtime.inventory_metrics_refresh_seq, true)
+        });
+
+        let core = self.clone();
+        tokio::spawn(async move {
+            let result = match core.load_profile(&profile_id).await {
+                Ok(profile) => {
+                    tokio::task::spawn_blocking(move || load_profile_inventory_metrics(&profile))
+                        .await
+                        .map_err(|e| crate::ApiError::new("inventory_metrics", e.to_string()))
+                        .and_then(|result| result)
+                }
+                Err(err) => Err(crate::ApiError::new("not_found", err.to_string())),
+            };
+
+            core.update_state(|state| {
+                let now = fleet_domain::time::now_unix_ms();
+                let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
+                if runtime.inventory_metrics_refresh_seq != seq {
+                    return;
+                }
+
+                runtime.inventory_metrics_loading = false;
+                runtime.inventory_metrics = result.ok();
+            });
         });
     }
 
@@ -763,6 +799,9 @@ fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
     runtime.repo_check = None;
     runtime.inventory_check = None;
+    runtime.inventory_metrics = None;
+    runtime.inventory_metrics_loading = false;
+    runtime.inventory_metrics_refresh_seq = 0;
     runtime.last_error = None;
     runtime.active = None;
     if let Some(profile) = profile.as_ref() {
@@ -910,6 +949,14 @@ mod tests {
                     inventory_unexpected_paths_count: 0,
                     unexpected_delete_paths: Vec::new(),
                 }),
+                inventory_metrics: Some(crate::LocalStateMetrics {
+                    root_path: "/tmp/mods".to_string(),
+                    files_count: 2,
+                    files_bytes: 12,
+                    last_stamp: None,
+                }),
+                inventory_metrics_loading: true,
+                inventory_metrics_refresh_seq: 9,
                 active: Some(crate::state::ActiveOperationState::new(
                     7,
                     fleet_domain::health::OperationKind::CheckInventory,
@@ -937,6 +984,9 @@ mod tests {
                 .map(|report| &report.local_health),
             Some(&LocalStateHealth::MissingDestination)
         );
+        assert!(updated.inventory_metrics.is_none());
+        assert!(!updated.inventory_metrics_loading);
+        assert_eq!(updated.inventory_metrics_refresh_seq, 0);
         assert!(updated.last_error.is_none());
         assert!(updated.active.is_none());
         assert_eq!(updated.status.last_check_ms, 42);
