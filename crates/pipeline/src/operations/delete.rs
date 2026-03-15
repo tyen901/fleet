@@ -143,6 +143,7 @@ fn is_delete_blocked(local_health: &LocalStateHealth) -> bool {
             | LocalStateHealth::ProbeFailed
             | LocalStateHealth::InventoryCorrupt
             | LocalStateHealth::LocalStateMissing
+            | LocalStateHealth::MissingDestination
     )
 }
 

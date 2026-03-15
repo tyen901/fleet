@@ -250,7 +250,18 @@ pub fn ProfileView(id: String) -> Element {
             )
         })
         .unwrap_or(false);
-    let modpack_size = modpack_size_text(inventory_metrics().as_ref(), inventory_metrics_loading());
+    let modpack_size = modpack_size_text(
+        inventory_metrics().as_ref(),
+        inventory_metrics_loading(),
+        profile_status
+            .map(|status| {
+                matches!(
+                    status.local_health,
+                    fleet_core::LocalStateHealth::MissingDestination
+                )
+            })
+            .unwrap_or(false),
+    );
     let progress_display = progress_ui.clone();
     let state_label = profile_status
         .map(|status| status.headline.label())

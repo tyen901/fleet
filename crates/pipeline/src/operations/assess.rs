@@ -9,6 +9,7 @@ use fleet_domain::ProfileSourceKind;
 use fleet_inventory::{Inventory, InventoryError};
 use flux_manifest::ManifestEntry;
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -128,7 +129,7 @@ pub(crate) async fn run_check_inventory(
     emit_verify_summary(&ctx, &snapshot);
     ctx.emitter.exit_stage(OperationStage::VerifyingInventory);
 
-    let cleanup = if is_hard_local_invalid_state(&snapshot.assessment.health) {
+    let cleanup = if preserve_assessed_local_health(&snapshot.assessment.health) {
         ManifestCleanupAssessment::default()
     } else {
         manifest_cleanup_assessment(&snapshot, cached_expected.as_ref())
@@ -173,6 +174,20 @@ pub(crate) async fn evaluate_local_state_snapshot(
     ctx: &OperationContext,
     resolved: &ResolvedProfile,
 ) -> anyhow::Result<local_state::LocalInventorySnapshot> {
+    let profile_id = ctx.profile.id.clone();
+    let db_path = resolved.paths.profile.inventory.db.clone();
+    let dest_path = resolved.dest_path.clone();
+    let pre_scan_snapshot = tokio::task::spawn_blocking(move || -> Result<_, InventoryError> {
+        let inventory = Inventory::open(&db_path)?;
+        pre_scan_local_state_snapshot(&inventory, &profile_id, &dest_path)
+    })
+    .await??;
+    if let Some(snapshot) = pre_scan_snapshot {
+        ctx.emitter.exit_stage(OperationStage::ScanningDisk);
+        ctx.emitter.enter_stage(OperationStage::VerifyingInventory);
+        return Ok(snapshot);
+    }
+
     let cfg = ctx.config.clone();
     let db_path = resolved.paths.profile.inventory.db.clone();
     let dest_path = resolved.dest_path.clone();
@@ -275,6 +290,43 @@ pub(crate) async fn evaluate_local_state_snapshot(
                 }
             }
         }
+    }
+}
+
+fn pre_scan_local_state_snapshot(
+    inventory: &Inventory,
+    profile_id: &str,
+    dest_path: &Path,
+) -> Result<Option<local_state::LocalInventorySnapshot>, InventoryError> {
+    if !dest_path.exists() {
+        return Ok(Some(invalid_snapshot(
+            profile_id,
+            LocalStateHealth::MissingDestination,
+        )));
+    }
+    if !inventory.has_trusted_baseline()? {
+        return Ok(Some(invalid_snapshot(
+            profile_id,
+            LocalStateHealth::LocalStateMissing,
+        )));
+    }
+    Ok(None)
+}
+
+fn invalid_snapshot(
+    profile_id: &str,
+    health: LocalStateHealth,
+) -> local_state::LocalInventorySnapshot {
+    local_state::LocalInventorySnapshot {
+        assessment: local_state::LocalStateAssessment {
+            profile_id: profile_id.to_string(),
+            health,
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+            unexpected_paths: Vec::new(),
+        },
+        tracked_paths: Vec::new(),
+        missing_tracked_paths: Vec::new(),
+        modified_tracked_paths: Vec::new(),
     }
 }
 
@@ -440,7 +492,7 @@ pub(crate) fn build_inventory_check_report(
     cleanup: ManifestCleanupAssessment,
 ) -> InventoryCheckReport {
     let mut local_health = snapshot.assessment.health.clone();
-    if !is_hard_local_invalid_state(&local_health)
+    if !preserve_assessed_local_health(&local_health)
         && (cleanup.expected_missing_in_inventory_count > 0
             || !cleanup.delete_candidates.is_empty())
     {
@@ -468,13 +520,15 @@ fn invalid_report(profile_id: &str, local_health: LocalStateHealth) -> Inventory
     }
 }
 
-fn is_hard_local_invalid_state(local_health: &LocalStateHealth) -> bool {
+fn preserve_assessed_local_health(local_health: &LocalStateHealth) -> bool {
     matches!(
         local_health,
         LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
             | LocalStateHealth::InventoryCorrupt
+            | LocalStateHealth::LocalStateMissing
+            | LocalStateHealth::MissingDestination
     )
 }
 
@@ -488,10 +542,12 @@ pub(crate) fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_inventory_check_report, manifest_cleanup_assessment, ManifestCleanupAssessment,
+        build_inventory_check_report, manifest_cleanup_assessment, pre_scan_local_state_snapshot,
+        ManifestCleanupAssessment,
     };
     use crate::local_state::{LocalInventorySnapshot, LocalStateAssessment};
     use fleet_domain::LocalStateHealth;
+    use fleet_inventory::Inventory;
     use std::collections::BTreeSet;
 
     #[test]
@@ -576,6 +632,50 @@ mod tests {
         assert_eq!(
             report.unexpected_delete_paths,
             vec!["mods/stale.pbo".to_string()]
+        );
+    }
+
+    #[test]
+    fn report_preserves_missing_destination_even_when_manifest_cleanup_exists() {
+        let snapshot = LocalInventorySnapshot {
+            assessment: LocalStateAssessment {
+                profile_id: "p1".to_string(),
+                health: LocalStateHealth::MissingDestination,
+                checked_at_unix_ms: 1,
+                unexpected_paths: Vec::new(),
+            },
+            tracked_paths: Vec::new(),
+            missing_tracked_paths: Vec::new(),
+            modified_tracked_paths: Vec::new(),
+        };
+
+        let report = build_inventory_check_report(
+            &snapshot,
+            ManifestCleanupAssessment {
+                expected_missing_in_inventory_count: 2,
+                delete_candidates: vec!["mods/stale.pbo".to_string()],
+            },
+        );
+
+        assert_eq!(report.local_health, LocalStateHealth::MissingDestination);
+        assert_eq!(report.expected_missing_in_inventory_count, 2);
+        assert_eq!(report.inventory_unexpected_paths_count, 1);
+    }
+
+    #[test]
+    fn pre_scan_snapshot_reports_missing_destination_without_disk_walk() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let db_path = tempdir.path().join("inventory.sqlite");
+        let inventory = Inventory::open(&db_path).expect("inventory");
+        let missing_dest = tempdir.path().join("missing");
+
+        let snapshot =
+            pre_scan_local_state_snapshot(&inventory, "p1", &missing_dest).expect("pre-scan");
+
+        let snapshot = snapshot.expect("missing destination snapshot");
+        assert_eq!(
+            snapshot.assessment.health,
+            LocalStateHealth::MissingDestination
         );
     }
 }
