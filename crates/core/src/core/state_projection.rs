@@ -163,6 +163,14 @@ pub(super) fn should_refresh_profile_repo_cache(ev: &PipelineSessionEvent) -> bo
     )
 }
 
+pub(super) fn should_refresh_profile_inventory_metrics(ev: &PipelineSessionEvent) -> bool {
+    matches!(
+        (&ev.operation, &ev.kind),
+        (OperationKind::Sync, PipelineEventKind::Finished { .. })
+            | (OperationKind::Delete, PipelineEventKind::Finished { .. })
+    )
+}
+
 fn active_operation_mut<'a>(
     state: &'a mut AppState,
     ev: &PipelineSessionEvent,

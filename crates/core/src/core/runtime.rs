@@ -1,5 +1,7 @@
 use super::operation_scheduler::{dispatch_auto_check, AutoCheckCoalescer};
-use super::state_projection::{apply_event, should_refresh_profile_repo_cache};
+use super::state_projection::{
+    apply_event, should_refresh_profile_inventory_metrics, should_refresh_profile_repo_cache,
+};
 use super::{publish_state, Core};
 use crate::state::AppState;
 use crate::storage::config_root_dir;
@@ -42,6 +44,7 @@ async fn run_core_loop(core: Core) {
     core.replace_state(initial);
     for profile_id in &profile_ids {
         core.spawn_profile_repo_cache_refresh(profile_id.clone(), false);
+        core.spawn_profile_inventory_metrics_refresh(profile_id.clone());
         if auto_check_on_startup {
             auto_check.enqueue(profile_id, fleet_domain::health::OperationKind::CheckRepo);
             auto_check.enqueue(
@@ -71,6 +74,9 @@ async fn run_core_loop(core: Core) {
 
         if should_refresh_profile_repo_cache(&ev) {
             core.spawn_profile_repo_cache_refresh(ev.profile_id.clone(), true);
+        }
+        if should_refresh_profile_inventory_metrics(&ev) {
+            core.spawn_profile_inventory_metrics_refresh(ev.profile_id.clone());
         }
         dispatch_auto_check(&core, &mut auto_check).await;
     }
