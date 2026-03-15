@@ -12,13 +12,15 @@ pub mod types;
 pub mod utils;
 
 pub use download::{DownloadEvent, DownloadPhase};
-pub use health::{AssessPhase, OperationKind, ProfileStateReport, RemoteFreshnessState};
+pub use health::{
+    InventoryCheckReport, OperationKind, RepoCheckFreshness, RepoCheckReport, SyncReport,
+};
 pub use inventory::{
     default_inventory_ignore_rules, InventoryIgnoreRules, DEFAULT_INVENTORY_IGNORE_RULES,
 };
 pub use inventory_types::{
-    AssessScope, BaselineStamp, LocalStateHealth, LocalStateMetrics, LocalStateProgress,
-    LocalStateStage, LocalStateStatus, REBUILD_REQUIRED_MESSAGE,
+    BaselineStamp, LocalStateHealth, LocalStateMetrics, LocalStateProgress, LocalStateStage,
+    LocalStateStatus, REBUILD_REQUIRED_MESSAGE,
 };
 pub use paths::{
     flux_cache_dir, flux_ws_dir, inventory_db_path, inventory_lock_path, normalize_rel_slashes,

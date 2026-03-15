@@ -73,8 +73,7 @@ fn profile_buttons_disabled(route: &Route, snapshot: &fleet_core::AppState) -> b
         .is_some_and(|operation| {
             matches!(
                 operation,
-                fleet_core::OperationKind::Sync
-                    | fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote)
+                fleet_core::OperationKind::Sync | fleet_core::OperationKind::CheckRepo
             )
         })
 }
@@ -91,8 +90,7 @@ fn profile_back_disabled(route: &Route, snapshot: &fleet_core::AppState) -> bool
         .is_some_and(|operation| {
             matches!(
                 operation,
-                fleet_core::OperationKind::Sync
-                    | fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote)
+                fleet_core::OperationKind::Sync | fleet_core::OperationKind::CheckRepo
             )
         })
 }

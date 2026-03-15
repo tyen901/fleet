@@ -18,8 +18,8 @@ pub use state::*;
 pub use storage::{profile_state_root_dir, ProfilesConfig};
 
 pub use fleet_domain::health::{
-    AssessScope, CancelResult, LocalStateHealth, OperationKind, ProfileStateReport,
-    RemoteFreshnessState,
+    CancelResult, InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness,
+    RepoCheckReport, SyncReport,
 };
 pub use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId, SyncSummary};
 pub use fleet_domain::RepoServer;

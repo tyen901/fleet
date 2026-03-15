@@ -4,6 +4,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::app::shell::ShellNavActionStore;
+use crate::features::profiles::common::inventory_out_of_sync;
 use crate::features::profiles::common::start_profile_operation;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
@@ -20,14 +21,7 @@ enum PendingStartAction {
 }
 
 fn selected_profile_requires_sync(status: Option<&fleet_core::ProfileStatusState>) -> bool {
-    matches!(
-        status.map(|status| status.local_health.clone()),
-        Some(
-            fleet_core::LocalStateHealth::LocalDrift
-                | fleet_core::LocalStateHealth::LocalStateMissing
-                | fleet_core::LocalStateHealth::InventoryCorrupt
-        )
-    )
+    status.is_some_and(inventory_out_of_sync)
 }
 
 #[component]
@@ -90,7 +84,7 @@ pub fn Home() -> Element {
         .and_then(|runtime| runtime.active.as_ref())
         .is_some();
     let quick_check_ui_blocked = selected_status
-        .map(|status| status.actions.check_updates_running)
+        .map(|status| status.actions.check_repo_running || status.actions.check_inventory_running)
         .unwrap_or(false);
     let launch_disabled = selected_profile_id.is_none()
         || quick_check_ui_blocked
@@ -109,8 +103,8 @@ pub fn Home() -> Element {
     let update_visible = selected_status
         .map(|status| {
             matches!(
-                status.remote_freshness,
-                Some(fleet_core::RemoteFreshnessState::UpdateAvailable)
+                status.repo_freshness,
+                Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
             )
         })
         .unwrap_or(false);

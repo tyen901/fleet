@@ -6,7 +6,7 @@ use crate::stores::toast_view::ToastViewport;
 use crate::stores::update_store::{check_for_updates_status, AppUpdateStatus, UpdateStore};
 use crate::style::ThemeRoot;
 use dioxus::prelude::*;
-use fleet_core::{AssessScope, OperationKind, OperationTerminalStatus};
+use fleet_core::{OperationKind, OperationTerminalStatus};
 use tracing::{error, warn};
 
 #[component]
@@ -28,7 +28,6 @@ pub fn AppRoot() -> Element {
     let last_sync_toast_at = use_signal(|| 0_u64);
     let last_rebuild_required_toast_at = use_signal(|| 0_u64);
     let startup_update_check_dispatched = use_signal(|| false);
-    let startup_assess_dispatched = use_signal(|| false);
 
     let rx_root = bridge.state_rx.clone();
     use_future(move || {
@@ -193,53 +192,6 @@ pub fn AppRoot() -> Element {
             spawn(async move {
                 let status = check_for_updates_status(channel).await;
                 update_status.set(status);
-            });
-        });
-    }
-
-    {
-        let bridge = bridge.clone();
-        let app_state = app_state;
-        let mut startup_assess_dispatched = startup_assess_dispatched;
-        use_effect(move || {
-            let snapshot = (app_state)();
-            if startup_assess_dispatched() || snapshot.version == 0 {
-                return;
-            }
-
-            startup_assess_dispatched.set(true);
-            if !snapshot.settings.ui.onboarding_completed
-                || !snapshot.settings.startup.auto_assess_on_startup
-            {
-                return;
-            }
-            if snapshot.profiles.is_empty() {
-                return;
-            }
-
-            let Some(profile_id) = snapshot
-                .selected_profile_id
-                .clone()
-                .filter(|profile_id| snapshot.profiles.contains_key(profile_id))
-            else {
-                startup_assess_dispatched.set(false);
-                return;
-            };
-
-            let Some(runtime) = snapshot.profile_runtime_by_id.get(&profile_id) else {
-                startup_assess_dispatched.set(false);
-                return;
-            };
-            if runtime.active.is_some() {
-                return;
-            }
-
-            let bridge = bridge.clone();
-            spawn(async move {
-                let _ = bridge
-                    .core()
-                    .start_operation(profile_id, OperationKind::Assess(AssessScope::Remote))
-                    .await;
             });
         });
     }

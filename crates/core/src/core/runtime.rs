@@ -37,10 +37,20 @@ async fn run_core_loop(core: Core) {
         }
     };
     let profile_ids: Vec<_> = initial.profiles.keys().cloned().collect();
+    let auto_check_on_startup =
+        initial.settings.startup.auto_assess_on_startup && initial.settings.ui.onboarding_completed;
     core.replace_state(initial);
     for profile_id in &profile_ids {
         core.spawn_profile_repo_cache_refresh(profile_id.clone(), false);
+        if auto_check_on_startup {
+            auto_check.enqueue(profile_id, fleet_domain::health::OperationKind::CheckRepo);
+            auto_check.enqueue(
+                profile_id,
+                fleet_domain::health::OperationKind::CheckInventory,
+            );
+        }
     }
+    dispatch_auto_check(&core, &mut auto_check).await;
 
     let mut rx = core.pipeline().subscribe();
 

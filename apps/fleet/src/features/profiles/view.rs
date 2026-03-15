@@ -5,10 +5,9 @@ use crate::app::router::Route;
 use crate::app::shell::{ShellNavActionStore, ShellNavEvent, ShellNavEventStore, ShellSaveAction};
 use crate::features::profiles::common::{
     cancel_operation, format_eta, format_progress_metric, format_repo_server_label, format_speed,
-    modpack_size_text, overall_status_presenter, preview_unexpected_paths,
-    profile_folder_row_class, profile_not_found_page, profile_row_class,
-    select_profile_in_background, show_unexpected_paths_panel, start_profile_operation,
-    ProfileTextFieldRow, UNEXPECTED_PATH_PREVIEW_LIMIT,
+    modpack_size_text, preview_unexpected_paths, profile_folder_row_class, profile_not_found_page,
+    profile_row_class, select_profile_in_background, show_unexpected_paths_panel,
+    start_profile_operation, ProfileTextFieldRow, UNEXPECTED_PATH_PREVIEW_LIMIT,
 };
 use crate::features::profiles::{
     PROFILE_NAME_PLACEHOLDER, PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER,
@@ -17,7 +16,8 @@ use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
 
-const ACTION_CHECK_UPDATES: &str = "assess_remote";
+const ACTION_CHECK_REPO: &str = "check_repo";
+const ACTION_CHECK_INVENTORY: &str = "check_inventory";
 const ACTION_SYNC: &str = "sync";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -101,12 +101,21 @@ fn build_main_actions(
     vec![
         MainActionUi {
             label: "Check for Updates",
-            operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote),
-            action: ACTION_CHECK_UPDATES,
-            error_reason: "start_assess_remote_failed",
+            operation: fleet_core::OperationKind::CheckRepo,
+            action: ACTION_CHECK_REPO,
+            error_reason: "start_check_repo_failed",
             fail_title: "Check for updates failed",
-            enabled: status.actions.check_updates_enabled,
-            running: status.actions.check_updates_running,
+            enabled: status.actions.check_repo_enabled,
+            running: status.actions.check_repo_running,
+        },
+        MainActionUi {
+            label: "Check Inventory",
+            operation: fleet_core::OperationKind::CheckInventory,
+            action: ACTION_CHECK_INVENTORY,
+            error_reason: "start_check_inventory_failed",
+            fail_title: "Check inventory failed",
+            enabled: status.actions.check_inventory_enabled,
+            running: status.actions.check_inventory_running,
         },
         MainActionUi {
             label: "Sync",
@@ -151,7 +160,7 @@ pub fn ProfileView(id: String) -> Element {
     let profile_runtime = snapshot.profile_runtime_by_id.get(&profile.id);
     let inventory_terminal_refresh_at = latest_inventory_refresh_at(profile_runtime);
     let inventory_active_refresh_tick = active_inventory_refresh_tick(profile_runtime);
-    let assessment = profile_runtime.and_then(|runtime| runtime.assessment.as_ref());
+    let inventory_check = profile_runtime.and_then(|runtime| runtime.inventory_check.as_ref());
     let profile_status = profile_runtime.map(|runtime| &runtime.status);
     let repo_servers = profile_runtime
         .map(|runtime| runtime.repo_servers.clone())
@@ -163,10 +172,7 @@ pub fn ProfileView(id: String) -> Element {
     let operation_active = active_operation.is_some();
     let navigation_locked = matches!(
         active_operation,
-        Some(fleet_core::OperationKind::Sync)
-            | Some(fleet_core::OperationKind::Assess(
-                fleet_core::AssessScope::Remote
-            ))
+        Some(fleet_core::OperationKind::Sync) | Some(fleet_core::OperationKind::CheckRepo)
     );
     let show_progress_view = matches!(active_operation, Some(fleet_core::OperationKind::Sync));
     let cancel_session_id = profile_runtime
@@ -204,7 +210,7 @@ pub fn ProfileView(id: String) -> Element {
         });
     }
 
-    let unexpected_paths = assessment
+    let unexpected_paths = inventory_check
         .map(|report| report.unexpected_delete_paths.clone())
         .unwrap_or_default();
     let unexpected_path_count = unexpected_paths.len();
@@ -236,9 +242,9 @@ pub fn ProfileView(id: String) -> Element {
         .unwrap_or(false);
     let modpack_size = modpack_size_text(inventory_metrics().as_ref(), inventory_metrics_loading());
     let progress_display = progress_ui.clone();
-    let (state_label, _state_tone) = profile_status
-        .map(|status| overall_status_presenter(status, has_repo_source))
-        .unwrap_or(("Not checked", "muted"));
+    let state_label = profile_status
+        .map(|status| status.headline.label())
+        .unwrap_or("Status unknown");
     let display_repo_servers = if repo_servers.is_empty() {
         profile
             .arma3_server
@@ -286,10 +292,14 @@ pub fn ProfileView(id: String) -> Element {
     };
 
     let main_actions = build_main_actions(profile_status);
-    let check_updates_action = main_actions
+    let check_repo_action = main_actions
         .iter()
         .copied()
-        .find(|action| action.action == ACTION_CHECK_UPDATES);
+        .find(|action| action.action == ACTION_CHECK_REPO);
+    let check_inventory_action = main_actions
+        .iter()
+        .copied()
+        .find(|action| action.action == ACTION_CHECK_INVENTORY);
     let sync_action = main_actions
         .iter()
         .copied()
@@ -340,8 +350,8 @@ pub fn ProfileView(id: String) -> Element {
         let mut save_action = shell_nav_actions.save_action;
         let mut back_disabled = shell_nav_actions.back_disabled;
         use_effect(use_reactive(
-            (&navigation_locked, &check_updates_action, &sync_action),
-            move |(navigation_locked, _check_updates_action, _sync_action)| {
+            (&navigation_locked, &check_repo_action, &sync_action),
+            move |(navigation_locked, _check_repo_action, _sync_action)| {
                 profile_action.set(Some(ShellSaveAction::new("Edit", navigation_locked)));
                 profile_secondary_action.set(None);
                 save_action.set(None);
@@ -373,9 +383,9 @@ pub fn ProfileView(id: String) -> Element {
                         bridge.clone(),
                         toasts.clone(),
                         profile_id.clone(),
-                        fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote),
-                        ACTION_CHECK_UPDATES,
-                        "start_assess_remote_failed",
+                        fleet_core::OperationKind::CheckRepo,
+                        ACTION_CHECK_REPO,
+                        "start_check_repo_failed",
                         "Check for updates failed",
                     );
                 }
@@ -444,19 +454,45 @@ pub fn ProfileView(id: String) -> Element {
                                 }
                             }
 
-                            div { class: "profile-page__stats",
-                                div { class: "profile-page__stat",
-                                    div { class: "profile-page__stat-label", "State" }
-                                    div { class: "profile-page__stat-value", "{state_label}" }
+                            div { class: "profile-page__state-list",
+                                div { class: "profile-page__state-row",
+                                    div { class: "profile-page__state-key", "State" }
+                                    div { class: "profile-page__state-value", "{state_label}" }
                                 }
-                                div { class: "profile-page__stat",
-                                    div { class: "profile-page__stat-label", "Size" }
-                                    div { class: "profile-page__stat-value", "{modpack_size}" }
+                                div { class: "profile-page__state-row",
+                                    div { class: "profile-page__state-key", "Size" }
+                                    div { class: "profile-page__state-value", "{modpack_size}" }
                                 }
                             }
 
                             div { class: "profile-page__section profile-page__action-row",
-                                if let Some(action) = check_updates_action {
+                                if let Some(action) = check_repo_action {
+                                    Button {
+                                        key: "profile-action-row-{action.label}",
+                                        variant: ButtonVariant::Secondary,
+                                        size: ButtonSize::Sm,
+                                        loading: action.running,
+                                        disabled: !action.enabled || operation_active,
+                                        onclick: {
+                                            let bridge = bridge.clone();
+                                            let toasts = toasts.clone();
+                                            let profile_id = profile_id.clone();
+                                            move |_| {
+                                                start_profile_operation(
+                                                    bridge.clone(),
+                                                    toasts.clone(),
+                                                    profile_id.clone(),
+                                                    action.operation,
+                                                    action.action,
+                                                    action.error_reason,
+                                                    action.fail_title,
+                                                );
+                                            }
+                                        },
+                                        "{action.label}"
+                                    }
+                                }
+                                if let Some(action) = check_inventory_action {
                                     Button {
                                         key: "profile-action-row-{action.label}",
                                         variant: ButtonVariant::Secondary,
@@ -626,7 +662,8 @@ mod tests {
     fn latest_inventory_refresh_at_uses_latest_terminal_timestamp() {
         let runtime = fleet_core::ProfileRuntimeState {
             profile_id: "p1".to_string(),
-            assessment: None,
+            repo_check: None,
+            inventory_check: None,
             active: None,
             last_operation: Some(fleet_core::OperationOutcomeState {
                 session_id: 7,
@@ -647,7 +684,7 @@ mod tests {
 
         let local_assess = fleet_core::ProfileRuntimeState {
             last_operation: Some(fleet_core::OperationOutcomeState {
-                operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Local),
+                operation: fleet_core::OperationKind::CheckInventory,
                 ..runtime.last_operation.clone().expect("last operation")
             }),
             ..runtime
@@ -661,7 +698,8 @@ mod tests {
     fn active_inventory_refresh_tick_only_tracks_sync_operations() {
         let runtime = fleet_core::ProfileRuntimeState {
             profile_id: "p1".to_string(),
-            assessment: None,
+            repo_check: None,
+            inventory_check: None,
             active: Some(fleet_core::ActiveOperationState {
                 session_id: 9,
                 operation: fleet_core::OperationKind::Sync,
@@ -685,7 +723,7 @@ mod tests {
 
         let unrelated_active = fleet_core::ProfileRuntimeState {
             active: Some(fleet_core::ActiveOperationState {
-                operation: fleet_core::OperationKind::Assess(fleet_core::AssessScope::Remote),
+                operation: fleet_core::OperationKind::CheckRepo,
                 ..runtime.active.clone().expect("active")
             }),
             ..runtime.clone()

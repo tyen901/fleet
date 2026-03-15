@@ -5,6 +5,7 @@ use dioxus_router::Navigator;
 use icondata::{BsArrowClockwise, BsPersonFill};
 
 use crate::app::router::Route;
+use crate::features::profiles::common::inventory_out_of_sync;
 use crate::services::bridge::FleetBridge;
 
 fn profile_icon_src(
@@ -68,7 +69,25 @@ pub(crate) fn build_profile_items(
             let check_running = snapshot
                 .profile_runtime_by_id
                 .get(&profile_id)
-                .map(|runtime| runtime.status.actions.check_updates_running)
+                .map(|runtime| {
+                    runtime.status.actions.check_repo_running
+                        || runtime.status.actions.check_inventory_running
+                })
+                .unwrap_or(false);
+            let show_update_badge = snapshot
+                .profile_runtime_by_id
+                .get(&profile_id)
+                .map(|runtime| {
+                    matches!(
+                        runtime.status.repo_freshness,
+                        Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
+                    )
+                })
+                .unwrap_or(false);
+            let show_inventory_badge = snapshot
+                .profile_runtime_by_id
+                .get(&profile_id)
+                .map(|runtime| inventory_out_of_sync(&runtime.status))
                 .unwrap_or(false);
             let icon_src = snapshot
                 .profiles
@@ -120,6 +139,16 @@ pub(crate) fn build_profile_items(
                         }
                         div { class: "home-card__content",
                             h3 { class: "home-card__name", "{profile_name}" }
+                            if show_update_badge || show_inventory_badge {
+                                div { class: "home-card__status-list",
+                                    if show_update_badge {
+                                        div { class: "home-card__status home-card__status--update", "Update" }
+                                    }
+                                    if show_inventory_badge {
+                                        div { class: "home-card__status home-card__status--sync", "Out of sync" }
+                                    }
+                                }
+                            }
                         }
                     }
                     if is_selected {

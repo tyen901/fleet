@@ -5,7 +5,7 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
-use fleet_domain::health::{AssessScope, LocalStateHealth, OperationKind, ProfileStateReport};
+use fleet_domain::health::{InventoryCheckReport, LocalStateHealth, OperationKind};
 use fleet_domain::{AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind};
 use serde::Serialize;
 use specta::Type;
@@ -84,8 +84,10 @@ impl Core {
         extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
-        let assessment = self.launch_assessment_by_profile_id(&profile_id).await?;
-        validate_launch_compatibility(&assessment)?;
+        let inventory_check = self
+            .launch_inventory_check_by_profile_id(&profile_id)
+            .await?;
+        validate_launch_compatibility(&inventory_check)?;
         let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
         let extra_args_os: Option<Vec<OsString>> =
             extra_args.map(|v| v.into_iter().map(OsString::from).collect());
@@ -122,27 +124,24 @@ impl Core {
         Ok((profile, settings))
     }
 
-    async fn launch_assessment_by_profile_id(
+    async fn launch_inventory_check_by_profile_id(
         &self,
         profile_id: &ProfileId,
-    ) -> Result<ProfileStateReport, ApiError> {
+    ) -> Result<InventoryCheckReport, ApiError> {
         if let Some(report) = self.read_state(|state| {
             state
                 .profile_runtime_by_id
                 .get(profile_id)
-                .and_then(|runtime| runtime.assessment.clone())
+                .and_then(|runtime| runtime.inventory_check.clone())
         }) {
             return Ok(report);
         }
 
         let session_id = self
-            .start_operation(
-                profile_id.clone(),
-                OperationKind::Assess(AssessScope::Local),
-            )
+            .start_operation(profile_id.clone(), OperationKind::CheckInventory)
             .await?;
 
-        self.await_assessment(session_id).await
+        self.await_inventory_check(session_id).await
     }
 
     async fn ensure_arma3_settings(&self, settings: &mut AppSettings) -> Result<(), ApiError> {
@@ -514,7 +513,7 @@ fn non_empty_string(s: &str) -> Option<String> {
     }
 }
 
-fn validate_launch_compatibility(report: &ProfileStateReport) -> Result<(), ApiError> {
+fn validate_launch_compatibility(report: &InventoryCheckReport) -> Result<(), ApiError> {
     if matches!(
         report.local_health,
         LocalStateHealth::Ready | LocalStateHealth::LocalDrift
@@ -572,7 +571,7 @@ impl CommandSpec {
 mod tests {
     use super::{build_args, resolve_launch_mode, validate_launch_compatibility, ActionKind};
     use fleet_arma3::LaunchMethod;
-    use fleet_domain::health::{LocalStateHealth, ProfileStateReport, RemoteFreshnessState};
+    use fleet_domain::health::{InventoryCheckReport, LocalStateHealth};
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
@@ -655,10 +654,9 @@ mod tests {
 
     #[test]
     fn validate_launch_compatibility_rejects_missing_or_modified() {
-        let err = validate_launch_compatibility(&ProfileStateReport {
+        let err = validate_launch_compatibility(&InventoryCheckReport {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::MissingDestination,
-            remote_freshness: Some(RemoteFreshnessState::Unknown),
             checked_at_unix_ms: 0,
             expected_missing_in_inventory_count: 0,
             inventory_unexpected_paths_count: 0,

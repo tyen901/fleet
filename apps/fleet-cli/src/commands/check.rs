@@ -1,37 +1,39 @@
 use fleet_core::{
-    AssessScope, Core, LocalStateHealth, OperationKind, ProfileStateReport, RemoteFreshnessState,
+    Core, InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness,
+    RepoCheckReport,
 };
 
-use super::flow_run::{run_assess_session, FlowOutput, FlowRunOptions};
+use super::flow_run::{
+    run_inventory_check_session, run_repo_check_session, FlowOutput, FlowRunOptions,
+};
 use super::{load_profile, start_operation};
 
 pub(crate) async fn run(core: &Core, profile_id: &str) -> anyhow::Result<()> {
     let profile = load_profile(core, profile_id).await?;
-    let report = run_check_report(core, profile_id, true).await?;
-    print_check_report(&report, !profile.source.trim().is_empty());
+    let repo_report = run_repo_check_report(core, profile_id).await?;
+    let inventory_report = run_inventory_check_report(core, profile_id).await?;
+    print_check_report(
+        &repo_report,
+        &inventory_report,
+        !profile.source.trim().is_empty(),
+    );
     Ok(())
 }
 
-pub(crate) async fn run_check_report(
+pub(crate) async fn run_repo_check_report(
     core: &Core,
     profile_id: &str,
-    include_remote: bool,
-) -> anyhow::Result<ProfileStateReport> {
+) -> anyhow::Result<RepoCheckReport> {
     let profile = load_profile(core, profile_id).await?;
-    let operation = if include_remote {
-        OperationKind::Assess(AssessScope::Remote)
-    } else {
-        OperationKind::Assess(AssessScope::Local)
-    };
+    let session_id = start_operation(
+        core,
+        profile.id.clone(),
+        OperationKind::CheckRepo,
+        "repo check",
+    )
+    .await?;
 
-    let action_label = if include_remote {
-        "remote assessment"
-    } else {
-        "local assessment"
-    };
-    let session_id = start_operation(core, profile.id.clone(), operation, action_label).await?;
-
-    run_assess_session(
+    run_repo_check_session(
         core,
         session_id,
         FlowRunOptions {
@@ -41,47 +43,84 @@ pub(crate) async fn run_check_report(
     .await
 }
 
-pub(crate) fn print_check_report(report: &ProfileStateReport, has_repo_source: bool) {
+pub(crate) async fn run_inventory_check_report(
+    core: &Core,
+    profile_id: &str,
+) -> anyhow::Result<InventoryCheckReport> {
+    let profile = load_profile(core, profile_id).await?;
+    let session_id = start_operation(
+        core,
+        profile.id.clone(),
+        OperationKind::CheckInventory,
+        "inventory check",
+    )
+    .await?;
+
+    run_inventory_check_session(
+        core,
+        session_id,
+        FlowRunOptions {
+            output: FlowOutput::Quiet,
+        },
+    )
+    .await
+}
+
+pub(crate) fn print_check_report(
+    repo_report: &RepoCheckReport,
+    inventory_report: &InventoryCheckReport,
+    has_repo_source: bool,
+) {
+    println!("repo_check:");
+    println!("  freshness: {:?}", repo_report.freshness);
     println!(
-        "profile check: local={:?} remote={:?} (checked_at_unix_ms={})",
-        report.local_health, report.remote_freshness, report.checked_at_unix_ms
+        "  local_revision: {}",
+        repo_report.local_revision.as_deref().unwrap_or("none")
     );
-
-    let has_update = matches!(
-        report.remote_freshness,
-        Some(RemoteFreshnessState::UpdateAvailable)
+    println!(
+        "  remote_revision: {}",
+        repo_report.remote_revision.as_deref().unwrap_or("unknown")
     );
-    println!("update_available: {}", has_update);
+    println!("  checked_at_unix_ms: {}", repo_report.checked_at_unix_ms);
 
-    if !report.unexpected_delete_paths.is_empty() {
-        println!(
-            "dirty_unexpected_files: {}",
-            report.unexpected_delete_paths.len()
-        );
-        for path in &report.unexpected_delete_paths {
-            println!("  - {}", path);
-        }
-    } else {
-        println!("dirty_unexpected_files: 0");
+    println!("inventory_check:");
+    println!("  local_health: {:?}", inventory_report.local_health);
+    println!(
+        "  checked_at_unix_ms: {}",
+        inventory_report.checked_at_unix_ms
+    );
+    println!(
+        "  expected_missing_in_inventory: {}",
+        inventory_report.expected_missing_in_inventory_count
+    );
+    println!(
+        "  unexpected_paths: {}",
+        inventory_report.unexpected_delete_paths.len()
+    );
+    for path in &inventory_report.unexpected_delete_paths {
+        println!("    - {path}");
     }
 
+    let has_update = matches!(repo_report.freshness, RepoCheckFreshness::UpdateAvailable);
+    println!("update_available: {}", has_update);
+
     if matches!(
-        report.local_health,
+        inventory_report.local_health,
         LocalStateHealth::LocalStateMissing | LocalStateHealth::InventoryCorrupt
     ) && has_repo_source
     {
         println!("sync_repair_required: true (run sync to repair inventory and reconcile)");
     }
 
-    if report.local_health == LocalStateHealth::LocalDrift
-        && report.unexpected_delete_paths.is_empty()
+    if inventory_report.local_health == LocalStateHealth::LocalDrift
+        && inventory_report.unexpected_delete_paths.is_empty()
     {
         println!(
             "local_drift_detected: true (modified/missing files likely; run sync to reconcile)"
         );
     }
 
-    if has_repo_source && !report.unexpected_delete_paths.is_empty() {
+    if has_repo_source && !inventory_report.unexpected_delete_paths.is_empty() {
         println!("sync_can_remove_unexpected_files: true");
     }
 }

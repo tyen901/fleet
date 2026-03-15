@@ -1,29 +1,91 @@
-use crate::api::{OperationStage, ProgressMetric, ProgressScope, ProgressUnit};
+use crate::api::{OperationOutput, OperationStage, ProgressMetric, ProgressScope, ProgressUnit};
 use crate::engine::{OperationContext, ResolvedProfile};
 use crate::local_state;
 use crate::operations::OperationError;
 use crate::support::locking::{check_lock_state, InventoryLockState};
-use fleet_domain::health::{
-    AssessScope, LocalStateHealth, ProfileStateReport, RemoteFreshnessState,
-};
+use fleet_domain::health::{InventoryCheckReport, RepoCheckFreshness, RepoCheckReport};
+use fleet_domain::LocalStateHealth;
 use fleet_domain::ProfileSourceKind;
 use fleet_inventory::{Inventory, InventoryError};
 use flux_manifest::ManifestEntry;
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-pub(crate) async fn run_assess(
+pub(crate) async fn run_check_repo(mut ctx: OperationContext) -> anyhow::Result<OperationContext> {
+    ctx.emitter.enter_stage(OperationStage::Validating);
+    let repo_url = match ctx.profile.validated_source_kind() {
+        Ok(ProfileSourceKind::Http(repo_url)) => repo_url.to_string(),
+        Err(_) => {
+            ctx.final_output = Some(OperationOutput::CheckRepo(RepoCheckReport {
+                profile_id: ctx.profile.id.clone(),
+                local_revision: None,
+                remote_revision: None,
+                freshness: RepoCheckFreshness::Error,
+                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+            }));
+            ctx.emitter.exit_stage(OperationStage::Validating);
+            return Ok(ctx);
+        }
+    };
+    ctx.emitter.exit_stage(OperationStage::Validating);
+
+    ctx.emitter
+        .enter_stage(OperationStage::LoadingExpectedState);
+    let repo_cache_dir =
+        fleet_domain::repo_cache_dir(&ctx.config.profile_state_root_dir, &ctx.profile.id);
+    let report = match fleet_manifest::probe_desired_manifest_freshness(
+        &repo_url,
+        &repo_cache_dir,
+        &ctx.config.downloads,
+        None,
+    )
+    .await
+    {
+        Ok(probe) => RepoCheckReport {
+            profile_id: ctx.profile.id.clone(),
+            local_revision: probe.local_revision,
+            remote_revision: probe.remote_revision,
+            freshness: match probe.freshness {
+                fleet_manifest::DesiredManifestFreshness::Unknown => RepoCheckFreshness::Unknown,
+                fleet_manifest::DesiredManifestFreshness::UpToDate => RepoCheckFreshness::UpToDate,
+                fleet_manifest::DesiredManifestFreshness::UpdateAvailable => {
+                    RepoCheckFreshness::UpdateAvailable
+                }
+            },
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        },
+        Err(_) => RepoCheckReport {
+            profile_id: ctx.profile.id.clone(),
+            local_revision: swifty_repo::load_cached_repo_blocking(&repo_cache_dir, &repo_url)
+                .ok()
+                .flatten()
+                .and_then(|cache| swifty_repo::repo_blob_revision(&cache)),
+            remote_revision: None,
+            freshness: RepoCheckFreshness::Error,
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        },
+    };
+    ctx.emitter.exit_stage(OperationStage::LoadingExpectedState);
+
+    ctx.emitter.enter_stage(OperationStage::Finalizing);
+    ctx.final_output = Some(OperationOutput::CheckRepo(report));
+    ctx.emitter.exit_stage(OperationStage::Finalizing);
+    Ok(ctx)
+}
+
+pub(crate) async fn run_check_inventory(
     mut ctx: OperationContext,
-    scope: AssessScope,
 ) -> anyhow::Result<OperationContext> {
     ensure_not_canceled(&ctx)?;
     ctx.emitter.enter_stage(OperationStage::Validating);
     let resolved = match resolve_profile(&ctx) {
         Ok(resolved) => resolved,
         Err(local_health) => {
-            ctx.final_report = Some(invalid_report(&ctx.profile.id, local_health, None));
+            ctx.final_output = Some(OperationOutput::CheckInventory(invalid_report(
+                &ctx.profile.id,
+                local_health,
+            )));
             ctx.emitter.exit_stage(OperationStage::Validating);
             return Ok(ctx);
         }
@@ -34,29 +96,22 @@ pub(crate) async fn run_assess(
     ctx.emitter
         .enter_stage(OperationStage::LoadingExpectedState);
     let cached_expected = load_cached_manifest(&ctx);
-    let remote = if matches!(scope, AssessScope::Remote) {
-        Some(load_remote_state(&ctx).await)
-    } else {
-        None
-    };
     ctx.emitter.exit_stage(OperationStage::LoadingExpectedState);
 
     match check_lock_state(&resolved.paths.profile.inventory.lock).await {
         Ok(InventoryLockState::Locked { .. }) => {
-            ctx.final_report = Some(invalid_report(
+            ctx.final_output = Some(OperationOutput::CheckInventory(invalid_report(
                 &ctx.profile.id,
                 LocalStateHealth::Blocked,
-                remote.as_ref().map(|r| r.remote_freshness.clone()),
-            ));
+            )));
             return Ok(ctx);
         }
         Ok(InventoryLockState::NotLocked) => {}
         Err(_) => {
-            ctx.final_report = Some(invalid_report(
+            ctx.final_output = Some(OperationOutput::CheckInventory(invalid_report(
                 &ctx.profile.id,
                 LocalStateHealth::ProbeFailed,
-                remote.as_ref().map(|r| r.remote_freshness.clone()),
-            ));
+            )));
             return Ok(ctx);
         }
     }
@@ -69,45 +124,22 @@ pub(crate) async fn run_assess(
 
     let mut assessment = snapshot.assessment;
     if !is_hard_local_invalid_state(&assessment.health) {
-        let expected_paths = if let Some(remote) = remote.as_ref() {
-            remote.expected_paths.as_ref()
-        } else {
-            cached_expected.as_ref()
-        };
-        if let Some(expected_paths) = expected_paths {
-            apply_expected_validation(
-                &mut assessment,
-                &snapshot.tracked_paths,
-                &ctx.profile.destination,
-                expected_paths,
-            );
+        if let Some(expected_paths) = cached_expected.as_ref() {
+            apply_expected_validation(&mut assessment, &snapshot.tracked_paths, expected_paths);
         }
     }
 
     ctx.emitter.enter_stage(OperationStage::Finalizing);
-    ctx.final_report = Some(ProfileStateReport {
+    ctx.final_output = Some(OperationOutput::CheckInventory(InventoryCheckReport {
         profile_id: assessment.profile_id,
         local_health: assessment.health,
-        remote_freshness: remote.map(|r| r.remote_freshness).or({
-            if matches!(scope, AssessScope::Remote) {
-                Some(RemoteFreshnessState::Unknown)
-            } else {
-                None
-            }
-        }),
         checked_at_unix_ms: assessment.checked_at_unix_ms,
         expected_missing_in_inventory_count: assessment.expected_missing_count,
         inventory_unexpected_paths_count: assessment.unexpected_count,
         unexpected_delete_paths: assessment.unexpected_paths,
-    });
+    }));
     ctx.emitter.exit_stage(OperationStage::Finalizing);
     Ok(ctx)
-}
-
-#[derive(Clone)]
-struct RemoteExpectedState {
-    remote_freshness: RemoteFreshnessState,
-    expected_paths: Option<BTreeSet<String>>,
 }
 
 fn resolve_profile(ctx: &OperationContext) -> Result<ResolvedProfile, LocalStateHealth> {
@@ -134,54 +166,6 @@ fn load_cached_manifest(ctx: &OperationContext) -> Option<BTreeSet<String>> {
     {
         Ok(Some(manifest)) => Some(manifest_expected_file_paths(&manifest)),
         _ => None,
-    }
-}
-
-async fn load_remote_state(ctx: &OperationContext) -> RemoteExpectedState {
-    let resolved = ctx.resolved.as_ref().expect("resolved");
-    let ProfileSourceKind::Http(repo_url) = match ctx.profile.validated_source_kind() {
-        Ok(kind) => kind,
-        Err(_) => {
-            return RemoteExpectedState {
-                remote_freshness: RemoteFreshnessState::Error,
-                expected_paths: None,
-            }
-        }
-    };
-
-    match fleet_manifest::load_desired_manifest_with_freshness(
-        repo_url,
-        &resolved.paths.profile.repo_cache,
-        &ctx.config.downloads,
-        None,
-    )
-    .await
-    {
-        Ok(loaded) => RemoteExpectedState {
-            remote_freshness: match loaded.freshness {
-                fleet_manifest::DesiredManifestFreshness::Unknown => RemoteFreshnessState::Unknown,
-                fleet_manifest::DesiredManifestFreshness::UpToDate => {
-                    RemoteFreshnessState::UpToDate
-                }
-                fleet_manifest::DesiredManifestFreshness::UpdateAvailable => {
-                    RemoteFreshnessState::UpdateAvailable
-                }
-            },
-            expected_paths: Some(manifest_expected_file_paths(&loaded.manifest)),
-        },
-        Err(_) => match fleet_manifest::load_cached_desired_manifest(
-            repo_url,
-            &resolved.paths.profile.repo_cache,
-        ) {
-            Ok(Some(manifest)) => RemoteExpectedState {
-                remote_freshness: RemoteFreshnessState::Error,
-                expected_paths: Some(manifest_expected_file_paths(&manifest)),
-            },
-            _ => RemoteExpectedState {
-                remote_freshness: RemoteFreshnessState::Unknown,
-                expected_paths: None,
-            },
-        },
     }
 }
 
@@ -308,7 +292,7 @@ fn emit_scan_progress(ctx: &OperationContext, progress: local_state::WalkProgres
         } => ctx.emitter.progress_metric(
             OperationStage::ScanningDisk,
             ProgressScope::InventoryEnumerate,
-            Some("Enumerating managed files".to_string()),
+            Some("Enumerating files".to_string()),
             ProgressMetric {
                 label: Some("Files".to_string()),
                 done: Some(files_matched),
@@ -322,8 +306,8 @@ fn emit_scan_progress(ctx: &OperationContext, progress: local_state::WalkProgres
         local_state::WalkProgress::Metadata {
             files_done,
             files_total,
-            bytes_done: _,
-            bytes_total: _,
+            bytes_done,
+            bytes_total,
         } => ctx.emitter.progress_metric(
             OperationStage::ScanningDisk,
             ProgressScope::InventoryMetadata,
@@ -334,7 +318,12 @@ fn emit_scan_progress(ctx: &OperationContext, progress: local_state::WalkProgres
                 total: Some(files_total),
                 unit: ProgressUnit::Files,
             },
-            None,
+            Some(ProgressMetric {
+                label: Some("Bytes".to_string()),
+                done: Some(bytes_done),
+                total: bytes_total,
+                unit: ProgressUnit::Bytes,
+            }),
             None,
             None,
         ),
@@ -342,41 +331,35 @@ fn emit_scan_progress(ctx: &OperationContext, progress: local_state::WalkProgres
 }
 
 fn emit_verify_progress(ctx: &OperationContext, progress: local_state::VerifyProgress) {
-    let local_state::VerifyProgress {
-        files_done,
-        files_total,
-        missing_count,
-        modified_count,
-    } = progress;
     ctx.emitter.progress_metric(
         OperationStage::VerifyingInventory,
         ProgressScope::InventoryVerify,
-        Some("Comparing tracked inventory against disk state".to_string()),
+        Some("Verifying managed files".to_string()),
         ProgressMetric {
             label: Some("Tracked files".to_string()),
-            done: Some(files_done),
-            total: Some(files_total),
+            done: Some(progress.files_done),
+            total: Some(progress.files_total),
             unit: ProgressUnit::Files,
         },
         Some(ProgressMetric {
             label: Some("Missing + modified".to_string()),
-            done: Some(missing_count.saturating_add(modified_count)),
-            total: Some(files_total),
+            done: Some(progress.missing_count + progress.modified_count),
+            total: Some(progress.files_total),
             unit: ProgressUnit::Files,
         }),
         None,
         None,
-    )
+    );
 }
 
 fn emit_verify_summary(ctx: &OperationContext, snapshot: &local_state::LocalInventorySnapshot) {
-    let files_total = snapshot.tracked_paths.len() as u64
-        + snapshot.missing_tracked_paths.len() as u64
-        + snapshot.modified_tracked_paths.len() as u64;
+    let files_total = snapshot.tracked_paths.len() as u64;
+    let problem_count =
+        (snapshot.missing_tracked_paths.len() + snapshot.modified_tracked_paths.len()) as u64;
     ctx.emitter.progress_metric(
         OperationStage::VerifyingInventory,
         ProgressScope::InventoryVerify,
-        Some("Comparing tracked inventory against disk state".to_string()),
+        Some("Verifying managed files".to_string()),
         ProgressMetric {
             label: Some("Tracked files".to_string()),
             done: Some(files_total),
@@ -385,28 +368,13 @@ fn emit_verify_summary(ctx: &OperationContext, snapshot: &local_state::LocalInve
         },
         Some(ProgressMetric {
             label: Some("Missing + modified".to_string()),
-            done: Some(
-                snapshot.missing_tracked_paths.len() as u64
-                    + snapshot.modified_tracked_paths.len() as u64,
-            ),
+            done: Some(problem_count),
             total: Some(files_total),
             unit: ProgressUnit::Files,
         }),
         None,
         None,
     );
-}
-
-fn is_hard_local_invalid_state(state: &LocalStateHealth) -> bool {
-    matches!(
-        state,
-        LocalStateHealth::MissingDestination
-            | LocalStateHealth::LocalStateMissing
-            | LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt
-    )
 }
 
 fn manifest_expected_file_paths(manifest: &fleet_manifest::DesiredManifest) -> BTreeSet<String> {
@@ -425,34 +393,36 @@ fn manifest_expected_file_paths(manifest: &fleet_manifest::DesiredManifest) -> B
 fn apply_expected_validation(
     assessment: &mut local_state::LocalStateAssessment,
     tracked_paths: &[String],
-    destination: &str,
     expected_paths: &BTreeSet<String>,
 ) {
-    let tracked_set = tracked_paths.iter().cloned().collect::<BTreeSet<_>>();
-    let expected_missing = expected_paths
-        .difference(&tracked_set)
-        .cloned()
-        .collect::<Vec<_>>();
-    let inventory_unexpected = tracked_paths
+    let tracked = tracked_paths
         .iter()
-        .filter(|rel| !expected_paths.contains(rel.as_str()))
-        .filter(|rel| {
-            !crate::support::prune_policy::is_protected_root_entry(
-                Path::new(destination),
-                Path::new(rel.as_str()),
-            )
-        })
+        .map(|path| fleet_domain::normalize_rel_slashes(path))
+        .collect::<BTreeSet<_>>();
+    let expected_missing = expected_paths
+        .iter()
+        .filter(|path| !tracked.contains(*path))
         .cloned()
         .collect::<Vec<_>>();
+
     let mut merged_unexpected = assessment
         .unexpected_paths
         .iter()
-        .map(|path| fleet_domain::normalize_rel_slashes(path))
-        .filter(|rel| !expected_paths.contains(rel))
+        .filter_map(|path| {
+            let normalized = fleet_domain::normalize_rel_slashes(path);
+            (!expected_paths.contains(&normalized)).then_some(path.clone())
+        })
         .collect::<Vec<_>>();
-    merged_unexpected.extend(inventory_unexpected);
+
+    merged_unexpected.extend(
+        tracked
+            .iter()
+            .filter(|path| !expected_paths.contains(*path))
+            .cloned(),
+    );
     merged_unexpected.sort();
     merged_unexpected.dedup();
+
     assessment.unexpected_paths = merged_unexpected;
     assessment.unexpected_count = assessment.unexpected_paths.len() as u64;
     assessment.expected_missing_count = expected_missing.len() as u64;
@@ -461,20 +431,25 @@ fn apply_expected_validation(
     }
 }
 
-fn invalid_report(
-    profile_id: &str,
-    local_health: LocalStateHealth,
-    remote_freshness: Option<RemoteFreshnessState>,
-) -> ProfileStateReport {
-    ProfileStateReport {
+fn invalid_report(profile_id: &str, local_health: LocalStateHealth) -> InventoryCheckReport {
+    InventoryCheckReport {
         profile_id: profile_id.to_string(),
         local_health,
-        remote_freshness,
         checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
         expected_missing_in_inventory_count: 0,
         inventory_unexpected_paths_count: 0,
         unexpected_delete_paths: Vec::new(),
     }
+}
+
+fn is_hard_local_invalid_state(local_health: &LocalStateHealth) -> bool {
+    matches!(
+        local_health,
+        LocalStateHealth::Blocked
+            | LocalStateHealth::InvalidProfile
+            | LocalStateHealth::ProbeFailed
+            | LocalStateHealth::InventoryCorrupt
+    )
 }
 
 fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {

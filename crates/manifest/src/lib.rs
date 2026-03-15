@@ -11,6 +11,7 @@ use tracing::{debug, debug_span, error};
 
 pub use flux_manifest::DesiredManifest;
 pub use swifty_repo::RepoFreshness as DesiredManifestFreshness;
+pub use swifty_repo::RepoProbeResult as DesiredRepoProbeResult;
 
 pub struct DesiredManifestLoadResult {
     pub manifest: DesiredManifest,
@@ -87,6 +88,16 @@ pub async fn load_desired_manifest_with_freshness(
         manifest,
         freshness,
     })
+}
+
+pub async fn probe_desired_manifest_freshness(
+    repo_url: &str,
+    repo_cache_dir: &Path,
+    downloads: &DownloadService,
+    sink: Option<DownloadEventSink>,
+) -> Result<DesiredRepoProbeResult> {
+    let store = swifty_repo::FsRepoCacheStore::new(repo_cache_dir.to_path_buf());
+    swifty_repo::probe_repo_freshness(repo_url, &store, downloads, sink).await
 }
 
 pub fn load_cached_desired_manifest(
