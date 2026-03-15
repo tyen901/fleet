@@ -66,7 +66,9 @@ impl Core {
     ) -> Result<InventoryCheckReport, ApiError> {
         match self.await_finished(session_id).await? {
             OperationOutput::CheckInventory(report) => Ok(report),
-            OperationOutput::CheckRepo(_) | OperationOutput::Sync(_) => Err(ApiError::new(
+            OperationOutput::CheckRepo(_)
+            | OperationOutput::Delete(_)
+            | OperationOutput::Sync(_) => Err(ApiError::new(
                 "internal",
                 "unexpected non-inventory-check result",
             )),

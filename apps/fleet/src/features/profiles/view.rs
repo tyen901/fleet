@@ -18,6 +18,7 @@ use crate::stores::toast_store::ToastStore;
 
 const ACTION_CHECK_REPO: &str = "check_repo";
 const ACTION_CHECK_INVENTORY: &str = "check_inventory";
+const ACTION_DELETE: &str = "delete";
 const ACTION_SYNC: &str = "sync";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -78,7 +79,12 @@ fn latest_inventory_refresh_at(profile_runtime: Option<&fleet_core::ProfileRunti
 fn active_inventory_refresh_tick(profile_runtime: Option<&fleet_core::ProfileRuntimeState>) -> u64 {
     profile_runtime
         .and_then(|runtime| runtime.active.as_ref())
-        .filter(|active| matches!(active.operation, fleet_core::OperationKind::Sync))
+        .filter(|active| {
+            matches!(
+                active.operation,
+                fleet_core::OperationKind::Sync | fleet_core::OperationKind::Delete
+            )
+        })
         .map(|active| active.updated_at_unix_ms / 1_000)
         .unwrap_or(0)
 }
@@ -165,16 +171,20 @@ pub fn ProfileView(id: String) -> Element {
     let repo_servers = profile_runtime
         .map(|runtime| runtime.repo_servers.clone())
         .unwrap_or_default();
-    let has_repo_source = !profile.source.trim().is_empty();
     let active_operation = profile_runtime
         .and_then(|runtime| runtime.active.as_ref())
         .map(|active| active.operation);
     let operation_active = active_operation.is_some();
     let navigation_locked = matches!(
         active_operation,
-        Some(fleet_core::OperationKind::Sync) | Some(fleet_core::OperationKind::CheckRepo)
+        Some(fleet_core::OperationKind::Sync)
+            | Some(fleet_core::OperationKind::Delete)
+            | Some(fleet_core::OperationKind::CheckRepo)
     );
-    let show_progress_view = matches!(active_operation, Some(fleet_core::OperationKind::Sync));
+    let show_progress_view = matches!(
+        active_operation,
+        Some(fleet_core::OperationKind::Sync) | Some(fleet_core::OperationKind::Delete)
+    );
     let cancel_session_id = profile_runtime
         .and_then(|runtime| runtime.active.as_ref())
         .map(|active| active.session_id);
@@ -221,7 +231,7 @@ pub fn ProfileView(id: String) -> Element {
     let show_unexpected_panel = show_unexpected_paths_panel(
         unexpected_path_count > 0,
         profile_status
-            .map(|status| status.actions.sync_running)
+            .map(|status| status.actions.delete_running)
             .unwrap_or(false),
     );
     let inventory_missing = profile_status
@@ -316,7 +326,7 @@ pub fn ProfileView(id: String) -> Element {
         None
     };
 
-    let on_sync_unexpected = {
+    let on_delete_unexpected = {
         let bridge = bridge.clone();
         let toasts = toasts.clone();
         let profile_id = profile_id.clone();
@@ -325,10 +335,10 @@ pub fn ProfileView(id: String) -> Element {
                 bridge.clone(),
                 toasts.clone(),
                 profile_id.clone(),
-                fleet_core::OperationKind::Sync,
-                "sync",
-                "start_sync_failed",
-                "Sync failed",
+                fleet_core::OperationKind::Delete,
+                ACTION_DELETE,
+                "start_delete_failed",
+                "Delete failed",
             );
         }
     };
@@ -612,24 +622,20 @@ pub fn ProfileView(id: String) -> Element {
                                             }
                                             div { class: "panel-row__control profile-page__issue-panel",
                                                 p { class: "profile-page__summary",
-                                                    if has_repo_source {
-                                                        "{unexpected_path_count} item(s) · Sync can reconcile and remove these automatically."
-                                                    } else {
-                                                        "{unexpected_path_count} item(s)"
-                                                    }
+                                                    "{unexpected_path_count} item(s) ready to delete from the managed folder."
                                                 }
                                                 Button {
                                                     variant: ButtonVariant::Danger,
                                                     size: ButtonSize::Md,
                                                     loading: profile_status
-                                                        .map(|status| status.actions.sync_running)
+                                                        .map(|status| status.actions.delete_running)
                                                         .unwrap_or(false),
                                                     disabled: !profile_status
-                                                        .map(|status| status.actions.sync_enabled)
+                                                        .map(|status| status.actions.delete_enabled)
                                                         .unwrap_or(false)
                                                         || operation_active,
-                                                    onclick: on_sync_unexpected,
-                                                    "Sync Unexpected Paths"
+                                                    onclick: on_delete_unexpected,
+                                                    "Delete Unexpected Paths"
                                                 }
                                                 ul { class: "profile-page__list",
                                                     for path in unexpected_path_preview {

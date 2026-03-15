@@ -5,7 +5,7 @@ use crate::operations::OperationError;
 use crate::support::locking::FileLockGuard;
 use crate::support::locking::{acquire_lock, check_lock_state, InventoryLockState};
 use crate::support::repo_cache::{commit_staged_repo_cache, prepare_staged_repo_cache};
-use fleet_domain::health::{InventoryCheckReport, RepoCheckFreshness, RepoCheckReport, SyncReport};
+use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport};
 use fleet_domain::{ProfileSourceKind, SyncProgress, ThroughputEstimator};
 use fleet_inventory::{Inventory, InventoryError};
 use flux_manifest::ManifestEntry;
@@ -481,7 +481,7 @@ async fn run_reconcile(
         })
 }
 
-async fn apply_deletes(
+pub(crate) async fn apply_deletes(
     ctx: &OperationContext,
     resolved: &ResolvedProfile,
     delete_paths: Vec<PathBuf>,
@@ -606,6 +606,10 @@ async fn assess_after_sync(
         None,
     )
     .map_err(map_inventory_error)?;
+    let cleanup = super::assess::manifest_cleanup_assessment(
+        &snapshot,
+        super::assess::load_cached_manifest(ctx).as_ref(),
+    );
     let repo_revision = match ctx.profile.validated_source_kind() {
         Ok(ProfileSourceKind::Http(repo_url)) => {
             swifty_repo::load_cached_repo_blocking(&resolved.paths.profile.repo_cache, repo_url)
@@ -615,14 +619,7 @@ async fn assess_after_sync(
         }
         Err(_) => None,
     };
-    let inventory = InventoryCheckReport {
-        local_health: snapshot.assessment.health,
-        profile_id: ctx.profile.id.clone(),
-        checked_at_unix_ms: snapshot.assessment.checked_at_unix_ms,
-        expected_missing_in_inventory_count: snapshot.assessment.expected_missing_count,
-        inventory_unexpected_paths_count: snapshot.assessment.unexpected_count,
-        unexpected_delete_paths: snapshot.assessment.unexpected_paths,
-    };
+    let inventory = super::assess::build_inventory_check_report(&snapshot, cleanup);
     let repo = RepoCheckReport {
         profile_id: ctx.profile.id.clone(),
         local_revision: repo_revision.clone(),
@@ -657,7 +654,7 @@ fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn map_inventory_error(err: InventoryError) -> anyhow::Error {
+pub(crate) fn map_inventory_error(err: InventoryError) -> anyhow::Error {
     match err {
         InventoryError::CorruptDatabase => anyhow::Error::new(OperationError::InventoryCorrupt),
         InventoryError::Locked => anyhow::Error::new(OperationError::InventoryLocked),
@@ -852,7 +849,7 @@ mod tests {
             None,
         )
         .expect("assess snapshot");
-        assert_eq!(snapshot.assessment.unexpected_count, 0);
+        assert!(snapshot.assessment.unexpected_paths.is_empty());
         assert_eq!(
             prepared_inventory
                 .inventory
