@@ -112,6 +112,7 @@ pub struct OperationOutcomeState {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
+    Deleting,
     Checking,
     UpdateAvailable,
     ReadyToPlay,
@@ -130,6 +131,7 @@ impl ProfileStatusHeadline {
     pub fn label(self) -> &'static str {
         match self {
             Self::Syncing => "Syncing",
+            Self::Deleting => "Deleting",
             Self::Checking => "Checking",
             Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
@@ -170,11 +172,13 @@ pub enum ProfileRecommendedAction {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
+    pub delete_enabled: bool,
     pub check_inventory_enabled: bool,
     pub check_repo_enabled: bool,
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
+    pub delete_running: bool,
     pub check_inventory_running: bool,
     pub check_repo_running: bool,
 }
@@ -273,6 +277,7 @@ impl ProfileStatusState {
             actions: ProfileActionAvailability {
                 check_inventory_enabled: true,
                 check_repo_enabled: true,
+                delete_enabled: false,
                 sync_enabled: true,
                 ..ProfileActionAvailability::default()
             },
@@ -365,6 +370,7 @@ fn derive_profile_status(
     let operation_active = active_operation.is_some();
 
     let sync_running = matches!(active_operation, Some(OperationKind::Sync));
+    let delete_running = matches!(active_operation, Some(OperationKind::Delete));
     let check_inventory_running = matches!(active_operation, Some(OperationKind::CheckInventory));
     let check_repo_running = matches!(active_operation, Some(OperationKind::CheckRepo));
     let can_run_actions = !operation_active;
@@ -415,6 +421,8 @@ fn derive_profile_status(
 
     let headline = if sync_running {
         ProfileStatusHeadline::Syncing
+    } else if delete_running {
+        ProfileStatusHeadline::Deleting
     } else if check_inventory_running || check_repo_running {
         ProfileStatusHeadline::Checking
     } else if has_error {
@@ -444,6 +452,7 @@ fn derive_profile_status(
         ProfileStatusHeadline::ReadyToPlay
         | ProfileStatusHeadline::InSync
         | ProfileStatusHeadline::SyncNotRequired
+        | ProfileStatusHeadline::Deleting
         | ProfileStatusHeadline::Checking
         | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
@@ -465,10 +474,12 @@ fn derive_profile_status(
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
+        delete_enabled: can_run_actions && unexpected_path_count > 0 && !hard_blocked,
         check_inventory_enabled: can_run_actions,
         check_repo_enabled: can_run_actions && !hard_blocked,
         cancel_enabled: operation_active,
         sync_running,
+        delete_running,
         check_inventory_running,
         check_repo_running,
     };
@@ -539,6 +550,14 @@ const CHECK_INVENTORY_PLAN: &[OperationStage] = &[
     OperationStage::VerifyingInventory,
     OperationStage::Finalizing,
 ];
+const DELETE_PLAN: &[OperationStage] = &[
+    OperationStage::Validating,
+    OperationStage::LoadingExpectedState,
+    OperationStage::ScanningDisk,
+    OperationStage::VerifyingInventory,
+    OperationStage::Pruning,
+    OperationStage::Finalizing,
+];
 const CHECK_REPO_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
@@ -558,6 +577,7 @@ pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
     match operation {
         OperationKind::CheckInventory => CHECK_INVENTORY_PLAN,
         OperationKind::CheckRepo => CHECK_REPO_PLAN,
+        OperationKind::Delete => DELETE_PLAN,
         OperationKind::Sync => SYNC_PLAN,
     }
 }

@@ -12,6 +12,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ManifestCleanupAssessment {
+    pub expected_missing_in_inventory_count: u64,
+    pub delete_candidates: Vec<String>,
+}
+
 pub(crate) async fn run_check_repo(mut ctx: OperationContext) -> anyhow::Result<OperationContext> {
     ctx.emitter.enter_stage(OperationStage::Validating);
     let repo_url = match ctx.profile.validated_source_kind() {
@@ -122,22 +128,16 @@ pub(crate) async fn run_check_inventory(
     emit_verify_summary(&ctx, &snapshot);
     ctx.emitter.exit_stage(OperationStage::VerifyingInventory);
 
-    let mut assessment = snapshot.assessment;
-    if !is_hard_local_invalid_state(&assessment.health) {
-        if let Some(expected_paths) = cached_expected.as_ref() {
-            apply_expected_validation(&mut assessment, &snapshot.tracked_paths, expected_paths);
-        }
-    }
+    let cleanup = if is_hard_local_invalid_state(&snapshot.assessment.health) {
+        ManifestCleanupAssessment::default()
+    } else {
+        manifest_cleanup_assessment(&snapshot, cached_expected.as_ref())
+    };
 
     ctx.emitter.enter_stage(OperationStage::Finalizing);
-    ctx.final_output = Some(OperationOutput::CheckInventory(InventoryCheckReport {
-        profile_id: assessment.profile_id,
-        local_health: assessment.health,
-        checked_at_unix_ms: assessment.checked_at_unix_ms,
-        expected_missing_in_inventory_count: assessment.expected_missing_count,
-        inventory_unexpected_paths_count: assessment.unexpected_count,
-        unexpected_delete_paths: assessment.unexpected_paths,
-    }));
+    ctx.final_output = Some(OperationOutput::CheckInventory(
+        build_inventory_check_report(&snapshot, cleanup),
+    ));
     ctx.emitter.exit_stage(OperationStage::Finalizing);
     Ok(ctx)
 }
@@ -159,7 +159,7 @@ fn resolve_profile(ctx: &OperationContext) -> Result<ResolvedProfile, LocalState
     })
 }
 
-fn load_cached_manifest(ctx: &OperationContext) -> Option<BTreeSet<String>> {
+pub(crate) fn load_cached_manifest(ctx: &OperationContext) -> Option<BTreeSet<String>> {
     let resolved = ctx.resolved.as_ref()?;
     let ProfileSourceKind::Http(repo_url) = ctx.profile.validated_source_kind().ok()?;
     match fleet_manifest::load_cached_desired_manifest(repo_url, &resolved.paths.profile.repo_cache)
@@ -169,7 +169,7 @@ fn load_cached_manifest(ctx: &OperationContext) -> Option<BTreeSet<String>> {
     }
 }
 
-async fn evaluate_local_state_snapshot(
+pub(crate) async fn evaluate_local_state_snapshot(
     ctx: &OperationContext,
     resolved: &ResolvedProfile,
 ) -> anyhow::Result<local_state::LocalInventorySnapshot> {
@@ -202,8 +202,6 @@ async fn evaluate_local_state_snapshot(
                                 profile_id: ctx.profile.id.clone(),
                                 health: LocalStateHealth::InventoryCorrupt,
                                 checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-                                expected_missing_count: 0,
-                                unexpected_count: 0,
                                 unexpected_paths: Vec::new(),
                             },
                             tracked_paths: Vec::new(),
@@ -245,8 +243,6 @@ async fn evaluate_local_state_snapshot(
                 profile_id,
                 health,
                 checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-                expected_missing_count,
-                unexpected_count,
                 unexpected_paths: audit.unexpected_paths,
             },
             tracked_paths: audit.valid_finalized,
@@ -268,8 +264,6 @@ async fn evaluate_local_state_snapshot(
                                 profile_id: ctx.profile.id.clone(),
                                 health: LocalStateHealth::InventoryCorrupt,
                                 checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-                                expected_missing_count: 0,
-                                unexpected_count: 0,
                                 unexpected_paths: Vec::new(),
                             },
                             tracked_paths: Vec::new(),
@@ -390,22 +384,34 @@ fn manifest_expected_file_paths(manifest: &fleet_manifest::DesiredManifest) -> B
         .collect()
 }
 
-fn apply_expected_validation(
-    assessment: &mut local_state::LocalStateAssessment,
-    tracked_paths: &[String],
-    expected_paths: &BTreeSet<String>,
-) {
-    let tracked = tracked_paths
+pub(crate) fn manifest_cleanup_assessment(
+    snapshot: &local_state::LocalInventorySnapshot,
+    expected_paths: Option<&BTreeSet<String>>,
+) -> ManifestCleanupAssessment {
+    let Some(expected_paths) = expected_paths else {
+        return ManifestCleanupAssessment::default();
+    };
+    let inventory_paths = snapshot
+        .tracked_paths
         .iter()
+        .chain(snapshot.missing_tracked_paths.iter())
+        .chain(snapshot.modified_tracked_paths.iter())
+        .map(|path| fleet_domain::normalize_rel_slashes(path))
+        .collect::<BTreeSet<_>>();
+    let inventory_present_paths = snapshot
+        .tracked_paths
+        .iter()
+        .chain(snapshot.modified_tracked_paths.iter())
         .map(|path| fleet_domain::normalize_rel_slashes(path))
         .collect::<BTreeSet<_>>();
     let expected_missing = expected_paths
         .iter()
-        .filter(|path| !tracked.contains(*path))
+        .filter(|path| !inventory_paths.contains(*path))
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut merged_unexpected = assessment
+    let mut delete_candidates = snapshot
+        .assessment
         .unexpected_paths
         .iter()
         .filter_map(|path| {
@@ -414,20 +420,40 @@ fn apply_expected_validation(
         })
         .collect::<Vec<_>>();
 
-    merged_unexpected.extend(
-        tracked
+    delete_candidates.extend(
+        inventory_present_paths
             .iter()
             .filter(|path| !expected_paths.contains(*path))
             .cloned(),
     );
-    merged_unexpected.sort();
-    merged_unexpected.dedup();
+    delete_candidates.sort();
+    delete_candidates.dedup();
 
-    assessment.unexpected_paths = merged_unexpected;
-    assessment.unexpected_count = assessment.unexpected_paths.len() as u64;
-    assessment.expected_missing_count = expected_missing.len() as u64;
-    if assessment.expected_missing_count > 0 || assessment.unexpected_count > 0 {
-        assessment.health = LocalStateHealth::LocalDrift;
+    ManifestCleanupAssessment {
+        expected_missing_in_inventory_count: expected_missing.len() as u64,
+        delete_candidates,
+    }
+}
+
+pub(crate) fn build_inventory_check_report(
+    snapshot: &local_state::LocalInventorySnapshot,
+    cleanup: ManifestCleanupAssessment,
+) -> InventoryCheckReport {
+    let mut local_health = snapshot.assessment.health.clone();
+    if !is_hard_local_invalid_state(&local_health)
+        && (cleanup.expected_missing_in_inventory_count > 0
+            || !cleanup.delete_candidates.is_empty())
+    {
+        local_health = LocalStateHealth::LocalDrift;
+    }
+
+    InventoryCheckReport {
+        profile_id: snapshot.assessment.profile_id.clone(),
+        local_health,
+        checked_at_unix_ms: snapshot.assessment.checked_at_unix_ms,
+        expected_missing_in_inventory_count: cleanup.expected_missing_in_inventory_count,
+        inventory_unexpected_paths_count: cleanup.delete_candidates.len() as u64,
+        unexpected_delete_paths: cleanup.delete_candidates,
     }
 }
 
@@ -452,9 +478,104 @@ fn is_hard_local_invalid_state(local_health: &LocalStateHealth) -> bool {
     )
 }
 
-fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {
+pub(crate) fn ensure_not_canceled(ctx: &OperationContext) -> anyhow::Result<()> {
     if ctx.cancel.is_cancelled() {
         return Err(anyhow::Error::new(OperationError::Canceled));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_inventory_check_report, manifest_cleanup_assessment, ManifestCleanupAssessment,
+    };
+    use crate::local_state::{LocalInventorySnapshot, LocalStateAssessment};
+    use fleet_domain::LocalStateHealth;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn manifest_cleanup_keeps_preseed_candidates_and_deletes_stale_tracked_paths() {
+        let assessment = LocalStateAssessment {
+            profile_id: "p1".to_string(),
+            health: LocalStateHealth::LocalDrift,
+            checked_at_unix_ms: 1,
+            unexpected_paths: vec![
+                "mods/preseeded.pbo".to_string(),
+                "mods/rogue.pbo".to_string(),
+            ],
+        };
+        let snapshot = LocalInventorySnapshot {
+            assessment: assessment.clone(),
+            tracked_paths: vec!["mods/keep.pbo".to_string()],
+            missing_tracked_paths: Vec::new(),
+            modified_tracked_paths: vec!["mods/stale-modified.pbo".to_string()],
+        };
+        let expected_paths = BTreeSet::from([
+            "mods/keep.pbo".to_string(),
+            "mods/preseeded.pbo".to_string(),
+        ]);
+
+        let cleanup = manifest_cleanup_assessment(&snapshot, Some(&expected_paths));
+
+        assert_eq!(cleanup.expected_missing_in_inventory_count, 1);
+        assert_eq!(
+            cleanup.delete_candidates,
+            vec![
+                "mods/rogue.pbo".to_string(),
+                "mods/stale-modified.pbo".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_cleanup_without_cache_is_empty() {
+        let snapshot = LocalInventorySnapshot {
+            assessment: LocalStateAssessment {
+                profile_id: "p1".to_string(),
+                health: LocalStateHealth::LocalDrift,
+                checked_at_unix_ms: 1,
+                unexpected_paths: vec!["mods/rogue.pbo".to_string()],
+            },
+            tracked_paths: Vec::new(),
+            missing_tracked_paths: Vec::new(),
+            modified_tracked_paths: Vec::new(),
+        };
+
+        assert_eq!(
+            manifest_cleanup_assessment(&snapshot, None),
+            ManifestCleanupAssessment::default()
+        );
+    }
+
+    #[test]
+    fn report_uses_cleanup_candidates_instead_of_raw_untracked_paths() {
+        let snapshot = LocalInventorySnapshot {
+            assessment: LocalStateAssessment {
+                profile_id: "p1".to_string(),
+                health: LocalStateHealth::Ready,
+                checked_at_unix_ms: 1,
+                unexpected_paths: Vec::new(),
+            },
+            tracked_paths: vec!["mods/keep.pbo".to_string()],
+            missing_tracked_paths: Vec::new(),
+            modified_tracked_paths: Vec::new(),
+        };
+
+        let report = build_inventory_check_report(
+            &snapshot,
+            ManifestCleanupAssessment {
+                expected_missing_in_inventory_count: 1,
+                delete_candidates: vec!["mods/stale.pbo".to_string()],
+            },
+        );
+
+        assert_eq!(report.local_health, LocalStateHealth::LocalDrift);
+        assert_eq!(report.expected_missing_in_inventory_count, 1);
+        assert_eq!(report.inventory_unexpected_paths_count, 1);
+        assert_eq!(
+            report.unexpected_delete_paths,
+            vec!["mods/stale.pbo".to_string()]
+        );
+    }
 }

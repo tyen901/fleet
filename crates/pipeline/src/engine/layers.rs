@@ -10,6 +10,7 @@ pub fn operation_service(
         match operation {
             OperationKind::CheckRepo => operations::run_check_repo(ctx).await,
             OperationKind::CheckInventory => operations::run_check_inventory(ctx).await,
+            OperationKind::Delete => operations::run_delete(ctx).await,
             OperationKind::Sync => operations::run_sync(ctx).await,
         }
     })

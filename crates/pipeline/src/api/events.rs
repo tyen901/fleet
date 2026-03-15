@@ -107,5 +107,6 @@ pub struct ProgressMetric {
 pub enum OperationOutput {
     CheckRepo(RepoCheckReport),
     CheckInventory(InventoryCheckReport),
+    Delete(InventoryCheckReport),
     Sync(SyncReport),
 }

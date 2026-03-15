@@ -1,10 +1,12 @@
 mod assess;
+mod delete;
 mod error;
 mod sync;
 
 use fleet_domain::ApiError;
 
 pub(crate) use assess::{run_check_inventory, run_check_repo};
+pub(crate) use delete::run_delete;
 pub(crate) use error::{find_operation_error, OperationError};
 pub(crate) use sync::run_sync;
 

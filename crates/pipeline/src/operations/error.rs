@@ -4,6 +4,8 @@ use fleet_domain::ApiError;
 pub(crate) enum OperationError {
     #[error("canceled")]
     Canceled,
+    #[error("Local swifty manifest cache is missing.")]
+    MissingCachedManifest,
     #[error("Local inventory database is corrupted.")]
     InventoryCorrupt,
     #[error("inventory lock is currently held by another running operation")]
@@ -18,6 +20,10 @@ impl OperationError {
     pub(crate) fn api_error(&self) -> ApiError {
         match self {
             Self::Canceled => ApiError::new("canceled", "canceled"),
+            Self::MissingCachedManifest => ApiError::new(
+                "missing_cached_manifest",
+                "Local swifty manifest cache is missing.",
+            ),
             Self::InventoryCorrupt => ApiError::new(
                 "inventory_corrupt",
                 "Local inventory database is corrupted.",

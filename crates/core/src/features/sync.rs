@@ -166,5 +166,6 @@ fn operation_start_label(operation: OperationKind) -> &'static str {
         OperationKind::Sync => "start_sync",
         OperationKind::CheckRepo => "start_check_repo",
         OperationKind::CheckInventory => "start_check_inventory",
+        OperationKind::Delete => "start_delete",
     }
 }
