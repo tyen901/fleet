@@ -89,7 +89,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        cargo binstall dioxus-cli --version 0.7.3 --no-confirm --force
+        cargo binstall dioxus-cli --version 0.7.9 --no-confirm --force
         dx --version
 
     - name: dx build (Dioxus desktop)
