@@ -10,32 +10,9 @@ pub enum SyncPhase {
     LoadingManifest,
     Planning,
     Syncing,
-    Deleting,
+    CleaningUp,
     Finalizing,
     Done,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Type)]
-pub struct SyncProgress {
-    pub bytes_done: Option<u64>,
-    pub bytes_total: Option<u64>,
-    pub bytes_per_sec: Option<u64>,
-    pub eta_seconds: Option<u64>,
-
-    // Plan / completion
-    pub files_total: Option<u64>,
-    pub files_finalized: Option<u64>,
-
-    // Extra (optional but useful)
-    pub bytes_downloaded: Option<u64>,
-
-    // Prune/delete work
-    pub prune_entries_total: Option<u64>,
-    pub prune_entries_done: Option<u64>,
-    pub prune_files_total: Option<u64>,
-    pub prune_files_done: Option<u64>,
-    pub prune_bytes_total: Option<u64>,
-    pub prune_bytes_done: Option<u64>,
 }
 
 /// Summary returned to callers (CLI/UI/runtime).

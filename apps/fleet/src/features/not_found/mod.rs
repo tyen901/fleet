@@ -1,4 +1,4 @@
-use crate::style::{Button, ButtonSize, ButtonVariant};
+use crate::style::{Button, ButtonVariant};
 use dioxus::prelude::*;
 use dioxus_router::use_navigator;
 
@@ -9,18 +9,17 @@ pub fn PageNotFound(route: Vec<String>) -> Element {
     let nav = use_navigator();
 
     rsx! {
-        div { class: "page",
-            div { class: "page__inner stack-sm",
-                p { class: "page__muted", "That route doesn't exist." }
-                pre { class: "code", "attempted: {route:?}" }
-                div { class: "form-footer",
+        div { class: "page-frame",
+            div { class: "page-frame__body",
+                div { class: "page__inner stack-sm",
+                    p { class: "page__muted", "That route doesn't exist." }
+                    pre { class: "code", "attempted: {route:?}" }
                     Button {
-                        variant: ButtonVariant::Secondary,
-                        size: ButtonSize::Lg,
+                        variant: ButtonVariant::Primary,
                         onclick: move |_| {
-                            let _ = nav.push(Route::Home {});
+                            let _ = nav.push(Route::Profiles {});
                         },
-                        "Back to Home"
+                        "Back to profiles"
                     }
                 }
             }

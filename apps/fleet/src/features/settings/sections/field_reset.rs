@@ -1,44 +1,35 @@
-use crate::style::{AppIcon, Button, ButtonSize, ButtonVariant};
+use crate::style::{Button, ButtonVariant};
 use dioxus::prelude::*;
 use fleet_core::SettingsField;
-use icondata::BsArrowClockwise;
-
-use crate::services::bridge::FleetBridge;
-use crate::stores::toast_store::ToastStore;
 
 #[derive(Props, Clone, PartialEq)]
-pub(crate) struct PanelFieldResetButtonProps {
+pub(crate) struct FieldResetButtonProps {
     pub field: SettingsField,
     pub show: bool,
+    pub on_reset: EventHandler<SettingsField>,
 }
 
 #[component]
-pub(crate) fn PanelFieldResetButton(props: PanelFieldResetButtonProps) -> Element {
-    if !props.show || matches!(props.field, SettingsField::Arma3GameDir) {
+pub(crate) fn FieldResetButton(props: FieldResetButtonProps) -> Element {
+    if matches!(props.field, SettingsField::Arma3GameDir) {
         return rsx! {};
     }
 
-    let bridge = use_context::<FleetBridge>();
-    let toasts = use_context::<ToastStore>();
     let field = props.field;
+    let class = if props.show {
+        "field-row__control-reset field-reset"
+    } else {
+        "field-row__control-reset field-reset field-reset--hidden"
+    };
 
     rsx! {
-        div { class: "panel-row__control-reset panel-field-reset",
+        div {
+            class,
+            aria_hidden: if props.show { "false" } else { "true" },
             Button {
-                variant: ButtonVariant::Secondary,
-                size: ButtonSize::Sm,
-                icon: Some(rsx! {
-                    AppIcon { icon: BsArrowClockwise }
-                }),
-                onclick: move |_| {
-                    let bridge = bridge.clone();
-                    let toasts = toasts.clone();
-                    spawn(async move {
-                        if let Err(err) = bridge.core().settings_reset_field(field).await {
-                            toasts.push_api_error("Reset setting", &err);
-                        }
-                    });
-                },
+                variant: ButtonVariant::Ghost,
+                disabled: !props.show,
+                onclick: move |_| props.on_reset.call(field),
                 "Reset"
             }
         }

@@ -4,7 +4,6 @@ use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::{Toast, ToastKind, ToastStore};
 use crate::stores::toast_view::ToastViewport;
 use crate::stores::update_store::{check_for_updates_status, AppUpdateStatus, UpdateStore};
-use crate::style::ThemeRoot;
 use dioxus::prelude::*;
 use fleet_core::{OperationKind, OperationTerminalStatus};
 use tracing::{error, warn};
@@ -50,7 +49,10 @@ pub fn AppRoot() -> Element {
                 let Some(info) = runtime.last_operation.as_ref() else {
                     continue;
                 };
-                if info.operation != OperationKind::Sync {
+                if !matches!(
+                    info.operation,
+                    OperationKind::Sync | OperationKind::FullSync
+                ) {
                     continue;
                 }
                 if latest
@@ -180,26 +182,24 @@ pub fn AppRoot() -> Element {
             }
 
             startup_update_check_dispatched.set(true);
-            if !snapshot.settings.ui.onboarding_completed
-                || !snapshot.settings.updates.auto_check_on_startup
-            {
+            if !snapshot.settings.updates.auto_check_on_startup {
+                return;
+            }
+            if !crate::services::updates::current_build_allows_update_checks() {
                 return;
             }
 
             update_status.set(AppUpdateStatus::Checking);
 
-            let channel = snapshot.settings.updates.release_channel;
             spawn(async move {
-                let status = check_for_updates_status(channel).await;
+                let status = check_for_updates_status().await;
                 update_status.set(status);
             });
         });
     }
 
-    let theme_mode = (app_state)().settings.appearance.theme_mode;
-
     rsx! {
-        ThemeRoot { theme: theme_mode,
+        div { class: "app-root",
             dioxus_router::Router::<Route> {}
             ToastViewport {}
         }

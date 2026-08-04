@@ -1,14 +1,10 @@
+mod support;
+
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-const MIN_REPO_JSON: &str = r#"{"repoName":"test-pack","checksum":"0000000000000000000000000000000000000000","requiredMods":[],"optionalMods":[]}"#;
+use support::swifty_repo_server::ExampleSwiftyRepoServer;
 
 fn unique_suffix() -> String {
     let nanos = SystemTime::now()
@@ -61,58 +57,7 @@ fn smoke_test_root() -> PathBuf {
         .join("smoke_inventory_tests")
 }
 
-struct RepoServer {
-    url: String,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl RepoServer {
-    fn start() -> std::io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_thread = Arc::clone(&stop);
-        let body = MIN_REPO_JSON.as_bytes().to_vec();
-        let handle = thread::spawn(move || {
-            while !stop_for_thread.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut req_buf = [0u8; 1024];
-                        let _ = stream.read(&mut req_buf);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            MIN_REPO_JSON
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Ok(Self {
-            url: format!("http://{addr}/repo.json"),
-            stop,
-            handle: Some(handle),
-        })
-    }
-
-    fn shutdown(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-fn run_smoke_inventory_sync_flow(profile_id: &str) {
+fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     let suffix = unique_suffix();
     let run_root = smoke_test_root().join(format!("fleet_run_{suffix}"));
     let dest_root = run_root.join("dest");
@@ -121,8 +66,15 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
 
     fs::create_dir_all(&run_root).expect("create run root");
     fs::create_dir_all(&dest_root).expect("create dest root");
+    fs::create_dir_all(&config_root).expect("create config root");
+    fs::write(
+        config_root.join("settings.json"),
+        r#"{"auto_assess_on_startup":false}"#,
+    )
+    .expect("write test settings");
 
-    let server = RepoServer::start().expect("spawn repo server");
+    let server = ExampleSwiftyRepoServer::start().expect("spawn repo server");
+    let repo_url = server.repo_url();
 
     let bin = bin_path();
     let envs = [
@@ -138,7 +90,7 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
             profile_id,
             "Smoke Test",
             "--source",
-            &server.url,
+            &repo_url,
             "--dest",
             dest_root.to_str().expect("dest path"),
         ],
@@ -151,22 +103,36 @@ fn run_smoke_inventory_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("repo_check:") && out.contains("inventory_check:"),
+        out.contains("repo_check:")
+            && out.contains("inventory_check:")
+            && out.contains("local_health: LocalDrift")
+            && out.contains("expected_missing_in_inventory: 1"),
         "expected profile check output, got: {out}"
     );
 
-    run_cmd(&bin, &["sync", profile_id], &envs);
+    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
+
+    let synced_file = dest_root.join(server.example_file_target_path());
+    assert_eq!(
+        fs::read(&synced_file).expect("read synced file"),
+        server.example_file_bytes()
+    );
+
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("local_health: Ready") && out.contains("expected_missing_in_inventory: 0"),
+        "expected ready profile check output, got: {out}"
+    );
 
     let profile_state_root = config_root.join("profile_state");
     let profile_state_dir = profile_state_root.join(fleet_domain::profile_state_key(profile_id));
     let inventory_db = profile_state_dir.join("inventory.db");
     assert!(inventory_db.exists(), "inventory db missing");
 
-    server.shutdown();
     let _ = fs::remove_dir_all(run_root);
 }
 
 #[test]
-fn smoke_inventory_sync_flow_remote_repo_url() {
-    run_smoke_inventory_sync_flow("smoke-test-remote");
+fn check_then_sync_with_local_swifty_repo_server() {
+    run_local_swifty_repo_sync_flow("smoke-test-remote");
 }

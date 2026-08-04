@@ -4,10 +4,9 @@ use dioxus_router::Routable;
 use crate::app::shell::ShellLayout;
 use crate::features::{
     boot::Boot,
-    home::Home,
     not_found::PageNotFound,
     onboarding::Onboarding,
-    profiles::{new::NewProfile, ProfileEdit, ProfileView},
+    profiles::{list::Profiles, new::NewProfile, view::ProfileView},
     settings::Settings,
 };
 
@@ -18,14 +17,12 @@ pub enum Route {
     Boot {},
 
     #[layout(ShellLayout)]
-        #[route("/home")]
-        Home {},
+        #[route("/profiles")]
+        Profiles {},
         #[route("/profiles/new")]
         NewProfile {},
         #[route("/profiles/:id")]
         ProfileView { id: String },
-        #[route("/profiles/:id/edit")]
-        ProfileEdit { id: String },
         #[route("/settings")]
         Settings {},
     #[end_layout]

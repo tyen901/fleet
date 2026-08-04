@@ -41,6 +41,8 @@ pub struct Profile {
     pub swifty_repo_revision: String,
     #[serde(default)]
     pub launch_params: String,
+    #[serde(default)]
+    pub additional_mod_folders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
@@ -198,9 +200,9 @@ impl Arma3LaunchMethod {
 
     pub fn display_label(self) -> &'static str {
         match self {
-            Arma3LaunchMethod::Arma3Exe => "arma3 exe",
-            Arma3LaunchMethod::Steam => "Steam (Native)",
-            Arma3LaunchMethod::Custom => "Custom Command",
+            Arma3LaunchMethod::Arma3Exe => "Arma 3 executable",
+            Arma3LaunchMethod::Steam => "Steam",
+            Arma3LaunchMethod::Custom => "Custom command",
         }
     }
 }
@@ -246,133 +248,6 @@ fn default_arma3_custom_launch_template() -> String {
 }
 
 pub const DEFAULT_ARMA3_ARGS: &str = "-noPause -noSplash -skipIntro -noLauncher";
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "lowercase")]
-pub enum ThemeMode {
-    Pluto,
-    Mercury,
-    Mars,
-    #[default]
-    Saturn,
-    Neptune,
-    Earth,
-}
-
-impl ThemeMode {
-    pub const ALL: [Self; 6] = [
-        ThemeMode::Pluto,
-        ThemeMode::Mercury,
-        ThemeMode::Mars,
-        ThemeMode::Saturn,
-        ThemeMode::Neptune,
-        ThemeMode::Earth,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ThemeMode::Pluto => "pluto",
-            ThemeMode::Mercury => "mercury",
-            ThemeMode::Mars => "mars",
-            ThemeMode::Saturn => "saturn",
-            ThemeMode::Neptune => "neptune",
-            ThemeMode::Earth => "earth",
-        }
-    }
-
-    pub fn display_label(self) -> &'static str {
-        match self {
-            ThemeMode::Pluto => "Pluto",
-            ThemeMode::Mercury => "Mercury",
-            ThemeMode::Mars => "Mars",
-            ThemeMode::Saturn => "Saturn",
-            ThemeMode::Neptune => "Neptune",
-            ThemeMode::Earth => "Earth",
-        }
-    }
-
-    pub fn next(self) -> Self {
-        let idx = Self::ALL
-            .iter()
-            .position(|theme| *theme == self)
-            .unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
-    }
-}
-
-impl FromStr for ThemeMode {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "pluto" => Ok(ThemeMode::Pluto),
-            "mercury" => Ok(ThemeMode::Mercury),
-            "mars" => Ok(ThemeMode::Mars),
-            "saturn" => Ok(ThemeMode::Saturn),
-            "neptune" => Ok(ThemeMode::Neptune),
-            "earth" => Ok(ThemeMode::Earth),
-            _ => Err(()),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ThemeMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Ok(raw.parse::<ThemeMode>().unwrap_or_default())
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Type)]
-#[serde(rename_all = "lowercase")]
-pub enum ReleaseChannel {
-    #[default]
-    Stable,
-    Dev,
-}
-
-impl ReleaseChannel {
-    pub const ALL: [Self; 2] = [ReleaseChannel::Stable, ReleaseChannel::Dev];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ReleaseChannel::Stable => "stable",
-            ReleaseChannel::Dev => "dev",
-        }
-    }
-
-    pub fn display_label(self) -> &'static str {
-        match self {
-            ReleaseChannel::Stable => "Stable",
-            ReleaseChannel::Dev => "Dev",
-        }
-    }
-}
-
-impl FromStr for ReleaseChannel {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "stable" => Ok(ReleaseChannel::Stable),
-            "dev" => Ok(ReleaseChannel::Dev),
-            _ => Err(()),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for ReleaseChannel {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        Ok(raw.parse::<ReleaseChannel>().unwrap_or_default())
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
 pub enum TelemetryPreference {
@@ -429,12 +304,6 @@ impl<'de> Deserialize<'de> for TelemetryPreference {
         };
         Ok(parsed)
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
-pub struct AppearanceSettings {
-    #[serde(default)]
-    pub theme_mode: ThemeMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -525,15 +394,12 @@ pub struct UpdateSettings {
     /// If true, automatically check for Fleet app updates once after app startup.
     #[serde(default = "default_true")]
     pub auto_check_on_startup: bool,
-    #[serde(default)]
-    pub release_channel: ReleaseChannel,
 }
 
 impl Default for UpdateSettings {
     fn default() -> Self {
         Self {
             auto_check_on_startup: true,
-            release_channel: ReleaseChannel::Stable,
         }
     }
 }
@@ -555,8 +421,6 @@ impl Default for SyncSettings {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 pub struct AppSettings {
-    #[serde(flatten)]
-    pub appearance: AppearanceSettings,
     #[serde(flatten)]
     pub arma3: Arma3Settings,
     #[serde(flatten)]
