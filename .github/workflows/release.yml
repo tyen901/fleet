@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build and Package
         id: build
@@ -46,7 +46,7 @@ jobs:
           private_deps_token: ${{ secrets.FLEET_PRIVATE_DEPS_TOKEN }}
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: releases-${{ matrix.target }}
           path: Releases
@@ -58,16 +58,17 @@ jobs:
     needs: build
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: releases-*
           path: Releases
           merge-multiple: true
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-dev') }}
           overwrite_files: true
           files: |
             Releases/fleet-*.nupkg

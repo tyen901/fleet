@@ -3,11 +3,19 @@ use directories::ProjectDirs;
 use std::io::LineWriter;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::time::UtcTime;
 use tracing_subscriber::prelude::*;
 
 static LOG_INITIALIZED: OnceLock<()> = OnceLock::new();
+
+const TAO_WINDOWS_EVENT_LOOP_TARGET: &str = "tao::platform_impl::platform::event_loop::runner";
+
+fn target_filter(level: tracing::Level) -> Targets {
+    Targets::new()
+        .with_default(LevelFilter::from_level(level))
+        .with_target(TAO_WINDOWS_EVENT_LOOP_TARGET, LevelFilter::ERROR)
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct LoggingConfig {
@@ -57,9 +65,13 @@ pub fn init(config: LoggingConfig) -> anyhow::Result<()> {
         .compact();
 
     let stdout_layer = tracing_subscriber::fmt::layer().compact();
+    // Tao's Windows runner repairs out-of-order lifecycle boundaries before logging its
+    // diagnostic warnings. Dioxus owns that event loop, so Fleet cannot act on those messages.
+    // Keep errors from the runner while preventing the repaired transitions from flooding logs.
+    let target_filter = target_filter(level);
 
     tracing_subscriber::registry()
-        .with(LevelFilter::from_level(level))
+        .with(target_filter)
         .with(file_layer)
         .with(stdout_layer)
         .with(sentry::integrations::tracing::layer())
@@ -89,5 +101,19 @@ fn prune_old_logs(log_dir: &std::path::Path) {
         if modified < cutoff {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{target_filter, TAO_WINDOWS_EVENT_LOOP_TARGET};
+
+    #[test]
+    fn tao_windows_runner_warnings_are_filtered_without_hiding_errors() {
+        let filter = target_filter(tracing::Level::INFO);
+
+        assert!(!filter.would_enable(TAO_WINDOWS_EVENT_LOOP_TARGET, &tracing::Level::WARN));
+        assert!(filter.would_enable(TAO_WINDOWS_EVENT_LOOP_TARGET, &tracing::Level::ERROR));
+        assert!(filter.would_enable("fleet_core", &tracing::Level::INFO));
     }
 }

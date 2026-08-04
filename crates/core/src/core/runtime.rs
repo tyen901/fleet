@@ -1,12 +1,7 @@
-use super::operation_scheduler::{dispatch_auto_check, AutoCheckCoalescer};
-use super::state_projection::{
-    apply_event, should_refresh_profile_inventory_metrics, should_refresh_profile_repo_cache,
-};
-use super::{publish_state, Core};
+use super::Core;
 use crate::state::AppState;
 use crate::storage::config_root_dir;
 use std::collections::BTreeMap;
-use tokio::sync::broadcast;
 use tracing::warn;
 
 pub(crate) fn spawn_threaded(core: Core) {
@@ -15,22 +10,15 @@ pub(crate) fn spawn_threaded(core: Core) {
             .enable_all()
             .build()
             .expect("tokio runtime");
-
-        rt.block_on(async move {
-            run_core_loop(core).await;
-        });
+        rt.block_on(async move { run_core_loop(core).await });
     });
 }
 
 pub(crate) fn spawn_in_current(core: Core) {
-    tokio::spawn(async move {
-        run_core_loop(core).await;
-    });
+    tokio::spawn(async move { run_core_loop(core).await });
 }
 
 async fn run_core_loop(core: Core) {
-    let mut auto_check = AutoCheckCoalescer::default();
-
     let initial = match load_initial_state(&core).await {
         Ok(state) => state,
         Err(err) => {
@@ -39,47 +27,40 @@ async fn run_core_loop(core: Core) {
         }
     };
     let profile_ids: Vec<_> = initial.profiles.keys().cloned().collect();
-    let auto_check_on_startup =
-        initial.settings.startup.auto_assess_on_startup && initial.settings.ui.onboarding_completed;
+    let auto_check_on_startup = initial.settings.startup.auto_assess_on_startup;
     core.replace_state(initial);
+
     for profile_id in &profile_ids {
         core.spawn_profile_repo_cache_refresh(profile_id.clone(), false);
-        core.spawn_profile_inventory_metrics_refresh(profile_id.clone());
         if auto_check_on_startup {
-            auto_check.enqueue(profile_id, fleet_domain::health::OperationKind::CheckRepo);
-            auto_check.enqueue(
-                profile_id,
-                fleet_domain::health::OperationKind::CheckInventory,
-            );
+            let core_for_checks = core.clone();
+            let profile_id_for_checks = profile_id.clone();
+            tokio::spawn(async move {
+                if let Ok(repo_session) = core_for_checks
+                    .start_operation(
+                        profile_id_for_checks.clone(),
+                        fleet_domain::health::OperationKind::CheckRepo,
+                    )
+                    .await
+                {
+                    let _ = core_for_checks.await_finished(repo_session).await;
+                }
+
+                if let Ok(inventory_session) = core_for_checks
+                    .start_operation(
+                        profile_id_for_checks,
+                        fleet_domain::health::OperationKind::CheckInventory,
+                    )
+                    .await
+                {
+                    let _ = core_for_checks.await_finished(inventory_session).await;
+                }
+            });
         }
     }
-    dispatch_auto_check(&core, &mut auto_check).await;
 
-    let mut rx = core.pipeline().subscribe();
-
-    loop {
-        let ev = match rx.recv().await {
-            Ok(ev) => ev,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => break,
-        };
-
-        let now = ev.timestamp_ms;
-        {
-            let mut guard = core.inner.state.lock().unwrap();
-            apply_event(&mut guard, &ev, now);
-            auto_check.observe_event(&ev);
-            publish_state(&mut guard, &core.inner.state_tx);
-        }
-
-        if should_refresh_profile_repo_cache(&ev) {
-            core.spawn_profile_repo_cache_refresh(ev.profile_id.clone(), true);
-        }
-        if should_refresh_profile_inventory_metrics(&ev) {
-            core.spawn_profile_inventory_metrics_refresh(ev.profile_id.clone());
-        }
-        dispatch_auto_check(&core, &mut auto_check).await;
-    }
+    // Keep the core Tokio runtime alive for background work spawned above.
+    std::future::pending::<()>().await;
 }
 
 async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
@@ -97,7 +78,7 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
 
     let now = fleet_domain::time::now_unix_ms();
     let mut profile_runtime_by_id = BTreeMap::new();
-    for (profile_id, profile) in profiles.iter() {
+    for (profile_id, profile) in &profiles {
         let mut runtime = crate::state::ProfileRuntimeState::new(
             profile_id.clone(),
             now,
