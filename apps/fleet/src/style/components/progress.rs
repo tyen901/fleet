@@ -26,17 +26,14 @@ pub fn ProgressBar(props: ProgressBarProps) -> Element {
     let width = props.percent.unwrap_or(0).clamp(0, 100);
 
     rsx! {
-        div {
+        progress {
             class: "progress-bar",
-            role: "progressbar",
+            max: "100",
+            value: width.to_string(),
             "aria-valuemin": "0",
             "aria-valuemax": "100",
             "aria-valuenow": width.to_string(),
             "aria-label": "Operation progress",
-            div {
-                class: "progress-bar-fill",
-                style: "width: {width}%;",
-            }
         }
     }
 }

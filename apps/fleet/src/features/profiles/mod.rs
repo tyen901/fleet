@@ -4,9 +4,6 @@ pub const PROFILE_TARGET_FOLDER_PLACEHOLDER: &str = "/path/to/arma3";
 
 pub(crate) mod common;
 pub mod draft;
-pub mod edit;
+pub mod list;
 pub mod new;
 pub mod view;
-
-pub use edit::ProfileEdit;
-pub use view::ProfileView;

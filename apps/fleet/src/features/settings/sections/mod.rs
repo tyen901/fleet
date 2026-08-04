@@ -1,12 +1,14 @@
-mod about;
-mod appearance;
-mod arma;
+mod advanced;
 mod field_reset;
-mod reset;
-mod support;
+mod game;
+mod general;
+mod privacy;
+mod startup;
+mod updates;
 
-pub(crate) use about::about_section;
-pub(crate) use appearance::appearance_section;
-pub(crate) use arma::arma_section;
-pub(crate) use reset::reset_section;
-pub(crate) use support::support_section;
+pub(crate) use advanced::advanced_section;
+pub(crate) use game::game_section;
+pub(crate) use general::general_section;
+pub(crate) use privacy::privacy_section;
+pub(crate) use startup::startup_section;
+pub(crate) use updates::updates_section;

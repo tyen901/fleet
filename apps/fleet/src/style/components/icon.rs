@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use icondata::{BsCheck2, Icon};
+use icondata::Icon;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum IconSize {
@@ -44,12 +44,5 @@ pub fn AppIcon(props: IconProps) -> Element {
             y: "{data.y.unwrap_or(\"\")}",
             dangerous_inner_html: "{data.data}",
         }
-    }
-}
-
-#[component]
-pub fn ActionMarkIcon() -> Element {
-    rsx! {
-        AppIcon { icon: BsCheck2 }
     }
 }

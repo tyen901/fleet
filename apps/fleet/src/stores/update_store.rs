@@ -1,6 +1,5 @@
 use crate::services::updates;
 use dioxus::prelude::*;
-use fleet_domain::ReleaseChannel;
 
 #[derive(Clone, PartialEq)]
 pub enum AppUpdateStatus {
@@ -17,10 +16,10 @@ pub struct UpdateStore {
     pub status: Signal<AppUpdateStatus>,
 }
 
-pub async fn check_for_updates_status(channel: ReleaseChannel) -> AppUpdateStatus {
+pub async fn check_for_updates_status() -> AppUpdateStatus {
     tokio::task::spawn_blocking(move || {
-        let feed = updates::resolve_feed_url(channel)?;
-        updates::check_for_updates(&feed, channel)
+        let feed = updates::resolve_feed_url()?;
+        updates::check_for_updates(&feed)
     })
     .await
     .map_err(|e| e.to_string())
@@ -32,10 +31,10 @@ pub async fn check_for_updates_status(channel: ReleaseChannel) -> AppUpdateStatu
     .unwrap_or_else(AppUpdateStatus::Error)
 }
 
-pub async fn apply_update(channel: ReleaseChannel) -> Result<(), String> {
+pub async fn apply_update() -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let feed = updates::resolve_feed_url(channel)?;
-        updates::download_apply_and_restart(&feed, channel)
+        let feed = updates::resolve_feed_url()?;
+        updates::download_apply_and_restart(&feed)
     })
     .await
     .map_err(|e| e.to_string())

@@ -1,3 +1,4 @@
+use crate::operations::{check_inventory, OperationPublisher};
 use crate::storage::profile_state_root_dir;
 use crate::ApiError;
 use crate::Core;
@@ -6,7 +7,10 @@ use fleet_arma3::{
     ModList,
 };
 use fleet_domain::health::{InventoryCheckReport, LocalStateHealth, OperationKind};
-use fleet_domain::{AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind};
+use fleet_domain::{
+    types::{ProfileServerInfo, RepoServer},
+    AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
+};
 use serde::Serialize;
 use specta::Type;
 use std::ffi::OsString;
@@ -137,11 +141,50 @@ impl Core {
             return Ok(report);
         }
 
+        if self.profile_has_active_repo_check(profile_id) {
+            return self
+                .launch_inventory_check_from_cached_repo(profile_id)
+                .await;
+        }
+
         let session_id = self
             .start_operation(profile_id.clone(), OperationKind::CheckInventory)
             .await?;
 
         self.await_inventory_check(session_id).await
+    }
+
+    fn profile_has_active_repo_check(&self, profile_id: &ProfileId) -> bool {
+        self.read_state(|state| {
+            state
+                .profile_runtime_by_id
+                .get(profile_id)
+                .and_then(|runtime| runtime.active.as_ref())
+                .is_some_and(|active| active.operation == OperationKind::CheckRepo)
+        })
+    }
+
+    async fn launch_inventory_check_from_cached_repo(
+        &self,
+        profile_id: &ProfileId,
+    ) -> Result<InventoryCheckReport, ApiError> {
+        let (profile, settings) = self.load_profile_and_settings(profile_id).await?;
+        let state_root =
+            profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
+        if !cached_repo_blob_exists(&state_root, &profile)? {
+            return Err(ApiError::new(
+                "profile_busy",
+                "profile already has an active operation",
+            ));
+        }
+
+        check_inventory::check_inventory(
+            &profile,
+            &settings,
+            &state_root,
+            OperationPublisher::silent(profile_id.clone(), OperationKind::CheckInventory),
+        )
+        .await
     }
 
     async fn ensure_arma3_settings(&self, settings: &mut AppSettings) -> Result<(), ApiError> {
@@ -218,8 +261,7 @@ fn build_launch(
     let install = Arma3Install { dir: game_dir };
     install.validate()?;
 
-    let mods = discover_mods(profile)?;
-    let mod_list = ModList::validate_and_normalize(mods.clone())?;
+    let mod_list = build_mod_list(profile)?;
 
     let args = build_args(profile, settings, kind, extra_args)?;
 
@@ -255,7 +297,7 @@ fn detect_arma3_install_path() -> Option<PathBuf> {
     {
         // Match HEMTT behavior: discover install dir via Steam, then run the executable from it.
         let install = Arma3Install { dir };
-        return install.executable_path().ok();
+        install.executable_path().ok()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -347,7 +389,7 @@ fn build_args(
     });
 
     if kind == ActionKind::Join && !has_connect_override {
-        if let Some(server) = profile.arma3_server.as_ref() {
+        if let Some(server) = resolve_join_server(profile)? {
             args.extend(server_join_args(
                 &server.address,
                 server.port,
@@ -363,6 +405,40 @@ fn build_args(
     Ok(args)
 }
 
+fn resolve_join_server(profile: &Profile) -> Result<Option<ProfileServerInfo>, Arma3Error> {
+    let cached = crate::features::profiles::load_cached_repo_server_snapshot_blocking(profile)
+        .map_err(|e| Arma3Error::Io(std::io::Error::other(e.message)))?;
+
+    Ok(select_join_server(
+        profile.arma3_server.as_ref(),
+        cached.as_ref().map(|snapshot| snapshot.servers.as_slice()),
+    ))
+}
+
+fn select_join_server(
+    saved: Option<&ProfileServerInfo>,
+    cached: Option<&[RepoServer]>,
+) -> Option<ProfileServerInfo> {
+    let Some(cached) = cached else {
+        return saved.cloned();
+    };
+
+    if let Some(saved_server) = saved {
+        let exists_in_cache = cached.iter().any(|server| {
+            server.address.trim() == saved_server.address.trim() && server.port == saved_server.port
+        });
+        if exists_in_cache {
+            return Some(saved_server.clone());
+        }
+    }
+
+    cached.first().map(|server| ProfileServerInfo {
+        address: server.address.clone(),
+        port: server.port,
+        password: server.password.clone(),
+    })
+}
+
 pub fn server_join_args(address: &str, port: u16, password: &str) -> Vec<String> {
     let address = address.trim();
     if address.is_empty() {
@@ -376,14 +452,18 @@ pub fn server_join_args(address: &str, port: u16, password: &str) -> Vec<String>
     args
 }
 
-fn discover_mods(profile: &Profile) -> Result<Vec<PathBuf>, Arma3Error> {
+fn build_mod_list(profile: &Profile) -> Result<ModList, Arma3Error> {
     let root = profile.dest_path().map_err(|e| {
         Arma3Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             e.to_string(),
         ))
     })?;
-    discover_mods_from_repo(profile, &root)
+    let repo_mods = discover_mods_from_repo(profile, &root)?;
+    let repo_mod_list = ModList::validate_and_normalize(repo_mods)?;
+    let mut mod_paths = repo_mod_list.paths().to_vec();
+    append_unique_paths(&mut mod_paths, additional_mod_folders(profile));
+    Ok(ModList::new(mod_paths))
 }
 
 fn discover_mods_from_repo(profile: &Profile, root: &Path) -> Result<Vec<PathBuf>, Arma3Error> {
@@ -414,6 +494,42 @@ fn discover_mods_from_repo(profile: &Profile, root: &Path) -> Result<Vec<PathBuf
     let mut out: Vec<PathBuf> = mod_names.into_iter().map(|m| root.join(m)).collect();
     out.sort_by(|a: &PathBuf, b: &PathBuf| a.to_string_lossy().cmp(&b.to_string_lossy()));
     Ok(out)
+}
+
+fn cached_repo_blob_exists(state_root: &Path, profile: &Profile) -> Result<bool, ApiError> {
+    let ProfileSourceKind::Http(repo_url) = profile
+        .validated_source_kind()
+        .map_err(|err| ApiError::new("invalid_profile", err.to_string()))?;
+    let cache_root = fleet_domain::repo_cache_dir(state_root, &profile.id);
+    Ok(swifty_repo::repo_cache_blob_path(&cache_root, repo_url).is_file())
+}
+
+// Additional mod folders are appended to the mod list verbatim; the game
+// resolves them, Fleet does not.
+fn additional_mod_folders(profile: &Profile) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for path in &profile.additional_mod_folders {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(trimmed);
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn append_unique_paths<I>(paths: &mut Vec<PathBuf>, extra_paths: I)
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for path in extra_paths {
+        if !path.as_os_str().is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
 }
 
 fn parse_args(args: &str) -> Result<Vec<String>, Arma3Error> {
@@ -569,12 +685,16 @@ impl CommandSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_args, resolve_launch_mode, validate_launch_compatibility, ActionKind};
+    use super::{
+        additional_mod_folders, append_unique_paths, build_args, cached_repo_blob_exists,
+        resolve_launch_mode, select_join_server, validate_launch_compatibility, ActionKind,
+    };
     use fleet_arma3::LaunchMethod;
     use fleet_domain::health::{InventoryCheckReport, LocalStateHealth};
-    use fleet_domain::types::ProfileServerInfo;
+    use fleet_domain::types::{ProfileServerInfo, RepoServer};
     use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn default_settings() -> AppSettings {
         let mut settings = AppSettings::default();
@@ -590,6 +710,32 @@ mod tests {
             destination: "/tmp".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn cached_repo_blob_exists_only_when_profile_cache_file_is_present() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state_root = temp.path().join("profile_state");
+        let profile = default_profile();
+
+        assert!(
+            !cached_repo_blob_exists(&state_root, &profile).expect("cache probe"),
+            "missing cache should not count as last known repo state"
+        );
+
+        let cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
+        std::fs::create_dir_all(&cache_root).expect("create cache dir");
+        let fleet_domain::ProfileSourceKind::Http(repo_url) = profile.source_kind();
+        std::fs::write(
+            swifty_repo::repo_cache_blob_path(&cache_root, repo_url),
+            b"{}",
+        )
+        .expect("write cache blob");
+
+        assert!(
+            cached_repo_blob_exists(&state_root, &profile).expect("cache probe"),
+            "present repo cache should count as last known repo state"
+        );
     }
 
     #[test]
@@ -638,6 +784,85 @@ mod tests {
         assert!(!args.contains(&"-connect=127.0.0.1".to_string()));
         assert!(!args.contains(&"-port=2302".to_string()));
         assert!(!args.contains(&"-password=pw".to_string()));
+    }
+
+    #[test]
+    fn additional_mod_folders_append_verbatim_without_duplicates() {
+        let mut profile = default_profile();
+        profile.additional_mod_folders = vec![
+            " @ace ".to_string(),
+            "@ace".to_string(),
+            String::new(),
+            "@acre2".to_string(),
+        ];
+
+        let paths = additional_mod_folders(&profile);
+
+        assert_eq!(paths, vec![PathBuf::from("@ace"), PathBuf::from("@acre2")]);
+    }
+
+    #[test]
+    fn append_unique_paths_keeps_missing_paths_without_duplicates() {
+        let existing = PathBuf::from("C:\\fleet\\mods\\repo-mod");
+        let missing = PathBuf::from("C:\\fleet\\mods\\missing-additional-folder");
+        let mut paths = vec![existing.clone()];
+
+        append_unique_paths(
+            &mut paths,
+            [missing.clone(), existing.clone(), missing.clone()],
+        );
+
+        assert_eq!(paths, vec![existing, missing]);
+    }
+
+    #[test]
+    fn select_join_server_keeps_saved_server_when_present_in_cache() {
+        let saved = ProfileServerInfo {
+            address: "127.0.0.1".into(),
+            port: 2302,
+            password: "saved".into(),
+        };
+        let cached = vec![RepoServer {
+            address: "127.0.0.1".into(),
+            port: 2302,
+            password: "cache".into(),
+        }];
+
+        let selected = select_join_server(Some(&saved), Some(&cached)).expect("selected");
+        assert_eq!(selected, saved);
+    }
+
+    #[test]
+    fn select_join_server_uses_first_cached_server_when_saved_missing() {
+        let cached = vec![RepoServer {
+            address: "10.0.0.1".into(),
+            port: 2303,
+            password: "pw".into(),
+        }];
+
+        let selected = select_join_server(None, Some(&cached)).expect("selected");
+        assert_eq!(selected.address, "10.0.0.1");
+        assert_eq!(selected.port, 2303);
+        assert_eq!(selected.password, "pw");
+    }
+
+    #[test]
+    fn select_join_server_replaces_stale_saved_server_with_first_cached_server() {
+        let saved = ProfileServerInfo {
+            address: "stale.example".into(),
+            port: 2302,
+            password: "old".into(),
+        };
+        let cached = vec![RepoServer {
+            address: "current.example".into(),
+            port: 2402,
+            password: "new".into(),
+        }];
+
+        let selected = select_join_server(Some(&saved), Some(&cached)).expect("selected");
+        assert_eq!(selected.address, "current.example");
+        assert_eq!(selected.port, 2402);
+        assert_eq!(selected.password, "new");
     }
 
     #[test]

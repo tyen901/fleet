@@ -45,7 +45,11 @@ pub fn SelectField(props: SelectFieldProps) -> Element {
                 disabled: props.disabled,
                 onchange: move |evt| props.onchange.call(evt.value()),
                 for option in props.options {
-                    option { value: option.value.clone(), "{option.label}" }
+                    option {
+                        value: option.value.clone(),
+                        selected: option.value == props.value,
+                        "{option.label}"
+                    }
                 }
             }
             span { class: "select-wrap__chev",
