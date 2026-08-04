@@ -13,7 +13,7 @@ pub struct FleetPaths {
 pub struct ProfilePaths {
     pub state_dir: PathBuf,
     pub inventory: InventoryPaths,
-    pub reconcile: ReconcilePaths,
+    pub flux: FluxPaths,
     pub repo_cache: PathBuf,
 }
 
@@ -24,7 +24,7 @@ pub struct InventoryPaths {
 }
 
 #[derive(Debug, Clone)]
-pub struct ReconcilePaths {
+pub struct FluxPaths {
     pub workspace: PathBuf,
     pub cache: PathBuf,
 }
@@ -48,7 +48,7 @@ impl FleetPaths {
                     db: inventory_db,
                     lock: inventory_lock,
                 },
-                reconcile: ReconcilePaths {
+                flux: FluxPaths {
                     workspace: flux_ws,
                     cache: flux_cache,
                 },

@@ -17,22 +17,6 @@ pub enum LocalStateHealth {
     InventoryCorrupt,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub struct BaselineStamp {
-    pub algo: String,
-    pub hash64: u64,
-    pub file_count: u64,
-    pub total_bytes: u64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub struct LocalStateMetrics {
-    pub root_path: String,
-    pub files_count: u64,
-    pub files_bytes: u64,
-    pub last_stamp: Option<BaselineStamp>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Type)]
 pub enum LocalStateStage {
     #[default]

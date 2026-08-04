@@ -5,22 +5,25 @@
 //! - mod.srf
 //!
 //! Design goals:
-//! - One shared reqwest::Client (connection pooling)
+//! - One shared reqwest client with retry middleware (connection pooling)
 //! - GET-only (no HEAD preflights)
 //! - Bounded concurrency across files (not per-file range parallelism)
 //! - Short, sane timeouts (avoid multi-minute “hangs”)
 //! - Minimal event emission (Started/Finished/Failed)
 
 use anyhow::{anyhow, Context, Result};
+use atomic_write_file::AtomicWriteFile;
 use fleet_domain::{DownloadEvent, DownloadPhase};
 use reqwest::header::{HeaderMap, HeaderValue, ETAG, LAST_MODIFIED, USER_AGENT};
 use reqwest::StatusCode;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 pub type DownloadEventSink = Arc<dyn Fn(DownloadEvent) + Send + Sync>;
 
@@ -56,7 +59,7 @@ impl Default for DownloadServiceConfig {
 #[derive(Clone)]
 pub struct DownloadService {
     cfg: DownloadServiceConfig,
-    client: reqwest::Client,
+    client: ClientWithMiddleware,
 }
 
 impl DownloadService {
@@ -74,6 +77,10 @@ impl DownloadService {
             .pool_max_idle_per_host(16)
             .build()
             .expect("build reqwest client");
+        let retry_policy = ExponentialBackoff::builder().build_with_max_retries(cfg.retries as u32);
+        let client = ClientBuilder::new(client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
 
         Self { cfg, client }
     }
@@ -105,122 +112,84 @@ impl DownloadService {
                 .await
                 .with_context(|| format!("create parent dir {}", parent.display()))?;
         }
-        let tmp_path = out_path.with_extension("tmp");
-
-        let mut attempt: u16 = 0;
-        let mut last_err: Option<anyhow::Error> = None;
         let progress_emit_interval = Duration::from_millis(100);
 
-        while attempt <= self.cfg.retries {
-            if attempt > 0 {
-                let backoff = backoff_delay(attempt);
-                warn!(
-                    id = id.as_str(),
-                    url = url,
-                    attempt = attempt,
-                    backoff_ms = backoff.as_millis(),
-                    "retrying download"
-                );
-                tokio::time::sleep(backoff).await;
-            }
+        let req = self.client.get(url);
+        let req = if let Some(h) = extra_headers {
+            req.headers(h)
+        } else {
+            req
+        };
 
-            let req = self.client.get(url);
-            let req = if let Some(h) = extra_headers.clone() {
-                req.headers(h)
-            } else {
-                req
-            };
-
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    if is_retryable_reqwest_error(&e) && attempt < self.cfg.retries {
-                        last_err = Some(anyhow::Error::new(e).context("reqwest send"));
-                        attempt = attempt.saturating_add(1);
-                        continue;
-                    }
-
-                    let err = anyhow::Error::new(e).context("reqwest send");
-                    emit_failed(&sink, &id, url, &err);
-                    return Err(err);
-                }
-            };
-
-            let status = resp.status();
-            let etag = header_str(resp.headers(), ETAG);
-            let last_modified = header_str(resp.headers(), LAST_MODIFIED);
-            let content_len = resp.content_length();
-
-            if status == StatusCode::NOT_MODIFIED {
-                emit_finished(&sink, &id, url, started_at, 0, content_len);
-                return Ok(DownloadResult::NotModified {
-                    etag,
-                    last_modified,
-                });
-            }
-
-            if status != StatusCode::OK {
-                if is_retryable_status(status) && attempt < self.cfg.retries {
-                    last_err = Some(anyhow!("HTTP {status}").context(format!("GET {url}")));
-                    attempt = attempt.saturating_add(1);
-                    continue;
-                }
-
-                let err = anyhow!("unexpected status {status} for GET {url}");
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = anyhow::Error::new(e).context("reqwest send");
                 emit_failed(&sink, &id, url, &err);
                 return Err(err);
             }
+        };
 
-            let mut last_progress_at = Instant::now();
-            let mut emitted_progress = false;
-            let bytes_written = match write_response_to_file(resp, &tmp_path, |written| {
-                if sink.is_none() {
-                    return;
-                }
-                let now = Instant::now();
-                let should_emit = !emitted_progress
-                    || now.duration_since(last_progress_at) >= progress_emit_interval
-                    || content_len.is_some_and(|total| written >= total);
-                if should_emit {
-                    emitted_progress = true;
-                    last_progress_at = now;
-                    emit_progress(&sink, &id, url, written, content_len);
-                }
-            })
-            .await
-            {
-                Ok(n) => n,
-                Err(e) => {
-                    let _ = tokio::fs::remove_file(&tmp_path).await;
+        let status = resp.status();
+        let etag = header_str(resp.headers(), ETAG);
+        let last_modified = header_str(resp.headers(), LAST_MODIFIED);
+        let content_len = resp.content_length();
 
-                    if attempt < self.cfg.retries {
-                        last_err = Some(e);
-                        attempt = attempt.saturating_add(1);
-                        continue;
-                    }
-
-                    emit_failed(&sink, &id, url, &e);
-                    return Err(e);
-                }
-            };
-
-            crate::atomic_replace_file(&tmp_path, &out_path).await?;
-
-            emit_finished(&sink, &id, url, started_at, bytes_written, content_len);
-
-            return Ok(DownloadResult::Downloaded(DownloadOutcome {
-                url: url.to_string(),
-                status: status.as_u16(),
-                path: out_path,
-                bytes_written,
+        if status == StatusCode::NOT_MODIFIED {
+            emit_finished(&sink, &id, url, started_at, 0, content_len);
+            return Ok(DownloadResult::NotModified {
                 etag,
                 last_modified,
-            }));
+            });
         }
 
-        let err = last_err.unwrap_or_else(|| anyhow!("download failed: {url}"));
-        emit_failed(&sink, &id, url, &err);
-        Err(err)
+        if status != StatusCode::OK {
+            let err = anyhow!("unexpected status {status} for GET {url}");
+            emit_failed(&sink, &id, url, &err);
+            return Err(err);
+        }
+
+        let mut last_progress_at = Instant::now();
+        let mut emitted_progress = false;
+        let bytes = match read_response_bytes(resp, |written| {
+            if sink.is_none() {
+                return;
+            }
+            let now = Instant::now();
+            let should_emit = !emitted_progress
+                || now.duration_since(last_progress_at) >= progress_emit_interval
+                || content_len.is_some_and(|total| written >= total);
+            if should_emit {
+                emitted_progress = true;
+                last_progress_at = now;
+                emit_progress(&sink, &id, url, written, content_len);
+            }
+        })
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                emit_failed(&sink, &id, url, &e);
+                return Err(e);
+            }
+        };
+        let bytes_written = bytes.len() as u64;
+
+        if let Err(err) = write_bytes_atomically(out_path.clone(), bytes).await {
+            emit_failed(&sink, &id, url, &err);
+            return Err(err);
+        }
+
+        emit_finished(&sink, &id, url, started_at, bytes_written, content_len);
+
+        Ok(DownloadResult::Downloaded(DownloadOutcome {
+            url: url.to_string(),
+            status: status.as_u16(),
+            path: out_path,
+            bytes_written,
+            etag,
+            last_modified,
+        }))
     }
 
     pub async fn download_many_to_folder(
@@ -401,49 +370,37 @@ fn header_str(headers: &HeaderMap, key: reqwest::header::HeaderName) -> Option<S
         .map(|s| s.to_string())
 }
 
-fn is_retryable_status(s: StatusCode) -> bool {
-    s.is_server_error()
-        || s == StatusCode::REQUEST_TIMEOUT
-        || s == StatusCode::TOO_MANY_REQUESTS
-        || s == StatusCode::BAD_GATEWAY
-        || s == StatusCode::SERVICE_UNAVAILABLE
-        || s == StatusCode::GATEWAY_TIMEOUT
-}
-
-fn is_retryable_reqwest_error(e: &reqwest::Error) -> bool {
-    e.is_timeout() || e.is_connect() || e.is_request()
-}
-
-fn backoff_delay(attempt: u16) -> Duration {
-    let base = 200u64;
-    let pow = 1u64 << std::cmp::min(attempt as u32, 6);
-    Duration::from_millis(base.saturating_mul(pow))
-}
-
-async fn write_response_to_file<F>(
-    resp: reqwest::Response,
-    tmp_path: &Path,
-    mut on_progress: F,
-) -> Result<u64>
+async fn read_response_bytes<F>(resp: reqwest::Response, mut on_progress: F) -> Result<Vec<u8>>
 where
     F: FnMut(u64),
 {
     use futures_util::StreamExt;
 
-    let mut f = tokio::fs::File::create(tmp_path)
-        .await
-        .with_context(|| format!("create {}", tmp_path.display()))?;
-
+    let mut bytes = Vec::with_capacity(resp.content_length().unwrap_or(0) as usize);
     let mut written: u64 = 0;
     let mut stream = resp.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read response chunk")?;
-        f.write_all(&chunk).await.context("write chunk")?;
+        bytes.extend_from_slice(&chunk);
         written = written.saturating_add(chunk.len() as u64);
         on_progress(written);
     }
 
-    f.flush().await.context("flush")?;
-    Ok(written)
+    Ok(bytes)
+}
+
+async fn write_bytes_atomically(path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut file = AtomicWriteFile::options()
+            .open(&path)
+            .with_context(|| format!("open atomic writer {}", path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write atomic file {}", path.display()))?;
+        file.commit()
+            .with_context(|| format!("commit atomic file {}", path.display()))?;
+        Ok(())
+    })
+    .await
+    .context("atomic file write task join")?
 }

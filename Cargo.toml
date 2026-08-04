@@ -8,9 +8,7 @@ members = [
     "crates/domain",
     "crates/download",
     "crates/inventory",
-    "crates/manifest",
-    "crates/pipeline",
-    "crates/reconcile",
+    "crates/flux",
     "crates/swifty-repo",
 ]
 
@@ -24,35 +22,33 @@ fleet-core               = { path = "crates/core" }
 fleet-download           = { path = "crates/download" }
 fleet-domain             = { path = "crates/domain" }
 fleet-inventory          = { path = "crates/inventory" }
-fleet-manifest           = { path = "crates/manifest" }
-fleet-pipeline           = { path = "crates/pipeline" }
-fleet-reconcile          = { path = "crates/reconcile" }
+fleet-flux               = { path = "crates/flux" }
 fleet                    = { path = "apps/fleet" }
 swifty-repo              = { path = "crates/swifty-repo" }
 fleet-arma3              = { path = "crates/arma3" }
 
-# Local dependencies
-swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", tag = "v1.1.0" }
+# Pinned external dependencies
+swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-
-
-# Local dependencies (Flux)
-flux-api                    = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-api" }
-flux-inventory-contract     = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-inventory-contract" }
-flux-manifest               = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-manifest" }
-flux-segment-cache          = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-segment-cache" }
-flux-types                  = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-types" }
+# Pinned Flux dependencies
+flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", tag = "v0.1.0" }
+flux-inventory          = { git = "https://github.com/tyen901/flux6.git", package = "flux-inventory", tag = "v0.1.0" }
+flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", tag = "v0.1.0" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
-tokio-util   = { version = "0.7.18", features = ["io-util"] }
+tokio-util   = { version = "0.7.18", features = ["io-util", "rt"] }
 hyper        = "1.8.1"
-reqwest      = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
+reqwest      = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 axum         = { version = "0.8.8", default-features = false, features = ["tokio", "http1"] }
 async-trait  = "0.1.89"
 futures      = "0.3.31"
 futures-util = "0.3.31"
-tower        = { version = "0.5.2", features = ["util"] }
+object_store = { version = "0.13", features = ["http"] }
+prodash      = "31"
+reqwest-middleware = "0.5"
+reqwest-retry = "0.9"
+atomic-write-file = "0.3"
 
 # Serialization
 serde      = { version = "1.0.228", features = ["derive"] }
@@ -99,7 +95,7 @@ rayon             = "1.11.0"
 crossbeam-channel = "0.5.15"
 
 # Filesystem / OS
-walkdir      = "2.5.0"
+ignore       = "0.4.25"
 directories  = "6.0.0"
 filetime     = "0.2.27"
 tempfile     = "3.24.0"
@@ -107,7 +103,7 @@ winreg       = "0.55.0"
 fs2          = "0.4.3"
 
 # Database
-rusqlite = { version = "0.38.0", features = ["bundled-windows"] }
+rusqlite = { version = "0.38.0", features = ["bundled-windows", "cache"] }
 
 # Time
 chrono = "0.4.43"

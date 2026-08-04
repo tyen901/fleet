@@ -3,6 +3,7 @@ pub mod telemetry;
 
 mod core;
 mod features;
+mod operations;
 mod state;
 mod storage;
 #[cfg(test)]
@@ -21,18 +22,16 @@ pub use fleet_domain::health::{
     CancelResult, InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness,
     RepoCheckReport, SyncReport,
 };
-pub use fleet_domain::sync::{SyncPhase, SyncProgress, SyncSessionId, SyncSummary};
+pub use fleet_domain::sync::{SyncPhase, SyncSessionId, SyncSummary};
 pub use fleet_domain::RepoServer;
 pub use fleet_domain::{
     ApiError, AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
     DEFAULT_ARMA3_ARGS,
 };
-pub use fleet_domain::{
-    BaselineStamp, LocalStateMetrics, LocalStateProgress, LocalStateStage, LocalStateStatus,
-};
-pub use fleet_pipeline::{
-    OperationOutput, OperationStage, PipelineEventKind, PipelineNoticeLevel, PipelineProgressEvent,
-    PipelineSessionEvent, ProgressMetric, ProgressScope, ProgressUnit, StageState,
+pub use fleet_domain::{LocalStateProgress, LocalStateStage, LocalStateStatus};
+pub use operations::{
+    OperationNoticeLevel, OperationOutput, OperationProgressEvent, OperationSessionEvent,
+    OperationSessionEventKind, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
 };
 
 pub mod download {

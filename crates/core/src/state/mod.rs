@@ -1,11 +1,11 @@
+use crate::operations::{
+    OperationOutput, OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit,
+};
 use fleet_domain::health::{
     InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
 use fleet_domain::sync::SyncSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
-use fleet_pipeline::{
-    OperationOutput, OperationStage, PipelineProgressEvent, ProgressMetric, ProgressUnit,
-};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,12 +31,6 @@ pub struct ProfileRuntimeState {
     #[serde(default)]
     pub inventory_check: Option<InventoryCheckReport>,
     #[serde(default)]
-    pub inventory_metrics: Option<crate::LocalStateMetrics>,
-    #[serde(default)]
-    pub inventory_metrics_loading: bool,
-    #[serde(default)]
-    pub inventory_metrics_refresh_seq: u64,
-    #[serde(default)]
     pub active: Option<ActiveOperationState>,
     #[serde(default)]
     pub last_operation: Option<OperationOutcomeState>,
@@ -55,9 +49,6 @@ impl ProfileRuntimeState {
             profile_id,
             repo_check: None,
             inventory_check: None,
-            inventory_metrics: None,
-            inventory_metrics_loading: false,
-            inventory_metrics_refresh_seq: 0,
             active: None,
             last_operation: None,
             last_error: None,
@@ -121,7 +112,7 @@ pub struct OperationOutcomeState {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
-    Deleting,
+    CleaningUp,
     Checking,
     UpdateAvailable,
     ReadyToPlay,
@@ -137,10 +128,18 @@ pub enum ProfileStatusHeadline {
 }
 
 impl ProfileStatusHeadline {
+    /// Whether this state is worth showing at all.
+    pub fn is_noteworthy(self) -> bool {
+        !matches!(
+            self,
+            Self::ReadyToPlay | Self::InSync | Self::SyncNotRequired | Self::StatusUnknown
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Syncing => "Syncing",
-            Self::Deleting => "Deleting",
+            Self::CleaningUp => "Cleaning up",
             Self::Checking => "Checking",
             Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
@@ -181,13 +180,13 @@ pub enum ProfileRecommendedAction {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
-    pub delete_enabled: bool,
+    pub cleanup_enabled: bool,
     pub check_inventory_enabled: bool,
     pub check_repo_enabled: bool,
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
-    pub delete_running: bool,
+    pub cleanup_running: bool,
     pub check_inventory_running: bool,
     pub check_repo_running: bool,
 }
@@ -232,6 +231,8 @@ pub struct ProfileOperationProgressState {
     pub stage: UiProgressBarState,
     pub primary_metric: Option<UiProgressMetric>,
     pub secondary_metric: Option<UiProgressMetric>,
+    #[serde(default)]
+    pub detail_metric: Option<UiProgressMetric>,
     pub throughput_bytes_per_sec: Option<u64>,
     pub eta_seconds: Option<u64>,
 }
@@ -252,6 +253,7 @@ impl ProfileOperationProgressState {
             },
             primary_metric: None,
             secondary_metric: None,
+            detail_metric: None,
             throughput_bytes_per_sec: None,
             eta_seconds: None,
         }
@@ -286,7 +288,7 @@ impl ProfileStatusState {
             actions: ProfileActionAvailability {
                 check_inventory_enabled: true,
                 check_repo_enabled: true,
-                delete_enabled: false,
+                cleanup_enabled: false,
                 sync_enabled: true,
                 ..ProfileActionAvailability::default()
             },
@@ -377,9 +379,19 @@ fn derive_profile_status(
 
     let active_operation = runtime.active.as_ref().map(|operation| operation.operation);
     let operation_active = active_operation.is_some();
+    let exclusive_operation_active = matches!(
+        active_operation,
+        Some(OperationKind::Sync | OperationKind::FullSync | OperationKind::CleanupUnexpectedFiles)
+    );
 
-    let sync_running = matches!(active_operation, Some(OperationKind::Sync));
-    let delete_running = matches!(active_operation, Some(OperationKind::Delete));
+    let sync_running = matches!(
+        active_operation,
+        Some(OperationKind::Sync | OperationKind::FullSync)
+    );
+    let cleanup_running = matches!(
+        active_operation,
+        Some(OperationKind::CleanupUnexpectedFiles)
+    );
     let check_inventory_running = matches!(active_operation, Some(OperationKind::CheckInventory));
     let check_repo_running = matches!(active_operation, Some(OperationKind::CheckRepo));
     let can_run_actions = !operation_active;
@@ -428,8 +440,8 @@ fn derive_profile_status(
 
     let headline = if sync_running {
         ProfileStatusHeadline::Syncing
-    } else if delete_running {
-        ProfileStatusHeadline::Deleting
+    } else if cleanup_running {
+        ProfileStatusHeadline::CleaningUp
     } else if check_inventory_running || check_repo_running {
         ProfileStatusHeadline::Checking
     } else if has_error {
@@ -459,7 +471,7 @@ fn derive_profile_status(
         ProfileStatusHeadline::ReadyToPlay
         | ProfileStatusHeadline::InSync
         | ProfileStatusHeadline::SyncNotRequired
-        | ProfileStatusHeadline::Deleting
+        | ProfileStatusHeadline::CleaningUp
         | ProfileStatusHeadline::Checking
         | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
@@ -481,16 +493,16 @@ fn derive_profile_status(
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
-        delete_enabled: can_run_actions && unexpected_path_count > 0 && !hard_blocked,
+        cleanup_enabled: can_run_actions && unexpected_path_count > 0 && !hard_blocked,
         check_inventory_enabled: can_run_actions,
         check_repo_enabled: can_run_actions && !hard_blocked,
         cancel_enabled: operation_active,
         sync_running,
-        delete_running,
+        cleanup_running,
         check_inventory_running,
         check_repo_running,
     };
-    let can_launch = !operation_active
+    let can_launch = !exclusive_operation_active
         && matches!(
             local_health,
             LocalStateHealth::Ready | LocalStateHealth::LocalDrift
@@ -543,8 +555,8 @@ pub fn stage_label(stage: OperationStage) -> &'static str {
         OperationStage::ScanningDisk => "Scanning disk",
         OperationStage::VerifyingInventory => "Verifying inventory",
         OperationStage::PreparingInventory => "Preparing inventory",
-        OperationStage::Reconciling => "Reconciling",
-        OperationStage::Pruning => "Pruning",
+        OperationStage::Sync => "Sync",
+        OperationStage::CleaningUp => "Cleaning up",
         OperationStage::Auditing => "Auditing",
         OperationStage::Finalizing => "Finalizing",
     }
@@ -557,12 +569,12 @@ const CHECK_INVENTORY_PLAN: &[OperationStage] = &[
     OperationStage::VerifyingInventory,
     OperationStage::Finalizing,
 ];
-const DELETE_PLAN: &[OperationStage] = &[
+const CLEANUP_UNEXPECTED_FILES_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
     OperationStage::ScanningDisk,
     OperationStage::VerifyingInventory,
-    OperationStage::Pruning,
+    OperationStage::CleaningUp,
     OperationStage::Finalizing,
 ];
 const CHECK_REPO_PLAN: &[OperationStage] = &[
@@ -574,8 +586,8 @@ const SYNC_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
     OperationStage::PreparingInventory,
-    OperationStage::Reconciling,
-    OperationStage::Pruning,
+    OperationStage::Sync,
+    OperationStage::CleaningUp,
     OperationStage::Auditing,
     OperationStage::Finalizing,
 ];
@@ -584,8 +596,8 @@ pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
     match operation {
         OperationKind::CheckInventory => CHECK_INVENTORY_PLAN,
         OperationKind::CheckRepo => CHECK_REPO_PLAN,
-        OperationKind::Delete => DELETE_PLAN,
-        OperationKind::Sync => SYNC_PLAN,
+        OperationKind::CleanupUnexpectedFiles => CLEANUP_UNEXPECTED_FILES_PLAN,
+        OperationKind::Sync | OperationKind::FullSync => SYNC_PLAN,
     }
 }
 
@@ -640,10 +652,10 @@ pub fn metric_from_progress(metric: &ProgressMetric) -> UiProgressMetric {
     }
 }
 
-pub fn apply_pipeline_progress(
+pub fn apply_operation_progress(
     progress_state: &mut ProfileOperationProgressState,
     completed_stages: &BTreeSet<OperationStage>,
-    progress: &PipelineProgressEvent,
+    progress: &OperationProgressEvent,
     now_ms: u64,
 ) {
     progress_state.last_updated_at_unix_ms = now_ms;
@@ -653,6 +665,7 @@ pub fn apply_pipeline_progress(
     progress_state.active_stage = progress.stage;
     progress_state.primary_metric = Some(metric_from_progress(&progress.primary));
     progress_state.secondary_metric = progress.secondary.as_ref().map(metric_from_progress);
+    progress_state.detail_metric = progress.detail.as_ref().map(metric_from_progress);
     let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
     progress_state.steps = build_operation_steps(
         progress_state.operation,
@@ -673,7 +686,7 @@ mod tests {
         derive_profile_status, ensure_profile_runtime_mut, AppState, ProfileStatusHeadline,
     };
     use fleet_domain::health::{
-        InventoryCheckReport, LocalStateHealth, RepoCheckFreshness, RepoCheckReport,
+        InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
     #[test]
@@ -820,5 +833,39 @@ mod tests {
             true,
         );
         assert_eq!(status.headline, ProfileStatusHeadline::Syncing);
+    }
+
+    #[test]
+    fn passive_checks_do_not_block_launch_when_inventory_is_launchable() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+
+        for operation in [OperationKind::CheckRepo, OperationKind::CheckInventory] {
+            let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+            runtime.inventory_check = Some(InventoryCheckReport {
+                profile_id: "p1".to_string(),
+                local_health: LocalStateHealth::Ready,
+                checked_at_unix_ms: 1,
+                expected_missing_in_inventory_count: 0,
+                inventory_unexpected_paths_count: 0,
+                unexpected_delete_paths: Vec::new(),
+            });
+            runtime.active = Some(super::ActiveOperationState::new(1, operation, 1));
+
+            let status = derive_profile_status(
+                state.profile_runtime_by_id.get("p1").expect("runtime"),
+                true,
+            );
+            assert!(status.can_launch);
+        }
     }
 }

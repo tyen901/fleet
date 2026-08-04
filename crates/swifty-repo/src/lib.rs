@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use atomic_write_file::AtomicWriteFile;
 use reqwest::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use fleet_download::{
-    atomic_replace_file, DownloadEventSink, DownloadResult, DownloadService, DownloadSpec,
-};
+use fleet_download::{DownloadEventSink, DownloadResult, DownloadService, DownloadSpec};
 
 /// Internal cached blob stored as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,12 +156,8 @@ impl RepoCacheStore for FsRepoCacheStore {
             .await
             .with_context(|| format!("create cache dir {}", self.root.display()))?;
         let p = self.blob_path(repo_url);
-        let tmp = p.with_extension("json.tmp");
-        let s = serde_json::to_vec_pretty(&blob).context("serialize cache blob")?;
-        tokio::fs::write(&tmp, s)
-            .await
-            .with_context(|| format!("write tmp cache {}", tmp.display()))?;
-        atomic_replace_file(&tmp, &p).await?;
+        let s = serde_json::to_vec(&blob).context("serialize cache blob")?;
+        write_bytes_atomically(p, s).await?;
         Ok(())
     }
 
@@ -178,6 +174,21 @@ impl RepoCacheStore for FsRepoCacheStore {
     fn cache_root_path(&self) -> Option<&Path> {
         Some(&self.root)
     }
+}
+
+async fn write_bytes_atomically(path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut file = AtomicWriteFile::options()
+            .open(&path)
+            .with_context(|| format!("open atomic writer {}", path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write atomic file {}", path.display()))?;
+        file.commit()
+            .with_context(|| format!("commit atomic file {}", path.display()))?;
+        Ok(())
+    })
+    .await
+    .context("atomic file write task join")?
 }
 
 pub trait ModSrfResolver: Send + Sync {

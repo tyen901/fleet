@@ -1,7 +1,8 @@
-use crate::style::{ButtonVariant, ConfirmDialog};
+use crate::style::{Button, ButtonVariant, InlineConfirm, PageFooter};
 use dioxus::prelude::*;
 use directories::ProjectDirs;
-use fleet_domain::{ReleaseChannel, TelemetryPreference, ThemeMode};
+use fleet_core::{Arma3LaunchMethod, SettingsField};
+use fleet_domain::TelemetryPreference;
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
@@ -12,11 +13,11 @@ use crate::stores::toast_store::ToastStore;
 use crate::stores::update_store::{
     apply_update, check_for_updates_status, AppUpdateStatus, UpdateStore,
 };
-use fleet_core::Arma3LaunchMethod;
 
-use super::actions::{spawn_debounced_settings_save, spawn_settings_task, spawn_settings_update};
+use super::actions::spawn_settings_task;
 use super::sections::{
-    about_section, appearance_section, arma_section, reset_section, support_section,
+    advanced_section, game_section, general_section, privacy_section, startup_section,
+    updates_section,
 };
 
 #[component]
@@ -27,67 +28,42 @@ pub fn Settings() -> Element {
     let update_store = use_context::<UpdateStore>();
     let nav = dioxus_router::use_navigator();
 
+    let snapshot = (store.state)();
+    let draft = use_signal(|| snapshot.settings.clone());
+    let dirty = use_signal(|| false);
+    let mut saving = use_signal(|| false);
+    let mut reset_settings_confirm_open = use_signal(|| false);
+    let mut factory_reset_confirm_open = use_signal(|| false);
     let installed_version = use_signal(updates::installed_version_string);
-
-    let snap = (store.state)();
+    let update_checks_enabled = updates::current_build_allows_update_checks();
+    let defaults = fleet_core::effective_settings_defaults();
+    let settings = draft();
 
     let on_check_updates = move || {
-        let channel = store.state.read().settings.updates.release_channel;
         let mut status = update_store.status;
         spawn(async move {
             status.set(AppUpdateStatus::Checking);
-            status.set(check_for_updates_status(channel).await);
+            status.set(check_for_updates_status().await);
         });
     };
 
     let on_apply_update = move || {
-        let channel = store.state.read().settings.updates.release_channel;
         let mut status = update_store.status;
         spawn(async move {
             status.set(AppUpdateStatus::Downloading);
-            if let Err(err) = apply_update(channel).await {
+            if let Err(err) = apply_update().await {
                 status.set(AppUpdateStatus::Error(err));
             }
         });
     };
 
-    let theme_value = snap.settings.appearance.theme_mode;
-    let bridge_for_theme = bridge.clone();
-    let toasts_for_theme = toasts.clone();
-    let on_set_theme = move |next: ThemeMode| {
-        let bridge = bridge_for_theme.clone();
-        let toasts = toasts_for_theme.clone();
-        spawn_settings_task(toasts, "Set theme", async move {
-            bridge.core().settings_set_theme_mode(next).await
-        });
-    };
-
-    let bridge_for_channel = bridge.clone();
-    let toasts_for_channel = toasts.clone();
-    let on_set_channel = move |next: ReleaseChannel| {
-        let bridge = bridge_for_channel.clone();
-        let toasts = toasts_for_channel.clone();
-        let mut status = update_store.status;
-        spawn_settings_task(toasts, "Set update channel", async move {
-            status.set(AppUpdateStatus::Idle);
-            let mut settings = bridge.get_snapshot().settings.clone();
-            settings.updates.release_channel = next;
-            bridge.core().settings_save(settings).await
-        });
-    };
-
+    let mut draft_for_detect = draft;
+    let mut dirty_for_detect = dirty;
     let bridge_for_detect = bridge.clone();
-    let toasts_for_detect = toasts.clone();
     let detect_arma3 = move || {
         if let Some(path) = bridge_for_detect.core().arma3_detect_install_dir() {
-            let p = path.to_string_lossy().to_string();
-            spawn_settings_update(
-                bridge_for_detect.clone(),
-                toasts_for_detect.clone(),
-                move |settings| {
-                    settings.arma3.arma3_game_dir = p;
-                },
-            );
+            draft_for_detect.write().arma3.arma3_game_dir = path.to_string_lossy().to_string();
+            dirty_for_detect.set(true);
         }
     };
 
@@ -122,85 +98,49 @@ pub fn Settings() -> Element {
         });
     };
 
-    let defaults = fleet_core::effective_settings_defaults();
-    let is_release_channel_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::ReleaseChannel,
-        &snap.settings,
-        &defaults,
-    );
-    let is_theme_mode_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::ThemeMode,
-        &snap.settings,
-        &defaults,
-    );
     let is_arma3_launch_method_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::Arma3LaunchMethod,
-        &snap.settings,
+        SettingsField::Arma3LaunchMethod,
+        &settings,
         &defaults,
     );
     let is_arma3_custom_template_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::Arma3CustomLaunchTemplate,
-        &snap.settings,
+        SettingsField::Arma3CustomLaunchTemplate,
+        &settings,
         &defaults,
     );
     let is_arma3_default_args_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::Arma3DefaultArgs,
-        &snap.settings,
+        SettingsField::Arma3DefaultArgs,
+        &settings,
         &defaults,
     );
     let is_telemetry_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::TelemetryConsent,
-        &snap.settings,
+        SettingsField::TelemetryConsent,
+        &settings,
         &defaults,
     );
     let is_auto_check_on_startup_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::AutoCheckOnStartup,
-        &snap.settings,
+        SettingsField::AutoCheckOnStartup,
+        &settings,
         &defaults,
     );
     let is_auto_assess_on_startup_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::AutoAssessOnStartup,
-        &snap.settings,
+        SettingsField::AutoAssessOnStartup,
+        &settings,
         &defaults,
     );
     let is_show_profile_icons_non_default = fleet_core::settings_field_is_non_default(
-        fleet_core::SettingsField::ShowProfileIcons,
-        &snap.settings,
+        SettingsField::ShowProfileIcons,
+        &settings,
         &defaults,
     );
-    let default_local_state_ignore = defaults.sync.local_state_ignore_rules.clone();
 
-    let bridge_for_game_dir = bridge.clone();
-    let bridge_for_launch_mode = bridge.clone();
-    let bridge_for_launch_mode_template = bridge.clone();
-    let bridge_for_default_args = bridge.clone();
-    let bridge_for_inventory_ignore = bridge.clone();
-    let bridge_for_inventory_ignore_reset = bridge.clone();
-    let mut local_state_ignore_draft =
-        use_signal(|| snap.settings.sync.local_state_ignore_rules.clone());
-    let mut local_state_ignore_last_synced =
-        use_signal(|| snap.settings.sync.local_state_ignore_rules.clone());
-    let inventory_ignore_save_seq = use_signal(|| 0_u64);
-    if local_state_ignore_last_synced() != snap.settings.sync.local_state_ignore_rules {
-        local_state_ignore_last_synced.set(snap.settings.sync.local_state_ignore_rules.clone());
-        local_state_ignore_draft.set(snap.settings.sync.local_state_ignore_rules.clone());
-    }
-    let bridge_for_telemetry = bridge.clone();
-    let bridge_for_auto_assess_on_startup = bridge.clone();
-    let bridge_for_auto_check_on_startup = bridge.clone();
-    let bridge_for_show_profile_icons = bridge.clone();
-    let bridge_for_reset_settings = bridge.clone();
-    let bridge_for_factory_reset = bridge.clone();
-    let nav_for_factory_reset = nav;
-    let mut reset_settings_modal_open = use_signal(|| false);
-    let mut factory_reset_modal_open = use_signal(|| false);
     let custom_args_preview = if cfg!(target_os = "windows") {
         "-noPause -noSplash -skipIntro -noLauncher"
     } else {
         "-applaunch 107410 -nolauncher -noPause -noSplash -skipIntro -noLauncher"
     };
     let custom_mods_preview = "-mod=@cba_a;@ace;@rhsusf";
-    let custom_template = snap.settings.arma3.arma3_custom_launch_template.trim();
+    let custom_template = settings.arma3.arma3_custom_launch_template.trim();
     let custom_default_template = defaults.arma3.arma3_custom_launch_template.clone();
     let uses_args = custom_template.contains("$ARGS") || custom_template.contains("${ARGS}");
     let uses_mods = custom_template.contains("$MODS") || custom_template.contains("${MODS}");
@@ -215,179 +155,146 @@ pub fn Settings() -> Element {
     if !uses_mods && !custom_template.is_empty() {
         custom_preview = format!("{custom_preview} {custom_mods_preview}");
     }
-    let mut custom_template_error = None;
-    if snap.settings.arma3.arma3_launch_method == Arma3LaunchMethod::Custom {
+    let custom_template_error = if settings.arma3.arma3_launch_method == Arma3LaunchMethod::Custom {
         if custom_template.is_empty() {
-            custom_template_error = Some("Template is required.");
+            Some("Template is required.")
         } else if !uses_args || !uses_mods {
-            custom_template_error = Some("Template must include $ARGS and $MODS.");
+            Some("Template must include $ARGS and $MODS.")
+        } else {
+            None
         }
-    }
-    let toasts_for_game_dir = toasts.clone();
+    } else {
+        None
+    };
+
+    let mut draft_for_game_dir = draft;
+    let mut dirty_for_game_dir = dirty;
     let on_set_game_dir = move |next: String| {
-        spawn_settings_update(
-            bridge_for_game_dir.clone(),
-            toasts_for_game_dir.clone(),
-            move |settings| {
-                settings.arma3.arma3_game_dir = next;
-            },
-        );
+        draft_for_game_dir.write().arma3.arma3_game_dir = next;
+        dirty_for_game_dir.set(true);
     };
 
-    let toasts_for_launch_mode = toasts.clone();
+    let mut draft_for_launch_method = draft;
+    let mut dirty_for_launch_method = dirty;
     let on_set_launch_method = move |next: String| {
-        let bridge = bridge_for_launch_mode.clone();
-        let toasts = toasts_for_launch_mode.clone();
-        spawn_settings_task(toasts, "Set launch method", async move {
-            let mut settings = bridge.get_snapshot().settings.clone();
-            let next_method = next
-                .parse::<Arma3LaunchMethod>()
-                .ok()
-                .map(|m| m.normalize_for_current_platform());
-            if let Some(method) = next_method {
-                settings.arma3.arma3_launch_method = method;
-                bridge.core().settings_save(settings).await?;
-            }
-            Ok(())
-        });
+        if let Ok(method) = next.parse::<Arma3LaunchMethod>() {
+            draft_for_launch_method.write().arma3.arma3_launch_method =
+                method.normalize_for_current_platform();
+            dirty_for_launch_method.set(true);
+        }
     };
 
-    let toasts_for_custom_template = toasts.clone();
+    let mut draft_for_custom_template = draft;
+    let mut dirty_for_custom_template = dirty;
     let on_set_custom_template = move |next: String| {
-        spawn_settings_update(
-            bridge_for_launch_mode_template.clone(),
-            toasts_for_custom_template.clone(),
-            move |settings| {
-                settings.arma3.arma3_custom_launch_template = next;
-            },
-        );
+        draft_for_custom_template
+            .write()
+            .arma3
+            .arma3_custom_launch_template = next;
+        dirty_for_custom_template.set(true);
     };
 
-    let toasts_for_default_args = toasts.clone();
+    let mut draft_for_default_args = draft;
+    let mut dirty_for_default_args = dirty;
     let on_set_default_args = move |next: String| {
-        spawn_settings_update(
-            bridge_for_default_args.clone(),
-            toasts_for_default_args.clone(),
-            move |settings| {
-                settings.arma3.arma3_default_args = next;
-            },
-        );
+        draft_for_default_args.write().arma3.arma3_default_args = next;
+        dirty_for_default_args.set(true);
     };
 
-    let mut local_state_ignore_draft_sig = local_state_ignore_draft;
-    let mut inventory_ignore_save_seq_sig = inventory_ignore_save_seq;
-    let toasts_for_inventory_ignore = toasts.clone();
-    let on_set_inventory_ignore = move |next: String| {
-        local_state_ignore_draft_sig.set(next.clone());
-        let seq = inventory_ignore_save_seq_sig().wrapping_add(1);
-        inventory_ignore_save_seq_sig.set(seq);
-        spawn_debounced_settings_save(
-            bridge_for_inventory_ignore.clone(),
-            toasts_for_inventory_ignore.clone(),
-            next,
-            seq,
-            inventory_ignore_save_seq_sig,
-            |settings, value| settings.sync.local_state_ignore_rules = value,
-        );
-    };
-
-    let mut local_state_ignore_draft_reset = local_state_ignore_draft;
-    let mut inventory_ignore_save_seq_reset = inventory_ignore_save_seq;
-    let default_local_state_ignore_for_reset = default_local_state_ignore.clone();
-    let toasts_for_inventory_reset = toasts.clone();
-    let on_reset_inventory_ignore = move || {
-        let bridge = bridge_for_inventory_ignore_reset.clone();
-        let toasts = toasts_for_inventory_reset.clone();
-        let defaults = default_local_state_ignore_for_reset.clone();
-        local_state_ignore_draft_reset.set(defaults.clone());
-        inventory_ignore_save_seq_reset.set(0);
-        spawn_settings_task(toasts, "Reset sync ignore rules", async move {
-            let mut settings = bridge.get_snapshot().settings.clone();
-            settings.sync.local_state_ignore_rules = defaults;
-            bridge.core().settings_save(settings).await
-        });
-    };
-
-    let toasts_for_telemetry = toasts.clone();
+    let mut draft_for_telemetry = draft;
+    let mut dirty_for_telemetry = dirty;
     let on_toggle_telemetry = move |next: bool| {
-        spawn_settings_update(
-            bridge_for_telemetry.clone(),
-            toasts_for_telemetry.clone(),
-            move |settings| {
-                settings.privacy.telemetry_consent = if next {
-                    TelemetryPreference::Allowed
-                } else {
-                    TelemetryPreference::Denied
-                };
-            },
-        );
+        draft_for_telemetry.write().privacy.telemetry_consent = if next {
+            TelemetryPreference::Allowed
+        } else {
+            TelemetryPreference::Denied
+        };
+        dirty_for_telemetry.set(true);
     };
 
-    let toasts_for_auto_check = toasts.clone();
+    let mut draft_for_auto_assess = draft;
+    let mut dirty_for_auto_assess = dirty;
     let on_toggle_auto_assess_on_startup = move |next: bool| {
-        spawn_settings_update(
-            bridge_for_auto_assess_on_startup.clone(),
-            toasts_for_auto_check.clone(),
-            move |settings| {
-                settings.startup.auto_assess_on_startup = next;
-            },
-        );
+        draft_for_auto_assess.write().startup.auto_assess_on_startup = next;
+        dirty_for_auto_assess.set(true);
     };
 
-    let toasts_for_auto_check = toasts.clone();
+    let mut draft_for_auto_check = draft;
+    let mut dirty_for_auto_check = dirty;
     let on_toggle_auto_check_on_startup = move |next: bool| {
-        spawn_settings_update(
-            bridge_for_auto_check_on_startup.clone(),
-            toasts_for_auto_check.clone(),
-            move |settings| {
-                settings.updates.auto_check_on_startup = next;
-            },
-        );
+        draft_for_auto_check.write().updates.auto_check_on_startup = next;
+        dirty_for_auto_check.set(true);
     };
 
-    let toasts_for_show_profile_icons = toasts.clone();
+    let mut draft_for_profile_icons = draft;
+    let mut dirty_for_profile_icons = dirty;
     let on_toggle_show_profile_icons = move |next: bool| {
-        spawn_settings_update(
-            bridge_for_show_profile_icons.clone(),
-            toasts_for_show_profile_icons.clone(),
-            move |settings| {
-                settings.ui.show_profile_icons = next;
-            },
-        );
+        draft_for_profile_icons.write().ui.show_profile_icons = next;
+        dirty_for_profile_icons.set(true);
     };
 
-    let on_request_reset_settings = move || {
-        reset_settings_modal_open.set(true);
-    };
+    let defaults_for_reset = defaults.clone();
+    let mut draft_for_reset = draft;
+    let mut dirty_for_reset = dirty;
+    let on_reset = EventHandler::new(move |field: SettingsField| {
+        let mut settings = draft_for_reset.write();
+        match field {
+            SettingsField::Arma3GameDir => {
+                settings.arma3.arma3_game_dir = defaults_for_reset.arma3.arma3_game_dir.clone();
+            }
+            SettingsField::Arma3LaunchMethod => {
+                settings.arma3.arma3_launch_method = defaults_for_reset.arma3.arma3_launch_method;
+            }
+            SettingsField::Arma3CustomLaunchTemplate => {
+                settings.arma3.arma3_custom_launch_template = defaults_for_reset
+                    .arma3
+                    .arma3_custom_launch_template
+                    .clone();
+            }
+            SettingsField::Arma3DefaultArgs => {
+                settings.arma3.arma3_default_args =
+                    defaults_for_reset.arma3.arma3_default_args.clone();
+            }
+            SettingsField::TelemetryConsent => {
+                settings.privacy.telemetry_consent = defaults_for_reset.privacy.telemetry_consent;
+            }
+            SettingsField::AutoAssessOnStartup => {
+                settings.startup.auto_assess_on_startup =
+                    defaults_for_reset.startup.auto_assess_on_startup;
+            }
+            SettingsField::AutoCheckOnStartup => {
+                settings.updates.auto_check_on_startup =
+                    defaults_for_reset.updates.auto_check_on_startup;
+            }
+            SettingsField::ShowProfileIcons => {
+                settings.ui.show_profile_icons = defaults_for_reset.ui.show_profile_icons;
+            }
+        }
+        drop(settings);
+        dirty_for_reset.set(true);
+    });
 
-    let on_cancel_reset_settings = move |_: MouseEvent| {
-        reset_settings_modal_open.set(false);
-    };
-
-    let toasts_for_reset_settings = toasts.clone();
+    let on_request_reset_settings = move || reset_settings_confirm_open.set(true);
+    let on_cancel_reset_settings = move |_: MouseEvent| reset_settings_confirm_open.set(false);
+    let defaults_for_reset_all = defaults.clone();
+    let mut draft_for_reset_all = draft;
+    let mut dirty_for_reset_all = dirty;
     let on_confirm_reset_settings = move |_: MouseEvent| {
-        let bridge = bridge_for_reset_settings.clone();
-        let toasts = toasts_for_reset_settings.clone();
-        reset_settings_modal_open.set(false);
-        spawn_settings_task(toasts, "Reset settings", async move {
-            bridge.core().reset_to_defaults().await
-        });
+        reset_settings_confirm_open.set(false);
+        draft_for_reset_all.set(defaults_for_reset_all.clone());
+        dirty_for_reset_all.set(true);
     };
 
-    let on_request_factory_reset = move || {
-        factory_reset_modal_open.set(true);
-    };
-
-    let on_cancel_factory_reset = move |_: MouseEvent| {
-        factory_reset_modal_open.set(false);
-    };
-
+    let on_request_factory_reset = move || factory_reset_confirm_open.set(true);
+    let on_cancel_factory_reset = move |_: MouseEvent| factory_reset_confirm_open.set(false);
+    let bridge_for_factory_reset = bridge.clone();
     let toasts_for_factory_reset = toasts.clone();
+    let nav_for_factory_reset = nav;
     let on_confirm_factory_reset = move |_: MouseEvent| {
         let bridge = bridge_for_factory_reset.clone();
         let toasts = toasts_for_factory_reset.clone();
         let nav = nav_for_factory_reset;
-        factory_reset_modal_open.set(false);
+        factory_reset_confirm_open.set(false);
         spawn_settings_task(toasts, "Factory reset", async move {
             bridge.core().factory_reset().await?;
             let _ = nav.push(Route::Onboarding {});
@@ -395,93 +302,136 @@ pub fn Settings() -> Element {
         });
     };
 
+    let nav_for_cancel = nav;
+    let on_cancel = move |_: MouseEvent| {
+        let _ = nav_for_cancel.push(Route::Profiles {});
+    };
+
+    let bridge_for_save = bridge.clone();
+    let toasts_for_save = toasts.clone();
+    let nav_for_save = nav;
+    let on_save = move |_: MouseEvent| {
+        if saving() || !dirty() || custom_template_error.is_some() {
+            return;
+        }
+        saving.set(true);
+        let bridge = bridge_for_save.clone();
+        let toasts = toasts_for_save.clone();
+        let nav = nav_for_save;
+        let settings = draft();
+        spawn(async move {
+            match bridge.core().settings_save(settings).await {
+                Ok(()) => {
+                    let _ = nav.push(Route::Profiles {});
+                }
+                Err(err) => {
+                    toasts.push_api_error("Save settings", &err);
+                    saving.set(false);
+                }
+            }
+        });
+    };
+
     rsx! {
-        div { class: "page page--scroll settings-page",
-            div { class: "page__inner dash-page__inner",
-                div { class: "dash-layout",
-                    div { class: "dash-layout__content",
-                        section { class: "settings-view",
-                            {about_section(
-                                installed_version,
-                                update_store.status,
-                                on_check_updates,
-                                on_apply_update,
-                            )}
+        div { class: "page-frame",
+            div { class: "page-frame__body",
+                div { class: "page__inner section-list",
+                    {updates_section(
+                        installed_version,
+                        update_store.status,
+                        update_checks_enabled,
+                        on_check_updates,
+                        on_apply_update,
+                    )}
 
-                            {arma_section(
-                                snap.settings.clone(),
-                                custom_default_template,
-                                custom_template_error,
-                                custom_preview,
-                                is_arma3_launch_method_non_default,
-                                is_arma3_custom_template_non_default,
-                                is_arma3_default_args_non_default,
-                                detect_arma3,
-                                on_set_game_dir,
-                                on_set_launch_method,
-                                on_set_custom_template,
-                                on_set_default_args,
-                            )}
+                    {game_section(
+                        settings.clone(),
+                        custom_default_template,
+                        custom_template_error,
+                        custom_preview,
+                        is_arma3_launch_method_non_default,
+                        is_arma3_custom_template_non_default,
+                        is_arma3_default_args_non_default,
+                        detect_arma3,
+                        on_set_game_dir,
+                        on_set_launch_method,
+                        on_set_custom_template,
+                        on_set_default_args,
+                        on_reset,
+                    )}
 
-                            {appearance_section(
-                                theme_value,
-                                is_theme_mode_non_default,
-                                on_set_theme,
-                                snap.settings.ui.show_profile_icons,
-                                is_show_profile_icons_non_default,
-                                on_toggle_show_profile_icons,
-                            )}
+                    {startup_section(
+                        settings.startup.auto_assess_on_startup,
+                        is_auto_assess_on_startup_non_default,
+                        on_toggle_auto_assess_on_startup,
+                        settings.updates.auto_check_on_startup,
+                        is_auto_check_on_startup_non_default,
+                        on_toggle_auto_check_on_startup,
+                        on_reset,
+                    )}
 
-                            {support_section(
-                                snap.settings.updates.release_channel,
-                                is_release_channel_non_default,
-                                on_set_channel,
-                                local_state_ignore_draft(),
-                                snap.settings.sync.local_state_ignore_rules.trim() != default_local_state_ignore.trim(),
-                                on_set_inventory_ignore,
-                                on_reset_inventory_ignore,
-                                snap.settings.privacy.telemetry_consent.is_enabled(),
-                                is_telemetry_non_default,
-                                on_toggle_telemetry,
-                                snap.settings.startup.auto_assess_on_startup,
-                                is_auto_assess_on_startup_non_default,
-                                on_toggle_auto_assess_on_startup,
-                                snap.settings.updates.auto_check_on_startup,
-                                is_auto_check_on_startup_non_default,
-                                on_toggle_auto_check_on_startup,
-                                open_logs,
-                                restart_onboarding,
-                            )}
+                    {privacy_section(
+                        settings.privacy.telemetry_consent.is_enabled(),
+                        is_telemetry_non_default,
+                        on_toggle_telemetry,
+                        on_reset,
+                    )}
 
-                            {reset_section(
-                                on_request_reset_settings,
-                                on_request_factory_reset,
-                            )}
-                        }
-                    }
+                    {general_section(
+                        settings.ui.show_profile_icons,
+                        is_show_profile_icons_non_default,
+                        on_toggle_show_profile_icons,
+                        on_reset,
+                    )}
+
+                    {advanced_section(
+                        open_logs,
+                        restart_onboarding,
+                        on_request_reset_settings,
+                        on_request_factory_reset,
+                        reset_settings_confirm_open(),
+                        rsx! {
+                            InlineConfirm {
+                                open: reset_settings_confirm_open(),
+                                message: "Restore all settings to defaults? Applied when you save.".to_string(),
+                                confirm_label: "Reset".to_string(),
+                                cancel_label: "Cancel".to_string(),
+                                confirm_variant: ButtonVariant::Secondary,
+                                on_confirm: on_confirm_reset_settings,
+                                on_cancel: on_cancel_reset_settings,
+                            }
+                        },
+                        factory_reset_confirm_open(),
+                        rsx! {
+                            InlineConfirm {
+                                open: factory_reset_confirm_open(),
+                                message: "Remove all settings and profiles, then return to setup?".to_string(),
+                                confirm_label: "Factory reset".to_string(),
+                                cancel_label: "Cancel".to_string(),
+                                confirm_variant: ButtonVariant::Danger,
+                                on_confirm: on_confirm_factory_reset,
+                                on_cancel: on_cancel_factory_reset,
+                            }
+                        },
+                    )}
                 }
             }
 
-            ConfirmDialog {
-                open: reset_settings_modal_open(),
-                title: "Reset Settings".to_string(),
-                message: "Reset all settings to defaults?".to_string(),
-                confirm_label: "Yes".to_string(),
-                cancel_label: "No".to_string(),
-                confirm_variant: ButtonVariant::Secondary,
-                on_confirm: on_confirm_reset_settings,
-                on_cancel: on_cancel_reset_settings,
-            }
-
-            ConfirmDialog {
-                open: factory_reset_modal_open(),
-                title: "Factory Reset".to_string(),
-                message: "Reset all settings and profiles and return to onboarding?".to_string(),
-                confirm_label: "Yes".to_string(),
-                cancel_label: "No".to_string(),
-                confirm_variant: ButtonVariant::Danger,
-                on_confirm: on_confirm_factory_reset,
-                on_cancel: on_cancel_factory_reset,
+            PageFooter {
+                actions: Some(rsx! {
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        onclick: on_cancel,
+                        "Cancel"
+                    }
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        loading: saving(),
+                        disabled: !dirty() || custom_template_error.is_some(),
+                        onclick: on_save,
+                        "Save"
+                    }
+                }),
             }
         }
     }
