@@ -25,9 +25,6 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
     - name: Authenticate git for private dependencies
       shell: bash
       env:
@@ -51,13 +48,13 @@ runs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: Rust cache
-      uses: swatinem/rust-cache@v2.8.2
+      uses: swatinem/rust-cache@v2.9.1
 
     - name: Install cargo-binstall
       uses: taiki-e/install-action@cargo-binstall
 
     - name: Install Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: "3.x"
 
@@ -125,6 +122,16 @@ runs:
           echo "fleet-cli binary found in packdir; release packaging must include only the Fleet app."
           exit 1
         fi
+
+    - name: Bundle Linux libxdo runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        exe="packdir/${{ inputs.exe_name }}"
+        lib_name="$(readelf -d "$exe" | sed -n 's/.*Shared library: \[\(libxdo\.so\.[^]]*\)\].*/\1/p')"
+        lib_path="$(ldconfig -p | awk -v lib="$lib_name" '$1 == lib { print $NF; exit }')"
+        install -m 0644 "$lib_path" "packdir/$lib_name"
 
     - name: Install .NET 8
       uses: actions/setup-dotnet@v5.1.0

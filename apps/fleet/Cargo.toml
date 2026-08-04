@@ -25,12 +25,7 @@ base64 = "0.22.1"
 image = { version = "0.25.6", default-features = false, features = ["png"] }
 
 # Dioxus
-dioxus = { version = "0.7.3", features = ["desktop", "router"] }
-dioxus-logger = "0.7.3"
+dioxus = { version = "0.7.9", features = ["desktop", "router"] }
+dioxus-logger = "0.7.9"
+dioxus-router = "0.7.9"
 tracing = { workspace = true }
-dioxus-router = "0.7.3"
-
-[build-dependencies]
-
-[target.'cfg(windows)'.build-dependencies]
-winresource = "0.1.20"

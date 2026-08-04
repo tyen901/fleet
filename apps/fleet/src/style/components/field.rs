@@ -10,6 +10,8 @@ pub struct TextFieldProps {
     #[props(default = false)]
     pub disabled: bool,
     #[props(default = false)]
+    pub readonly: bool,
+    #[props(default = false)]
     pub invalid: bool,
     #[props(default)]
     pub on_change: Option<EventHandler<String>>,
@@ -29,6 +31,7 @@ pub fn TextField(props: TextFieldProps) -> Element {
                     value: props.value.clone(),
                     placeholder: props.placeholder.unwrap_or_default(),
                     disabled: props.disabled,
+                    readonly: props.readonly,
                     "aria-invalid": if props.invalid { "true" } else { "false" },
                     autocomplete: "off",
                     spellcheck: "false",

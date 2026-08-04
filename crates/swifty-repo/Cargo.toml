@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+atomic-write-file = { workspace = true }
 fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
 reqwest = { workspace = true }

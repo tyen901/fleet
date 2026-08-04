@@ -5,17 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = { workspace = true }
+camino = { workspace = true }
 fleet-domain = { workspace = true }
-flux-manifest = { workspace = true }
-flux-inventory-contract = { workspace = true }
-flux-types = { workspace = true }
-blake3 = { workspace = true }
-md5 = { workspace = true }
+flux = { workspace = true }
+futures-util = { workspace = true }
 rusqlite = { workspace = true }
-serde = { workspace = true }
-specta = { workspace = true }
 thiserror = { workspace = true }
-walkdir = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

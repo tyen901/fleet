@@ -6,6 +6,8 @@
   },
   "scripts": {
     "fmt:css": "prettier --write \"apps/fleet/assets/css/**/*.css\"",
-    "lint:css": "prettier --check \"apps/fleet/assets/css/**/*.css\""
+    "lint:css": "prettier --check \"apps/fleet/assets/css/**/*.css\"",
+    "lint:design": "node scripts/lint-design.mjs",
+    "render:ui": "cargo build -p fleet && node scripts/render-ui.mjs"
   }
 }

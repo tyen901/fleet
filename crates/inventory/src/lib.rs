@@ -1,9 +1,22 @@
-//! Inventory is the authoritative finalized local file index used for trust and segment lookup.
-//! It persists only finalized on-disk file facts and their segments.
+//! Fleet-owned durable materialization inventory.
+//!
+//! The inventory is a facts database for the managed target scope. It persists
+//! the current managed target-path snapshot plus reusable local file facts and
+//! reusable segment metadata. Managed paths drive Flux delete-extra planning;
+//! reusable file facts drive local keep/reuse.
 
-mod flux_view;
-mod inventory;
+mod path;
+mod provider;
+mod row;
+mod schema;
+mod sqlite;
 mod store;
+mod types;
 
-pub use flux_view::open_flux_inventory;
-pub use inventory::{FinalizedFileRow, Inventory, InventoryError};
+pub use path::target_path_from_relative_path;
+pub use provider::FleetInventoryProvider;
+pub use store::MaterializationInventory;
+pub use types::{
+    InventoryAuditReport, InventoryDesiredFile, InventoryError, InventoryObservedFile,
+    InventoryRefreshPlan, InventoryRefreshReport, InventoryRefreshWrite,
+};

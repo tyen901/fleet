@@ -15,8 +15,9 @@ pub enum RepoCheckFreshness {
 pub enum OperationKind {
     CheckRepo,
     CheckInventory,
-    Delete,
+    CleanupUnexpectedFiles,
     Sync,
+    FullSync,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]

@@ -113,9 +113,9 @@ pub(crate) fn print_check_report(
     {
         let repair_reason = match &inventory_report.local_health {
             LocalStateHealth::MissingDestination => {
-                "local folder missing; run sync to recreate it and reconcile"
+                "local folder missing; run sync to recreate it and materialize files"
             }
-            _ => "run sync to repair inventory and reconcile",
+            _ => "run sync to repair inventory and materialize files",
         };
         println!("sync_repair_required: true ({repair_reason})");
     }
@@ -124,7 +124,7 @@ pub(crate) fn print_check_report(
         && inventory_report.unexpected_delete_paths.is_empty()
     {
         println!(
-            "local_drift_detected: true (modified/missing files likely; run sync to reconcile)"
+            "local_drift_detected: true (modified/missing files likely; run sync to materialize)"
         );
     }
 
