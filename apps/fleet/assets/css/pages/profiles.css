@@ -172,8 +172,3 @@
   color: var(--clr-text-muted);
   font-size: var(--text-caption);
 }
-
-.sync-panel__actions {
-  display: flex;
-  justify-content: flex-end;
-}

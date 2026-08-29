@@ -648,6 +648,7 @@ const child = spawn(executable, [], {
     FLEET_CONFIG_DIR: configRoot,
     FLEET_SIMULATE_SYNC: '1',
     FLEET_SIMULATE_SYNC_HOLD_PERCENT: '50',
+    WEBVIEW2_USER_DATA_FOLDER: path.join(testRoot, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
   },
   stdio: 'ignore',

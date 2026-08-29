@@ -62,10 +62,8 @@ pub(crate) async fn sync(
                 total: Some(TOTAL_FILES),
                 unit: ProgressUnit::Files,
             }),
-            detail: None,
             throughput_bytes_per_sec: Some(12 * 1024 * 1024),
             eta_seconds: Some(TOTAL_FILES - step),
-            elapsed_ms: Some(step * STEP_DELAY.as_millis() as u64),
         });
         if hold_percent() == Some(step * 100 / TOTAL_FILES) {
             cancel.cancelled().await;

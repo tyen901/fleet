@@ -83,11 +83,8 @@ pub struct OperationProgressEvent {
     pub status_text: Option<String>,
     pub primary: ProgressMetric,
     pub secondary: Option<ProgressMetric>,
-    #[serde(default)]
-    pub detail: Option<ProgressMetric>,
     pub throughput_bytes_per_sec: Option<u64>,
     pub eta_seconds: Option<u64>,
-    pub elapsed_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]

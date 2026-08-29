@@ -101,28 +101,26 @@ pub(crate) fn project_materialization_progress(
         }
         _ => None,
     };
-    let detail = session_transfer_total.map(|total| ProgressMetric {
-        label: Some("This sync".to_string()),
-        done: Some(safe_session_transfer_done),
-        total: Some(total),
-        unit: ProgressUnit::Bytes,
-    });
-
     OperationProgressEvent {
         stage: OperationStage::Sync,
         scope: ProgressScope::MaterializationBytes,
         status_text: Some("Syncing files".to_string()),
+        // The bar tracks the work this sync has to do, so it starts at zero.
+        // Reusable content already on disk is not progress this run earned.
         primary: ProgressMetric {
+            label: Some("Transferred".to_string()),
+            done: Some(safe_session_transfer_done),
+            total: session_transfer_total,
+            unit: ProgressUnit::Bytes,
+        },
+        secondary: Some(ProgressMetric {
             label: Some("Local folder size".to_string()),
             done: Some(target_done),
             total: target_total,
             unit: ProgressUnit::Bytes,
-        },
-        secondary: None,
-        detail,
+        }),
         throughput_bytes_per_sec: throughput,
         eta_seconds,
-        elapsed_ms: None,
     }
 }
 
@@ -169,13 +167,14 @@ mod tests {
             },
         );
 
-        assert_eq!(event.primary.label.as_deref(), Some("Local folder size"));
-        assert_eq!(event.primary.done, Some(40_000_000_000));
-        assert_eq!(event.primary.total, Some(79_700_000_000));
-        let session = event.detail.as_ref().expect("session transfer metric");
-        assert_eq!(session.label.as_deref(), Some("This sync"));
-        assert_eq!(session.done, Some(0));
-        assert_eq!(session.total, Some(39_700_000_000));
+        // A warm target must not read as nearly finished before a byte moves.
+        assert_eq!(event.primary.label.as_deref(), Some("Transferred"));
+        assert_eq!(event.primary.done, Some(0));
+        assert_eq!(event.primary.total, Some(39_700_000_000));
+        let target = event.secondary.as_ref().expect("target size metric");
+        assert_eq!(target.label.as_deref(), Some("Local folder size"));
+        assert_eq!(target.done, Some(40_000_000_000));
+        assert_eq!(target.total, Some(79_700_000_000));
         assert_eq!(event.throughput_bytes_per_sec, None);
         assert_eq!(event.eta_seconds, None);
     }
@@ -196,14 +195,13 @@ mod tests {
             },
         );
 
-        assert_eq!(event.primary.label.as_deref(), Some("Local folder size"));
-        assert_eq!(event.primary.done, Some(40_000_800_000));
-        assert_eq!(event.primary.total, Some(79_700_000_000));
-        let session = event.detail.as_ref().expect("session transfer metric");
-        assert_eq!(session.label.as_deref(), Some("This sync"));
-        assert_eq!(session.done, Some(1_400_000));
-        assert_eq!(session.total, Some(12_000_000));
-        assert!(event.secondary.is_none());
+        assert_eq!(event.primary.label.as_deref(), Some("Transferred"));
+        assert_eq!(event.primary.done, Some(1_400_000));
+        assert_eq!(event.primary.total, Some(12_000_000));
+        let target = event.secondary.as_ref().expect("target size metric");
+        assert_eq!(target.label.as_deref(), Some("Local folder size"));
+        assert_eq!(target.done, Some(40_000_800_000));
+        assert_eq!(target.total, Some(79_700_000_000));
         assert_eq!(event.throughput_bytes_per_sec, Some(45_000));
         assert!(event.eta_seconds.is_some());
     }
