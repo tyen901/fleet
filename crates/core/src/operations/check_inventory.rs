@@ -275,10 +275,8 @@ fn emit_scan_progress(publisher: &OperationPublisher, progress: local_state::Wal
                     unit: ProgressUnit::Files,
                 },
                 secondary: None,
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
         local_state::WalkProgress::Metadata {
@@ -292,21 +290,19 @@ fn emit_scan_progress(publisher: &OperationPublisher, progress: local_state::Wal
                 scope: ProgressScope::InventoryMetadata,
                 status_text: Some("Reading file metadata".to_string()),
                 primary: ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
-                },
-                secondary: Some(ProgressMetric {
                     label: Some("Bytes".to_string()),
                     done: Some(bytes_done),
                     total: bytes_total,
                     unit: ProgressUnit::Bytes,
+                },
+                secondary: Some(ProgressMetric {
+                    label: Some("Files".to_string()),
+                    done: Some(files_done),
+                    total: Some(files_total),
+                    unit: ProgressUnit::Files,
                 }),
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
     }
@@ -329,10 +325,8 @@ fn emit_verify_progress(publisher: &OperationPublisher, progress: local_state::V
             total: Some(progress.files_total),
             unit: ProgressUnit::Files,
         }),
-        detail: None,
         throughput_bytes_per_sec: None,
         eta_seconds: None,
-        elapsed_ms: None,
     });
 }
 

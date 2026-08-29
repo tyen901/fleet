@@ -4,7 +4,7 @@ use crate::operations::events::{
 };
 use crate::operations::{check_inventory, check_repo, cleanup, simulated, sync, OperationOutput};
 use crate::state::{
-    apply_operation_progress, build_operation_steps, ensure_profile_runtime_mut,
+    apply_operation_progress, apply_operation_stage, ensure_profile_runtime_mut,
     recompute_profile_status, ActiveOperationState, OperationOutcomeState, OperationTerminalStatus,
 };
 use crate::Core;
@@ -384,7 +384,6 @@ impl OperationPublisher {
             return;
         };
         let profile_id = self.profile_id.clone();
-        let operation = self.operation;
         core.update_state(|state| {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
@@ -393,12 +392,9 @@ impl OperationPublisher {
                 if previous != stage {
                     active.completed_stages.insert(previous);
                 }
-                active.progress.active_stage = stage;
-                active.progress.steps =
-                    build_operation_steps(operation, Some(stage), &active.completed_stages);
+                apply_operation_stage(&mut active.progress, &active.completed_stages, stage);
                 active.updated_at_unix_ms = now;
                 active.progress.last_updated_at_unix_ms = now;
-                active.progress.elapsed_ms = now.saturating_sub(active.progress.started_at_unix_ms);
             }
             recompute_profile_status(state, &profile_id);
         });

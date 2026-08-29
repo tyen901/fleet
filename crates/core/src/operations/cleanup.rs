@@ -93,10 +93,8 @@ async fn delete_cleanup_candidates(
                     unit: ProgressUnit::Paths,
                 },
                 secondary: None,
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
         fleet_domain::filesystem::remove_empty_parent_dirs(&root, &rel_paths)

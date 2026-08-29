@@ -493,8 +493,8 @@ pub fn ProfileView(id: String) -> Element {
                     }
 
                     Section {
-                        // One set of controls. Read mode renders them
-                        // read-only, so nothing shifts when edit is toggled.
+                        // Editing is a mode on this page. Read mode keeps the
+                        // same controls in place and marks them readonly.
                         ProfileFormField {
                             title: "Name".to_string(),
                             value: if editing() { name() } else { profile.name.clone() },
@@ -578,14 +578,15 @@ pub fn ProfileView(id: String) -> Element {
                     div { class: "section-divider" }
 
                     Section {
-                        if editing() {
-                            div { class: "section__standalone-action",
+                        SectionHeader {
+                            title: "Additional mods".to_string(),
+                            action: editing().then(|| rsx! {
                                 IconButton {
                                     icon: BsPlusLg,
                                     label: "Add mod".to_string(),
                                     onclick: on_add_mod,
                                 }
-                            }
+                            }),
                         }
                         if editing() {
                             div { class: "mod-list",
@@ -773,11 +774,7 @@ fn render_sync_mode(
     session_id: Option<u64>,
     cancel_enabled: bool,
 ) -> Element {
-    let percent = progress.and_then(|progress| {
-        fleet_core::stage_fraction(progress.primary_metric.as_ref())
-            .map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u64)
-            .or(progress.stage.percent)
-    });
+    let percent = progress.and_then(|progress| progress.stage.percent);
     let indeterminate = progress
         .map(|progress| !progress.stage.determinate)
         .unwrap_or(true);
@@ -793,7 +790,6 @@ fn render_sync_mode(
     let rate = progress
         .and_then(|progress| progress.throughput_bytes_per_sec)
         .map(format_speed);
-    let elapsed = progress.map(|progress| format_clock(progress.elapsed_ms / 1000));
     let remaining = progress
         .and_then(|progress| progress.eta_seconds)
         .map(format_clock);
@@ -825,15 +821,11 @@ fn render_sync_mode(
                             if let Some(rate) = rate.as_ref() {
                                 span { class: "mono", "{rate}" }
                             }
-                            if let Some(elapsed) = elapsed.as_ref() {
-                                span { class: "mono", "Elapsed {elapsed}" }
-                            }
                             if let Some(remaining) = remaining.as_ref() {
                                 span { class: "mono", "Remaining {remaining}" }
                             }
                         }
                     }
-                
                 }
             }
 

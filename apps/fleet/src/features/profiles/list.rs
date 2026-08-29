@@ -60,9 +60,7 @@ fn row_sync_state(
     runtime: &fleet_core::ProfileRuntimeState,
     progress: &fleet_core::ProfileOperationProgressState,
 ) -> RowSyncState {
-    let percent = fleet_core::stage_fraction(progress.primary_metric.as_ref())
-        .map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u64)
-        .or(progress.stage.percent);
+    let percent = progress.stage.percent;
     let phase = match progress.primary_metric.as_ref() {
         Some(metric) => format!(
             "{} · {}",
