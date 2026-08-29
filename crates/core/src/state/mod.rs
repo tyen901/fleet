@@ -223,16 +223,12 @@ pub struct UiOperationStepState {
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
-    pub started_at_unix_ms: u64,
     pub last_updated_at_unix_ms: u64,
-    pub elapsed_ms: u64,
     pub active_stage: OperationStage,
     pub steps: Vec<UiOperationStepState>,
     pub stage: UiProgressBarState,
     pub primary_metric: Option<UiProgressMetric>,
     pub secondary_metric: Option<UiProgressMetric>,
-    #[serde(default)]
-    pub detail_metric: Option<UiProgressMetric>,
     pub throughput_bytes_per_sec: Option<u64>,
     pub eta_seconds: Option<u64>,
 }
@@ -242,9 +238,7 @@ impl ProfileOperationProgressState {
         let active_stage = OperationStage::Validating;
         Self {
             operation,
-            started_at_unix_ms: now_ms,
             last_updated_at_unix_ms: now_ms,
-            elapsed_ms: 0,
             active_stage,
             steps: build_operation_steps(operation, Some(active_stage), &BTreeSet::new()),
             stage: UiProgressBarState {
@@ -253,7 +247,6 @@ impl ProfileOperationProgressState {
             },
             primary_metric: None,
             secondary_metric: None,
-            detail_metric: None,
             throughput_bytes_per_sec: None,
             eta_seconds: None,
         }
@@ -601,7 +594,7 @@ pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
     }
 }
 
-pub fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
+fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
     let metric = metric?;
     let (Some(done), Some(total)) = (metric.done, metric.total) else {
         return None;
@@ -612,7 +605,7 @@ pub fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
     Some((done as f64 / total as f64).clamp(0.0, 1.0))
 }
 
-pub fn build_operation_steps(
+fn build_operation_steps(
     operation: OperationKind,
     active_stage: Option<OperationStage>,
     completed_stages: &BTreeSet<OperationStage>,
@@ -659,36 +652,92 @@ pub fn apply_operation_progress(
     now_ms: u64,
 ) {
     progress_state.last_updated_at_unix_ms = now_ms;
-    progress_state.elapsed_ms = progress
-        .elapsed_ms
-        .unwrap_or_else(|| now_ms.saturating_sub(progress_state.started_at_unix_ms));
     progress_state.active_stage = progress.stage;
     progress_state.primary_metric = Some(metric_from_progress(&progress.primary));
     progress_state.secondary_metric = progress.secondary.as_ref().map(metric_from_progress);
-    progress_state.detail_metric = progress.detail.as_ref().map(metric_from_progress);
-    let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
     progress_state.steps = build_operation_steps(
         progress_state.operation,
         Some(progress.stage),
         completed_stages,
     );
+    let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
     progress_state.stage = UiProgressBarState {
         determinate: active_fraction.is_some(),
-        percent: active_fraction.map(|f| (f * 100.0).round().clamp(0.0, 100.0) as u64),
+        percent: active_fraction
+            .map(|fraction| (fraction * 100.0).round().clamp(0.0, 100.0) as u64),
     };
     progress_state.throughput_bytes_per_sec = progress.throughput_bytes_per_sec;
     progress_state.eta_seconds = progress.eta_seconds;
 }
 
+pub(crate) fn apply_operation_stage(
+    progress_state: &mut ProfileOperationProgressState,
+    completed_stages: &BTreeSet<OperationStage>,
+    stage: OperationStage,
+) {
+    progress_state.active_stage = stage;
+    progress_state.steps =
+        build_operation_steps(progress_state.operation, Some(stage), completed_stages);
+    progress_state.stage = UiProgressBarState {
+        determinate: false,
+        percent: None,
+    };
+    progress_state.primary_metric = None;
+    progress_state.secondary_metric = None;
+    progress_state.throughput_bytes_per_sec = None;
+    progress_state.eta_seconds = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_profile_status, ensure_profile_runtime_mut, AppState, ProfileStatusHeadline,
+        apply_operation_progress, apply_operation_stage, derive_profile_status,
+        ensure_profile_runtime_mut, AppState, ProfileOperationProgressState, ProfileStatusHeadline,
+    };
+    use crate::operations::{
+        OperationProgressEvent, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
     };
     use fleet_domain::health::{
         InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn stage_transition_clears_previous_stage_progress() {
+        let completed = BTreeSet::from([OperationStage::Validating]);
+        let mut progress = ProfileOperationProgressState::new(OperationKind::Sync, 0);
+        apply_operation_progress(
+            &mut progress,
+            &completed,
+            &OperationProgressEvent {
+                stage: OperationStage::PreparingInventory,
+                scope: ProgressScope::InventoryRefresh,
+                status_text: None,
+                primary: ProgressMetric {
+                    label: Some("Bytes".to_string()),
+                    done: Some(5),
+                    total: Some(10),
+                    unit: ProgressUnit::Bytes,
+                },
+                secondary: None,
+                throughput_bytes_per_sec: Some(5),
+                eta_seconds: Some(1),
+            },
+            1,
+        );
+
+        apply_operation_stage(&mut progress, &completed, OperationStage::Sync);
+
+        assert_eq!(progress.active_stage, OperationStage::Sync);
+        assert_eq!(progress.stage.percent, None);
+        assert!(!progress.stage.determinate);
+        assert!(progress.primary_metric.is_none());
+        assert!(progress.secondary_metric.is_none());
+        assert!(progress.throughput_bytes_per_sec.is_none());
+        assert!(progress.eta_seconds.is_none());
+    }
+
     #[test]
     fn unexpected_files_recommend_sync() {
         let mut state = AppState::default();

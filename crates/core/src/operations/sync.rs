@@ -170,10 +170,8 @@ fn emit_audit_progress(publisher: &OperationPublisher, progress: local_state::Au
                     unit: ProgressUnit::Files,
                 },
                 secondary: None,
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
         local_state::AuditProgress::Scan(local_state::WalkProgress::Metadata {
@@ -187,21 +185,19 @@ fn emit_audit_progress(publisher: &OperationPublisher, progress: local_state::Au
                 scope: ProgressScope::AuditEnumerate,
                 status_text: Some("Reading audit metadata".to_string()),
                 primary: ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
-                },
-                secondary: Some(ProgressMetric {
                     label: Some("Bytes".to_string()),
                     done: Some(bytes_done),
                     total: bytes_total,
                     unit: ProgressUnit::Bytes,
+                },
+                secondary: Some(ProgressMetric {
+                    label: Some("Files".to_string()),
+                    done: Some(files_done),
+                    total: Some(files_total),
+                    unit: ProgressUnit::Files,
                 }),
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
         local_state::AuditProgress::Verify(progress) => {
@@ -221,10 +217,8 @@ fn emit_audit_progress(publisher: &OperationPublisher, progress: local_state::Au
                     total: Some(progress.files_total),
                     unit: ProgressUnit::Files,
                 }),
-                detail: None,
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
-                elapsed_ms: None,
             });
         }
     }
@@ -347,22 +341,22 @@ fn emit_refresh_progress(
         stage: OperationStage::PreparingInventory,
         scope: ProgressScope::InventoryRefresh,
         status_text: Some(status_text.to_string()),
+        // Bytes lead: they drive the percentage, so a few large files cannot
+        // stall a bar that counted them as one step each.
         primary: ProgressMetric {
-            label: Some("Files".to_string()),
-            done: Some(files_done),
-            total: files_total,
-            unit: ProgressUnit::Files,
-        },
-        secondary: Some(ProgressMetric {
             label: Some("Bytes".to_string()),
             done: Some(bytes_done),
             total: bytes_total,
             unit: ProgressUnit::Bytes,
+        },
+        secondary: Some(ProgressMetric {
+            label: Some("Files".to_string()),
+            done: Some(files_done),
+            total: files_total,
+            unit: ProgressUnit::Files,
         }),
-        detail: None,
         throughput_bytes_per_sec: None,
         eta_seconds: None,
-        elapsed_ms: None,
     });
 }
 
