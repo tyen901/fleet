@@ -126,6 +126,65 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "expected ready profile check output, got: {out}"
     );
 
+    let mut modified_bytes = server.example_file_bytes().to_vec();
+    modified_bytes[0] ^= 0x20;
+    fs::write(&synced_file, &modified_bytes).expect("modify synced file in place");
+    assert_eq!(
+        fs::metadata(&synced_file).expect("modified metadata").len(),
+        server.example_file_bytes().len() as u64,
+        "the drift scenario must not be detectable from file length alone"
+    );
+
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("manifest_health: Different")
+            && out.contains("modified_paths: 1")
+            && out.contains("sync_repair_required: true"),
+        "expected same-size local drift to require repair, got: {out}"
+    );
+
+    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
+    assert_eq!(
+        fs::read(&synced_file).expect("read repaired file"),
+        server.example_file_bytes(),
+        "sync must repair a changed managed file"
+    );
+
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("manifest_health: Exact")
+            && out.contains("modified_paths: 0")
+            && out.contains("unexpected_health: Clean"),
+        "expected repaired profile check output, got: {out}"
+    );
+
+    server.publish_update();
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("freshness: UpdateAvailable")
+            && out.contains("update_available: true")
+            && out.contains("manifest_health: Different")
+            && out.contains("modified_paths: 1")
+            && out.contains("sync_repair_required: true"),
+        "expected published repository update to be detected, got: {out}"
+    );
+
+    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
+    assert_eq!(
+        fs::read(&synced_file).expect("read updated file"),
+        server.example_file_bytes(),
+        "sync must pull and materialize the published repository update"
+    );
+
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("freshness: UpToDate")
+            && out.contains("update_available: false")
+            && out.contains("manifest_health: Exact")
+            && out.contains("unexpected_health: Clean"),
+        "expected updated profile to be fully healthy, got: {out}"
+    );
+
     let profile_state_root = config_root.join("profile_state");
     let profile_state_dir = profile_state_root.join(fleet_domain::profile_state_key(profile_id));
     let inventory_db = profile_state_dir.join("inventory.db");
@@ -135,6 +194,6 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 }
 
 #[test]
-fn check_then_sync_with_local_swifty_repo_server() {
+fn check_sync_repair_local_change_and_pull_remote_update() {
     run_local_swifty_repo_sync_flow("smoke-test-remote");
 }

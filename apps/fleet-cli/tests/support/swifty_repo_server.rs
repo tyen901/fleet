@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -12,10 +12,14 @@ const EXAMPLE_FILE_ROUTE: &str = "/@fleet-example/addons/hello.txt";
 const EXAMPLE_FILE_BYTES: &[u8] = b"fleet dummy file\n";
 const EXAMPLE_FILE_MD5: &str = "7dc1773e58b61108bc3f40abdb29eaa4";
 const EXAMPLE_MOD_MD5: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const UPDATED_FILE_BYTES: &[u8] = b"fleet updated file\n";
+const UPDATED_FILE_MD5: &str = "146712534a31b1d71683176e9a0e1e47";
+const UPDATED_MOD_MD5: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 pub struct ExampleSwiftyRepoServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    revision: Arc<AtomicUsize>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -24,15 +28,31 @@ impl ExampleSwiftyRepoServer {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let repo = Arc::new(ExampleSwiftyRepo::new());
+        let revision = Arc::new(AtomicUsize::new(0));
+        let repos = Arc::new([
+            ExampleSwiftyRepo::new(
+                "0000000000000000000000000000000000000000",
+                EXAMPLE_MOD_MD5,
+                EXAMPLE_FILE_BYTES,
+                EXAMPLE_FILE_MD5,
+            ),
+            ExampleSwiftyRepo::new(
+                "1111111111111111111111111111111111111111",
+                UPDATED_MOD_MD5,
+                UPDATED_FILE_BYTES,
+                UPDATED_FILE_MD5,
+            ),
+        ]);
         let handle = {
             let stop = Arc::clone(&stop);
-            thread::spawn(move || serve(listener, repo, stop))
+            let revision = Arc::clone(&revision);
+            thread::spawn(move || serve(listener, repos, revision, stop))
         };
 
         Ok(Self {
             addr,
             stop,
+            revision,
             handle: Some(handle),
         })
     }
@@ -48,7 +68,14 @@ impl ExampleSwiftyRepoServer {
     }
 
     pub fn example_file_bytes(&self) -> &'static [u8] {
-        EXAMPLE_FILE_BYTES
+        match self.revision.load(Ordering::Acquire) {
+            0 => EXAMPLE_FILE_BYTES,
+            _ => UPDATED_FILE_BYTES,
+        }
+    }
+
+    pub fn publish_update(&self) {
+        self.revision.store(1, Ordering::Release);
     }
 }
 
@@ -65,25 +92,31 @@ impl Drop for ExampleSwiftyRepoServer {
 struct ExampleSwiftyRepo {
     repo_json: Vec<u8>,
     mod_srf: Vec<u8>,
+    file_bytes: &'static [u8],
 }
 
 impl ExampleSwiftyRepo {
-    fn new() -> Self {
-        let mod_checksum = md5_digest(EXAMPLE_MOD_MD5);
+    fn new(
+        repo_checksum: &str,
+        mod_checksum: &str,
+        file_bytes: &'static [u8],
+        file_checksum: &str,
+    ) -> Self {
+        let mod_checksum = md5_digest(mod_checksum);
         let part = swifty_artifacts::SrfPart {
             path: format!(
                 "{}_{}",
                 EXAMPLE_FILE_REL.replace('\\', "/"),
-                EXAMPLE_FILE_BYTES.len()
+                file_bytes.len()
             ),
             start: 0,
-            length: EXAMPLE_FILE_BYTES.len() as u64,
-            checksum: md5_digest(EXAMPLE_FILE_MD5),
+            length: file_bytes.len() as u64,
+            checksum: md5_digest(file_checksum),
         };
         let file_checksum = swifty_artifacts::file_md5_from_parts(std::slice::from_ref(&part));
         let repo = swifty_artifacts::RepoSpec {
             repo_name: "fleet-example-test-repo".to_string(),
-            checksum: "0000000000000000000000000000000000000000".to_string(),
+            checksum: repo_checksum.to_string(),
             required_mods: vec![swifty_artifacts::RepoMod {
                 mod_name: EXAMPLE_MOD_NAME.to_string(),
                 checksum: mod_checksum,
@@ -105,7 +138,7 @@ impl ExampleSwiftyRepo {
             checksum: mod_checksum,
             files: vec![swifty_artifacts::SrfFile {
                 path: EXAMPLE_FILE_REL.to_string(),
-                length: EXAMPLE_FILE_BYTES.len() as u64,
+                length: file_bytes.len() as u64,
                 checksum: file_checksum,
                 r#type: None,
                 parts: vec![part],
@@ -115,6 +148,7 @@ impl ExampleSwiftyRepo {
         Self {
             repo_json: serde_json::to_vec(&repo).expect("serialize repo.json"),
             mod_srf: serde_json::to_vec(&mod_manifest).expect("serialize mod.srf"),
+            file_bytes,
         }
     }
 
@@ -134,7 +168,7 @@ impl ExampleSwiftyRepo {
             EXAMPLE_FILE_ROUTE => (
                 "200 OK",
                 "application/octet-stream",
-                EXAMPLE_FILE_BYTES.to_vec(),
+                self.file_bytes.to_vec(),
             ),
             _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
         };
@@ -192,7 +226,12 @@ impl<'a> HttpRequest<'a> {
     }
 }
 
-fn serve(listener: TcpListener, repo: Arc<ExampleSwiftyRepo>, stop: Arc<AtomicBool>) {
+fn serve(
+    listener: TcpListener,
+    repos: Arc<[ExampleSwiftyRepo; 2]>,
+    revision: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+) {
     for stream in listener.incoming() {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -209,7 +248,8 @@ fn serve(listener: TcpListener, repo: Arc<ExampleSwiftyRepo>, stop: Arc<AtomicBo
         }
 
         let request = String::from_utf8_lossy(&request[..bytes_read]);
-        let response = repo.response(&request);
+        let selected = revision.load(Ordering::Acquire).min(repos.len() - 1);
+        let response = repos[selected].response(&request);
         let _ = stream.write_all(&response);
         let _ = stream.flush();
     }
