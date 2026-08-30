@@ -1,11 +1,9 @@
-use crate::operations::local_state::{self, LocalContentSnapshot, LocalReconcileJob};
-use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressScope,
-    ProgressUnit,
-};
+use crate::operations::local_state::enumerate_unexpected_paths;
+use crate::operations::progress::FluxProgressObserver;
+use crate::operations::{OperationPublisher, OperationStage};
 use fleet_domain::health::InventoryCheckReport;
-use fleet_domain::{AppSettings, LocalStateHealth, Profile, ProfileSourceKind};
-use fleet_inventory::{InventoryError, InventoryReconcileMode, MaterializationInventory};
+use fleet_domain::{AppSettings, ManifestHealth, Profile, ProfileSourceKind, UnexpectedHealth};
+use fleet_inventory::FleetInventoryProvider;
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -17,35 +15,35 @@ pub(crate) async fn check_inventory(
     publisher: OperationPublisher,
     cancel: CancellationToken,
 ) -> Result<InventoryCheckReport, crate::ApiError> {
-    check_inventory_with_mode(
+    check_inventory_with_scope(
         profile,
         settings,
         state_root,
         publisher,
-        InventoryReconcileMode::Full,
+        flux::VerificationScope::All,
+        true,
         cancel,
     )
     .await
 }
 
-pub(crate) async fn check_inventory_with_mode(
+pub(crate) async fn check_inventory_with_scope(
     profile: &Profile,
     settings: &AppSettings,
     state_root: &Path,
     publisher: OperationPublisher,
-    mode: InventoryReconcileMode,
+    scope: flux::VerificationScope,
+    check_unexpected: bool,
     cancel: CancellationToken,
 ) -> Result<InventoryCheckReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     let dest = match profile.dest_path() {
         Ok(path) => path,
-        Err(_) => {
-            return Ok(invalid_report(
-                &profile.id,
-                LocalStateHealth::InvalidProfile,
-            ))
-        }
+        Err(_) => return Ok(report(profile, ManifestHealth::InvalidProfile)),
     };
+    if !dest.is_dir() {
+        return Ok(report(profile, ManifestHealth::MissingDestination));
+    }
     let ProfileSourceKind::Http(repo_url) = profile
         .validated_source_kind()
         .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
@@ -59,148 +57,109 @@ pub(crate) async fn check_inventory_with_mode(
         fleet_flux::load_cached_swifty_materialization_input(repo_url, &paths.profile.repo_cache)
             .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
     else {
-        publisher.stage(OperationStage::Finalizing);
-        return Ok(invalid_report(
-            &profile.id,
-            LocalStateHealth::LocalStateMissing,
-        ));
+        return Ok(report(profile, ManifestHealth::InventoryUnavailable));
     };
-    let inventory = MaterializationInventory::open(&paths.profile.inventory.db)
-        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
-    let snapshot = run_reconcile(
-        LocalReconcileJob {
-            inventory,
-            profile_id: profile.id.clone(),
-            dest,
-            manifest: input.manifest,
-            ignore_rules: settings.sync.local_state_ignore_rules.clone(),
-            mode,
-            cancel,
-        },
-        publisher.clone(),
-    )
-    .await?;
-    publisher.stage(OperationStage::Finalizing);
-    Ok(report_from_snapshot(&snapshot))
-}
+    let inventory = match FleetInventoryProvider::open_existing(&paths.profile.inventory.db) {
+        Ok(inventory) => Arc::new(inventory),
+        Err(_) => return Ok(report(profile, ManifestHealth::InventoryUnavailable)),
+    };
+    if cancel.is_cancelled() {
+        return Err(crate::ApiError::new("canceled", "canceled"));
+    }
 
-pub(crate) async fn run_reconcile(
-    job: LocalReconcileJob,
-    publisher: OperationPublisher,
-) -> Result<LocalContentSnapshot, crate::ApiError> {
-    publisher.stage(OperationStage::ScanningDisk);
-    local_state::reconcile_inventory(
-        job,
-        Some(Arc::new({
-            let publisher = publisher.clone();
-            move |event| emit_progress(&publisher, event)
-        })),
+    let progress = Arc::new(FluxProgressObserver::new(publisher.clone()));
+    let verification = match fleet_flux::verify_manifest(
+        &dest,
+        inventory,
+        &input,
+        scope,
+        cancel.clone(),
+        Some(progress),
     )
     .await
-    .map_err(map_inventory_error)
-}
-
-fn emit_progress(publisher: &OperationPublisher, progress: local_state::ReconcileProgress) {
-    match progress {
-        local_state::ReconcileProgress::Walking { files, bytes } => {
-            publisher.progress(OperationProgressEvent {
-                stage: OperationStage::ScanningDisk,
-                scope: ProgressScope::InventoryEnumerate,
-                status_text: Some("Reconciling local files".to_string()),
-                primary: ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files),
-                    total: Some(files),
-                    unit: ProgressUnit::Files,
-                },
-                secondary: Some(ProgressMetric {
-                    label: Some("Bytes".to_string()),
-                    done: Some(bytes),
-                    total: Some(bytes),
-                    unit: ProgressUnit::Bytes,
-                }),
-                throughput_bytes_per_sec: None,
-                eta_seconds: None,
-            });
-        }
-        local_state::ReconcileProgress::Scanning {
-            files_done,
-            files_total,
-            bytes_done,
-            bytes_total,
-        } => {
-            publisher.stage(OperationStage::VerifyingInventory);
-            publisher.progress(OperationProgressEvent {
-                stage: OperationStage::VerifyingInventory,
-                scope: ProgressScope::InventoryVerify,
-                status_text: Some("Validating local content".to_string()),
-                primary: ProgressMetric {
-                    label: Some("Bytes".to_string()),
-                    done: Some(bytes_done),
-                    total: Some(bytes_total),
-                    unit: ProgressUnit::Bytes,
-                },
-                secondary: Some(ProgressMetric {
-                    label: Some("Files".to_string()),
-                    done: Some(files_done),
-                    total: Some(files_total),
-                    unit: ProgressUnit::Files,
-                }),
-                throughput_bytes_per_sec: None,
-                eta_seconds: None,
-            });
-        }
-        local_state::ReconcileProgress::Finalizing => {}
-    }
-}
-
-pub(crate) fn report_from_snapshot(snapshot: &LocalContentSnapshot) -> InventoryCheckReport {
-    InventoryCheckReport {
-        profile_id: snapshot.profile_id.clone(),
-        local_health: snapshot.health.clone(),
-        checked_at_unix_ms: snapshot.checked_at_unix_ms,
-        missing_paths_count: snapshot.missing_paths.len() as u64,
-        modified_paths_count: snapshot.modified_paths.len() as u64,
-        unexpected_paths: snapshot.unexpected_paths.clone(),
-    }
-}
-
-pub(crate) fn report_from_assessment(
-    profile_id: &str,
-    assessment: fleet_inventory::InventoryAssessment,
-) -> InventoryCheckReport {
-    let local_health = if assessment.missing_paths.is_empty()
-        && assessment.modified_paths.is_empty()
-        && assessment.unexpected_paths.is_empty()
     {
-        LocalStateHealth::Ready
+        Ok(verification) => verification,
+        Err(error) => {
+            let code = if cancel.is_cancelled() {
+                "canceled"
+            } else {
+                "inventory_check"
+            };
+            return Err(crate::ApiError::new(code, error.to_string()));
+        }
+    };
+    let mut result = report_from_verification(profile, &verification);
+
+    if check_unexpected {
+        publisher.stage(OperationStage::ScanningDisk);
+        let manifest = input.manifest;
+        let ignore_rules = settings.sync.local_state_ignore_rules.clone();
+        let root = dest.clone();
+        let walk_cancel = cancel.clone();
+        let candidates = tokio::task::spawn_blocking(move || {
+            enumerate_unexpected_paths(&root, &manifest, &ignore_rules, &walk_cancel)
+        })
+        .await
+        .map_err(|error| crate::ApiError::new("inventory_check", error.to_string()))?
+        .map_err(|error| crate::ApiError::new("inventory_check", error.to_string()))?;
+        let inspected = fleet_flux::inspect_target_files(&dest, &candidates)
+            .map_err(|error| crate::ApiError::new("inventory_check", error.to_string()))?;
+        result.unexpected_paths = inspected
+            .into_iter()
+            .filter(|file| file.version.is_some())
+            .map(|file| file.path.as_str().to_string())
+            .collect();
+        result.unexpected_health = if result.unexpected_paths.is_empty() {
+            UnexpectedHealth::Clean
+        } else {
+            UnexpectedHealth::Present
+        };
+    }
+
+    publisher.stage(OperationStage::Finalizing);
+    Ok(result)
+}
+
+fn report_from_verification(
+    profile: &Profile,
+    verification: &flux::ManifestVerification,
+) -> InventoryCheckReport {
+    let missing_paths_count = verification
+        .files
+        .iter()
+        .filter(|file| file.state == flux::ManifestFileState::Missing)
+        .count() as u64;
+    let modified_paths_count = verification
+        .files
+        .iter()
+        .filter(|file| file.state == flux::ManifestFileState::Different)
+        .count() as u64;
+    let manifest_health = if missing_paths_count > 0 {
+        ManifestHealth::Missing
+    } else if modified_paths_count > 0 {
+        ManifestHealth::Different
     } else {
-        LocalStateHealth::LocalDrift
+        ManifestHealth::Exact
     };
     InventoryCheckReport {
-        profile_id: profile_id.to_string(),
-        local_health,
+        profile_id: profile.id.clone(),
+        manifest_health,
+        unexpected_health: UnexpectedHealth::NotChecked,
         checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-        missing_paths_count: assessment.missing_paths.len() as u64,
-        modified_paths_count: assessment.modified_paths.len() as u64,
-        unexpected_paths: assessment.unexpected_paths,
-    }
-}
-
-fn invalid_report(profile_id: &str, local_health: LocalStateHealth) -> InventoryCheckReport {
-    InventoryCheckReport {
-        profile_id: profile_id.to_string(),
-        local_health,
-        checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-        missing_paths_count: 0,
-        modified_paths_count: 0,
+        missing_paths_count,
+        modified_paths_count,
         unexpected_paths: Vec::new(),
     }
 }
 
-fn map_inventory_error(error: InventoryError) -> crate::ApiError {
-    match error {
-        InventoryError::Canceled => crate::ApiError::new("canceled", "canceled"),
-        error => crate::ApiError::new("inventory", error.to_string()),
+pub(crate) fn report(profile: &Profile, manifest_health: ManifestHealth) -> InventoryCheckReport {
+    InventoryCheckReport {
+        profile_id: profile.id.clone(),
+        manifest_health,
+        unexpected_health: UnexpectedHealth::NotChecked,
+        checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        missing_paths_count: 0,
+        modified_paths_count: 0,
+        unexpected_paths: Vec::new(),
     }
 }

@@ -2,7 +2,7 @@ use crate::operations::{
     OperationOutput, OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit,
 };
 use fleet_domain::health::{
-    InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
+    InventoryCheckReport, ManifestHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
 use fleet_domain::sync::SyncSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
@@ -175,6 +175,7 @@ pub enum ProfileRecommendedAction {
     Sync,
     CheckInventory,
     CheckRepo,
+    CleanupUnexpectedFiles,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
@@ -263,7 +264,7 @@ pub struct ProfileStatusState {
     pub actions: ProfileActionAvailability,
     #[serde(default)]
     pub progress: Option<ProfileOperationProgressState>,
-    pub local_health: LocalStateHealth,
+    pub manifest_health: ManifestHealth,
     pub repo_freshness: Option<RepoCheckFreshness>,
     pub has_error: bool,
     pub unexpected_path_count: u64,
@@ -286,7 +287,7 @@ impl ProfileStatusState {
                 ..ProfileActionAvailability::default()
             },
             progress: None,
-            local_health: LocalStateHealth::Unknown,
+            manifest_health: ManifestHealth::Unknown,
             repo_freshness: None,
             has_error: false,
             unexpected_path_count: 0,
@@ -342,11 +343,11 @@ fn derive_profile_status(
     runtime: &ProfileRuntimeState,
     has_repo_source: bool,
 ) -> ProfileStatusState {
-    let local_health = runtime
+    let manifest_health = runtime
         .inventory_check
         .as_ref()
-        .map(|report| report.local_health.clone())
-        .unwrap_or(LocalStateHealth::Unknown);
+        .map(|report| report.manifest_health.clone())
+        .unwrap_or(ManifestHealth::Unknown);
     let repo_freshness = runtime
         .repo_check
         .as_ref()
@@ -388,40 +389,26 @@ fn derive_profile_status(
     let check_inventory_running = matches!(active_operation, Some(OperationKind::CheckInventory));
     let check_repo_running = matches!(active_operation, Some(OperationKind::CheckRepo));
     let can_run_actions = !operation_active;
-    let hard_blocked = matches!(
-        local_health,
-        LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-    );
-    let sync_blocked = matches!(
-        local_health,
-        LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-    );
-    let has_error = matches!(
-        local_health,
-        LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-    ) || matches!(repo_freshness, Some(RepoCheckFreshness::Error));
+    let hard_blocked = manifest_health == ManifestHealth::InvalidProfile;
+    let sync_blocked = manifest_health == ManifestHealth::InvalidProfile;
+    let has_error = manifest_health == ManifestHealth::InvalidProfile
+        || matches!(repo_freshness, Some(RepoCheckFreshness::Error));
 
     let recommended_action = if matches!(
-        local_health,
-        LocalStateHealth::Unknown
-            | LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
+        manifest_health,
+        ManifestHealth::Unknown | ManifestHealth::InvalidProfile
     ) {
         ProfileRecommendedAction::CheckInventory
     } else if matches!(
-        local_health,
-        LocalStateHealth::LocalDrift
-            | LocalStateHealth::MissingDestination
-            | LocalStateHealth::LocalStateMissing
+        manifest_health,
+        ManifestHealth::Missing
+            | ManifestHealth::Different
+            | ManifestHealth::MissingDestination
+            | ManifestHealth::InventoryUnavailable
     ) {
         ProfileRecommendedAction::Sync
+    } else if unexpected_path_count > 0 {
+        ProfileRecommendedAction::CleanupUnexpectedFiles
     } else if has_repo_source && matches!(repo_freshness, None | Some(RepoCheckFreshness::Unknown))
     {
         ProfileRecommendedAction::CheckRepo
@@ -440,15 +427,13 @@ fn derive_profile_status(
     } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
         ProfileStatusHeadline::UpdateAvailable
     } else {
-        match local_health {
-            LocalStateHealth::Ready => ProfileStatusHeadline::ReadyToPlay,
-            LocalStateHealth::LocalDrift => ProfileStatusHeadline::NeedsSync,
-            LocalStateHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
-            LocalStateHealth::LocalStateMissing => ProfileStatusHeadline::NeedsSync,
-            LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed => ProfileStatusHeadline::ActionRequired,
-            LocalStateHealth::Unknown => match repo_freshness {
+        match manifest_health {
+            ManifestHealth::Exact => ProfileStatusHeadline::ReadyToPlay,
+            ManifestHealth::Missing | ManifestHealth::Different => ProfileStatusHeadline::NeedsSync,
+            ManifestHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
+            ManifestHealth::InventoryUnavailable => ProfileStatusHeadline::NeedsSync,
+            ManifestHealth::InvalidProfile => ProfileStatusHeadline::ActionRequired,
+            ManifestHealth::Unknown => match repo_freshness {
                 Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::InSync,
                 Some(RepoCheckFreshness::Error) => ProfileStatusHeadline::UpdateCheckFailed,
                 Some(RepoCheckFreshness::Unknown) | None => ProfileStatusHeadline::StatusUnknown,
@@ -492,11 +477,7 @@ fn derive_profile_status(
         check_inventory_running,
         check_repo_running,
     };
-    let can_launch = !exclusive_operation_active
-        && matches!(
-            local_health,
-            LocalStateHealth::Ready | LocalStateHealth::LocalDrift
-        );
+    let can_launch = !exclusive_operation_active && manifest_health == ManifestHealth::Exact;
 
     ProfileStatusState {
         headline,
@@ -508,7 +489,7 @@ fn derive_profile_status(
             .active
             .as_ref()
             .map(|active| active.progress.clone()),
-        local_health,
+        manifest_health,
         repo_freshness,
         has_error,
         unexpected_path_count,
@@ -695,7 +676,7 @@ mod tests {
         OperationProgressEvent, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
     };
     use fleet_domain::health::{
-        InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
+        InventoryCheckReport, ManifestHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
     use std::collections::BTreeSet;
@@ -709,7 +690,7 @@ mod tests {
             &completed,
             &OperationProgressEvent {
                 stage: OperationStage::PreparingInventory,
-                scope: ProgressScope::InventoryReconcile,
+                scope: ProgressScope::InventoryVerify,
                 status_text: None,
                 primary: ProgressMetric {
                     label: Some("Bytes".to_string()),
@@ -736,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_files_recommend_sync() {
+    fn unexpected_files_recommend_cleanup_when_manifest_is_exact() {
         let mut state = AppState::default();
         state.profiles.insert(
             "p1".to_string(),
@@ -752,7 +733,8 @@ mod tests {
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
         runtime.inventory_check = Some(InventoryCheckReport {
             profile_id: "p1".to_string(),
-            local_health: LocalStateHealth::LocalDrift,
+            manifest_health: ManifestHealth::Exact,
+            unexpected_health: fleet_domain::UnexpectedHealth::Present,
             checked_at_unix_ms: 1,
             missing_paths_count: 0,
             modified_paths_count: 0,
@@ -770,10 +752,10 @@ mod tests {
             state.profile_runtime_by_id.get("p1").expect("runtime"),
             true,
         );
-        assert_eq!(status.headline, ProfileStatusHeadline::NeedsSync);
+        assert_eq!(status.headline, ProfileStatusHeadline::ReadyToPlay);
         assert_eq!(
             status.recommended_action,
-            super::ProfileRecommendedAction::Sync
+            super::ProfileRecommendedAction::CleanupUnexpectedFiles
         );
     }
 
@@ -794,7 +776,8 @@ mod tests {
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
         runtime.inventory_check = Some(InventoryCheckReport {
             profile_id: "p1".to_string(),
-            local_health: LocalStateHealth::MissingDestination,
+            manifest_health: ManifestHealth::MissingDestination,
+            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
             checked_at_unix_ms: 1,
             missing_paths_count: 0,
             modified_paths_count: 0,
@@ -832,7 +815,8 @@ mod tests {
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
         runtime.inventory_check = Some(InventoryCheckReport {
             profile_id: "p1".to_string(),
-            local_health: LocalStateHealth::LocalDrift,
+            manifest_health: ManifestHealth::Different,
+            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
             checked_at_unix_ms: 1,
             missing_paths_count: 0,
             modified_paths_count: 0,
@@ -899,7 +883,8 @@ mod tests {
             let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
             runtime.inventory_check = Some(InventoryCheckReport {
                 profile_id: "p1".to_string(),
-                local_health: LocalStateHealth::Ready,
+                manifest_health: ManifestHealth::Exact,
+                unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
                 checked_at_unix_ms: 1,
                 missing_paths_count: 0,
                 modified_paths_count: 0,

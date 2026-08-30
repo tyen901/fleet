@@ -10,7 +10,6 @@ fleet-domain = { workspace = true }
 fleet-inventory = { workspace = true }
 fleet-flux = { workspace = true }
 flux = { workspace = true }
-prodash = { workspace = true }
 swifty-repo = { workspace = true }
 directories = { workspace = true }
 fleet-arma3 = { workspace = true }

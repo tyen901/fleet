@@ -10,4 +10,4 @@ pub use input::{
     SwiftyStoreObject, SwiftyStorePart,
 };
 pub use profile::SwiftyFluxProfile;
-pub use runner::materialize;
+pub use runner::{conditional_delete, inspect_target_files, materialize, verify_manifest};

@@ -30,10 +30,10 @@ fleet-arma3              = { path = "crates/arma3" }
 # Pinned external dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-# Pinned Flux dependencies
-flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", tag = "v0.1.0" }
-flux-inventory          = { git = "https://github.com/tyen901/flux6.git", package = "flux-inventory", tag = "v0.1.0" }
-flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", tag = "v0.1.0" }
+# Sibling Flux repository pinned to its committed contract revision
+flux                    = { git = "file:///C:/projects/flux", package = "flux", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
+flux-inventory          = { git = "file:///C:/projects/flux", package = "flux-inventory", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
+flux-content            = { git = "file:///C:/projects/flux", package = "flux-content", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
@@ -45,7 +45,6 @@ async-trait  = "0.1.89"
 futures      = "0.3.31"
 futures-util = "0.3.31"
 object_store = { version = "0.13", features = ["http"] }
-prodash      = "31"
 reqwest-middleware = "0.5"
 reqwest-retry = "0.9"
 atomic-write-file = "0.3"

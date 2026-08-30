@@ -1,5 +1,3 @@
-mod reconcile;
+mod unexpected;
 
-pub(crate) use reconcile::{
-    desired_files, reconcile_inventory, LocalContentSnapshot, LocalReconcileJob, ReconcileProgress,
-};
+pub(crate) use unexpected::enumerate_unexpected_paths;

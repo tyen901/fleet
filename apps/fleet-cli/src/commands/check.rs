@@ -1,6 +1,5 @@
 use fleet_core::{
-    Core, InventoryCheckReport, LocalStateHealth, OperationKind, RepoCheckFreshness,
-    RepoCheckReport,
+    Core, InventoryCheckReport, ManifestHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
 
 use super::flow_run::{
@@ -84,7 +83,11 @@ pub(crate) fn print_check_report(
     println!("  checked_at_unix_ms: {}", repo_report.checked_at_unix_ms);
 
     println!("inventory_check:");
-    println!("  local_health: {:?}", inventory_report.local_health);
+    println!("  manifest_health: {:?}", inventory_report.manifest_health);
+    println!(
+        "  unexpected_health: {:?}",
+        inventory_report.unexpected_health
+    );
     println!(
         "  checked_at_unix_ms: {}",
         inventory_report.checked_at_unix_ms
@@ -106,12 +109,15 @@ pub(crate) fn print_check_report(
     println!("update_available: {}", has_update);
 
     if matches!(
-        inventory_report.local_health,
-        LocalStateHealth::MissingDestination | LocalStateHealth::LocalStateMissing
+        inventory_report.manifest_health,
+        ManifestHealth::Missing
+            | ManifestHealth::Different
+            | ManifestHealth::MissingDestination
+            | ManifestHealth::InventoryUnavailable
     ) && has_repo_source
     {
-        let repair_reason = match &inventory_report.local_health {
-            LocalStateHealth::MissingDestination => {
+        let repair_reason = match &inventory_report.manifest_health {
+            ManifestHealth::MissingDestination => {
                 "local folder missing; run sync to recreate it and materialize files"
             }
             _ => "run sync to repair inventory and materialize files",
@@ -119,8 +125,10 @@ pub(crate) fn print_check_report(
         println!("sync_repair_required: true ({repair_reason})");
     }
 
-    if inventory_report.local_health == LocalStateHealth::LocalDrift
-        && inventory_report.unexpected_paths.is_empty()
+    if matches!(
+        inventory_report.manifest_health,
+        ManifestHealth::Missing | ManifestHealth::Different
+    ) && inventory_report.unexpected_paths.is_empty()
     {
         println!(
             "local_drift_detected: true (modified/missing files likely; run sync to materialize)"
@@ -128,6 +136,6 @@ pub(crate) fn print_check_report(
     }
 
     if has_repo_source && !inventory_report.unexpected_paths.is_empty() {
-        println!("sync_can_remove_unexpected_files: true");
+        println!("cleanup_available: true");
     }
 }
