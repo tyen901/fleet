@@ -18,11 +18,11 @@ pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Re
 
     println!("---");
     println!("done");
-    println!("local_health: {:?}", report.inventory.local_health);
+    println!("manifest_health: {:?}", report.inventory.manifest_health);
     println!("repo_freshness: {:?}", report.repo.freshness);
     println!(
-        "remaining_unexpected_files: {}",
-        report.inventory.unexpected_paths.len()
+        "unexpected_health: {:?}",
+        report.inventory.unexpected_health
     );
 
     Ok(())

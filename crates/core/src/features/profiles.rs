@@ -3,7 +3,7 @@ use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppStat
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
 use fleet_domain::health::InventoryCheckReport;
-use fleet_domain::{LocalStateHealth, Profile, ProfileId, ProfileSourceKind, RepoServer};
+use fleet_domain::{ManifestHealth, Profile, ProfileId, ProfileSourceKind, RepoServer};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
@@ -553,7 +553,7 @@ fn cached_repo_revision(cache: &swifty_repo::RepoCacheBlob) -> Option<String> {
     }
 
     // Some legacy cache blobs may not have repo_json_checksum/repo.checksum.
-    // Fall back to a deterministic server fingerprint so reconciliation still works.
+    // Fall back to a deterministic server fingerprint so server identity remains stable.
     let mut server_fingerprint = cache
         .repo
         .servers
@@ -638,7 +638,8 @@ pub(crate) fn seed_missing_destination_inventory_hint(
 
     runtime.inventory_check = Some(InventoryCheckReport {
         profile_id: profile.id.clone(),
-        local_health: LocalStateHealth::MissingDestination,
+        manifest_health: ManifestHealth::MissingDestination,
+        unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
         checked_at_unix_ms: now_ms,
         missing_paths_count: 0,
         modified_paths_count: 0,
@@ -778,7 +779,7 @@ mod tests {
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use crate::Core;
     use fleet_domain::health::{
-        InventoryCheckReport, LocalStateHealth, RepoCheckFreshness, RepoCheckReport,
+        InventoryCheckReport, ManifestHealth, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{ApiError, Profile};
@@ -827,7 +828,7 @@ mod tests {
             .inventory_check
             .as_ref()
             .expect("missing destination hint");
-        assert_eq!(report.local_health, LocalStateHealth::MissingDestination);
+        assert_eq!(report.manifest_health, ManifestHealth::MissingDestination);
         assert_eq!(report.checked_at_unix_ms, 5);
     }
 
@@ -895,7 +896,8 @@ mod tests {
                 }),
                 inventory_check: Some(InventoryCheckReport {
                     profile_id: profile_id.clone(),
-                    local_health: LocalStateHealth::ProbeFailed,
+                    manifest_health: ManifestHealth::Different,
+                    unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
                     checked_at_unix_ms: 10,
                     missing_paths_count: 0,
                     modified_paths_count: 0,
@@ -925,8 +927,8 @@ mod tests {
             updated
                 .inventory_check
                 .as_ref()
-                .map(|report| &report.local_health),
-            Some(&LocalStateHealth::MissingDestination)
+                .map(|report| &report.manifest_health),
+            Some(&ManifestHealth::MissingDestination)
         );
         assert!(updated.last_error.is_none());
         assert!(updated.active.is_none());

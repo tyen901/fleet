@@ -105,8 +105,8 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     assert!(
         out.contains("repo_check:")
             && out.contains("inventory_check:")
-            && out.contains("local_health: LocalDrift")
-            && out.contains("missing_paths: 1"),
+            && out.contains("manifest_health: InventoryUnavailable")
+            && out.contains("sync_repair_required: true"),
         "expected profile check output, got: {out}"
     );
 
@@ -120,7 +120,9 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("local_health: Ready") && out.contains("missing_paths: 0"),
+        out.contains("manifest_health: Exact")
+            && out.contains("unexpected_health: Clean")
+            && out.contains("missing_paths: 0"),
         "expected ready profile check output, got: {out}"
     );
 

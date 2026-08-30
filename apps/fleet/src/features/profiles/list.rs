@@ -523,13 +523,14 @@ mod tests {
 
     #[test]
     fn selected_profile_requires_sync_for_local_repair_states() {
-        for local_health in [
-            fleet_core::LocalStateHealth::LocalDrift,
-            fleet_core::LocalStateHealth::MissingDestination,
-            fleet_core::LocalStateHealth::LocalStateMissing,
+        for manifest_health in [
+            fleet_core::ManifestHealth::Missing,
+            fleet_core::ManifestHealth::Different,
+            fleet_core::ManifestHealth::MissingDestination,
+            fleet_core::ManifestHealth::InventoryUnavailable,
         ] {
             let status = fleet_core::ProfileStatusState {
-                local_health,
+                manifest_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
             assert!(selected_profile_requires_sync(Some(&status)));
@@ -538,12 +539,12 @@ mod tests {
 
     #[test]
     fn selected_profile_does_not_require_sync_for_ready_or_unknown() {
-        for local_health in [
-            fleet_core::LocalStateHealth::Ready,
-            fleet_core::LocalStateHealth::Unknown,
+        for manifest_health in [
+            fleet_core::ManifestHealth::Exact,
+            fleet_core::ManifestHealth::Unknown,
         ] {
             let status = fleet_core::ProfileStatusState {
-                local_health,
+                manifest_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
             assert!(!selected_profile_requires_sync(Some(&status)));

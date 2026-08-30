@@ -1,5 +1,5 @@
 use crate::types::ProfileId;
-pub use crate::LocalStateHealth;
+pub use crate::{ManifestHealth, UnexpectedHealth};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -41,7 +41,8 @@ pub struct RepoCheckReport {
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct InventoryCheckReport {
     pub profile_id: ProfileId,
-    pub local_health: LocalStateHealth,
+    pub manifest_health: ManifestHealth,
+    pub unexpected_health: UnexpectedHealth,
     pub checked_at_unix_ms: u64,
     pub missing_paths_count: u64,
     pub modified_paths_count: u64,

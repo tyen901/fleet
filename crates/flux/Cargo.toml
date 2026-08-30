@@ -14,7 +14,6 @@ bytes = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
-prodash = { workspace = true }
 swifty-repo = { workspace = true }
 swifty_artifacts = { workspace = true }
 tokio = { workspace = true }

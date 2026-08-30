@@ -156,14 +156,14 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
 - Operation events are observational only; terminal completion is read from the core session registry.
 - Supported operation kinds are `CheckRepo`, `CheckInventory`, `Sync`, and `CleanupUnexpectedFiles`.
 - `CheckInventory` is read-only and reports local state and whether sync or cleanup is required.
-- `Sync` is the primary materialization and self-heal path. It calls `fleet_flux::materialize(...)` directly; Flux/prodash owns live materialization progress.
+- `Sync` is the primary materialization and self-heal path. It calls `fleet_flux::materialize(...)` directly; Flux owns typed live materialization progress.
 - `CleanupUnexpectedFiles` deletes approved unexpected candidates only, preserves protected root entries, updates inventory, and returns a reassessed inventory report.
 - Inventory corruption is surfaced by `CheckInventory` and repaired by `Sync`.
 - Check and sync logic may read materialization inventory facts, but must not push operational state back into inventory.
 - Flux entry-point ownership:
   - `crates/flux` is the only Fleet crate that should convert Fleet/Swifty shapes into Flux materialization inputs or call `flux::materialize`.
   - `swifty-repo` owns Swifty repo cache/probe/sync behavior. Do not recreate repo cache logic in `fleet-flux`.
-  - `fleet-inventory` owns the Flux `LocalInventory` and `InventoryUpdateSink` bridge.
+  - `fleet-inventory` owns the capability-specific Flux inventory bridge.
 - Removed paths that should not be reintroduced:
   - `crates/pipeline/`
   - `crates/core/src/features/flow_ops.rs`

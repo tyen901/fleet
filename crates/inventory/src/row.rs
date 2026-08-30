@@ -1,31 +1,26 @@
 use flux::{
-    FinalizedFileFact, FluxError, FluxErrorKind, FluxResult, FreshnessProof, LocalFileFact,
-    LocalFileSegmentFact, LocalSegmentHit, SegmentKey, TargetPath, ValidationSpec,
+    FluxError, FluxErrorKind, FluxResult, LocalFileFact, LocalFileSegmentFact, LocalSegmentHit,
+    SegmentKey, TargetFileVersion, TargetPath, ValidationSpec,
 };
 
 use crate::InventoryError;
 
 pub(crate) fn local_file_from_rows(
-    rel: String,
+    rel_path: String,
     len: i64,
-    modified_secs: i64,
-    modified_nanos: i64,
+    version_token: Vec<u8>,
     rows: Vec<(i64, i64, Vec<u8>, Vec<u8>)>,
 ) -> FluxResult<LocalFileFact> {
-    let len = read_u64(len, "file len")?;
-    let modified_nanos = read_nanos(modified_nanos)?;
-    let mut segments = Vec::new();
-    for (start, range_len, profile, identity) in rows {
-        segments.push(segment_from_row(start, range_len, profile, identity)?);
-    }
+    let len = read_u64(len, "file length")?;
+    let segments = rows
+        .into_iter()
+        .map(|(start, range_len, profile, identity)| {
+            segment_from_row(start, range_len, profile, identity)
+        })
+        .collect::<FluxResult<Vec<_>>>()?;
     Ok(LocalFileFact {
-        path: TargetPath::new(rel)?,
-        len,
-        freshness: FreshnessProof {
-            len,
-            modified_secs,
-            modified_nanos,
-        },
+        path: stored_target_path(rel_path)?,
+        version: TargetFileVersion::from_storage(len, version_token)?,
         segments,
     })
 }
@@ -38,67 +33,46 @@ pub(crate) fn segment_from_row(
 ) -> FluxResult<LocalFileSegmentFact> {
     let profile = profile_fingerprint(profile)?;
     let (start, len, end) = read_range(start, range_len)?;
-    let identity_bytes: [u8; 16] = identity.try_into().map_err(|_| {
-        FluxError::new(
-            FluxErrorKind::InventoryReadFailed,
-            "stored segment identity length is invalid",
-        )
-    })?;
-    let key = SegmentKey::new(
-        profile,
-        flux::OpaqueSegmentIdentity::new(identity_bytes.to_vec())?,
-        len,
-    )?;
-    let validation = ValidationSpec {
-        profile,
-        key: key.clone(),
-        len,
-    };
+    let identity = flux::OpaqueSegmentIdentity::new(identity).map_err(stored_data_error)?;
+    let key = SegmentKey::new(profile, identity, len).map_err(stored_data_error)?;
     Ok(LocalFileSegmentFact {
         range: start..end,
+        validation: ValidationSpec {
+            profile,
+            key: key.clone(),
+            len,
+        },
         key,
-        validation,
     })
 }
 
 pub(crate) fn segment_hit_from_row(
     key: &SegmentKey,
-    rel: String,
+    rel_path: String,
     start: i64,
     range_len: i64,
     file_len: i64,
-    modified_secs: i64,
-    modified_nanos: i64,
+    version_token: Vec<u8>,
 ) -> FluxResult<LocalSegmentHit> {
-    let (start, _range_len, end) = read_range(start, range_len)?;
-    let file_len = read_u64(file_len, "file len")?;
-    let modified_nanos = read_nanos(modified_nanos)?;
-    let validation = ValidationSpec {
-        profile: key.profile,
-        key: key.clone(),
-        len: key.len,
-    };
+    let (start, _, end) = read_range(start, range_len)?;
+    let file_len = read_u64(file_len, "file length")?;
+    if end > file_len {
+        return Err(FluxError::new(
+            FluxErrorKind::InventoryReadFailed,
+            "stored segment range exceeds its file length",
+        ));
+    }
     Ok(LocalSegmentHit {
         key: key.clone(),
-        path: TargetPath::new(rel)?,
+        path: stored_target_path(rel_path)?,
         range: start..end,
-        file_len,
-        file_freshness: FreshnessProof {
-            len: file_len,
-            modified_secs,
-            modified_nanos,
+        file_version: TargetFileVersion::from_storage(file_len, version_token)?,
+        validation: ValidationSpec {
+            profile: key.profile,
+            key: key.clone(),
+            len: key.len,
         },
-        validation,
     })
-}
-
-pub(crate) fn finalized_to_local(fact: FinalizedFileFact) -> LocalFileFact {
-    LocalFileFact {
-        path: fact.path,
-        len: fact.len,
-        freshness: fact.freshness,
-        segments: fact.segments,
-    }
 }
 
 pub(crate) fn to_i64(value: u64, what: &str) -> Result<i64, InventoryError> {
@@ -116,6 +90,17 @@ fn profile_fingerprint(bytes: Vec<u8>) -> FluxResult<flux::ProfileFingerprint> {
     Ok(flux::ProfileFingerprint::new(bytes))
 }
 
+fn stored_target_path(path: String) -> FluxResult<TargetPath> {
+    TargetPath::new(path).map_err(stored_data_error)
+}
+
+fn stored_data_error(error: FluxError) -> FluxError {
+    FluxError::new(
+        FluxErrorKind::InventoryReadFailed,
+        format!("stored inventory data is invalid: {error}"),
+    )
+}
+
 fn read_u64(value: i64, what: &str) -> FluxResult<u64> {
     u64::try_from(value).map_err(|_| {
         FluxError::new(
@@ -126,23 +111,13 @@ fn read_u64(value: i64, what: &str) -> FluxResult<u64> {
 }
 
 fn read_range(start: i64, len: i64) -> FluxResult<(u64, u64, u64)> {
-    if start.checked_add(len).is_none() {
-        return Err(FluxError::new(
+    let start = read_u64(start, "segment start")?;
+    let len = read_u64(len, "segment length")?;
+    let end = start.checked_add(len).ok_or_else(|| {
+        FluxError::new(
             FluxErrorKind::InventoryReadFailed,
-            "stored segment range overflows sqlite integer range",
-        ));
-    }
-    let start = read_u64(start, "segment range_start")?;
-    let len = read_u64(len, "segment range_len")?;
-    Ok((start, len, start + len))
-}
-
-fn read_nanos(value: i64) -> FluxResult<u32> {
-    if !(0..1_000_000_000).contains(&value) {
-        return Err(FluxError::new(
-            FluxErrorKind::InventoryReadFailed,
-            "stored modified_nanos is outside 0..1_000_000_000",
-        ));
-    }
-    Ok(value as u32)
+            "stored segment range overflows",
+        )
+    })?;
+    Ok((start, len, end))
 }

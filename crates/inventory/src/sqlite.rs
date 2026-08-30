@@ -2,313 +2,76 @@ use std::path::{Path, PathBuf};
 
 use flux::{
     FluxError, FluxErrorKind, FluxResult, LocalFileFact, LocalSegmentLookupResult,
-    ManagedPathBatch, SegmentKey, TargetPath, TerminalInventoryBatch, TerminalInventoryUpdate,
+    ManagedInventoryBatch, ManagedInventoryChange, ManagedPathBatch, SegmentKey, TargetPath,
+    VerifiedFactBatch, VerifiedFactChange,
 };
 use futures_util::{stream::BoxStream, StreamExt};
-use rusqlite::{params, Connection};
+use rusqlite::params;
 
-use crate::row::{finalized_to_local, local_file_from_rows, segment_hit_from_row, to_i64};
-use crate::schema::{map_sqlite_error, open_conn};
-use crate::{
-    InventoryAssessment, InventoryDesiredFile, InventoryError, InventoryObservedFile,
-    InventoryReconcileMode, InventoryReconcilePlan, InventoryReconcileReport,
-    InventoryReconcileWrite,
-};
+use crate::row::{local_file_from_rows, segment_hit_from_row, to_i64};
+use crate::schema::open_conn;
+use crate::InventoryError;
 
-pub(crate) fn plan_reconcile(
-    db_path: &Path,
-    observed: &[InventoryObservedFile],
-    desired: &[InventoryDesiredFile],
-    mode: InventoryReconcileMode,
-) -> Result<InventoryReconcilePlan, InventoryError> {
-    let mut conn = open_conn(db_path)?;
-    let tx = conn.transaction().map_err(map_sqlite_error)?;
-    create_observed_and_desired(&tx)?;
-    insert_observed_files(&tx, observed)?;
-    insert_desired_files(&tx, desired)?;
-    tx.execute_batch(
-        "CREATE TEMP TABLE kept_reusable_paths (
-             rel_path TEXT PRIMARY KEY NOT NULL
-         ) WITHOUT ROWID;",
-    )
-    .map_err(map_sqlite_error)?;
-    tx.execute(
-        "INSERT INTO kept_reusable_paths(rel_path)
-         SELECT o.rel_path
-         FROM observed_files o
-         JOIN managed_paths mp ON mp.rel_path = o.rel_path
-         JOIN files f ON f.path_id = mp.id
-         WHERE ?1 = 0
-           AND f.len = o.len
-           AND f.modified_secs = o.modified_secs
-           AND f.modified_nanos = o.modified_nanos",
-        params![matches!(mode, InventoryReconcileMode::Full) as i64],
-    )
-    .map_err(map_sqlite_error)?;
-
-    let managed_paths = observed.iter().map(|item| item.path.clone()).collect();
-
-    let mut scan_candidate_positions = Vec::new();
-    let mut stmt = tx
-        .prepare(
-            "SELECT o.position
-             FROM observed_files o
-             LEFT JOIN desired_files d ON d.rel_path = o.rel_path
-             LEFT JOIN managed_paths mp ON mp.rel_path = o.rel_path
-             LEFT JOIN files f ON f.path_id = mp.id
-             LEFT JOIN kept_reusable_paths k ON k.rel_path = o.rel_path
-             WHERE k.rel_path IS NULL
-               AND (d.rel_path IS NOT NULL OR f.path_id IS NOT NULL)
-             ORDER BY o.position ASC",
-        )
-        .map_err(map_sqlite_error)?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, i64>(0))
-        .map_err(map_sqlite_error)?;
-    for row in rows {
-        scan_candidate_positions.push(usize::try_from(row.map_err(map_sqlite_error)?).map_err(
-            |_| InventoryError::Message("observed file position is negative".to_string()),
-        )?);
-    }
-    drop(stmt);
-
-    let mut remove_reusable_facts = Vec::new();
-    let mut stmt = tx
-        .prepare(
-            "SELECT mp.rel_path
-             FROM files f
-             JOIN managed_paths mp ON mp.id = f.path_id
-             LEFT JOIN observed_files o ON o.rel_path = mp.rel_path
-             WHERE o.rel_path IS NULL
-             ORDER BY mp.rel_path ASC",
-        )
-        .map_err(map_sqlite_error)?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(map_sqlite_error)?;
-    for row in rows {
-        remove_reusable_facts.push(target_path(row.map_err(map_sqlite_error)?)?);
-    }
-    drop(stmt);
-    tx.commit().map_err(map_sqlite_error)?;
-
-    Ok(InventoryReconcilePlan {
-        managed_paths,
-        scan_candidate_positions,
-        remove_reusable_facts,
-    })
-}
-
-pub(crate) fn assess_expected(
-    db_path: &Path,
-    desired: &[InventoryDesiredFile],
-) -> Result<InventoryAssessment, InventoryError> {
-    let mut conn = open_conn(db_path)?;
-    let tx = conn.transaction().map_err(map_sqlite_error)?;
-    create_desired_files(&tx)?;
-    insert_desired_files(&tx, desired)?;
-    let mut report = InventoryAssessment::default();
-
-    let mut stmt = tx
-        .prepare(
-            "WITH classified AS (
-                 SELECT d.rel_path,
-                         CASE
-                           WHEN mp.id IS NULL THEN 'missing'
-                           WHEN f.path_id IS NULL OR f.len != d.size_bytes
-                           THEN 'modified'
-                           WHEN (SELECT count(*) FROM file_segments s WHERE s.path_id = f.path_id)
-                              != (SELECT count(*) FROM desired_segments ds WHERE ds.rel_path = d.rel_path)
-                           THEN 'modified'
-                           WHEN EXISTS (
-                               SELECT 1
-                               FROM desired_segments ds
-                               LEFT JOIN file_segments s
-                                 ON s.path_id = f.path_id
-                                AND s.segment_index = ds.segment_index
-                               WHERE ds.rel_path = d.rel_path
-                                 AND (s.path_id IS NULL
-                                   OR s.range_start != ds.range_start
-                                   OR s.range_len != ds.range_len
-                                   OR s.profile_fingerprint != ds.profile_fingerprint
-                                   OR s.identity_bytes != ds.identity_bytes)
-                           ) THEN 'modified'
-                           ELSE 'exact'
-                         END AS status
-                 FROM desired_files d
-                 LEFT JOIN managed_paths mp ON mp.rel_path = d.rel_path
-                 LEFT JOIN files f ON f.path_id = mp.id
-             )
-             SELECT rel_path, status
-             FROM classified
-             ORDER BY rel_path ASC",
-        )
-        .map_err(map_sqlite_error)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+pub(crate) fn apply_verified_batch(db_path: &Path, batch: VerifiedFactBatch) -> FluxResult<()> {
+    let changes = batch
+        .changes
+        .into_iter()
+        .map(|change| match change {
+            VerifiedFactChange::Upsert(fact) => Change::Upsert(fact),
+            VerifiedFactChange::Remove(path) => Change::Remove(path),
         })
-        .map_err(map_sqlite_error)?;
-    for row in rows {
-        let (rel_path, status) = row.map_err(map_sqlite_error)?;
-        match status.as_str() {
-            "exact" => report.exact_paths.push(rel_path),
-            "missing" => report.missing_paths.push(rel_path),
-            "modified" => report.modified_paths.push(rel_path),
-            _ => return Err(InventoryError::CorruptDatabase),
-        }
-    }
-    drop(stmt);
-    let mut stmt = tx
-        .prepare(
-            "SELECT mp.rel_path
-             FROM managed_paths mp
-             LEFT JOIN desired_files d ON d.rel_path = mp.rel_path
-             WHERE d.rel_path IS NULL
-             ORDER BY mp.rel_path",
-        )
-        .map_err(map_sqlite_error)?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(map_sqlite_error)?;
-    for row in rows {
-        report.unexpected_paths.push(row.map_err(map_sqlite_error)?);
-    }
-    drop(stmt);
-    tx.commit().map_err(map_sqlite_error)?;
-    Ok(report)
+        .collect::<Vec<_>>();
+    apply_changes(db_path, changes, false)
 }
 
-pub(crate) fn apply_reconcile(
-    db_path: &Path,
-    write: InventoryReconcileWrite,
-) -> Result<InventoryReconcileReport, InventoryError> {
-    for fact in &write.upsert_facts {
-        fact.validate_basic()
-            .map_err(|error| InventoryError::Message(error.to_string()))?;
-    }
-
-    let mut conn = open_conn(db_path)?;
-    let tx = conn.transaction().map_err(map_sqlite_error)?;
-    tx.execute_batch(
-        "CREATE TEMP TABLE reconcile_managed_paths (
-             rel_path TEXT PRIMARY KEY NOT NULL
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE reconcile_remove_paths (
-             rel_path TEXT PRIMARY KEY NOT NULL
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE reconcile_upsert_files (
-             rel_path TEXT PRIMARY KEY NOT NULL,
-             len INTEGER NOT NULL,
-             modified_secs INTEGER NOT NULL,
-             modified_nanos INTEGER NOT NULL
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE reconcile_upsert_segments (
-             rel_path TEXT NOT NULL,
-             segment_index INTEGER NOT NULL,
-             range_start INTEGER NOT NULL,
-             range_len INTEGER NOT NULL,
-             profile_fingerprint BLOB NOT NULL,
-             identity_bytes BLOB NOT NULL,
-             PRIMARY KEY (rel_path, segment_index)
-         ) WITHOUT ROWID;",
-    )
-    .map_err(map_sqlite_error)?;
-    insert_target_paths(&tx, "reconcile_managed_paths", &write.managed_paths)?;
-    insert_target_paths(&tx, "reconcile_remove_paths", &write.remove_reusable_facts)?;
-    insert_local_file_facts(
-        &tx,
-        "reconcile_upsert_files",
-        "reconcile_upsert_segments",
-        &write.upsert_facts,
-    )
-    .map_err(|error| InventoryError::Message(error.to_string()))?;
-
-    tx.execute_batch(
-        "DELETE FROM managed_paths
-         WHERE rel_path NOT IN (SELECT rel_path FROM reconcile_managed_paths);
-
-         INSERT OR IGNORE INTO managed_paths(rel_path)
-         SELECT rel_path FROM reconcile_managed_paths;
-
-         DELETE FROM files
-         WHERE path_id IN (
-             SELECT mp.id
-             FROM managed_paths mp
-             JOIN reconcile_remove_paths r ON r.rel_path = mp.rel_path
-         );
-
-         INSERT OR IGNORE INTO managed_paths(rel_path)
-         SELECT rel_path FROM reconcile_upsert_files;
-
-         INSERT INTO files(path_id, len, modified_secs, modified_nanos)
-         SELECT mp.id, u.len, u.modified_secs, u.modified_nanos
-         FROM reconcile_upsert_files u
-         JOIN managed_paths mp ON mp.rel_path = u.rel_path
-         WHERE true
-         ON CONFLICT(path_id) DO UPDATE SET
-             len = excluded.len,
-             modified_secs = excluded.modified_secs,
-             modified_nanos = excluded.modified_nanos;
-
-         DELETE FROM file_segments
-         WHERE path_id IN (
-             SELECT mp.id
-             FROM managed_paths mp
-             JOIN reconcile_upsert_files u ON u.rel_path = mp.rel_path
-         );
-
-         INSERT INTO file_segments(
-             path_id,
-             segment_index,
-             range_start,
-             range_len,
-             profile_fingerprint,
-             identity_bytes
-         )
-         SELECT mp.id,
-                s.segment_index,
-                s.range_start,
-                s.range_len,
-                s.profile_fingerprint,
-                s.identity_bytes
-         FROM reconcile_upsert_segments s
-         JOIN managed_paths mp ON mp.rel_path = s.rel_path;",
-    )
-    .map_err(map_sqlite_error)?;
-    tx.commit().map_err(map_sqlite_error)?;
-    Ok(InventoryReconcileReport::from_write(&write))
+pub(crate) fn apply_managed_batch(db_path: &Path, batch: ManagedInventoryBatch) -> FluxResult<()> {
+    let changes = batch
+        .changes
+        .into_iter()
+        .map(|change| match change {
+            ManagedInventoryChange::Manage(fact) => Change::Upsert(fact),
+            ManagedInventoryChange::Delete(path) => Change::Remove(path),
+        })
+        .collect::<Vec<_>>();
+    apply_changes(db_path, changes, true)
 }
 
-pub(crate) fn apply_terminal_batch(
-    db_path: &Path,
-    batch: TerminalInventoryBatch,
-) -> FluxResult<()> {
-    let mut finalized = Vec::new();
-    let mut deleted = Vec::new();
-    for update in batch.updates {
-        match update {
-            TerminalInventoryUpdate::Finalized(fact) => {
-                fact.validate_basic()?;
-                finalized.push(finalized_to_local(fact));
+enum Change {
+    Upsert(LocalFileFact),
+    Remove(TargetPath),
+}
+
+fn apply_changes(db_path: &Path, changes: Vec<Change>, managed: bool) -> FluxResult<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    for change in &changes {
+        let path = match change {
+            Change::Upsert(fact) => {
+                fact.validate()?;
+                &fact.path
             }
-            TerminalInventoryUpdate::Deleted(path) => deleted.push(path),
+            Change::Remove(path) => path,
+        };
+        if !seen.insert(path.clone()) {
+            return Err(FluxError::new(
+                FluxErrorKind::InventoryUpdateFailed,
+                "inventory batch contains duplicate paths",
+            ));
         }
     }
+    if changes.is_empty() {
+        return Ok(());
+    }
 
-    let mut conn = open_conn(db_path).map_err(flux_inventory_read_error)?;
+    let mut conn = open_conn(db_path).map_err(inventory_update_error)?;
     let tx = conn.transaction().map_err(sql_update_error)?;
     tx.execute_batch(
-        "CREATE TEMP TABLE terminal_deleted_paths (
-             rel_path TEXT PRIMARY KEY NOT NULL
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE terminal_finalized_files (
+        "CREATE TEMP TABLE batch_files (
              rel_path TEXT PRIMARY KEY NOT NULL,
-             len INTEGER NOT NULL,
-             modified_secs INTEGER NOT NULL,
-             modified_nanos INTEGER NOT NULL
+             operation INTEGER NOT NULL,
+             len INTEGER,
+             version_token BLOB
          ) WITHOUT ROWID;
-         CREATE TEMP TABLE terminal_finalized_segments (
+         CREATE TEMP TABLE batch_segments (
              rel_path TEXT NOT NULL,
              segment_index INTEGER NOT NULL,
              range_start INTEGER NOT NULL,
@@ -319,58 +82,93 @@ pub(crate) fn apply_terminal_batch(
          ) WITHOUT ROWID;",
     )
     .map_err(sql_update_error)?;
-    insert_target_paths_flux(&tx, "terminal_deleted_paths", &deleted)?;
-    insert_local_file_facts(
-        &tx,
-        "terminal_finalized_files",
-        "terminal_finalized_segments",
-        &finalized,
-    )?;
 
+    {
+        let mut file_stmt = tx
+            .prepare_cached(
+                "INSERT INTO batch_files(rel_path, operation, len, version_token)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(sql_update_error)?;
+        let mut segment_stmt = tx
+            .prepare_cached(
+                "INSERT INTO batch_segments(
+                    rel_path, segment_index, range_start, range_len,
+                    profile_fingerprint, identity_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(sql_update_error)?;
+        for change in changes {
+            match change {
+                Change::Remove(path) => {
+                    file_stmt
+                        .execute(params![path.as_str(), 2_i64, None::<i64>, None::<Vec<u8>>])
+                        .map_err(sql_update_error)?;
+                }
+                Change::Upsert(fact) => {
+                    file_stmt
+                        .execute(params![
+                            fact.path.as_str(),
+                            1_i64,
+                            to_i64(fact.len(), "file length").map_err(inventory_update_error)?,
+                            fact.version.token(),
+                        ])
+                        .map_err(sql_update_error)?;
+                    for (index, segment) in fact.segments.iter().enumerate() {
+                        segment_stmt
+                            .execute(params![
+                                fact.path.as_str(),
+                                to_i64(index as u64, "segment index")
+                                    .map_err(inventory_update_error)?,
+                                to_i64(segment.range.start, "segment start")
+                                    .map_err(inventory_update_error)?,
+                                to_i64(segment.range.end - segment.range.start, "segment length",)
+                                    .map_err(inventory_update_error)?,
+                                segment.key.profile.bytes().as_slice(),
+                                segment.key.identity.bytes(),
+                            ])
+                            .map_err(sql_update_error)?;
+                    }
+                }
+            }
+        }
+    }
+
+    if managed {
+        tx.execute_batch(
+            "DELETE FROM managed_paths
+             WHERE rel_path IN (SELECT rel_path FROM batch_files WHERE operation = 2);
+             INSERT INTO managed_paths(rel_path)
+             SELECT rel_path FROM batch_files WHERE operation = 1
+             ON CONFLICT(rel_path) DO NOTHING;",
+        )
+        .map_err(sql_update_error)?;
+    }
     tx.execute_batch(
-        "DELETE FROM managed_paths
-         WHERE rel_path IN (SELECT rel_path FROM terminal_deleted_paths);
+        "DELETE FROM file_facts
+         WHERE rel_path IN (SELECT rel_path FROM batch_files WHERE operation = 2);
 
-         INSERT OR IGNORE INTO managed_paths(rel_path)
-         SELECT rel_path FROM terminal_finalized_files;
-
-         INSERT INTO files(path_id, len, modified_secs, modified_nanos)
-         SELECT mp.id, t.len, t.modified_secs, t.modified_nanos
-         FROM terminal_finalized_files t
-         JOIN managed_paths mp ON mp.rel_path = t.rel_path
-         WHERE true
-         ON CONFLICT(path_id) DO UPDATE SET
+         INSERT INTO file_facts(rel_path, len, version_token)
+         SELECT rel_path, len, version_token
+         FROM batch_files
+         WHERE operation = 1
+         ON CONFLICT(rel_path) DO UPDATE SET
              len = excluded.len,
-             modified_secs = excluded.modified_secs,
-             modified_nanos = excluded.modified_nanos;
+             version_token = excluded.version_token;
 
          DELETE FROM file_segments
-         WHERE path_id IN (
-             SELECT mp.id
-             FROM managed_paths mp
-             JOIN terminal_finalized_files t ON t.rel_path = mp.rel_path
-         );
+         WHERE rel_path IN (SELECT rel_path FROM batch_files WHERE operation = 1);
 
          INSERT INTO file_segments(
-             path_id,
-             segment_index,
-             range_start,
-             range_len,
-             profile_fingerprint,
-             identity_bytes
+             rel_path, segment_index, range_start, range_len,
+             profile_fingerprint, identity_bytes
          )
-         SELECT mp.id,
-                s.segment_index,
-                s.range_start,
-                s.range_len,
-                s.profile_fingerprint,
-                s.identity_bytes
-         FROM terminal_finalized_segments s
-         JOIN managed_paths mp ON mp.rel_path = s.rel_path;",
+         SELECT rel_path, segment_index, range_start, range_len,
+                profile_fingerprint, identity_bytes
+         FROM batch_segments;",
     )
     .map_err(sql_update_error)?;
-    tx.commit().map_err(sql_update_error)?;
-    Ok(())
+    tx.commit().map_err(sql_update_error)
 }
 
 pub(crate) fn lookup_files(
@@ -380,23 +178,18 @@ pub(crate) fn lookup_files(
     if paths.is_empty() {
         return Ok(Vec::new());
     }
-    let mut conn = open_conn(db_path).map_err(flux_inventory_read_error)?;
+    let mut conn = open_conn(db_path).map_err(inventory_read_error)?;
     let tx = conn.transaction().map_err(sql_read_error)?;
-    create_requested_paths(&tx).map_err(flux_inventory_read_error)?;
-    insert_requested_paths(&tx, paths).map_err(flux_inventory_read_error)?;
+    create_requested_paths(&tx)?;
+    insert_requested_paths(&tx, paths)?;
 
     let mut out = vec![None; paths.len()];
     let mut stmt = tx
         .prepare(
-            "SELECT rp.position,
-                   mp.rel_path,
-                   f.len,
-                   f.modified_secs,
-                   f.modified_nanos
-            FROM requested_paths rp
-            LEFT JOIN managed_paths mp ON mp.rel_path = rp.rel_path
-            LEFT JOIN files f ON f.path_id = mp.id
-            ORDER BY rp.position ASC",
+            "SELECT rp.position, f.rel_path, f.len, f.version_token
+             FROM requested_paths rp
+             LEFT JOIN file_facts f ON f.rel_path = rp.rel_path
+             ORDER BY rp.position",
         )
         .map_err(sql_read_error)?;
     let rows = stmt
@@ -405,45 +198,26 @@ pub(crate) fn lookup_files(
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
             ))
         })
         .map_err(sql_read_error)?;
     for row in rows {
-        let (position, rel_path, len, modified_secs, modified_nanos) =
-            row.map_err(sql_read_error)?;
-        let position = usize::try_from(position).map_err(|_| {
-            FluxError::new(
-                FluxErrorKind::InventoryReadFailed,
-                "requested path position is negative",
-            )
-        })?;
-        if let (Some(rel_path), Some(len), Some(modified_secs), Some(modified_nanos)) =
-            (rel_path, len, modified_secs, modified_nanos)
-        {
-            out[position] = Some(local_file_from_rows(
-                rel_path,
-                len,
-                modified_secs,
-                modified_nanos,
-                Vec::new(),
-            )?);
+        let (position, path, len, token) = row.map_err(sql_read_error)?;
+        if let (Some(path), Some(len), Some(token)) = (path, len, token) {
+            let position = read_position(position, out.len())?;
+            out[position] = Some(local_file_from_rows(path, len, token, Vec::new())?);
         }
     }
     drop(stmt);
 
     let mut stmt = tx
         .prepare(
-            "SELECT rp.position,
-                   s.range_start,
-                   s.range_len,
-                   s.profile_fingerprint,
-                   s.identity_bytes
-            FROM requested_paths rp
-            JOIN managed_paths mp ON mp.rel_path = rp.rel_path
-            JOIN file_segments s ON s.path_id = mp.id
-            ORDER BY rp.position ASC, s.segment_index ASC",
+            "SELECT rp.position, s.range_start, s.range_len,
+                    s.profile_fingerprint, s.identity_bytes
+             FROM requested_paths rp
+             JOIN file_segments s ON s.rel_path = rp.rel_path
+             ORDER BY rp.position, s.segment_index",
         )
         .map_err(sql_read_error)?;
     let rows = stmt
@@ -459,18 +233,25 @@ pub(crate) fn lookup_files(
         .map_err(sql_read_error)?;
     for row in rows {
         let (position, start, len, profile, identity) = row.map_err(sql_read_error)?;
-        let position = usize::try_from(position).map_err(|_| {
+        let position = read_position(position, out.len())?;
+        let file = out[position].as_mut().ok_or_else(|| {
             FluxError::new(
                 FluxErrorKind::InventoryReadFailed,
-                "requested path position is negative",
+                "stored segment has no file fact",
             )
         })?;
-        if let Some(file) = out[position].as_mut() {
-            file.segments
-                .push(crate::row::segment_from_row(start, len, profile, identity)?);
-        }
+        file.segments
+            .push(crate::row::segment_from_row(start, len, profile, identity)?);
     }
     drop(stmt);
+    for fact in out.iter().flatten() {
+        fact.validate().map_err(|error| {
+            FluxError::new(
+                FluxErrorKind::InventoryReadFailed,
+                format!("stored file fact is invalid: {error}"),
+            )
+        })?;
+    }
     tx.commit().map_err(sql_read_error)?;
     Ok(out)
 }
@@ -491,8 +272,7 @@ pub(crate) fn lookup_segments(
     if keys.is_empty() || limit_per_key == 0 {
         return Ok(out);
     }
-
-    let mut conn = open_conn(db_path).map_err(flux_inventory_read_error)?;
+    let mut conn = open_conn(db_path).map_err(inventory_read_error)?;
     let tx = conn.transaction().map_err(sql_read_error)?;
     tx.execute_batch(
         "CREATE TEMP TABLE requested_segment_keys (
@@ -513,80 +293,60 @@ pub(crate) fn lookup_segments(
             .map_err(sql_read_error)?;
         for (position, key) in keys.iter().enumerate() {
             stmt.execute(params![
-                position as i64,
+                to_i64(position as u64, "requested key position").map_err(inventory_read_error)?,
                 key.profile.bytes().as_slice(),
                 key.identity.bytes(),
-                to_i64(key.len, "range_len").map_err(flux_inventory_read_error)?,
+                to_i64(key.len, "segment length").map_err(inventory_read_error)?,
             ])
             .map_err(sql_read_error)?;
         }
     }
-
     let mut stmt = tx
         .prepare(
             "WITH ranked_hits AS (
-                SELECT rk.position,
-                       mp.rel_path,
-                       s.range_start,
-                       s.range_len,
-                       f.len,
-                       f.modified_secs,
-                       f.modified_nanos,
-                       row_number() OVER (
-                           PARTITION BY rk.position
-                           ORDER BY mp.rel_path ASC, s.range_start ASC
-                       ) AS hit_rank
-                FROM requested_segment_keys rk
-                JOIN file_segments s
-                  ON s.profile_fingerprint = rk.profile_fingerprint
-                 AND s.identity_bytes = rk.identity_bytes
-                 AND s.range_len = rk.range_len
-                JOIN files f ON f.path_id = s.path_id
-                JOIN managed_paths mp ON mp.id = s.path_id
-            )
-            SELECT position,
-                   rel_path,
-                   range_start,
-                   range_len,
-                   len,
-                   modified_secs,
-                   modified_nanos
-            FROM ranked_hits
-            WHERE hit_rank <= ?1
-            ORDER BY position ASC, hit_rank ASC",
+                 SELECT rk.position, s.rel_path, s.range_start, s.range_len,
+                        f.len, f.version_token,
+                        row_number() OVER (
+                            PARTITION BY rk.position
+                            ORDER BY s.rel_path, s.range_start
+                        ) AS hit_rank
+                 FROM requested_segment_keys rk
+                 JOIN file_segments s
+                   ON s.profile_fingerprint = rk.profile_fingerprint
+                  AND s.identity_bytes = rk.identity_bytes
+                  AND s.range_len = rk.range_len
+                 JOIN file_facts f ON f.rel_path = s.rel_path
+             )
+             SELECT position, rel_path, range_start, range_len, len, version_token
+             FROM ranked_hits
+             WHERE hit_rank <= ?1
+             ORDER BY position, hit_rank",
         )
         .map_err(sql_read_error)?;
     let rows = stmt
-        .query_map(params![limit_per_key as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-            ))
-        })
+        .query_map(
+            [
+                to_i64(limit_per_key as u64, "segment lookup limit")
+                    .map_err(inventory_read_error)?,
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                ))
+            },
+        )
         .map_err(sql_read_error)?;
     for row in rows {
-        let (position, rel_path, start, range_len, file_len, modified_secs, modified_nanos) =
-            row.map_err(sql_read_error)?;
-        let position = usize::try_from(position).map_err(|_| {
-            FluxError::new(
-                FluxErrorKind::InventoryReadFailed,
-                "requested segment key position is negative",
-            )
-        })?;
+        let (position, path, start, range_len, file_len, token) = row.map_err(sql_read_error)?;
+        let position = read_position(position, out.len())?;
         let key = out[position].key.clone();
         out[position].hits.push(segment_hit_from_row(
-            &key,
-            rel_path,
-            start,
-            range_len,
-            file_len,
-            modified_secs,
-            modified_nanos,
+            &key, path, start, range_len, file_len, token,
         )?);
     }
     drop(stmt);
@@ -603,7 +363,7 @@ pub(crate) fn managed_path_batches(
         async move {
             let after = cursor?;
             let result = tokio::task::spawn_blocking(move || {
-                managed_paths_after(&db_path, after.as_ref(), batch_size)
+                read_managed_batch(&db_path, after.as_ref(), batch_size)
             })
             .await
             .map_err(|error| {
@@ -613,259 +373,91 @@ pub(crate) fn managed_path_batches(
                 )
             });
             match result {
-                Ok(Ok(batch)) => {
-                    if batch.paths.is_empty() {
-                        None
-                    } else {
-                        let next = batch.paths.last().cloned();
-                        Some((Ok(batch), next.map(Some)))
-                    }
+                Ok(Ok(paths)) if paths.is_empty() => None,
+                Ok(Ok(paths)) => {
+                    let next = paths.last().cloned();
+                    Some((Ok(ManagedPathBatch { paths }), Some(next)))
                 }
-                Ok(Err(err)) | Err(err) => Some((Err(err), None)),
+                Ok(Err(error)) | Err(error) => Some((Err(error), None)),
             }
         }
     })
     .boxed()
 }
 
-fn managed_paths_after(
+fn read_managed_batch(
     db_path: &Path,
     after: Option<&TargetPath>,
     limit: usize,
-) -> FluxResult<ManagedPathBatch> {
+) -> FluxResult<Vec<TargetPath>> {
     if limit == 0 {
-        return Ok(ManagedPathBatch { paths: Vec::new() });
+        return Ok(Vec::new());
     }
-    let conn = open_conn(db_path).map_err(flux_inventory_read_error)?;
-    let mut stmt = match after {
-        Some(_) => conn
-            .prepare(
-                "SELECT rel_path FROM managed_paths
-                 WHERE rel_path > ?1
-                 ORDER BY rel_path ASC
-                 LIMIT ?2",
-            )
-            .map_err(sql_read_error)?,
-        None => conn
-            .prepare("SELECT rel_path FROM managed_paths ORDER BY rel_path ASC LIMIT ?1")
-            .map_err(sql_read_error)?,
-    };
-    let mut paths = Vec::new();
-    if let Some(after) = after {
-        let rows = stmt
-            .query_map(params![after.as_str(), limit as i64], |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(sql_read_error)?;
-        for row in rows {
-            paths.push(TargetPath::new(row.map_err(sql_read_error)?)?);
-        }
-    } else {
-        let rows = stmt
-            .query_map(params![limit as i64], |row| row.get::<_, String>(0))
-            .map_err(sql_read_error)?;
-        for row in rows {
-            paths.push(TargetPath::new(row.map_err(sql_read_error)?)?);
-        }
-    }
-    Ok(ManagedPathBatch { paths })
+    let conn = open_conn(db_path).map_err(inventory_read_error)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rel_path FROM managed_paths
+             WHERE (?1 IS NULL OR rel_path > ?1)
+             ORDER BY rel_path LIMIT ?2",
+        )
+        .map_err(sql_read_error)?;
+    let paths = stmt
+        .query_map(
+            params![after.map(TargetPath::as_str), limit as i64],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(sql_read_error)?
+        .map(|row| TargetPath::new(row.map_err(sql_read_error)?))
+        .collect();
+    paths
 }
 
-fn create_requested_paths(conn: &Connection) -> Result<(), InventoryError> {
+fn create_requested_paths(conn: &rusqlite::Connection) -> FluxResult<()> {
     conn.execute_batch(
         "CREATE TEMP TABLE requested_paths (
              position INTEGER PRIMARY KEY NOT NULL,
              rel_path TEXT NOT NULL
          ) WITHOUT ROWID;",
     )
-    .map_err(map_sqlite_error)
+    .map_err(sql_read_error)
 }
 
-fn insert_requested_paths(conn: &Connection, paths: &[TargetPath]) -> Result<(), InventoryError> {
+fn insert_requested_paths(conn: &rusqlite::Connection, paths: &[TargetPath]) -> FluxResult<()> {
     let mut stmt = conn
         .prepare_cached("INSERT INTO requested_paths(position, rel_path) VALUES (?1, ?2)")
-        .map_err(map_sqlite_error)?;
+        .map_err(sql_read_error)?;
     for (position, path) in paths.iter().enumerate() {
-        stmt.execute(params![position as i64, path.as_str()])
-            .map_err(map_sqlite_error)?;
-    }
-    Ok(())
-}
-
-fn create_observed_and_desired(conn: &Connection) -> Result<(), InventoryError> {
-    create_observed_files(conn)?;
-    create_desired_files(conn)
-}
-
-fn create_observed_files(conn: &Connection) -> Result<(), InventoryError> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE observed_files (
-             position INTEGER PRIMARY KEY NOT NULL,
-             rel_path TEXT NOT NULL,
-             len INTEGER NOT NULL,
-             modified_secs INTEGER NOT NULL,
-             modified_nanos INTEGER NOT NULL
-         ) WITHOUT ROWID;",
-    )
-    .map_err(map_sqlite_error)
-}
-
-fn create_desired_files(conn: &Connection) -> Result<(), InventoryError> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE desired_files (
-             rel_path TEXT NOT NULL,
-             size_bytes INTEGER NOT NULL,
-             PRIMARY KEY (rel_path)
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE desired_segments (
-             rel_path TEXT NOT NULL,
-             segment_index INTEGER NOT NULL,
-             range_start INTEGER NOT NULL,
-             range_len INTEGER NOT NULL,
-             profile_fingerprint BLOB NOT NULL,
-             identity_bytes BLOB NOT NULL,
-             PRIMARY KEY (rel_path, segment_index)
-         ) WITHOUT ROWID;",
-    )
-    .map_err(map_sqlite_error)
-}
-
-fn insert_observed_files(
-    conn: &Connection,
-    observed: &[InventoryObservedFile],
-) -> Result<(), InventoryError> {
-    let mut stmt = conn
-        .prepare_cached(
-            "INSERT INTO observed_files(
-                position, rel_path, len, modified_secs, modified_nanos
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .map_err(map_sqlite_error)?;
-    for (position, item) in observed.iter().enumerate() {
         stmt.execute(params![
-            position as i64,
-            item.path.as_str(),
-            to_i64(item.freshness.len, "len")?,
-            item.freshness.modified_secs,
-            i64::from(item.freshness.modified_nanos),
+            to_i64(position as u64, "requested path position").map_err(inventory_read_error)?,
+            path.as_str(),
         ])
-        .map_err(map_sqlite_error)?;
+        .map_err(sql_read_error)?;
     }
     Ok(())
 }
 
-fn insert_desired_files(
-    conn: &Connection,
-    desired: &[InventoryDesiredFile],
-) -> Result<(), InventoryError> {
-    let mut stmt = conn
-        .prepare_cached("INSERT INTO desired_files(rel_path, size_bytes) VALUES (?1, ?2)")
-        .map_err(map_sqlite_error)?;
-    let mut segment_stmt = conn
-        .prepare_cached(
-            "INSERT INTO desired_segments(
-                rel_path, segment_index, range_start, range_len,
-                profile_fingerprint, identity_bytes
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+fn read_position(position: i64, len: usize) -> FluxResult<usize> {
+    let position = usize::try_from(position).map_err(|_| {
+        FluxError::new(
+            FluxErrorKind::InventoryReadFailed,
+            "stored request position is negative",
         )
-        .map_err(map_sqlite_error)?;
-    for file in desired {
-        stmt.execute(params![
-            file.path.as_str(),
-            to_i64(file.size_bytes, "size_bytes")?,
-        ])
-        .map_err(map_sqlite_error)?;
-        for (index, segment) in file.segments.iter().enumerate() {
-            segment_stmt
-                .execute(params![
-                    file.path.as_str(),
-                    index as i64,
-                    to_i64(segment.range.start, "range_start")?,
-                    to_i64(segment.range.end - segment.range.start, "range_len")?,
-                    segment.key.profile.bytes().as_slice(),
-                    segment.key.identity.bytes(),
-                ])
-                .map_err(map_sqlite_error)?;
-        }
+    })?;
+    if position >= len {
+        return Err(FluxError::new(
+            FluxErrorKind::InventoryReadFailed,
+            "stored request position is outside the result set",
+        ));
     }
-    Ok(())
+    Ok(position)
 }
 
-fn insert_target_paths(
-    conn: &Connection,
-    table: &str,
-    paths: &[TargetPath],
-) -> Result<(), InventoryError> {
-    let mut stmt = conn
-        .prepare_cached(&format!(
-            "INSERT OR IGNORE INTO {table}(rel_path) VALUES (?1)"
-        ))
-        .map_err(map_sqlite_error)?;
-    for path in paths {
-        stmt.execute(params![path.as_str()])
-            .map_err(map_sqlite_error)?;
-    }
-    Ok(())
+fn inventory_read_error(error: InventoryError) -> FluxError {
+    FluxError::new(FluxErrorKind::InventoryReadFailed, error.to_string())
 }
 
-fn insert_target_paths_flux(
-    conn: &Connection,
-    table: &str,
-    paths: &[TargetPath],
-) -> FluxResult<()> {
-    insert_target_paths(conn, table, paths).map_err(flux_inventory_update_error)
-}
-
-fn insert_local_file_facts(
-    conn: &Connection,
-    file_table: &str,
-    segment_table: &str,
-    facts: &[LocalFileFact],
-) -> FluxResult<()> {
-    let mut file_stmt = conn
-        .prepare_cached(&format!(
-            "INSERT OR REPLACE INTO {file_table}(
-                rel_path, len, modified_secs, modified_nanos
-             ) VALUES (?1, ?2, ?3, ?4)"
-        ))
-        .map_err(sql_update_error)?;
-    let mut segment_stmt = conn
-        .prepare_cached(&format!(
-            "INSERT INTO {segment_table}(
-                rel_path, segment_index, range_start, range_len,
-                profile_fingerprint, identity_bytes
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-        ))
-        .map_err(sql_update_error)?;
-    for fact in facts {
-        file_stmt
-            .execute(params![
-                fact.path.as_str(),
-                to_i64(fact.len, "len").map_err(flux_inventory_update_error)?,
-                fact.freshness.modified_secs,
-                i64::from(fact.freshness.modified_nanos),
-            ])
-            .map_err(sql_update_error)?;
-        for (index, segment) in fact.segments.iter().enumerate() {
-            segment_stmt
-                .execute(params![
-                    fact.path.as_str(),
-                    index as i64,
-                    to_i64(segment.range.start, "range_start")
-                        .map_err(flux_inventory_update_error)?,
-                    to_i64(segment.range.end - segment.range.start, "range_len")
-                        .map_err(flux_inventory_update_error)?,
-                    segment.key.profile.bytes().as_slice(),
-                    segment.key.identity.bytes(),
-                ])
-                .map_err(sql_update_error)?;
-        }
-    }
-    Ok(())
-}
-
-fn target_path(path: String) -> Result<TargetPath, InventoryError> {
-    TargetPath::new(path).map_err(|error| InventoryError::Message(error.to_string()))
+fn inventory_update_error(error: InventoryError) -> FluxError {
+    FluxError::new(FluxErrorKind::InventoryUpdateFailed, error.to_string())
 }
 
 fn sql_read_error(error: rusqlite::Error) -> FluxError {
@@ -873,13 +465,5 @@ fn sql_read_error(error: rusqlite::Error) -> FluxError {
 }
 
 fn sql_update_error(error: rusqlite::Error) -> FluxError {
-    FluxError::new(FluxErrorKind::InventoryUpdateFailed, error.to_string())
-}
-
-fn flux_inventory_read_error(error: InventoryError) -> FluxError {
-    FluxError::new(FluxErrorKind::InventoryReadFailed, error.to_string())
-}
-
-fn flux_inventory_update_error(error: InventoryError) -> FluxError {
     FluxError::new(FluxErrorKind::InventoryUpdateFailed, error.to_string())
 }

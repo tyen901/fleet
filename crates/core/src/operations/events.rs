@@ -61,7 +61,6 @@ pub enum ProgressScope {
     InventoryEnumerate,
     InventoryMetadata,
     InventoryVerify,
-    InventoryReconcile,
     MaterializationBytes,
     MaterializationFiles,
     Cleanup,

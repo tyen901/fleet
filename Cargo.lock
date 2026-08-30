@@ -2146,7 +2146,6 @@ dependencies = [
  "futures",
  "futures-util",
  "ignore",
- "prodash",
  "rand 0.8.5",
  "regex",
  "sentry",
@@ -2206,7 +2205,6 @@ dependencies = [
  "futures-util",
  "object_store",
  "percent-encoding",
- "prodash",
  "swifty-repo",
  "swifty_artifacts",
  "tempfile",
@@ -2235,7 +2233,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2249,7 +2247,7 @@ dependencies = [
 [[package]]
 name = "flux-content"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "bincode",
  "bytes",
@@ -2259,7 +2257,7 @@ dependencies = [
 [[package]]
 name = "flux-domain"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2269,17 +2267,18 @@ dependencies = [
 [[package]]
 name = "flux-inventory"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "flux-content",
  "flux-domain",
+ "flux-target",
  "futures-util",
 ]
 
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2290,7 +2289,7 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "bytes",
  "flux-content",
@@ -2302,7 +2301,6 @@ dependencies = [
  "futures-dag",
  "futures-util",
  "object_store",
- "prodash",
  "rangemap",
  "tokio",
  "tokio-util",
@@ -2312,7 +2310,7 @@ dependencies = [
 [[package]]
 name = "flux-source"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2323,7 +2321,7 @@ dependencies = [
 [[package]]
 name = "flux-target"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?tag=v0.1.0#c53bd6df02f81b50a156b1d1c6f0b38b1afe5e04"
+source = "git+file:///C:/projects/flux?rev=8d7a07e5d3f2c061d49dce172c412d4ac901d60a#8d7a07e5d3f2c061d49dce172c412d4ac901d60a"
 dependencies = [
  "blake3",
  "bytes",
@@ -2337,6 +2335,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5182,15 +5181,6 @@ dependencies = [
  "quote",
  "syn 2.0.114",
  "version_check",
-]
-
-[[package]]
-name = "prodash"
-version = "31.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "962200e2d7d551451297d9fdce85138374019ada198e30ea9ede38034e27604c"
-dependencies = [
- "parking_lot",
 ]
 
 [[package]]
