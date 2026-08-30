@@ -1,7 +1,9 @@
+use crate::operations::progress::FluxProgressObserver;
 use crate::operations::{check_repo, local_files, OperationPublisher, OperationStage};
-use fleet_domain::health::{CheckReport, OperationKind};
+use fleet_domain::health::CheckReport;
 use fleet_domain::Profile;
 use std::path::Path;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn check(
@@ -11,19 +13,13 @@ pub(crate) async fn check(
     cancellation: CancellationToken,
 ) -> Result<CheckReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
-    let repo_publisher = OperationPublisher::silent(profile.id.clone(), OperationKind::Check);
-    let inventory_publisher = OperationPublisher::silent(profile.id.clone(), OperationKind::Check);
     publisher.stage(OperationStage::LoadingExpectedState);
+    let progress = Arc::new(FluxProgressObserver::new(publisher.clone()));
 
     let work = async {
         tokio::join!(
-            check_repo::check_repo(profile, state_root, repo_publisher),
-            local_files::check(
-                profile,
-                state_root,
-                inventory_publisher,
-                cancellation.clone(),
-            )
+            check_repo::check_repo(profile, state_root),
+            local_files::check(profile, state_root, cancellation.clone(), Some(progress))
         )
     };
     let (repo, inventory) = tokio::select! {
@@ -35,7 +31,7 @@ pub(crate) async fn check(
     publisher.stage(OperationStage::Finalizing);
     Ok(CheckReport {
         profile_id: profile.id.clone(),
-        repo: repo?,
+        repo,
         local: inventory?,
     })
 }

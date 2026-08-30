@@ -23,7 +23,7 @@ Fleet is a Rust workspace with a native Dioxus desktop UI.
 - `npm run fmt:css`: format CSS with Prettier.
 - `npm run lint:css`: check CSS formatting with Prettier.
 - `npm run lint:design`: enforce the UI Design Rules (type roles, weights, tracking, uppercase ownership, spacing scale) against the stylesheets.
-- `cargo run -p fleet-cli -- <command>`: run CLI tasks (sync, clean, profile, launch/join). Example: `cargo run -p fleet-cli -- profile check <profile_id>`.
+- `cargo run -p fleet-cli -- <command>`: run CLI tasks (check, validate, sync, profile, launch/join). Example: `cargo run -p fleet-cli -- check <profile_id>`.
 - `cargo run -p fleet`: run the native UI.
 - `cargo test`: run Rust unit tests across the workspace.
 

@@ -31,7 +31,7 @@ async fn run_core_loop(core: Core) {
     core.replace_state(initial);
 
     for profile_id in &profile_ids {
-        core.spawn_profile_repo_cache_refresh(profile_id.clone(), false);
+        core.spawn_profile_repo_cache_refresh(profile_id.clone());
         if auto_check_on_startup {
             let core_for_checks = core.clone();
             let profile_id_for_checks = profile_id.clone();

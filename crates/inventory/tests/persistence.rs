@@ -1,9 +1,9 @@
 use fleet_inventory::FleetInventoryProvider;
 use flux::{
-    InventoryReader, LocalFileFact, LocalFileSegmentFact, ManagedInventoryBatch,
-    ManagedInventoryChange, ManagedInventoryWriter, OpaqueSegmentIdentity, ProfileFingerprint,
-    SegmentKey, TargetFileVersion, TargetPath, ValidationSpec, VerifiedFactBatch,
-    VerifiedFactChange, VerifiedFactWriter,
+    CheckInventory, ExpectedFileFact, InventoryReader, LocalFileFact, LocalFileSegmentFact,
+    ManagedInventoryBatch, ManagedInventoryChange, ManagedInventoryWriter, OpaqueSegmentIdentity,
+    ProfileFingerprint, SegmentKey, TargetFileVersion, TargetPath, ValidationSpec,
+    VerifiedFactBatch, VerifiedFactChange, VerifiedFactWriter,
 };
 use futures_util::StreamExt;
 
@@ -116,6 +116,39 @@ async fn managed_batches_are_sorted_bounded_and_persisted() {
     );
 }
 
+#[tokio::test]
+async fn fast_assessment_compares_expected_facts_and_managed_scope_in_one_query() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let inventory = FleetInventoryProvider::open_or_recreate(&temp.path().join("inventory.sqlite"))
+        .expect("open inventory");
+    let matching = fact("expected/matching.pbo", 1);
+    let changed_manifest = fact("expected/changed.pbo", 2);
+    let obsolete = fact("obsolete/old.pbo", 3);
+    inventory
+        .apply_managed_batch(ManagedInventoryBatch {
+            changes: vec![
+                ManagedInventoryChange::Manage(matching.clone()),
+                ManagedInventoryChange::Manage(changed_manifest.clone()),
+                ManagedInventoryChange::Manage(obsolete.clone()),
+            ],
+        })
+        .await
+        .expect("seed managed inventory");
+
+    let replacement = fact("expected/changed.pbo", 4);
+    let expected = [expected_fact(&matching), expected_fact(&replacement)];
+    let assessment = inventory
+        .assess_expected_state(&expected)
+        .await
+        .expect("assess expected state");
+
+    assert_eq!(assessment.files.len(), 2);
+    assert!(assessment.files[0].content_matches);
+    assert_eq!(assessment.files[0].stored_version, Some(matching.version));
+    assert!(!assessment.files[1].content_matches);
+    assert_eq!(assessment.obsolete_paths, vec![obsolete.path]);
+}
+
 async fn lookup_file(
     inventory: &FleetInventoryProvider,
     path: &TargetPath,
@@ -158,5 +191,13 @@ fn fact(path: &str, id: u8) -> LocalFileFact {
             },
             key,
         }],
+    }
+}
+
+fn expected_fact(fact: &LocalFileFact) -> ExpectedFileFact {
+    ExpectedFileFact {
+        path: fact.path.clone(),
+        len: fact.len(),
+        segments: fact.segments.clone(),
     }
 }

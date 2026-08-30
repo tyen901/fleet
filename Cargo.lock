@@ -599,16 +599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
-dependencies = [
- "memchr",
- "serde",
-]
-
-[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2132,8 +2122,6 @@ name = "fleet-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "atomic-write-file",
- "axum",
  "chrono",
  "directories",
  "fleet-arma3",
@@ -2141,11 +2129,6 @@ dependencies = [
  "fleet-download",
  "fleet-flux",
  "fleet-inventory",
- "flux",
- "fs2",
- "futures",
- "futures-util",
- "ignore",
  "rand 0.8.5",
  "regex",
  "sentry",
@@ -2155,7 +2138,6 @@ dependencies = [
  "specta",
  "swifty-repo",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2233,7 +2215,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2247,7 +2229,7 @@ dependencies = [
 [[package]]
 name = "flux-content"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "bincode",
  "bytes",
@@ -2257,7 +2239,7 @@ dependencies = [
 [[package]]
 name = "flux-domain"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2267,7 +2249,7 @@ dependencies = [
 [[package]]
 name = "flux-inventory"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2278,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2289,7 +2271,7 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "bytes",
  "flux-content",
@@ -2310,7 +2292,7 @@ dependencies = [
 [[package]]
 name = "flux-source"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2321,7 +2303,7 @@ dependencies = [
 [[package]]
 name = "flux-target"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec#d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec"
+source = "git+https://github.com/tyen901/flux6.git?rev=ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc#ef3a8beadfaf09d3b2ae38a6eeb5675183f376dc"
 dependencies = [
  "blake3",
  "bytes",
@@ -2435,16 +2417,6 @@ dependencies = [
  "io-lifetimes 2.0.4",
  "rustix",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
@@ -2871,19 +2843,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "globset"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "gloo-timers"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3218,7 +3177,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tokio",
  "tower-service",
  "tracing",
@@ -3425,22 +3384,6 @@ checksum = "3acae9609540aa318d1bc588455225fb2085b9ed0c4f6bd0d9d5bcd86f1a0344"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "ignore"
-version = "0.4.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
 ]
 
 [[package]]
@@ -5255,7 +5198,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5293,7 +5236,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tracing",
  "windows-sys 0.60.2",
 ]

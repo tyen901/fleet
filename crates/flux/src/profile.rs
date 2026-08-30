@@ -7,11 +7,13 @@ use swifty_artifacts::{
     Md5Digest, SrfPart, SwiftyStreamingPartScanner, SwiftyStreamingPartValidator,
 };
 
+use crate::input::swifty_profile_fingerprint;
+
 pub struct SwiftyFluxProfile;
 
 impl flux::ContentProfile for SwiftyFluxProfile {
     fn fingerprint(&self) -> flux::ProfileFingerprint {
-        crate::swifty_profile_fingerprint()
+        swifty_profile_fingerprint()
     }
 
     fn begin_file_scan(
@@ -61,7 +63,7 @@ impl ProfileFileScanner for SwiftyInventoryScanner {
 }
 
 fn part_observation(part: SrfPart) -> FluxResult<SegmentObservation> {
-    let profile = crate::swifty_profile_fingerprint();
+    let profile = swifty_profile_fingerprint();
     let key = flux::SegmentKey::new(
         profile,
         flux::OpaqueSegmentIdentity::new(part.checksum.as_bytes().to_vec())?,
@@ -98,7 +100,7 @@ impl StreamingValidator for SwiftyPartValidator {
 }
 
 fn validate_spec(spec: &flux::ValidationSpec) -> FluxResult<()> {
-    if spec.profile != crate::swifty_profile_fingerprint() {
+    if spec.profile != swifty_profile_fingerprint() {
         return Err(FluxError::new(
             FluxErrorKind::ValidationFailed,
             "validation spec profile fingerprint mismatch",

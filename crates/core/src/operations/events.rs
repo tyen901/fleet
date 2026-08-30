@@ -16,31 +16,11 @@ pub struct OperationSessionEvent {
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub enum OperationSessionEventKind {
     Started,
-    Stage {
-        stage: OperationStage,
-    },
-    Progress {
-        progress: OperationProgressEvent,
-    },
-    Notice {
-        level: OperationNoticeLevel,
-        code: Option<String>,
-        text: String,
-    },
-    Finished {
-        output: OperationOutput,
-    },
-    Failed {
-        error: ApiError,
-    },
+    Stage { stage: OperationStage },
+    Progress { progress: OperationProgressEvent },
+    Finished { output: OperationOutput },
+    Failed { error: ApiError },
     Canceled,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum OperationNoticeLevel {
-    Info,
-    Warn,
-    Error,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Type)]
@@ -50,7 +30,7 @@ pub enum OperationStage {
     ScanningDisk,
     VerifyingInventory,
     Sync,
-    CleaningUp,
+    RemovingObsoleteFiles,
     Finalizing,
 }
 

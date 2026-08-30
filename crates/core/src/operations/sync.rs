@@ -1,5 +1,4 @@
 use crate::operations::progress::FluxProgressObserver;
-use crate::operations::support::repo_cache::{commit_staged_repo_cache, prepare_staged_repo_cache};
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
 use fleet_domain::{LocalFileHealth, Profile, ProfileSourceKind};
@@ -21,27 +20,25 @@ pub(crate) async fn sync(
     let ProfileSourceKind::Http(repo_url) = profile
         .validated_source_kind()
         .map_err(|_| crate::ApiError::new("invalid_profile", "invalid profile source"))?;
-    let paths = fleet_domain::FleetPaths::for_profile(state_root.to_path_buf(), &profile.id);
-    let _lock = crate::operations::support::locking::acquire_lock(paths.profile.inventory.lock)
-        .await
-        .map_err(|error| crate::ApiError::new("inventory_locked", error.to_string()))?;
+    let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
+    let inventory_db = fleet_domain::inventory_db_path(state_root, &profile.id);
 
     publisher.stage(OperationStage::LoadingExpectedState);
-    let stage = prepare_staged_repo_cache(&paths.profile.repo_cache)
-        .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?;
     let downloads = fleet_download::DownloadService::new_default();
-    let input = fleet_flux::load_swifty_materialization_input(
-        repo_url,
-        stage.stage_dir(),
-        &downloads,
-        None,
-    )
-    .await
-    .map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?;
+    let input = tokio::select! {
+        result = fleet_flux::load_swifty_materialization_input(
+            repo_url,
+            &repo_cache,
+            &downloads,
+            None,
+        ) => result.map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?,
+        () = cancel.cancelled() => return Err(crate::ApiError::new("canceled", "canceled")),
+    };
+    let revision = input.revision().map(ToOwned::to_owned);
     std::fs::create_dir_all(&dest)
         .map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?;
     let inventory = Arc::new(
-        FleetInventoryProvider::open_or_recreate(&paths.profile.inventory.db)
+        FleetInventoryProvider::open_or_recreate(&inventory_db)
             .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?,
     );
 
@@ -51,9 +48,8 @@ pub(crate) async fn sync(
         &dest,
         inventory,
         input,
-        flux::VerificationScope::Changed,
         cancel.clone(),
-        Some(progress),
+        Some(progress as fleet_flux::ProgressObserverRef),
     )
     .await
     .map_err(|error| {
@@ -63,35 +59,20 @@ pub(crate) async fn sync(
             crate::ApiError::new("sync_failed", error.to_string())
         }
     })?;
-    commit_staged_repo_cache(stage)
-        .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?;
-
     publisher.stage(OperationStage::Finalizing);
     Ok(SyncReport {
         profile_id: profile.id.clone(),
-        repo: repo_report_from_cache(profile, repo_url, &paths.profile.repo_cache),
+        repo: RepoCheckReport {
+            profile_id: profile.id.clone(),
+            local_revision: revision.clone(),
+            remote_revision: revision,
+            freshness: RepoCheckFreshness::UpToDate,
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        },
         local: local_files::report(
             profile,
             VerificationKind::Materialized,
             LocalFileHealth::Clean,
         ),
     })
-}
-
-fn repo_report_from_cache(
-    profile: &Profile,
-    repo_url: &str,
-    repo_cache_dir: &Path,
-) -> RepoCheckReport {
-    let revision = swifty_repo::load_cached_repo_blocking(repo_cache_dir, repo_url)
-        .ok()
-        .flatten()
-        .and_then(|cache| swifty_repo::repo_blob_revision(&cache));
-    RepoCheckReport {
-        profile_id: profile.id.clone(),
-        local_revision: revision.clone(),
-        remote_revision: revision,
-        freshness: RepoCheckFreshness::UpToDate,
-        checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-    }
 }

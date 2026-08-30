@@ -12,14 +12,16 @@ use object_store::{ClientOptions, ObjectStore};
 use percent_encoding::percent_decode_str;
 use url::Url;
 
+use crate::input::{swifty_profile_fingerprint, SwiftyStoreIndex, SwiftyStoreObject};
+
 struct SwiftyStoreSource {
     source_id: String,
     store: Arc<dyn ObjectStore>,
     hits_by_key: HashMap<SegmentKey, Vec<StoreOccurrence>>,
 }
 
-pub(crate) fn build_store_sources(index: crate::SwiftyStoreIndex) -> Result<Vec<StoreSourceRef>> {
-    let mut by_base_url = BTreeMap::<String, Vec<crate::SwiftyStoreObject>>::new();
+pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<StoreSourceRef>> {
+    let mut by_base_url = BTreeMap::<String, Vec<SwiftyStoreObject>>::new();
     for object in index.objects {
         by_base_url
             .entry(store_base_url(&object)?)
@@ -89,7 +91,7 @@ impl StoreSource for SwiftyStoreSource {
         limit_per_key: usize,
     ) -> BoxFuture<'a, FluxResult<Vec<StoreLookupResult>>> {
         async move {
-            if profile != crate::swifty_profile_fingerprint() {
+            if profile != swifty_profile_fingerprint() {
                 return Ok(requests
                     .iter()
                     .map(|req| StoreLookupResult {
@@ -125,7 +127,7 @@ impl StoreSource for SwiftyStoreSource {
     }
 }
 
-fn store_base_url(object: &crate::SwiftyStoreObject) -> Result<String> {
+fn store_base_url(object: &SwiftyStoreObject) -> Result<String> {
     let url = Url::parse(&object.source_url)?;
     let suffix = object.object_path.as_ref();
     let path = percent_decode_str(url.path())
@@ -152,16 +154,18 @@ fn store_base_url(object: &crate::SwiftyStoreObject) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use flux::{
-        OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey, SourceLookupRequest, TargetPath,
-        ValidationSpec,
+        OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey, SourceLookupRequest, ValidationSpec,
     };
     use object_store::path::Path as ObjectPath;
 
     use super::*;
+    use crate::input::{
+        swifty_profile_fingerprint, SwiftyStoreIndex, SwiftyStoreObject, SwiftyStorePart,
+    };
 
     #[test]
     fn empty_store_index_creates_no_sources() {
-        let sources = build_store_sources(crate::SwiftyStoreIndex {
+        let sources = build_store_sources(SwiftyStoreIndex {
             objects: Vec::new(),
         })
         .expect("build sources");
@@ -171,15 +175,11 @@ mod tests {
 
     #[test]
     fn store_sources_are_grouped_by_base_url() {
-        let index = crate::SwiftyStoreIndex {
+        let index = SwiftyStoreIndex {
             objects: vec![
-                object("one", "https://a.example/mods/one.pbo", "mods/one.pbo"),
-                object("two", "https://b.example/mods/two.pbo", "mods/two.pbo"),
-                object(
-                    "three",
-                    "https://a.example/mods/three.pbo",
-                    "mods/three.pbo",
-                ),
+                object("https://a.example/mods/one.pbo", "mods/one.pbo"),
+                object("https://b.example/mods/two.pbo", "mods/two.pbo"),
+                object("https://a.example/mods/three.pbo", "mods/three.pbo"),
             ],
         };
 
@@ -200,12 +200,8 @@ mod tests {
 
     #[test]
     fn source_url_object_path_mismatch_is_rejected() {
-        let index = crate::SwiftyStoreIndex {
-            objects: vec![object(
-                "one",
-                "https://a.example/mods/one.pbo",
-                "other/one.pbo",
-            )],
+        let index = SwiftyStoreIndex {
+            objects: vec![object("https://a.example/mods/one.pbo", "other/one.pbo")],
         };
 
         assert!(build_store_sources(index).is_err());
@@ -213,9 +209,8 @@ mod tests {
 
     #[test]
     fn percent_encoded_source_url_path_matches_decoded_object_path() {
-        let index = crate::SwiftyStoreIndex {
+        let index = SwiftyStoreIndex {
             objects: vec![object(
-                "one",
                 "https://a.example/@rksl/docs/home%20-%20rksl%20studios%20community.url",
                 "@rksl/docs/home - rksl studios community.url",
             )],
@@ -233,13 +228,11 @@ mod tests {
         let second = key(2, 1);
         let source = only_source(vec![
             object_with_key(
-                "one",
                 "https://a.example/mods/one.pbo",
                 "mods/one.pbo",
                 first.clone(),
             ),
             object_with_key(
-                "two",
                 "https://a.example/mods/two.pbo",
                 "mods/two.pbo",
                 second.clone(),
@@ -248,7 +241,7 @@ mod tests {
         let requests = vec![request(second.clone()), request(first.clone())];
 
         let results = source
-            .lookup_many(crate::swifty_profile_fingerprint(), &requests, 10)
+            .lookup_many(swifty_profile_fingerprint(), &requests, 10)
             .await
             .expect("lookup");
 
@@ -264,13 +257,11 @@ mod tests {
         let key = key(1, 1);
         let source = only_source(vec![
             object_with_key(
-                "two",
                 "https://a.example/mods/two.pbo",
                 "mods/two.pbo",
                 key.clone(),
             ),
             object_with_key(
-                "one",
                 "https://a.example/mods/one.pbo",
                 "mods/one.pbo",
                 key.clone(),
@@ -279,7 +270,7 @@ mod tests {
         let requests = vec![request(key)];
 
         let results = source
-            .lookup_many(crate::swifty_profile_fingerprint(), &requests, 1)
+            .lookup_many(swifty_profile_fingerprint(), &requests, 1)
             .await
             .expect("lookup");
 
@@ -288,9 +279,8 @@ mod tests {
         assert_eq!(results[0].hits[0].object.as_ref(), "mods/one.pbo");
     }
 
-    fn only_source(objects: Vec<crate::SwiftyStoreObject>) -> StoreSourceRef {
-        let sources =
-            build_store_sources(crate::SwiftyStoreIndex { objects }).expect("build sources");
+    fn only_source(objects: Vec<SwiftyStoreObject>) -> StoreSourceRef {
+        let sources = build_store_sources(SwiftyStoreIndex { objects }).expect("build sources");
         assert_eq!(sources.len(), 1);
         sources.into_iter().next().expect("source")
     }
@@ -307,30 +297,23 @@ mod tests {
         }
     }
 
-    fn object(target: &str, source_url: &str, object_path: &str) -> crate::SwiftyStoreObject {
-        object_with_key(target, source_url, object_path, key(1, 1))
+    fn object(source_url: &str, object_path: &str) -> SwiftyStoreObject {
+        object_with_key(source_url, object_path, key(1, 1))
     }
 
-    fn object_with_key(
-        target: &str,
-        source_url: &str,
-        object_path: &str,
-        key: SegmentKey,
-    ) -> crate::SwiftyStoreObject {
+    fn object_with_key(source_url: &str, object_path: &str, key: SegmentKey) -> SwiftyStoreObject {
         let validation = ValidationSpec {
             profile: key.profile,
             key: key.clone(),
             len: 1,
         };
-        crate::SwiftyStoreObject {
-            target_path: TargetPath::new(format!("{target}.pbo")).expect("target path"),
+        SwiftyStoreObject {
             source_url: source_url.to_string(),
             object_path: ObjectPath::from(object_path),
-            parts: vec![crate::SwiftyStorePart {
+            parts: vec![SwiftyStorePart {
                 key,
                 validation,
                 object_range: 0..1,
-                target_range: 0..1,
             }],
         }
     }

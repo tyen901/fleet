@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use flux::{
-    FluxError, FluxErrorKind, FluxResult, LocalFileFact, LocalSegmentLookupResult,
-    ManagedInventoryBatch, ManagedInventoryChange, ManagedPathBatch, SegmentKey, TargetPath,
+    ExpectedFileAssessment, ExpectedFileFact, ExpectedStateAssessment, FluxError, FluxErrorKind,
+    FluxResult, LocalFileFact, LocalSegmentLookupResult, ManagedInventoryBatch,
+    ManagedInventoryChange, ManagedPathBatch, SegmentKey, TargetFileVersion, TargetPath,
     VerifiedFactBatch, VerifiedFactChange,
 };
 use futures_util::{stream::BoxStream, StreamExt};
@@ -39,6 +40,158 @@ pub(crate) fn apply_managed_batch(db_path: &Path, batch: ManagedInventoryBatch) 
 enum Change {
     Upsert(LocalFileFact),
     Remove(TargetPath),
+}
+
+pub(crate) fn assess_expected_state(
+    db_path: &Path,
+    expected: &[ExpectedFileFact],
+) -> FluxResult<ExpectedStateAssessment> {
+    let mut conn = open_conn(db_path).map_err(inventory_read_error)?;
+    let tx = conn.transaction().map_err(sql_read_error)?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE expected_files (
+             position INTEGER PRIMARY KEY NOT NULL,
+             rel_path TEXT UNIQUE NOT NULL,
+             len INTEGER NOT NULL
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE expected_segments (
+             rel_path TEXT NOT NULL,
+             segment_index INTEGER NOT NULL,
+             range_start INTEGER NOT NULL,
+             range_len INTEGER NOT NULL,
+             profile_fingerprint BLOB NOT NULL,
+             identity_bytes BLOB NOT NULL,
+             PRIMARY KEY (rel_path, segment_index)
+         ) WITHOUT ROWID;",
+    )
+    .map_err(sql_read_error)?;
+    {
+        let mut file_stmt = tx
+            .prepare_cached(
+                "INSERT INTO expected_files(position, rel_path, len) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(sql_read_error)?;
+        let mut segment_stmt = tx
+            .prepare_cached(
+                "INSERT INTO expected_segments(
+                     rel_path, segment_index, range_start, range_len,
+                     profile_fingerprint, identity_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(sql_read_error)?;
+        for (position, file) in expected.iter().enumerate() {
+            file_stmt
+                .execute(params![
+                    to_i64(position as u64, "expected file position")
+                        .map_err(inventory_read_error)?,
+                    file.path.as_str(),
+                    to_i64(file.len, "expected file length").map_err(inventory_read_error)?,
+                ])
+                .map_err(sql_read_error)?;
+            for (segment_index, segment) in file.segments.iter().enumerate() {
+                segment_stmt
+                    .execute(params![
+                        file.path.as_str(),
+                        to_i64(segment_index as u64, "expected segment index")
+                            .map_err(inventory_read_error)?,
+                        to_i64(segment.range.start, "expected segment start")
+                            .map_err(inventory_read_error)?,
+                        to_i64(
+                            segment.range.end - segment.range.start,
+                            "expected segment length",
+                        )
+                        .map_err(inventory_read_error)?,
+                        segment.key.profile.bytes().as_slice(),
+                        segment.key.identity.bytes(),
+                    ])
+                    .map_err(sql_read_error)?;
+            }
+        }
+    }
+
+    let mut files = Vec::with_capacity(expected.len());
+    {
+        let mut stmt = tx
+            .prepare(
+                "SELECT ef.position, f.len, f.version_token,
+                        CASE WHEN f.rel_path IS NOT NULL
+                                  AND f.len = ef.len
+                                  AND (SELECT count(*) FROM file_segments fs
+                                       WHERE fs.rel_path = ef.rel_path)
+                                      = (SELECT count(*) FROM expected_segments es
+                                         WHERE es.rel_path = ef.rel_path)
+                                  AND (SELECT count(*)
+                                       FROM expected_segments es
+                                       JOIN file_segments fs
+                                         ON fs.rel_path = es.rel_path
+                                        AND fs.segment_index = es.segment_index
+                                        AND fs.range_start = es.range_start
+                                        AND fs.range_len = es.range_len
+                                        AND fs.profile_fingerprint = es.profile_fingerprint
+                                        AND fs.identity_bytes = es.identity_bytes
+                                       WHERE es.rel_path = ef.rel_path)
+                                      = (SELECT count(*) FROM expected_segments es
+                                         WHERE es.rel_path = ef.rel_path)
+                             THEN 1 ELSE 0 END
+                 FROM expected_files ef
+                 LEFT JOIN file_facts f ON f.rel_path = ef.rel_path
+                 ORDER BY ef.position",
+            )
+            .map_err(sql_read_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(sql_read_error)?;
+        for row in rows {
+            let (position, stored_len, token, content_matches) = row.map_err(sql_read_error)?;
+            let position = read_position(position, expected.len())?;
+            let stored_version = match (stored_len, token) {
+                (Some(len), Some(token)) => Some(TargetFileVersion::from_storage(
+                    u64::try_from(len).map_err(|_| {
+                        FluxError::new(
+                            FluxErrorKind::InventoryReadFailed,
+                            "stored file length is negative",
+                        )
+                    })?,
+                    token,
+                )?),
+                _ => None,
+            };
+            files.push(ExpectedFileAssessment {
+                path: expected[position].path.clone(),
+                stored_version,
+                content_matches: content_matches != 0,
+            });
+        }
+    }
+    let obsolete_paths = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT managed.rel_path
+                 FROM managed_paths managed
+                 LEFT JOIN expected_files expected ON expected.rel_path = managed.rel_path
+                 WHERE expected.rel_path IS NULL
+                 ORDER BY managed.rel_path",
+            )
+            .map_err(sql_read_error)?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sql_read_error)?
+            .map(|row| TargetPath::new(row.map_err(sql_read_error)?))
+            .collect::<FluxResult<Vec<_>>>()?;
+        paths
+    };
+    tx.commit().map_err(sql_read_error)?;
+    Ok(ExpectedStateAssessment {
+        files,
+        obsolete_paths,
+    })
 }
 
 fn apply_changes(db_path: &Path, changes: Vec<Change>, managed: bool) -> FluxResult<()> {

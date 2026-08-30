@@ -22,15 +22,15 @@ pub use fleet_domain::health::{
     CancelResult, CheckReport, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
     SyncReport, VerificationKind,
 };
-pub use fleet_domain::sync::SyncSessionId;
+pub use fleet_domain::OperationSessionId;
 pub use fleet_domain::RepoServer;
 pub use fleet_domain::{
     ApiError, AppSettings, Arma3LaunchMethod, LocalFileHealth, Profile, ProfileId,
     ProfileSourceKind, DEFAULT_ARMA3_ARGS,
 };
 pub use operations::{
-    OperationNoticeLevel, OperationOutput, OperationProgressEvent, OperationSessionEvent,
-    OperationSessionEventKind, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
+    OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
+    OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
 };
 
 pub mod download {
