@@ -79,8 +79,22 @@
 }
 
 .profile-row__state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--text-label);
   white-space: nowrap;
+}
+
+.profile-row__spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: conic-gradient(currentColor 0 24%, transparent 24% 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 0);
+  animation: spin 0.9s linear infinite;
 }
 
 .profile-row__detail {
@@ -104,8 +118,18 @@
   gap: var(--space-2);
 }
 
+.profile-row__buttons--with-update {
+  width: 268px;
+}
+
 .profile-row__buttons .btn {
   width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile-row__spinner {
+    animation: none;
+  }
 }
 
 /* Profile page: overview */
