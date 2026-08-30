@@ -5,9 +5,8 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
-    format_speed, inventory_out_of_sync, profile_not_found_page, save_profile_and_update_state,
-    select_profile_in_background, stage_phase_label, start_profile_operation,
-    start_profile_operation_request, ProfileFormField,
+    format_speed, profile_not_found_page, save_profile_and_update_state,
+    select_profile_in_background, stage_phase_label, start_profile_operation, ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
@@ -24,10 +23,37 @@ use icondata::BsPlusLg;
 fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
     matches!(
         kind,
-        fleet_core::OperationKind::Sync
-            | fleet_core::OperationKind::FullSync
-            | fleet_core::OperationKind::CleanupUnexpectedFiles
+        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
     )
+}
+
+fn local_state_description(report: &fleet_core::LocalFileReport) -> String {
+    use fleet_core::{LocalFileHealth, VerificationKind};
+
+    match (&report.verification, &report.health) {
+        (VerificationKind::Fast, LocalFileHealth::Clean) => {
+            "No local metadata changes detected".to_string()
+        }
+        (VerificationKind::Fast, LocalFileHealth::Missing | LocalFileHealth::Dirty) => {
+            "Local files changed since the last known state".to_string()
+        }
+        (VerificationKind::ByteExact, LocalFileHealth::Clean) => {
+            "Byte validation passed".to_string()
+        }
+        (VerificationKind::ByteExact, LocalFileHealth::Missing | LocalFileHealth::Dirty) => {
+            "Byte validation found files that need repair".to_string()
+        }
+        (VerificationKind::Materialized, LocalFileHealth::Clean) => {
+            "Installed version materialized".to_string()
+        }
+        (_, LocalFileHealth::MissingDestination) => "Local folder is missing".to_string(),
+        (_, LocalFileHealth::InventoryUnavailable) => {
+            "Local inventory is unavailable; sync will rebuild it".to_string()
+        }
+        (_, LocalFileHealth::InvalidProfile) => "Profile paths are invalid".to_string(),
+        (_, LocalFileHealth::Unknown) => "Local state has not been checked".to_string(),
+        _ => "Local files need sync".to_string(),
+    }
 }
 
 #[component]
@@ -38,7 +64,6 @@ pub fn ProfileView(id: String) -> Element {
     let nav = use_navigator();
 
     let mut editing = use_signal(|| false);
-    let mut full_sync_confirm_open = use_signal(|| false);
     let mut name = use_signal(String::new);
     let mut repo = use_signal(String::new);
     let mut folder = use_signal(String::new);
@@ -75,7 +100,7 @@ pub fn ProfileView(id: String) -> Element {
 
     let nav_for_back = nav;
 
-    // Sync mode: an exclusive operation owns the page.
+    // Validation and sync own the page while they access the managed target.
     if exclusive_active {
         return render_sync_mode(
             &bridge,
@@ -88,38 +113,38 @@ pub fn ProfileView(id: String) -> Element {
         );
     }
 
-    let update_available = status
-        .as_ref()
-        .map(|status| {
-            matches!(
-                status.repo_freshness,
-                Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
-            )
-        })
-        .unwrap_or(false);
-    let repair_required = status.as_ref().map(inventory_out_of_sync).unwrap_or(false);
-    let sync_required = update_available || repair_required;
     let check_enabled = status
         .as_ref()
-        .map(|status| status.actions.check_repo_enabled)
+        .map(|status| status.actions.check_enabled)
         .unwrap_or(false);
     let check_running = status
         .as_ref()
-        .map(|status| status.actions.check_repo_running || status.actions.check_inventory_running)
+        .map(|status| status.actions.check_running)
+        .unwrap_or(false);
+    let validate_enabled = status
+        .as_ref()
+        .map(|status| status.actions.validate_enabled)
+        .unwrap_or(false);
+    let validate_running = status
+        .as_ref()
+        .map(|status| status.actions.validate_running)
         .unwrap_or(false);
     let sync_enabled = status
         .as_ref()
         .map(|status| status.actions.sync_enabled)
         .unwrap_or(false);
+    let check_description = runtime
+        .and_then(|runtime| runtime.local_state.as_ref())
+        .map(local_state_description)
+        .unwrap_or_else(|| "Compare local file metadata with the last known state".to_string());
+    let validation_description = runtime
+        .and_then(|runtime| runtime.validation.as_ref())
+        .map(local_state_description)
+        .unwrap_or_else(|| "Read every managed file and verify its bytes".to_string());
 
     let last_sync_failure = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
-        .filter(|outcome| {
-            matches!(
-                outcome.operation,
-                fleet_core::OperationKind::Sync | fleet_core::OperationKind::FullSync
-            )
-        })
+        .filter(|outcome| matches!(outcome.operation, fleet_core::OperationKind::Sync))
         .and_then(|outcome| match outcome.status {
             fleet_core::OperationTerminalStatus::Failed => Some((
                 "Sync failed",
@@ -133,10 +158,52 @@ pub fn ProfileView(id: String) -> Element {
             )),
             fleet_core::OperationTerminalStatus::Canceled => Some((
                 "Sync cancelled",
-                "No new profile version was activated.".to_string(),
+                "Sync stopped. Run it again to finish updating the profile.".to_string(),
                 "Restart sync",
             )),
             fleet_core::OperationTerminalStatus::Succeeded => None,
+        });
+    let last_read_failure = runtime
+        .and_then(|runtime| runtime.last_operation.as_ref())
+        .filter(|outcome| {
+            matches!(
+                outcome.operation,
+                fleet_core::OperationKind::Check | fleet_core::OperationKind::Validate
+            )
+        })
+        .and_then(|outcome| {
+            let failure_message = || {
+                outcome
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.clone())
+                    .or_else(|| outcome.message.clone())
+                    .unwrap_or_else(|| "The operation did not complete.".to_string())
+            };
+            match (outcome.operation, &outcome.status) {
+                (fleet_core::OperationKind::Check, fleet_core::OperationTerminalStatus::Failed) => {
+                    Some(("Check failed", failure_message()))
+                }
+                (
+                    fleet_core::OperationKind::Validate,
+                    fleet_core::OperationTerminalStatus::Failed,
+                ) => Some(("Validation failed", failure_message())),
+                (
+                    fleet_core::OperationKind::Check,
+                    fleet_core::OperationTerminalStatus::Canceled,
+                ) => Some((
+                    "Check cancelled",
+                    "No new local file state was recorded.".to_string(),
+                )),
+                (
+                    fleet_core::OperationKind::Validate,
+                    fleet_core::OperationTerminalStatus::Canceled,
+                ) => Some((
+                    "Validation cancelled",
+                    "No new local file state was recorded.".to_string(),
+                )),
+                _ => None,
+            }
         });
 
     let bridge_for_check = bridge.clone();
@@ -147,37 +214,20 @@ pub fn ProfileView(id: String) -> Element {
         let toasts = toasts_for_check.clone();
         let profile_id = profile_id_for_check.clone();
         spawn(async move {
-            info!(profile_id = %profile_id, "profile update and inventory check requested");
+            info!(profile_id = %profile_id, "profile check requested");
             match bridge
                 .core()
-                .start_operation(profile_id.clone(), fleet_core::OperationKind::CheckRepo)
+                .start_operation(profile_id, fleet_core::OperationKind::Check)
                 .await
             {
                 Ok(session_id) => {
-                    let _ = bridge.core().await_finished(session_id).await;
-                }
-                Err(err) => {
-                    if err.code != "profile_busy" {
-                        toasts.push_api_error("Check for updates failed", &err);
+                    if let Err(error) = bridge.core().await_finished(session_id).await {
+                        toasts.push_api_error("Check failed", &error);
                     }
-                    return;
-                }
-            }
-
-            match bridge
-                .core()
-                .start_operation(
-                    profile_id.clone(),
-                    fleet_core::OperationKind::CheckInventory,
-                )
-                .await
-            {
-                Ok(session_id) => {
-                    let _ = bridge.core().await_finished(session_id).await;
                 }
                 Err(err) => {
                     if err.code != "profile_busy" {
-                        toasts.push_api_error("Check inventory failed", &err);
+                        toasts.push_api_error("Check failed", &err);
                     }
                 }
             }
@@ -208,41 +258,20 @@ pub fn ProfileView(id: String) -> Element {
         start_sync_for_action();
     };
 
-    let on_request_full_sync = move |_: MouseEvent| {
-        if any_active {
-            return;
-        }
-        full_sync_confirm_open.set(true);
-    };
-
-    let on_cancel_full_sync = move |_: MouseEvent| {
-        full_sync_confirm_open.set(false);
-    };
-
-    let on_confirm_full_sync = {
+    let on_validate = {
         let bridge = bridge.clone();
         let toasts = toasts.clone();
         let profile_id = profile.id.clone();
         move |_: MouseEvent| {
-            if any_active {
-                return;
-            }
-            full_sync_confirm_open.set(false);
-            let bridge = bridge.clone();
-            let toasts = toasts.clone();
-            let profile_id = profile_id.clone();
-            spawn(async move {
-                start_profile_operation_request(
-                    bridge,
-                    toasts,
-                    profile_id,
-                    fleet_core::OperationKind::FullSync,
-                    "full_sync",
-                    "start_full_sync_failed",
-                    "Full sync failed",
-                )
-                .await;
-            });
+            start_profile_operation(
+                bridge.clone(),
+                toasts.clone(),
+                profile_id.clone(),
+                fleet_core::OperationKind::Validate,
+                "validate",
+                "start_validate_failed",
+                "Validation failed",
+            );
         }
     };
 
@@ -639,6 +668,13 @@ pub fn ProfileView(id: String) -> Element {
                     }
 
                     if !editing() {
+                        if let Some((title, message)) = last_read_failure.clone() {
+                            section { class: "profile-view__result",
+                                h3 { class: "profile-view__result-title", "{title}" }
+                                p { class: "profile-view__result-message", "{message}" }
+                            }
+                        }
+
                         if let Some((title, message, action_label)) = last_sync_failure.clone() {
                             section { class: "profile-view__result",
                                 h3 { class: "profile-view__result-title", "{title}" }
@@ -653,56 +689,50 @@ pub fn ProfileView(id: String) -> Element {
                         }
 
                         Section {
-                            SectionHeader { title: "Sync".to_string() }
+                            SectionHeader {
+                                title: "Sync".to_string(),
+                                subtitle: Some(format!(
+                                    "Check: {check_description}. Validate: {validation_description}."
+                                )),
+                            }
                             FieldRow {
-                                FieldRowMeta { title: "Check for updates".to_string() }
+                                FieldRowMeta {
+                                    title: "Check profile".to_string(),
+                                }
                                 FieldRowActions {
                                     Button {
                                         variant: ButtonVariant::Secondary,
                                         disabled: !check_enabled || any_active,
                                         loading: check_running,
                                         onclick: on_check_for_updates,
-                                        "Check"
-                                    }
-                                }
-                            }
-                            if sync_required && last_sync_failure.is_none() {
-                                FieldRow {
-                                    FieldRowMeta { title: if update_available { "Update profile".to_string() } else { "Repair profile".to_string() } }
-                                    FieldRowActions {
-                                        Button {
-                                            variant: ButtonVariant::Primary,
-                                            disabled: !sync_enabled || any_active,
-                                            onclick: on_sync_action,
-                                            if update_available {
-                                                "Update"
-                                            } else {
-                                                "Repair"
-                                            }
-                                        }
+                                    "Check now"
                                     }
                                 }
                             }
                             FieldRow {
-                                FieldRowMeta { title: "Full sync".to_string() }
+                                FieldRowMeta { title: "Sync profile".to_string() }
                                 FieldRowActions {
                                     Button {
-                                        variant: ButtonVariant::Secondary,
-                                        disabled: any_active || full_sync_confirm_open(),
-                                        onclick: on_request_full_sync,
-                                        "Full sync"
+                                        variant: ButtonVariant::Primary,
+                                        disabled: !sync_enabled || any_active,
+                                        onclick: on_sync_action,
+                                        "Sync"
                                     }
                                 }
                             }
-                            InlineConfirm {
-                                open: full_sync_confirm_open(),
-                                message: "Rescan every local file and reconcile from scratch?".to_string(),
-                                confirm_label: "Start".to_string(),
-                                cancel_label: "Cancel".to_string(),
-                                confirm_variant: ButtonVariant::Primary,
-                                disabled: any_active,
-                                on_confirm: on_confirm_full_sync,
-                                on_cancel: on_cancel_full_sync,
+                            FieldRow {
+                                FieldRowMeta {
+                                    title: "Validate local files".to_string(),
+                                }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        disabled: !validate_enabled || any_active,
+                                        loading: validate_running,
+                                        onclick: on_validate,
+                                        "Validate"
+                                    }
+                                }
                             }
                         }
                     }
@@ -835,7 +865,7 @@ fn render_sync_mode(
                         variant: ButtonVariant::Secondary,
                         disabled: !cancel_enabled || session_id.is_none(),
                         onclick: on_cancel_sync,
-                        "Cancel sync"
+                        "Cancel"
                     }
                 }),
             }

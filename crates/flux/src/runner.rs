@@ -7,6 +7,26 @@ use tokio_util::sync::CancellationToken;
 use crate::source::build_store_sources;
 use crate::{MaterializationInput, SwiftyFluxProfile};
 
+pub async fn check_target(
+    dest: &Path,
+    inventory: Arc<FleetInventoryProvider>,
+    input: &MaterializationInput,
+    cancel: CancellationToken,
+    progress: Option<flux::ProgressObserverRef>,
+) -> Result<flux::TargetCheck> {
+    flux::check_target(flux::CheckTargetRequest {
+        target: flux::TargetSpec {
+            root: dest.to_path_buf(),
+        },
+        manifest: input.manifest.clone(),
+        inventory,
+        progress,
+        cancellation: cancel,
+    })
+    .await
+    .map_err(anyhow::Error::new)
+}
+
 pub async fn verify_manifest(
     dest: &Path,
     inventory: Arc<FleetInventoryProvider>,
@@ -66,35 +86,4 @@ pub async fn materialize(
             anyhow::Error::new(error)
         }
     })
-}
-
-pub fn inspect_target_files(
-    dest: &Path,
-    paths: &[flux::TargetPath],
-) -> Result<Vec<flux::InspectedTargetFile>> {
-    flux::inspect_target_files(
-        &flux::TargetSpec {
-            root: dest.to_path_buf(),
-        },
-        paths,
-    )
-    .map_err(anyhow::Error::new)
-}
-
-pub async fn conditional_delete(
-    dest: &Path,
-    inventory: Arc<FleetInventoryProvider>,
-    candidates: Vec<flux::ConditionalDeleteCandidate>,
-    cancel: CancellationToken,
-) -> Result<Vec<flux::ConditionalDeleteResult>> {
-    flux::conditional_delete(flux::ConditionalDeleteRequest {
-        target: flux::TargetSpec {
-            root: dest.to_path_buf(),
-        },
-        candidates,
-        inventory,
-        cancellation: cancel,
-    })
-    .await
-    .map_err(anyhow::Error::new)
 }

@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::app::router::Route;
 use crate::features::profiles::common::{
-    inventory_out_of_sync, profile_icon_src, stage_phase_label, start_profile_operation,
+    local_files_need_sync, profile_icon_src, stage_phase_label, start_profile_operation,
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
@@ -50,9 +50,7 @@ struct ProfileRowViewState {
 fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
     matches!(
         kind,
-        fleet_core::OperationKind::Sync
-            | fleet_core::OperationKind::FullSync
-            | fleet_core::OperationKind::CleanupUnexpectedFiles
+        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
     )
 }
 
@@ -158,7 +156,7 @@ fn use_select_initial_profile(
 }
 
 fn selected_profile_requires_sync(status: Option<&fleet_core::ProfileStatusState>) -> bool {
-    status.is_some_and(inventory_out_of_sync)
+    status.is_some_and(local_files_need_sync)
 }
 
 fn profile_requires_sync(snapshot: &fleet_core::AppState, profile_id: &str) -> bool {
@@ -523,14 +521,14 @@ mod tests {
 
     #[test]
     fn selected_profile_requires_sync_for_local_repair_states() {
-        for manifest_health in [
-            fleet_core::ManifestHealth::Missing,
-            fleet_core::ManifestHealth::Different,
-            fleet_core::ManifestHealth::MissingDestination,
-            fleet_core::ManifestHealth::InventoryUnavailable,
+        for local_health in [
+            fleet_core::LocalFileHealth::Missing,
+            fleet_core::LocalFileHealth::Dirty,
+            fleet_core::LocalFileHealth::MissingDestination,
+            fleet_core::LocalFileHealth::InventoryUnavailable,
         ] {
             let status = fleet_core::ProfileStatusState {
-                manifest_health,
+                local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
             assert!(selected_profile_requires_sync(Some(&status)));
@@ -539,12 +537,12 @@ mod tests {
 
     #[test]
     fn selected_profile_does_not_require_sync_for_ready_or_unknown() {
-        for manifest_health in [
-            fleet_core::ManifestHealth::Exact,
-            fleet_core::ManifestHealth::Unknown,
+        for local_health in [
+            fleet_core::LocalFileHealth::Clean,
+            fleet_core::LocalFileHealth::Unknown,
         ] {
             let status = fleet_core::ProfileStatusState {
-                manifest_health,
+                local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
             assert!(!selected_profile_requires_sync(Some(&status)));

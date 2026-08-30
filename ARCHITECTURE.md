@@ -19,7 +19,7 @@ internal layers or shims inside core.
 
 Operation execution is operation-centric and keyed by a single shared type:
 `fleet_domain::health::OperationKind`
-(`CheckRepo`, `CheckInventory`, `CleanupUnexpectedFiles`, `Sync`, `FullSync`).
+(`Check`, `Validate`, `Sync`).
 
 - `fleet-core` owns operation lifecycle APIs:
   - `start_operation(profile_id, operation_kind) -> session_id`
@@ -33,13 +33,17 @@ Operation execution is operation-centric and keyed by a single shared type:
   `AppState.profile_runtime_by_id[profile].active.progress`.
 - Runtime state is per-profile in `AppState.profile_runtime_by_id`.
 - `OperationSessionEvent.operation` carries the domain `OperationKind` directly.
-- `CheckInventory` never mutates the target. Flux verifies manifest paths and
-  durably refreshes reusable facts; Fleet separately enumerates unexpected paths.
-- `CheckRepo` is read-only and checks repo freshness.
-- `CleanupUnexpectedFiles` removes approved unexpected paths only.
+- `Check` concurrently probes repo freshness and compares target file metadata
+  with the installed expected manifest and durable file facts. It never reads
+  file content or mutates inventory.
+- `Validate` reads every managed file through Flux, verifies its bytes against
+  the installed expected manifest, and refreshes reusable observed facts.
 - `Sync` is the primary self-heal path. Flux holds one target session across
   verification, planning, materialization, deletion, and terminal ownership updates.
-- Inventory corruption is surfaced by `CheckInventory` and repaired by `Sync`.
+- A failed or cancelled `Sync` invalidates prior local-clean runtime evidence.
+- Inventory corruption is surfaced by `Check`/`Validate` and repaired by `Sync`.
+- Arbitrary unmanaged files are outside Fleet's maintenance scope. `Sync` removes
+  only paths previously managed by Fleet and removed from the new manifest.
 
 Removed architectural paths that must stay deleted:
 
@@ -76,6 +80,8 @@ The operation system is split into purpose-built crates with strict dependency r
 - Core/Flux/runtime layers must recompute transient decisions from manifest + disk + materialization inventory truth instead of storing those decisions in inventory.
 - Flux produces typed verification and materialization progress snapshots; Fleet
   UI/CLI only render read-only projections.
+- Runtime keeps fast-check evidence, byte-validation evidence, and successful
+  materialization evidence distinct; the UI derives directly from those reports.
 - If a change introduces inventory persistence for run state, staging state, delete intent, audit history, manifest intent, progress, or recovery journals, treat it as an architectural violation unless explicitly approved.
 
 ### Dependency graph (enforced by convention)

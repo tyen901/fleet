@@ -16,7 +16,7 @@ pub(crate) fn open_existing(db_path: &Path) -> Result<(), InventoryError> {
         return Err(InventoryError::Missing);
     }
     let conn = open_conn(db_path)?;
-    validate_schema(&conn)
+    validate_schema_version(&conn)
 }
 
 pub(crate) fn open_or_recreate(db_path: &Path) -> Result<(), InventoryError> {
@@ -25,7 +25,7 @@ pub(crate) fn open_or_recreate(db_path: &Path) -> Result<(), InventoryError> {
             .with_context(|| format!("create {}", parent.display()))
             .map_err(InventoryError::Other)?;
     }
-    match open_existing(db_path) {
+    match open_existing_validated(db_path) {
         Ok(()) => Ok(()),
         Err(
             InventoryError::Missing
@@ -35,7 +35,7 @@ pub(crate) fn open_or_recreate(db_path: &Path) -> Result<(), InventoryError> {
             scrub_inventory_db(db_path)?;
             let conn = open_conn(db_path)?;
             conn.execute_batch(SCHEMA_SQL).map_err(map_sqlite_error)?;
-            validate_schema(&conn)
+            validate_schema_version(&conn)
         }
         Err(error) => Err(error),
     }
@@ -50,7 +50,11 @@ pub(crate) fn open_conn(db_path: &Path) -> Result<Connection, InventoryError> {
     Ok(conn)
 }
 
-fn validate_schema(conn: &Connection) -> Result<(), InventoryError> {
+fn open_existing_validated(db_path: &Path) -> Result<(), InventoryError> {
+    if !db_path.is_file() {
+        return Err(InventoryError::Missing);
+    }
+    let conn = open_conn(db_path)?;
     let quick_check: String = conn
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(map_sqlite_error)?;
@@ -58,6 +62,10 @@ fn validate_schema(conn: &Connection) -> Result<(), InventoryError> {
         return Err(InventoryError::CorruptDatabase);
     }
 
+    validate_schema_version(&conn)
+}
+
+fn validate_schema_version(conn: &Connection) -> Result<(), InventoryError> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(map_sqlite_error)?;

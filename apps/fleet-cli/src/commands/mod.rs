@@ -3,6 +3,7 @@ mod check;
 mod flow_run;
 mod profile;
 mod sync;
+mod validate;
 
 use crate::Commands;
 use fleet_core::{ApiError, Core, OperationKind, ProfileId};
@@ -10,6 +11,10 @@ use fleet_core::{ApiError, Core, OperationKind, ProfileId};
 pub async fn dispatch(core: &Core, command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Check { profile_id } => check::run(core, &profile_id).await,
+        Commands::Validate {
+            profile_id,
+            no_progress,
+        } => validate::run(core, &profile_id, no_progress).await,
         Commands::Profile { command } => profile::run(core, command).await,
         Commands::Sync {
             profile_id,

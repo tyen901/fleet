@@ -19,14 +19,14 @@ pub use state::*;
 pub use storage::{profile_state_root_dir, ProfilesConfig};
 
 pub use fleet_domain::health::{
-    CancelResult, InventoryCheckReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
-    SyncReport,
+    CancelResult, CheckReport, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
+    SyncReport, VerificationKind,
 };
-pub use fleet_domain::sync::{SyncPhase, SyncSessionId, SyncSummary};
+pub use fleet_domain::sync::SyncSessionId;
 pub use fleet_domain::RepoServer;
 pub use fleet_domain::{
-    ApiError, AppSettings, Arma3LaunchMethod, ManifestHealth, Profile, ProfileId,
-    ProfileSourceKind, UnexpectedHealth, DEFAULT_ARMA3_ARGS,
+    ApiError, AppSettings, Arma3LaunchMethod, LocalFileHealth, Profile, ProfileId,
+    ProfileSourceKind, DEFAULT_ARMA3_ARGS,
 };
 pub use operations::{
     OperationNoticeLevel, OperationOutput, OperationProgressEvent, OperationSessionEvent,

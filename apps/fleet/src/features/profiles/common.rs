@@ -123,13 +123,11 @@ pub(crate) fn profile_icon_src(
 pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static str {
     match stage {
         fleet_core::OperationStage::Validating => "Checking",
-        fleet_core::OperationStage::LoadingExpectedState
-        | fleet_core::OperationStage::PreparingInventory => "Planning",
+        fleet_core::OperationStage::LoadingExpectedState => "Planning",
         fleet_core::OperationStage::ScanningDisk
-        | fleet_core::OperationStage::VerifyingInventory
-        | fleet_core::OperationStage::Auditing => "Verifying",
+        | fleet_core::OperationStage::VerifyingInventory => "Verifying",
         fleet_core::OperationStage::Sync => "Downloading",
-        fleet_core::OperationStage::CleaningUp => "Cleaning up",
+        fleet_core::OperationStage::CleaningUp => "Removing obsolete files",
         fleet_core::OperationStage::Finalizing => "Installing",
     }
 }
@@ -183,13 +181,13 @@ pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
     format!("{}/s", fleet_domain::utils::format_bytes(bytes_per_sec))
 }
 
-pub(crate) fn inventory_out_of_sync(status: &fleet_core::ProfileStatusState) -> bool {
+pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> bool {
     matches!(
-        status.manifest_health,
-        fleet_core::ManifestHealth::Missing
-            | fleet_core::ManifestHealth::Different
-            | fleet_core::ManifestHealth::MissingDestination
-            | fleet_core::ManifestHealth::InventoryUnavailable
+        status.local_health,
+        fleet_core::LocalFileHealth::Missing
+            | fleet_core::LocalFileHealth::Dirty
+            | fleet_core::LocalFileHealth::MissingDestination
+            | fleet_core::LocalFileHealth::InventoryUnavailable
     )
 }
 

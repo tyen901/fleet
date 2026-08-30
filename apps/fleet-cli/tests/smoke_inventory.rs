@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,6 +50,48 @@ fn run_cmd(bin: &Path, args: &[&str], envs: &[(&str, &Path)]) -> String {
     format!("{}{}", stdout, stderr)
 }
 
+fn run_cmd_expect_failure(bin: &Path, args: &[&str], envs: &[(&str, &Path)]) -> String {
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().expect("run command");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "command unexpectedly succeeded: {:?}\nstdout: {}\nstderr: {}",
+        args,
+        stdout,
+        stderr
+    );
+    format!("{}{}", stdout, stderr)
+}
+
+fn snapshot_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).expect("read snapshot directory") {
+            let entry = entry.expect("read snapshot entry");
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, out);
+            } else if path.is_file() {
+                out.insert(
+                    path.strip_prefix(root)
+                        .expect("relative snapshot path")
+                        .to_path_buf(),
+                    fs::read(path).expect("read snapshot file"),
+                );
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
+}
+
 fn smoke_test_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -69,7 +112,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     fs::create_dir_all(&config_root).expect("create config root");
     fs::write(
         config_root.join("settings.json"),
-        r#"{"auto_assess_on_startup":false}"#,
+        r#"{"auto_check_profiles_on_startup":false}"#,
     )
     .expect("write test settings");
 
@@ -104,9 +147,9 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
         out.contains("repo_check:")
-            && out.contains("inventory_check:")
-            && out.contains("manifest_health: InventoryUnavailable")
-            && out.contains("sync_repair_required: true"),
+            && out.contains("local_check:")
+            && out.contains("health: InventoryUnavailable")
+            && out.contains("sync_required: true"),
         "expected profile check output, got: {out}"
     );
 
@@ -120,11 +163,48 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("manifest_health: Exact")
-            && out.contains("unexpected_health: Clean")
+        out.contains("verification: Fast")
+            && out.contains("health: Clean")
             && out.contains("missing_paths: 0"),
         "expected ready profile check output, got: {out}"
     );
+
+    let unmanaged_file = dest_root.join("user-owned-not-managed.txt");
+    fs::write(&unmanaged_file, b"not part of the managed manifest").expect("write unmanaged file");
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("verification: Fast") && out.contains("health: Clean"),
+        "a rapid check must inspect managed paths without walking unrelated files, got: {out}"
+    );
+
+    let profile_state_root = config_root.join("profile_state");
+    let profile_state_dir = profile_state_root.join(fleet_domain::profile_state_key(profile_id));
+    let repo_cache_dir = profile_state_dir.join("repo_cache");
+    let installed_cache = snapshot_files(&repo_cache_dir);
+    server.set_repo_available(false);
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("freshness: Error")
+            && out.contains("health: Clean")
+            && out.contains("modified_paths: 0"),
+        "a failed remote update check must not invalidate clean installed files, got: {out}"
+    );
+    let failure = run_cmd_expect_failure(&bin, &["sync", profile_id, "--no-progress"], &envs);
+    assert!(
+        failure.contains("sync_failed"),
+        "expected unavailable repository to fail sync, got: {failure}"
+    );
+    assert_eq!(
+        snapshot_files(&repo_cache_dir),
+        installed_cache,
+        "failed sync must not advance or corrupt the installed repository cache"
+    );
+    assert_eq!(
+        fs::read(&synced_file).expect("read installed file after failed sync"),
+        server.example_file_bytes(),
+        "failed sync must leave the installed managed file usable"
+    );
+    server.set_repo_available(true);
 
     let mut modified_bytes = server.example_file_bytes().to_vec();
     modified_bytes[0] ^= 0x20;
@@ -137,9 +217,9 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("manifest_health: Different")
+        out.contains("health: Dirty")
             && out.contains("modified_paths: 1")
-            && out.contains("sync_repair_required: true"),
+            && out.contains("sync_required: true"),
         "expected same-size local drift to require repair, got: {out}"
     );
 
@@ -152,9 +232,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
     assert!(
-        out.contains("manifest_health: Exact")
-            && out.contains("modified_paths: 0")
-            && out.contains("unexpected_health: Clean"),
+        out.contains("health: Clean") && out.contains("modified_paths: 0"),
         "expected repaired profile check output, got: {out}"
     );
 
@@ -163,9 +241,8 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     assert!(
         out.contains("freshness: UpdateAvailable")
             && out.contains("update_available: true")
-            && out.contains("manifest_health: Different")
-            && out.contains("modified_paths: 1")
-            && out.contains("sync_repair_required: true"),
+            && out.contains("health: Clean")
+            && out.contains("modified_paths: 0"),
         "expected published repository update to be detected, got: {out}"
     );
 
@@ -180,20 +257,91 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     assert!(
         out.contains("freshness: UpToDate")
             && out.contains("update_available: false")
-            && out.contains("manifest_health: Exact")
-            && out.contains("unexpected_health: Clean"),
+            && out.contains("health: Clean"),
         "expected updated profile to be fully healthy, got: {out}"
     );
+    assert!(
+        unmanaged_file.exists(),
+        "sync must not treat unrelated user files as managed content"
+    );
 
-    let profile_state_root = config_root.join("profile_state");
-    let profile_state_dir = profile_state_root.join(fleet_domain::profile_state_key(profile_id));
     let inventory_db = profile_state_dir.join("inventory.db");
     assert!(inventory_db.exists(), "inventory db missing");
+
+    fs::write(&inventory_db, b"corrupt inventory").expect("corrupt inventory database");
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("health: InventoryUnavailable") && out.contains("sync_required: true"),
+        "a rapid check must request sync when durable facts are unavailable, got: {out}"
+    );
+    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
+    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    assert!(
+        out.contains("health: Clean") && out.contains("modified_paths: 0"),
+        "sync must recreate corrupt local knowledge and return to a clean state, got: {out}"
+    );
 
     let _ = fs::remove_dir_all(run_root);
 }
 
 #[test]
-fn check_sync_repair_local_change_and_pull_remote_update() {
+fn user_story_sync_installs_repairs_and_updates_only_managed_files() {
     run_local_swifty_repo_sync_flow("smoke-test-remote");
+}
+
+#[test]
+fn user_story_validate_finds_byte_corruption_and_sync_repairs_content() {
+    let suffix = unique_suffix();
+    let run_root = smoke_test_root().join(format!("validate_{suffix}"));
+    let dest_root = run_root.join("dest");
+    let config_root = run_root.join("config");
+    let log_root = run_root.join("logs");
+    fs::create_dir_all(&dest_root).expect("create destination");
+    fs::create_dir_all(&config_root).expect("create config");
+    fs::write(
+        config_root.join("settings.json"),
+        r#"{"auto_check_profiles_on_startup":false}"#,
+    )
+    .expect("write settings");
+    let server = ExampleSwiftyRepoServer::start().expect("spawn repo server");
+    let repo_url = server.repo_url();
+    let bin = bin_path();
+    let envs = [
+        ("FLEET_CONFIG_DIR", config_root.as_path()),
+        ("FLEET_LOG_DIR", log_root.as_path()),
+    ];
+    run_cmd(
+        &bin,
+        &[
+            "profile",
+            "add",
+            "validate-story",
+            "Validate Story",
+            "--source",
+            &repo_url,
+            "--dest",
+            dest_root.to_str().expect("destination path"),
+        ],
+        &envs,
+    );
+    run_cmd(&bin, &["sync", "validate-story", "--no-progress"], &envs);
+    let file = dest_root.join(server.example_file_target_path());
+    fs::write(&file, b"content requiring full validation").expect("modify managed file");
+
+    let validation = run_cmd(
+        &bin,
+        &["validate", "validate-story", "--no-progress"],
+        &envs,
+    );
+    assert!(
+        validation.contains("local_health: Dirty") && validation.contains("modified_paths: 1"),
+        "byte validation must report corruption before repair, got: {validation}"
+    );
+    run_cmd(&bin, &["sync", "validate-story", "--no-progress"], &envs);
+
+    assert_eq!(
+        fs::read(file).expect("read fully repaired file"),
+        server.example_file_bytes()
+    );
+    let _ = fs::remove_dir_all(run_root);
 }
