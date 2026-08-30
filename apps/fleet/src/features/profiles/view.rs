@@ -5,7 +5,7 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
-    format_speed, profile_not_found_page, save_profile_and_update_state,
+    format_speed, profile_not_found_page, repo_update_available, save_profile_and_update_state,
     select_profile_in_background, stage_phase_label, start_profile_operation, ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
@@ -136,6 +136,13 @@ pub fn ProfileView(id: String) -> Element {
         .as_ref()
         .map(|status| status.actions.sync_enabled)
         .unwrap_or(false);
+    let update_available = repo_update_available(status.as_ref(), check_running);
+    let sync_action_title = if update_available {
+        "Update profile"
+    } else {
+        "Sync profile"
+    };
+    let sync_action_label = if update_available { "Update" } else { "Sync" };
     let check_description = runtime
         .and_then(|runtime| runtime.check.as_ref())
         .map(local_file_description)
@@ -652,13 +659,13 @@ pub fn ProfileView(id: String) -> Element {
                                 }
                             }
                             FieldRow {
-                                FieldRowMeta { title: "Sync profile".to_string() }
+                                FieldRowMeta { title: sync_action_title.to_string() }
                                 FieldRowActions {
                                     Button {
                                         variant: ButtonVariant::Primary,
                                         disabled: !sync_enabled || any_active,
                                         onclick: on_sync_action,
-                                        "Sync"
+                                        "{sync_action_label}"
                                     }
                                 }
                             }

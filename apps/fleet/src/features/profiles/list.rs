@@ -5,7 +5,8 @@ use tracing::info;
 
 use crate::app::router::Route;
 use crate::features::profiles::common::{
-    local_files_need_sync, profile_icon_src, stage_phase_label, start_profile_operation,
+    local_files_need_sync, profile_icon_src, repo_update_available, stage_phase_label,
+    start_profile_operation,
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
@@ -44,6 +45,9 @@ struct ProfileRowViewState {
     start_disabled: bool,
     launch_loading: bool,
     join_loading: bool,
+    check_running: bool,
+    update_available: bool,
+    update_enabled: bool,
     sync: Option<RowSyncState>,
 }
 
@@ -117,6 +121,8 @@ fn profile_row_view_state(
 
     let launch_loading = launching_profile_id == Some(profile_id);
     let join_loading = joining_profile_id == Some(profile_id);
+    let check_running = active_operation == Some(fleet_core::OperationKind::Check);
+    let update_available = repo_update_available(status, check_running);
     let start_disabled = status.map(|status| !status.can_launch).unwrap_or(true)
         || exclusive_active
         || launch_loading
@@ -131,6 +137,9 @@ fn profile_row_view_state(
         start_disabled,
         launch_loading,
         join_loading,
+        check_running,
+        update_available,
+        update_enabled: status.is_some_and(|status| status.actions.sync_enabled),
         sync,
     }
 }
@@ -395,6 +404,7 @@ struct ProfileRowProps {
 #[component]
 fn ProfileRow(props: ProfileRowProps) -> Element {
     let bridge = use_context::<FleetBridge>();
+    let toasts = use_context::<ToastStore>();
     let nav = use_navigator();
     let row = props.row.clone();
 
@@ -407,6 +417,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
 
     let profile_id_for_launch = row.id.clone();
     let profile_id_for_join = row.id.clone();
+    let profile_id_for_update = row.id.clone();
     let on_start = props.on_start;
 
     let launch_label = if row.launch_loading {
@@ -442,7 +453,12 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                 }
                 div { class: "profile-row__status",
                     if let Some(status_label) = row.status_label.clone() {
-                        div { class: "profile-row__state", "{status_label}" }
+                        div { class: "profile-row__state",
+                            if row.check_running {
+                                span { class: "profile-row__spinner", aria_hidden: "true" }
+                            }
+                            span { "{status_label}" }
+                        }
                     }
                     if let Some(detail) = row.status_detail.clone() {
                         div { class: "profile-row__detail", "{detail}" }
@@ -450,7 +466,12 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                 }
             }
             div { class: "profile-row__actions",
-                div { class: "profile-row__buttons",
+                div {
+                    class: if row.update_available {
+                        "profile-row__buttons profile-row__buttons--with-update"
+                    } else {
+                        "profile-row__buttons"
+                    },
                     if let Some(sync) = row.sync.as_ref() {
                         Button {
                             variant: ButtonVariant::Secondary,
@@ -467,8 +488,34 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                             "Cancel"
                         }
                     } else {
+                        if row.update_available {
+                            Button {
+                                variant: ButtonVariant::Primary,
+                                disabled: !row.update_enabled || props.confirm_open,
+                                onclick: {
+                                    let bridge = bridge.clone();
+                                    let toasts = toasts.clone();
+                                    move |_| {
+                                        start_profile_operation(
+                                            bridge.clone(),
+                                            toasts.clone(),
+                                            profile_id_for_update.clone(),
+                                            fleet_core::OperationKind::Sync,
+                                            "update",
+                                            "start_update_failed",
+                                            "Update failed",
+                                        );
+                                    }
+                                },
+                                "Update"
+                            }
+                        }
                         Button {
-                            variant: ButtonVariant::Primary,
+                            variant: if row.update_available {
+                                ButtonVariant::Secondary
+                            } else {
+                                ButtonVariant::Primary
+                            },
                             disabled: row.start_disabled || props.confirm_open,
                             loading: row.launch_loading,
                             onclick: move |_| {

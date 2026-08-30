@@ -459,10 +459,14 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         check_running,
         validate_running,
     };
-    let can_launch = !exclusive_operation_active
-        && failed_operation.is_none()
-        && canceled_operation.is_none()
-        && local_health == LocalFileHealth::Clean;
+    let can_launch = if check_running {
+        !invalid_profile
+    } else {
+        !exclusive_operation_active
+            && failed_operation.is_none()
+            && canceled_operation.is_none()
+            && local_health == LocalFileHealth::Clean
+    };
 
     ProfileStatusState {
         headline,
@@ -875,6 +879,28 @@ mod tests {
         runtime.active = Some(super::ActiveOperationState::new(1, OperationKind::Check, 1));
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
+        assert!(status.can_launch);
+    }
+
+    #[test]
+    fn user_story_background_check_does_not_block_launch_before_it_finishes() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.invalid/repo.json".to_string(),
+                destination: "target".to_string(),
+                ..Profile::default()
+            },
+        );
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.active = Some(super::ActiveOperationState::new(1, OperationKind::Check, 1));
+
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
+
+        assert_eq!(status.headline, ProfileStatusHeadline::Checking);
         assert!(status.can_launch);
     }
 
