@@ -88,9 +88,9 @@ pub(crate) async fn sync(
             profile_id: profile.id.clone(),
             local_health: LocalStateHealth::Ready,
             checked_at_unix_ms: checked_at,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: Vec::new(),
         },
     })
 }

@@ -7,8 +7,9 @@ use flux::{
 use futures_util::stream::BoxStream;
 
 use crate::{
-    schema, sqlite, InventoryAuditReport, InventoryDesiredFile, InventoryError,
-    InventoryObservedFile, InventoryRefreshPlan, InventoryRefreshReport, InventoryRefreshWrite,
+    schema, sqlite, InventoryAssessment, InventoryDesiredFile, InventoryError,
+    InventoryObservedFile, InventoryReconcileMode, InventoryReconcilePlan,
+    InventoryReconcileReport, InventoryReconcileWrite,
 };
 
 #[derive(Clone, Default)]
@@ -24,33 +25,27 @@ impl MaterializationInventory {
         })
     }
 
-    pub fn reset(db_path: &Path) -> Result<Self, InventoryError> {
-        schema::reset(db_path)?;
-        Ok(Self {
-            db_path: db_path.to_path_buf(),
-        })
-    }
-
-    pub fn plan_refresh(
+    pub fn plan_reconcile(
         &self,
         observed: &[InventoryObservedFile],
         desired: &[InventoryDesiredFile],
-    ) -> Result<InventoryRefreshPlan, InventoryError> {
-        sqlite::plan_refresh(&self.db_path, observed, desired)
+        mode: InventoryReconcileMode,
+    ) -> Result<InventoryReconcilePlan, InventoryError> {
+        sqlite::plan_reconcile(&self.db_path, observed, desired, mode)
     }
 
-    pub fn audit_observed_files(
+    pub fn assess_expected(
         &self,
-        observed: &[InventoryObservedFile],
-    ) -> Result<InventoryAuditReport, InventoryError> {
-        sqlite::audit_observed_files(&self.db_path, observed)
+        desired: &[InventoryDesiredFile],
+    ) -> Result<InventoryAssessment, InventoryError> {
+        sqlite::assess_expected(&self.db_path, desired)
     }
 
-    pub fn apply_refresh(
+    pub fn apply_reconcile(
         &self,
-        write: InventoryRefreshWrite,
-    ) -> Result<InventoryRefreshReport, InventoryError> {
-        sqlite::apply_refresh(&self.db_path, write)
+        write: InventoryReconcileWrite,
+    ) -> Result<InventoryReconcileReport, InventoryError> {
+        sqlite::apply_reconcile(&self.db_path, write)
     }
 
     pub fn apply_terminal_batch(&self, batch: TerminalInventoryBatch) -> FluxResult<()> {

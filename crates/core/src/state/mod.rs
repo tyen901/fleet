@@ -354,7 +354,7 @@ fn derive_profile_status(
     let unexpected_path_count = runtime
         .inventory_check
         .as_ref()
-        .map(|report| report.unexpected_delete_paths.len() as u64)
+        .map(|report| report.unexpected_paths.len() as u64)
         .unwrap_or(0);
     let last_check_ms = runtime
         .repo_check
@@ -405,7 +405,6 @@ fn derive_profile_status(
         LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
             | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt
     ) || matches!(repo_freshness, Some(RepoCheckFreshness::Error));
 
     let recommended_action = if matches!(
@@ -421,7 +420,6 @@ fn derive_profile_status(
         LocalStateHealth::LocalDrift
             | LocalStateHealth::MissingDestination
             | LocalStateHealth::LocalStateMissing
-            | LocalStateHealth::InventoryCorrupt
     ) {
         ProfileRecommendedAction::Sync
     } else if has_repo_source && matches!(repo_freshness, None | Some(RepoCheckFreshness::Unknown))
@@ -449,8 +447,7 @@ fn derive_profile_status(
             LocalStateHealth::LocalStateMissing => ProfileStatusHeadline::NeedsSync,
             LocalStateHealth::Blocked
             | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt => ProfileStatusHeadline::ActionRequired,
+            | LocalStateHealth::ProbeFailed => ProfileStatusHeadline::ActionRequired,
             LocalStateHealth::Unknown => match repo_freshness {
                 Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::InSync,
                 Some(RepoCheckFreshness::Error) => ProfileStatusHeadline::UpdateCheckFailed,
@@ -712,7 +709,7 @@ mod tests {
             &completed,
             &OperationProgressEvent {
                 stage: OperationStage::PreparingInventory,
-                scope: ProgressScope::InventoryRefresh,
+                scope: ProgressScope::InventoryReconcile,
                 status_text: None,
                 primary: ProgressMetric {
                     label: Some("Bytes".to_string()),
@@ -757,9 +754,9 @@ mod tests {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::LocalDrift,
             checked_at_unix_ms: 1,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 1,
-            unexpected_delete_paths: vec!["extra.txt".to_string()],
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: vec!["extra.txt".to_string()],
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
@@ -799,9 +796,9 @@ mod tests {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::MissingDestination,
             checked_at_unix_ms: 1,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: Vec::new(),
         });
 
         let status = derive_profile_status(
@@ -837,9 +834,9 @@ mod tests {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::LocalDrift,
             checked_at_unix_ms: 1,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: Vec::new(),
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
@@ -904,9 +901,9 @@ mod tests {
                 profile_id: "p1".to_string(),
                 local_health: LocalStateHealth::Ready,
                 checked_at_unix_ms: 1,
-                expected_missing_in_inventory_count: 0,
-                inventory_unexpected_paths_count: 0,
-                unexpected_delete_paths: Vec::new(),
+                missing_paths_count: 0,
+                modified_paths_count: 0,
+                unexpected_paths: Vec::new(),
             });
             runtime.active = Some(super::ActiveOperationState::new(1, operation, 1));
 

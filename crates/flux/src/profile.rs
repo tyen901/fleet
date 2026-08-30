@@ -1,7 +1,12 @@
 use bytes::Bytes;
 use flux::{FluxError, FluxErrorKind, FluxResult, TargetPath};
-use flux_content::{ProfileFileScanner, StreamingValidator, ValidationEvidence};
-use swifty_artifacts::{Md5Digest, SwiftyStreamingPartValidator};
+use flux_content::{
+    FinishedFileScan, ProfileFileScanner, SegmentObservation, StreamingValidator,
+    ValidationEvidence,
+};
+use swifty_artifacts::{
+    Md5Digest, SrfPart, SwiftyStreamingPartScanner, SwiftyStreamingPartValidator,
+};
 
 pub struct SwiftyFluxProfile;
 
@@ -12,16 +17,13 @@ impl flux::ContentProfile for SwiftyFluxProfile {
 
     fn begin_file_inventory(
         &self,
-        _path: &TargetPath,
-        _len: u64,
+        path: &TargetPath,
+        len: u64,
     ) -> FluxResult<Box<dyn ProfileFileScanner>> {
-        // Fleet/Swifty requires pre-determined part layout for inventory scanning.
-        // Core Flux materialization does not perform Swifty-style part scanning on arbitrary files.
-        // Fleet's own refresh logic handles this using swifty_artifacts.
-        Err(FluxError::new(
-            FluxErrorKind::Unsupported,
-            "Swifty profile does not support arbitrary file inventory scanning",
-        ))
+        Ok(Box::new(SwiftyInventoryScanner {
+            scanner: SwiftyStreamingPartScanner::new(path.as_str(), len),
+            len,
+        }))
     }
 
     fn validator(&self, spec: &flux::ValidationSpec) -> FluxResult<Box<dyn StreamingValidator>> {
@@ -32,6 +34,56 @@ impl flux::ContentProfile for SwiftyFluxProfile {
             validator: SwiftyStreamingPartValidator::new(digest, spec.len),
         }))
     }
+}
+
+struct SwiftyInventoryScanner {
+    scanner: SwiftyStreamingPartScanner,
+    len: u64,
+}
+
+impl ProfileFileScanner for SwiftyInventoryScanner {
+    fn push(&mut self, bytes: Bytes) -> FluxResult<Vec<SegmentObservation>> {
+        self.scanner
+            .push(bytes.as_ref())
+            .map_err(swifty_error)?
+            .into_iter()
+            .filter(|part| part.length > 0)
+            .map(part_observation)
+            .collect()
+    }
+
+    fn finish(self: Box<Self>) -> FluxResult<FinishedFileScan> {
+        let trailing_segments = self
+            .scanner
+            .finish()
+            .map_err(swifty_error)?
+            .into_iter()
+            .filter(|part| part.length > 0)
+            .map(part_observation)
+            .collect::<FluxResult<Vec<_>>>()?;
+        Ok(FinishedFileScan {
+            trailing_segments,
+            len: self.len,
+        })
+    }
+}
+
+fn part_observation(part: SrfPart) -> FluxResult<SegmentObservation> {
+    let profile = crate::swifty_profile_fingerprint();
+    let key = flux::SegmentKey::new(
+        profile,
+        flux::OpaqueSegmentIdentity::new(part.checksum.as_bytes().to_vec())?,
+        part.length,
+    )?;
+    Ok(SegmentObservation {
+        range: part.start..part.start + part.length,
+        validation: flux::ValidationSpec {
+            profile,
+            key: key.clone(),
+            len: part.length,
+        },
+        key,
+    })
 }
 
 struct SwiftyPartValidator {

@@ -1,118 +1,136 @@
 use crate::operations::support::prune_policy;
-use crate::operations::{check_inventory, local_state};
-use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressScope,
-    ProgressUnit,
-};
+use crate::operations::{check_inventory, OperationPublisher, OperationStage};
 use fleet_domain::health::InventoryCheckReport;
-use fleet_domain::{AppSettings, LocalStateHealth, Profile};
-use fleet_inventory::{InventoryRefreshWrite, MaterializationInventory};
+use fleet_domain::{AppSettings, LocalStateHealth, Profile, ProfileSourceKind};
+use fleet_inventory::{InventoryReconcileMode, MaterializationInventory};
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn cleanup_unexpected_files(
     profile: &Profile,
     settings: &AppSettings,
     state_root: &Path,
     publisher: OperationPublisher,
+    cancel: CancellationToken,
 ) -> Result<InventoryCheckReport, crate::ApiError> {
-    let before =
-        check_inventory::check_inventory(profile, settings, state_root, publisher.clone()).await?;
-    if is_cleanup_blocked(&before.local_health) || before.unexpected_delete_paths.is_empty() {
-        return Ok(before);
-    }
-    let dest_path = profile
+    let dest = profile
         .dest_path()
-        .map_err(|err| crate::ApiError::new("invalid_profile", err.to_string()))?;
+        .map_err(|error| crate::ApiError::new("invalid_profile", error.to_string()))?;
+    let ProfileSourceKind::Http(repo_url) = profile
+        .validated_source_kind()
+        .map_err(|_| crate::ApiError::new("invalid_profile", "invalid profile source"))?;
     let paths = fleet_domain::FleetPaths::for_profile(state_root.to_path_buf(), &profile.id);
-    let lock_guard =
-        crate::operations::support::locking::acquire_lock(paths.profile.inventory.lock)
-            .await
-            .map_err(|err| crate::ApiError::new("inventory_locked", err.to_string()))?;
-    publisher.stage(OperationStage::CleaningUp);
-    let delete_paths = before
-        .unexpected_delete_paths
-        .iter()
-        .map(PathBuf::from)
-        .filter(|path| !prune_policy::is_protected_root_entry(&dest_path, path))
-        .collect::<Vec<_>>();
-    delete_cleanup_candidates(&dest_path, &delete_paths, &publisher).await?;
+    let _lock = crate::operations::support::locking::acquire_lock(paths.profile.inventory.lock)
+        .await
+        .map_err(|error| crate::ApiError::new("inventory_locked", error.to_string()))?;
+    let Some(input) =
+        fleet_flux::load_cached_swifty_materialization_input(repo_url, &paths.profile.repo_cache)
+            .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
+    else {
+        return Ok(InventoryCheckReport {
+            profile_id: profile.id.clone(),
+            local_health: LocalStateHealth::LocalStateMissing,
+            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: Vec::new(),
+        });
+    };
     let inventory = MaterializationInventory::open(&paths.profile.inventory.db)
-        .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?;
-    let remove_reusable_facts = local_state::target_paths(
-        delete_paths
-            .iter()
-            .map(|path| path.to_string_lossy().replace('\\', "/")),
+        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
+    let manifest = input.manifest;
+    let snapshot = check_inventory::run_reconcile(
+        crate::operations::local_state::LocalReconcileJob {
+            inventory: inventory.clone(),
+            profile_id: profile.id.clone(),
+            dest: dest.clone(),
+            manifest: manifest.clone(),
+            ignore_rules: settings.sync.local_state_ignore_rules.clone(),
+            mode: InventoryReconcileMode::Incremental,
+            cancel: cancel.clone(),
+        },
+        publisher.clone(),
     )
-    .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?;
-    let after_snapshot = local_state::assess_snapshot(
-        &inventory,
-        &profile.id,
-        &dest_path,
-        &settings.sync.local_state_ignore_rules,
-        None,
-    )
-    .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?;
-    inventory
-        .apply_refresh(InventoryRefreshWrite {
-            managed_paths: local_state::target_paths(after_snapshot.observed_paths)
-                .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?,
-            remove_reusable_facts,
-            ..Default::default()
-        })
-        .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?;
-    drop(lock_guard);
-    publisher.stage(OperationStage::Finalizing);
-    check_inventory::check_inventory(profile, settings, state_root, publisher).await
-}
+    .await?;
+    if snapshot.unexpected_paths.is_empty() {
+        return Ok(check_inventory::report_from_snapshot(&snapshot));
+    }
 
-async fn delete_cleanup_candidates(
-    root: &Path,
-    rel_paths: &[PathBuf],
-    publisher: &OperationPublisher,
-) -> Result<(), crate::ApiError> {
-    let root = root.to_path_buf();
-    let rel_paths = rel_paths.to_vec();
-    let total = rel_paths.len() as u64;
-    let publisher = publisher.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), crate::ApiError> {
-        for (index, rel_path) in rel_paths.iter().enumerate() {
-            let path = root.join(rel_path);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(crate::ApiError::new("cleanup_failed", err.to_string())),
-            }
-            publisher.progress(OperationProgressEvent {
-                stage: OperationStage::CleaningUp,
-                scope: ProgressScope::Cleanup,
-                status_text: Some("Deleting unexpected files".to_string()),
-                primary: ProgressMetric {
-                    label: Some("Paths".to_string()),
-                    done: Some((index + 1) as u64),
-                    total: Some(total),
-                    unit: ProgressUnit::Paths,
-                },
-                secondary: None,
-                throughput_bytes_per_sec: None,
-                eta_seconds: None,
-            });
-        }
-        fleet_domain::filesystem::remove_empty_parent_dirs(&root, &rel_paths)
-            .map_err(|err| crate::ApiError::new("cleanup_failed", err.to_string()))?;
-        Ok(())
+    publisher.stage(OperationStage::CleaningUp);
+    let root = dest.clone();
+    let candidates = snapshot
+        .unexpected_paths
+        .iter()
+        .filter_map(|path| {
+            snapshot
+                .observed_freshness
+                .get(path)
+                .cloned()
+                .map(|stamp| (path.clone(), stamp))
+        })
+        .collect::<Vec<_>>();
+    let delete_cancel = cancel.clone();
+    let delete_result = tokio::task::spawn_blocking(move || {
+        delete_stable_candidates(&root, &candidates, &delete_cancel)
     })
     .await
-    .map_err(|err| crate::ApiError::new("cleanup_failed", err.to_string()))?
+    .map_err(|error| crate::ApiError::new("cleanup_failed", error.to_string()))?;
+    match delete_result {
+        Ok(()) => {}
+        Err(_) if cancel.is_cancelled() => {
+            return Err(crate::ApiError::new("canceled", "canceled"));
+        }
+        Err(error) => {
+            return Err(crate::ApiError::new("cleanup_failed", error.to_string()));
+        }
+    }
+    let after = check_inventory::run_reconcile(
+        crate::operations::local_state::LocalReconcileJob {
+            inventory,
+            profile_id: profile.id.clone(),
+            dest,
+            manifest,
+            ignore_rules: settings.sync.local_state_ignore_rules.clone(),
+            mode: InventoryReconcileMode::Incremental,
+            cancel,
+        },
+        publisher.clone(),
+    )
+    .await?;
+    publisher.stage(OperationStage::Finalizing);
+    Ok(check_inventory::report_from_snapshot(&after))
 }
 
-fn is_cleanup_blocked(local_health: &LocalStateHealth) -> bool {
-    matches!(
-        local_health,
-        LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt
-            | LocalStateHealth::LocalStateMissing
-            | LocalStateHealth::MissingDestination
-    )
+fn delete_stable_candidates(
+    root: &Path,
+    candidates: &[(String, flux::FreshnessProof)],
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    let target = flux::TargetSession::open(&flux::TargetSpec {
+        root: root.to_path_buf(),
+    })?;
+    let mut approved = Vec::new();
+    for (candidate, reconciled_freshness) in candidates {
+        if cancel.is_cancelled() {
+            anyhow::bail!("canceled");
+        }
+        let rel = PathBuf::from(candidate);
+        if prune_policy::is_protected_root_entry(root, &rel) {
+            continue;
+        }
+        let target_path = flux::TargetPath::new(candidate.clone())?;
+        let Some(current) = target.freshness_for_existing_file(&target_path)? else {
+            continue;
+        };
+        if current != *reconciled_freshness {
+            continue;
+        }
+        target.delete_target_path(&target_path)?;
+        approved.push(candidate.clone());
+    }
+    fleet_domain::filesystem::remove_empty_parent_dirs(
+        root,
+        &approved.iter().map(PathBuf::from).collect::<Vec<_>>(),
+    )?;
+    Ok(())
 }

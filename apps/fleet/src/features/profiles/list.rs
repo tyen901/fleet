@@ -527,7 +527,6 @@ mod tests {
             fleet_core::LocalStateHealth::LocalDrift,
             fleet_core::LocalStateHealth::MissingDestination,
             fleet_core::LocalStateHealth::LocalStateMissing,
-            fleet_core::LocalStateHealth::InventoryCorrupt,
         ] {
             let status = fleet_core::ProfileStatusState {
                 local_health,
