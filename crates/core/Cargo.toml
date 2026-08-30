@@ -9,7 +9,6 @@ fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
 fleet-inventory = { workspace = true }
 fleet-flux = { workspace = true }
-flux = { workspace = true }
 swifty-repo = { workspace = true }
 directories = { workspace = true }
 fleet-arma3 = { workspace = true }
@@ -19,12 +18,6 @@ serde_json = { workspace = true }
 specta = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-tempfile = { workspace = true }
-atomic-write-file = { workspace = true }
-fs2 = { workspace = true }
-ignore = { workspace = true }
-thiserror = { workspace = true }
-futures-util = { workspace = true }
 sentry = { workspace = true, features = ["logs", "tracing"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -34,5 +27,4 @@ regex = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
-axum = { workspace = true }
-futures = { workspace = true }
+tempfile = { workspace = true }

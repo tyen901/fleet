@@ -54,6 +54,7 @@ pub(crate) fn print_check_report(repo: &RepoCheckReport, local: &LocalFileReport
         LocalFileHealth::Missing
             | LocalFileHealth::Dirty
             | LocalFileHealth::MissingDestination
+            | LocalFileHealth::ExpectedStateUnavailable
             | LocalFileHealth::InventoryUnavailable
     ) {
         println!("sync_required: true");

@@ -127,7 +127,7 @@ pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static s
         fleet_core::OperationStage::ScanningDisk
         | fleet_core::OperationStage::VerifyingInventory => "Verifying",
         fleet_core::OperationStage::Sync => "Downloading",
-        fleet_core::OperationStage::CleaningUp => "Removing obsolete files",
+        fleet_core::OperationStage::RemovingObsoleteFiles => "Removing obsolete files",
         fleet_core::OperationStage::Finalizing => "Installing",
     }
 }
@@ -187,6 +187,7 @@ pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> 
         fleet_core::LocalFileHealth::Missing
             | fleet_core::LocalFileHealth::Dirty
             | fleet_core::LocalFileHealth::MissingDestination
+            | fleet_core::LocalFileHealth::ExpectedStateUnavailable
             | fleet_core::LocalFileHealth::InventoryUnavailable
     )
 }

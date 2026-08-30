@@ -17,7 +17,6 @@ fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
                 progress.status_text.clone()
             }
         }
-        OperationSessionEventKind::Notice { text, .. } => Some(text.clone()),
         OperationSessionEventKind::Finished { .. } => Some("finished".to_string()),
         OperationSessionEventKind::Failed { error } => {
             Some(format!("failed: {}: {}", error.code, error.message))
@@ -94,9 +93,6 @@ pub fn spawn_flow_printer(
                     if let Some(msg) = progress.status_text {
                         progress_pb.set_message(msg);
                     }
-                }
-                OperationSessionEventKind::Notice { text, .. } => {
-                    let _ = mp.println(text);
                 }
                 OperationSessionEventKind::Finished { .. } => break,
                 OperationSessionEventKind::Failed { error } => {

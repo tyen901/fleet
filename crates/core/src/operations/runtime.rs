@@ -1,6 +1,5 @@
 use crate::operations::events::{
-    OperationNoticeLevel, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
-    OperationStage,
+    OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind, OperationStage,
 };
 use crate::operations::{check, simulated, sync, validate, OperationOutput};
 use crate::state::{
@@ -25,6 +24,20 @@ pub(crate) struct OperationRuntime {
     tracker: TaskTracker,
 }
 
+pub(crate) struct ProfileMutationGuard {
+    active_profiles: Arc<Mutex<HashSet<ProfileId>>>,
+    profile_id: ProfileId,
+}
+
+impl Drop for ProfileMutationGuard {
+    fn drop(&mut self) {
+        self.active_profiles
+            .lock()
+            .unwrap()
+            .remove(&self.profile_id);
+    }
+}
+
 #[derive(Clone)]
 struct SessionRecord {
     profile_id: ProfileId,
@@ -44,8 +57,8 @@ struct OperationTerminal {
 
 #[derive(Clone)]
 pub(crate) struct OperationPublisher {
-    core: Option<Core>,
-    events_tx: Option<broadcast::Sender<OperationSessionEvent>>,
+    core: Core,
+    events_tx: broadcast::Sender<OperationSessionEvent>,
     session_id: u64,
     profile_id: ProfileId,
     operation: OperationKind,
@@ -65,6 +78,24 @@ impl OperationRuntime {
 
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<OperationSessionEvent> {
         self.events_tx.subscribe()
+    }
+
+    pub(crate) fn reserve_profile_mutation(
+        &self,
+        profile_id: ProfileId,
+    ) -> Result<ProfileMutationGuard, ApiError> {
+        let mut active_profiles = self.active_profiles.lock().unwrap();
+        if !active_profiles.insert(profile_id.clone()) {
+            return Err(ApiError::new(
+                "profile_busy",
+                "profile already has an active operation",
+            ));
+        }
+        drop(active_profiles);
+        Ok(ProfileMutationGuard {
+            active_profiles: self.active_profiles.clone(),
+            profile_id,
+        })
     }
 
     pub(crate) fn start(
@@ -111,8 +142,8 @@ impl OperationRuntime {
         });
 
         let publisher = OperationPublisher {
-            core: Some(core.clone()),
-            events_tx: Some(self.events_tx.clone()),
+            core: core.clone(),
+            events_tx: self.events_tx.clone(),
             session_id,
             profile_id: profile_id.clone(),
             operation,
@@ -180,46 +211,18 @@ impl OperationRuntime {
             .remove(&record.profile_id);
 
         let now = fleet_domain::time::now_unix_ms();
-        if record.cancel.is_cancelled() {
-            core.update_state(|state| {
-                if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                    invalidate_local_state_after_incomplete_operation(runtime, record.operation);
-                    runtime.active = None;
-                    runtime.last_operation = Some(OperationOutcomeState {
-                        session_id,
-                        operation: record.operation,
-                        status: OperationTerminalStatus::Canceled,
-                        updated_at_unix_ms: now,
-                        message: Some("canceled".to_string()),
-                        summary: None,
-                        error: None,
-                    });
-                }
-                recompute_profile_status(state, &record.profile_id);
-            });
-            let _ = record.terminal_tx.send(Some(OperationTerminal {
-                output: None,
-                error: None,
-                canceled: true,
-            }));
-            self.emit_terminal_event(&record, session_id, OperationSessionEventKind::Canceled);
-            return;
-        }
-
         match out {
             Ok(output) => {
                 core.update_state(|state| {
                     if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
                         apply_successful_output(runtime, &output);
                         runtime.active = None;
-                        runtime.last_error = None;
                         runtime.last_operation = Some(OperationOutcomeState {
                             session_id,
                             operation: record.operation,
                             status: OperationTerminalStatus::Succeeded,
                             updated_at_unix_ms: now,
                             message: None,
-                            summary: Some(output.clone()),
                             error: None,
                         });
                     }
@@ -236,22 +239,40 @@ impl OperationRuntime {
                     OperationSessionEventKind::Finished { output },
                 );
             }
+            Err(error) if error.code == "canceled" => {
+                core.update_state(|state| {
+                    if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
+                        invalidate_local_state_after_incomplete_operation(runtime);
+                        runtime.active = None;
+                        runtime.last_operation = Some(OperationOutcomeState {
+                            session_id,
+                            operation: record.operation,
+                            status: OperationTerminalStatus::Canceled,
+                            updated_at_unix_ms: now,
+                            message: Some(canceled_message(record.operation).to_string()),
+                            error: None,
+                        });
+                    }
+                    recompute_profile_status(state, &record.profile_id);
+                });
+                let _ = record.terminal_tx.send(Some(OperationTerminal {
+                    output: None,
+                    error: None,
+                    canceled: true,
+                }));
+                self.emit_terminal_event(&record, session_id, OperationSessionEventKind::Canceled);
+            }
             Err(error) => {
                 core.update_state(|state| {
                     if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                        invalidate_local_state_after_incomplete_operation(
-                            runtime,
-                            record.operation,
-                        );
+                        invalidate_local_state_after_incomplete_operation(runtime);
                         runtime.active = None;
-                        runtime.last_error = Some(error.clone());
                         runtime.last_operation = Some(OperationOutcomeState {
                             session_id,
                             operation: record.operation,
                             status: OperationTerminalStatus::Failed,
                             updated_at_unix_ms: now,
                             message: Some(error.message.clone()),
-                            summary: None,
                             error: Some(error.clone()),
                         });
                     }
@@ -341,52 +362,48 @@ fn apply_successful_output(
     match output {
         OperationOutput::Check(report) => {
             runtime.repo_check = Some(report.repo.clone());
-            runtime.local_state = Some(report.local.clone());
+            runtime.check = Some(report.local.clone());
             if report.local.health != fleet_domain::LocalFileHealth::Clean {
                 runtime.validation = None;
+                runtime.materialization = None;
             }
         }
         OperationOutput::Validate(report) => {
-            runtime.local_state = Some(report.clone());
             runtime.validation = Some(report.clone());
+            if report.health != fleet_domain::LocalFileHealth::Clean {
+                runtime.materialization = None;
+            }
         }
         OperationOutput::Sync(report) => {
             runtime.repo_check = Some(report.repo.clone());
-            runtime.local_state = Some(report.local.clone());
+            runtime.check = None;
             runtime.validation = None;
+            runtime.materialization = Some(report.local.clone());
         }
     }
 }
 
 fn invalidate_local_state_after_incomplete_operation(
     runtime: &mut crate::state::ProfileRuntimeState,
-    operation: OperationKind,
 ) {
-    if operation == OperationKind::Sync {
-        runtime.local_state = None;
-        runtime.validation = None;
+    runtime.check = None;
+    runtime.validation = None;
+    runtime.materialization = None;
+}
+
+fn canceled_message(operation: OperationKind) -> &'static str {
+    match operation {
+        OperationKind::Check => "Check stopped before recording a new local state.",
+        OperationKind::Validate => "Validation stopped before recording a byte-correct state.",
+        OperationKind::Sync => "Sync stopped before completion; run Sync again.",
     }
 }
 
 impl OperationPublisher {
-    pub(crate) fn silent(profile_id: ProfileId, operation: OperationKind) -> Self {
-        Self {
-            core: None,
-            events_tx: None,
-            session_id: 0,
-            profile_id,
-            operation,
-            seq: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
     pub(crate) fn stage(&self, stage: OperationStage) {
         self.emit_raw(OperationSessionEventKind::Stage { stage });
-        let Some(core) = self.core.as_ref() else {
-            return;
-        };
         let profile_id = self.profile_id.clone();
-        core.update_state(|state| {
+        self.core.update_state(|state| {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
             if let Some(active) = runtime.active.as_mut() {
@@ -406,14 +423,15 @@ impl OperationPublisher {
         self.emit_raw(OperationSessionEventKind::Progress {
             progress: progress.clone(),
         });
-        let Some(core) = self.core.as_ref() else {
-            return;
-        };
         let profile_id = self.profile_id.clone();
-        core.update_state(|state| {
+        self.core.update_state(|state| {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
             if let Some(active) = runtime.active.as_mut() {
+                let previous = active.progress.active_stage;
+                if previous != progress.stage {
+                    active.completed_stages.insert(previous);
+                }
                 apply_operation_progress(
                     &mut active.progress,
                     &active.completed_stages,
@@ -426,32 +444,8 @@ impl OperationPublisher {
         });
     }
 
-    pub(crate) fn notice(&self, level: OperationNoticeLevel, code: Option<String>, text: String) {
-        self.emit_raw(OperationSessionEventKind::Notice {
-            level,
-            code,
-            text: text.clone(),
-        });
-        let Some(core) = self.core.as_ref() else {
-            return;
-        };
-        let profile_id = self.profile_id.clone();
-        core.update_state(|state| {
-            let now = fleet_domain::time::now_unix_ms();
-            let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
-            if let Some(active) = runtime.active.as_mut() {
-                active.message = Some(text);
-                active.updated_at_unix_ms = now;
-            }
-            recompute_profile_status(state, &profile_id);
-        });
-    }
-
     fn emit_raw(&self, kind: OperationSessionEventKind) {
-        let Some(events_tx) = self.events_tx.as_ref() else {
-            return;
-        };
-        let _ = events_tx.send(OperationSessionEvent {
+        let _ = self.events_tx.send(OperationSessionEvent {
             session_id: self.session_id,
             profile_id: self.profile_id.clone(),
             operation: self.operation,
@@ -468,8 +462,7 @@ mod tests {
     use crate::operations::OperationOutput;
     use crate::state::ProfileRuntimeState;
     use fleet_domain::health::{
-        CheckReport, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
-        VerificationKind,
+        CheckReport, LocalFileReport, RepoCheckFreshness, RepoCheckReport, VerificationKind,
     };
     use fleet_domain::LocalFileHealth;
 
@@ -497,7 +490,7 @@ mod tests {
     #[test]
     fn user_story_incomplete_sync_invalidates_all_local_clean_evidence() {
         let mut runtime = ProfileRuntimeState::new("profile".to_string(), 0);
-        runtime.local_state = Some(local_report(
+        runtime.materialization = Some(local_report(
             VerificationKind::Materialized,
             LocalFileHealth::Clean,
         ));
@@ -506,10 +499,11 @@ mod tests {
             LocalFileHealth::Clean,
         ));
 
-        invalidate_local_state_after_incomplete_operation(&mut runtime, OperationKind::Sync);
+        invalidate_local_state_after_incomplete_operation(&mut runtime);
 
-        assert!(runtime.local_state.is_none());
+        assert!(runtime.check.is_none());
         assert!(runtime.validation.is_none());
+        assert!(runtime.materialization.is_none());
     }
 
     #[test]
@@ -527,6 +521,10 @@ mod tests {
 
         apply_successful_output(&mut runtime, &check);
 
+        assert_eq!(
+            runtime.check.as_ref().map(|report| report.verification),
+            Some(VerificationKind::Fast)
+        );
         assert_eq!(
             runtime
                 .validation
@@ -552,5 +550,26 @@ mod tests {
         apply_successful_output(&mut runtime, &check);
 
         assert!(runtime.validation.is_none());
+        assert!(runtime.materialization.is_none());
+    }
+
+    #[test]
+    fn user_story_failed_read_invalidates_all_prior_local_evidence() {
+        let mut runtime = ProfileRuntimeState::new("profile".to_string(), 0);
+        runtime.check = Some(local_report(VerificationKind::Fast, LocalFileHealth::Clean));
+        runtime.validation = Some(local_report(
+            VerificationKind::ByteExact,
+            LocalFileHealth::Clean,
+        ));
+        runtime.materialization = Some(local_report(
+            VerificationKind::Materialized,
+            LocalFileHealth::Clean,
+        ));
+
+        invalidate_local_state_after_incomplete_operation(&mut runtime);
+
+        assert!(runtime.check.is_none());
+        assert!(runtime.validation.is_none());
+        assert!(runtime.materialization.is_none());
     }
 }

@@ -1,4 +1,4 @@
-use crate::operations::{local_files, OperationPublisher};
+use crate::operations::local_files;
 use crate::storage::profile_state_root_dir;
 use crate::ApiError;
 use crate::Core;
@@ -6,7 +6,7 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
-use fleet_domain::health::{LocalFileReport, OperationKind};
+use fleet_domain::health::LocalFileReport;
 use fleet_domain::LocalFileHealth;
 use fleet_domain::{
     types::{ProfileServerInfo, RepoServer},
@@ -138,8 +138,8 @@ impl Core {
         local_files::check(
             &profile,
             &state_root,
-            OperationPublisher::silent(profile_id.clone(), OperationKind::Check),
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
     }
@@ -363,12 +363,12 @@ fn build_args(
 }
 
 fn resolve_join_server(profile: &Profile) -> Result<Option<ProfileServerInfo>, Arma3Error> {
-    let cached = crate::features::profiles::load_cached_repo_server_snapshot_blocking(profile)
+    let cached = crate::features::profiles::load_cached_repo_servers_blocking(profile)
         .map_err(|e| Arma3Error::Io(std::io::Error::other(e.message)))?;
 
     Ok(select_join_server(
         profile.arma3_server.as_ref(),
-        cached.as_ref().map(|snapshot| snapshot.servers.as_slice()),
+        cached.as_deref(),
     ))
 }
 

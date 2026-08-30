@@ -1,7 +1,20 @@
 use crate::types::ProfileId;
-pub use crate::LocalFileHealth;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+
+pub type OperationSessionId = u64;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub enum LocalFileHealth {
+    Unknown,
+    MissingDestination,
+    ExpectedStateUnavailable,
+    InventoryUnavailable,
+    Missing,
+    Dirty,
+    Clean,
+    InvalidProfile,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum RepoCheckFreshness {

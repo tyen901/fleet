@@ -68,10 +68,6 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum ProfileCommands {
     List,
-    /// Check profile health (local + remote)
-    Check {
-        profile_id: String,
-    },
     Add {
         id: String,
         name: String,

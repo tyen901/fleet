@@ -13,56 +13,56 @@ impl FluxProgressObserver {
     }
 }
 
-impl flux::ProgressObserver for FluxProgressObserver {
-    fn update(&self, snapshot: flux::ProgressSnapshot) {
+impl fleet_flux::ProgressObserver for FluxProgressObserver {
+    fn update(&self, snapshot: fleet_flux::ProgressSnapshot) {
         let (stage, scope, text, unit) = match snapshot.phase {
-            flux::MaterializationPhase::Verification => (
+            fleet_flux::MaterializationPhase::Verification => (
                 OperationStage::VerifyingInventory,
                 ProgressScope::InventoryVerify,
                 "Verifying files",
                 ProgressUnit::Files,
             ),
-            flux::MaterializationPhase::Planning => (
+            fleet_flux::MaterializationPhase::Planning => (
                 OperationStage::Sync,
                 ProgressScope::MaterializationBytes,
                 "Planning materialization",
                 ProgressUnit::Paths,
             ),
-            flux::MaterializationPhase::StoreDownload
-            | flux::MaterializationPhase::ExternalReuse
-            | flux::MaterializationPhase::LocalReuse
-            | flux::MaterializationPhase::StageWrites => (
+            fleet_flux::MaterializationPhase::StoreDownload
+            | fleet_flux::MaterializationPhase::ExternalReuse
+            | fleet_flux::MaterializationPhase::LocalReuse
+            | fleet_flux::MaterializationPhase::StageWrites => (
                 OperationStage::Sync,
                 ProgressScope::MaterializationBytes,
                 "Materializing files",
                 ProgressUnit::Bytes,
             ),
-            flux::MaterializationPhase::FinalizeFiles => (
+            fleet_flux::MaterializationPhase::FinalizeFiles => (
                 OperationStage::Sync,
                 ProgressScope::MaterializationFiles,
                 "Finalizing files",
                 ProgressUnit::Files,
             ),
-            flux::MaterializationPhase::DeletePaths => (
-                OperationStage::CleaningUp,
+            fleet_flux::MaterializationPhase::DeletePaths => (
+                OperationStage::RemovingObsoleteFiles,
                 ProgressScope::InventoryVerify,
                 "Removing managed files",
                 ProgressUnit::Files,
             ),
-            flux::MaterializationPhase::Inventory => (
+            fleet_flux::MaterializationPhase::Inventory => (
                 OperationStage::Finalizing,
                 ProgressScope::InventoryVerify,
                 "Committing inventory",
                 ProgressUnit::Paths,
             ),
-            flux::MaterializationPhase::Complete | flux::MaterializationPhase::Failed => (
+            fleet_flux::MaterializationPhase::Complete
+            | fleet_flux::MaterializationPhase::Failed => (
                 OperationStage::Finalizing,
                 ProgressScope::MaterializationBytes,
                 "Finalizing",
                 ProgressUnit::Paths,
             ),
         };
-        self.publisher.stage(stage);
         self.publisher.progress(OperationProgressEvent {
             stage,
             scope,

@@ -34,10 +34,6 @@ pub struct Profile {
     pub destination: String,
     #[serde(default)]
     pub arma3_server: Option<ProfileServerInfo>,
-    /// Last seen persisted swifty repo cache revision for this profile/source.
-    /// Used to reconcile persisted server selection only when cache changed on disk.
-    #[serde(default)]
-    pub swifty_repo_revision: String,
     #[serde(default)]
     pub launch_params: String,
     #[serde(default)]
