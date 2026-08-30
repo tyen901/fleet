@@ -19,7 +19,7 @@ internal layers or shims inside core.
 
 Operation execution is operation-centric and keyed by a single shared type:
 `fleet_domain::health::OperationKind`
-(`CheckRepo`, `CheckInventory`, `CleanupUnexpectedFiles`, `Sync`).
+(`CheckRepo`, `CheckInventory`, `CleanupUnexpectedFiles`, `Sync`, `FullSync`).
 
 - `fleet-core` owns operation lifecycle APIs:
   - `start_operation(profile_id, operation_kind) -> session_id`
@@ -33,12 +33,12 @@ Operation execution is operation-centric and keyed by a single shared type:
   `AppState.profile_runtime_by_id[profile].active.progress`.
 - Runtime state is per-profile in `AppState.profile_runtime_by_id`.
 - `OperationSessionEvent.operation` carries the domain `OperationKind` directly.
-- `CheckInventory` is read-only and returns the canonical local assessment.
+- `CheckInventory` never mutates the target. Flux verifies manifest paths and
+  durably refreshes reusable facts; Fleet separately enumerates unexpected paths.
 - `CheckRepo` is read-only and checks repo freshness.
 - `CleanupUnexpectedFiles` removes approved unexpected paths only.
-- `Sync` is the primary self-heal path. It refreshes local inventory from disk
-  before Flux materialization, then projects Flux/prodash progress into Fleet
-  operation progress events.
+- `Sync` is the primary self-heal path. Flux holds one target session across
+  verification, planning, materialization, deletion, and terminal ownership updates.
 - Inventory corruption is surfaced by `CheckInventory` and repaired by `Sync`.
 
 Removed architectural paths that must stay deleted:
@@ -57,7 +57,7 @@ The operation system is split into purpose-built crates with strict dependency r
   - Must not expose generic workflow builders.
 - `fleet-flux`: the only Fleet crate that converts Fleet/Swifty shapes into Flux materialization input or talks to Flux runtime/services.
   - Owns Swifty-to-Flux input conversion, Swifty content profile/store source wiring, and calls `flux::materialize` directly.
-  - Creates/passes prodash progress items into Flux and never owns authoritative materialization progress counters.
+  - Passes Flux's typed progress snapshots into Fleet's operation event model.
 - `swifty-repo`: Swifty repo cache, repo metadata sync/probe, and cached repo access.
   - Owns repo freshness checks and cache fallback. Fleet crates should not duplicate Swifty cache logic.
 - `fleet-inventory`: durable materialization facts database for the managed target scope.
@@ -74,7 +74,8 @@ The operation system is split into purpose-built crates with strict dependency r
 - Inventory does not answer: what a current sync intends to do, what a manifest expects in the future, what should be deleted later, or how an interrupted operation should resume.
 - There is no initialized baseline state.
 - Core/Flux/runtime layers must recompute transient decisions from manifest + disk + materialization inventory truth instead of storing those decisions in inventory.
-- Flux materialization live progress is produced by Flux via prodash; Fleet UI/CLI only render read-only projections.
+- Flux produces typed verification and materialization progress snapshots; Fleet
+  UI/CLI only render read-only projections.
 - If a change introduces inventory persistence for run state, staging state, delete intent, audit history, manifest intent, progress, or recovery journals, treat it as an architectural violation unless explicitly approved.
 
 ### Dependency graph (enforced by convention)
@@ -96,6 +97,6 @@ fleet-flux        (ONLY Fleet crate with Flux materialization/runtime ownership)
   └─ object_store
 
 fleet-inventory
-  ├─ flux           (LocalInventory + InventoryUpdateSink traits)
+  ├─ flux           (capability-specific inventory traits)
   └─ rusqlite       (private SQL-native implementation)
 ```

@@ -18,7 +18,7 @@ pub use health::{
 pub use inventory::{
     default_inventory_ignore_rules, InventoryIgnoreRules, DEFAULT_INVENTORY_IGNORE_RULES,
 };
-pub use inventory_types::LocalStateHealth;
+pub use inventory_types::{ManifestHealth, UnexpectedHealth};
 pub use paths::{
     flux_cache_dir, flux_ws_dir, inventory_db_path, inventory_lock_path, normalize_rel_slashes,
     profile_state_dir, profile_state_key, repo_cache_dir, FleetPaths,

@@ -1,1 +1,3 @@
-pub(crate) mod prodash;
+mod flux;
+
+pub(crate) use flux::FluxProgressObserver;

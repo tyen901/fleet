@@ -1,8 +1,7 @@
 use bytes::Bytes;
 use flux::{FluxError, FluxErrorKind, FluxResult, TargetPath};
 use flux_content::{
-    FinishedFileScan, ProfileFileScanner, SegmentObservation, StreamingValidator,
-    ValidationEvidence,
+    ProfileFileScanner, SegmentObservation, StreamingValidator, ValidationEvidence,
 };
 use swifty_artifacts::{
     Md5Digest, SrfPart, SwiftyStreamingPartScanner, SwiftyStreamingPartValidator,
@@ -15,14 +14,13 @@ impl flux::ContentProfile for SwiftyFluxProfile {
         crate::swifty_profile_fingerprint()
     }
 
-    fn begin_file_inventory(
+    fn begin_file_scan(
         &self,
         path: &TargetPath,
         len: u64,
     ) -> FluxResult<Box<dyn ProfileFileScanner>> {
         Ok(Box::new(SwiftyInventoryScanner {
             scanner: SwiftyStreamingPartScanner::new(path.as_str(), len),
-            len,
         }))
     }
 
@@ -38,7 +36,6 @@ impl flux::ContentProfile for SwiftyFluxProfile {
 
 struct SwiftyInventoryScanner {
     scanner: SwiftyStreamingPartScanner,
-    len: u64,
 }
 
 impl ProfileFileScanner for SwiftyInventoryScanner {
@@ -52,19 +49,14 @@ impl ProfileFileScanner for SwiftyInventoryScanner {
             .collect()
     }
 
-    fn finish(self: Box<Self>) -> FluxResult<FinishedFileScan> {
-        let trailing_segments = self
-            .scanner
+    fn finish(self: Box<Self>) -> FluxResult<Vec<SegmentObservation>> {
+        self.scanner
             .finish()
             .map_err(swifty_error)?
             .into_iter()
             .filter(|part| part.length > 0)
             .map(part_observation)
-            .collect::<FluxResult<Vec<_>>>()?;
-        Ok(FinishedFileScan {
-            trailing_segments,
-            len: self.len,
-        })
+            .collect()
     }
 }
 

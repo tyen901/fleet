@@ -6,7 +6,8 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
-use fleet_domain::health::{InventoryCheckReport, LocalStateHealth, OperationKind};
+use fleet_domain::health::{InventoryCheckReport, OperationKind};
+use fleet_domain::ManifestHealth;
 use fleet_domain::{
     types::{ProfileServerInfo, RepoServer},
     AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
@@ -136,12 +137,13 @@ impl Core {
         let state_root =
             profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
 
-        check_inventory::check_inventory_with_mode(
+        check_inventory::check_inventory_with_scope(
             &profile,
             &settings,
             &state_root,
             OperationPublisher::silent(profile_id.clone(), OperationKind::CheckInventory),
-            fleet_inventory::InventoryReconcileMode::Incremental,
+            flux::VerificationScope::Changed,
+            false,
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -582,16 +584,16 @@ fn non_empty_string(s: &str) -> Option<String> {
 }
 
 fn validate_launch_compatibility(report: &InventoryCheckReport) -> Result<(), ApiError> {
-    if matches!(
-        report.local_health,
-        LocalStateHealth::Ready | LocalStateHealth::LocalDrift
-    ) {
+    if report.manifest_health == ManifestHealth::Exact {
         return Ok(());
     }
 
     Err(ApiError::new(
         "launch_incompatible",
-        format!("launch blocked: local health {:?}", report.local_health),
+        format!(
+            "launch blocked: manifest health {:?}; run Sync",
+            report.manifest_health
+        ),
     ))
 }
 
@@ -642,7 +644,7 @@ mod tests {
         select_join_server, validate_launch_compatibility, ActionKind,
     };
     use fleet_arma3::LaunchMethod;
-    use fleet_domain::health::{InventoryCheckReport, LocalStateHealth};
+    use fleet_domain::health::{InventoryCheckReport, ManifestHealth};
     use fleet_domain::types::{ProfileServerInfo, RepoServer};
     use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
@@ -807,7 +809,8 @@ mod tests {
     fn validate_launch_compatibility_rejects_missing_or_modified() {
         let err = validate_launch_compatibility(&InventoryCheckReport {
             profile_id: "p1".to_string(),
-            local_health: LocalStateHealth::MissingDestination,
+            manifest_health: ManifestHealth::MissingDestination,
+            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
             checked_at_unix_ms: 0,
             missing_paths_count: 0,
             modified_paths_count: 0,

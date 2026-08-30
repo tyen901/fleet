@@ -185,10 +185,11 @@ pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
 
 pub(crate) fn inventory_out_of_sync(status: &fleet_core::ProfileStatusState) -> bool {
     matches!(
-        status.local_health,
-        fleet_core::LocalStateHealth::LocalDrift
-            | fleet_core::LocalStateHealth::MissingDestination
-            | fleet_core::LocalStateHealth::LocalStateMissing
+        status.manifest_health,
+        fleet_core::ManifestHealth::Missing
+            | fleet_core::ManifestHealth::Different
+            | fleet_core::ManifestHealth::MissingDestination
+            | fleet_core::ManifestHealth::InventoryUnavailable
     )
 }
 
