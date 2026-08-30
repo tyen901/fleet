@@ -144,7 +144,6 @@ impl Core {
 
         let profile_id_owned = profile.id.clone();
         let profile_for_state = profile.clone();
-        let has_repo_source = !profile.source.trim().is_empty();
         self.update_state(|state| {
             state
                 .profiles
@@ -152,7 +151,7 @@ impl Core {
             let now = fleet_domain::time::now_unix_ms();
             let _ = ensure_profile_runtime_mut(state, &profile_id_owned, now);
             if let Some(runtime) = state.profile_runtime_by_id.get_mut(&profile_id_owned) {
-                runtime.recompute_status(has_repo_source);
+                runtime.recompute_status();
             }
         });
         Ok(())

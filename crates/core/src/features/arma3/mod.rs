@@ -1,4 +1,4 @@
-use crate::operations::{check_inventory, OperationPublisher};
+use crate::operations::{local_files, OperationPublisher};
 use crate::storage::profile_state_root_dir;
 use crate::ApiError;
 use crate::Core;
@@ -6,8 +6,8 @@ use fleet_arma3::{
     Arma3Install, Error as Arma3Error, LaunchCommand, LaunchMethod, LaunchRequest, Launcher,
     ModList,
 };
-use fleet_domain::health::{InventoryCheckReport, OperationKind};
-use fleet_domain::ManifestHealth;
+use fleet_domain::health::{LocalFileReport, OperationKind};
+use fleet_domain::LocalFileHealth;
 use fleet_domain::{
     types::{ProfileServerInfo, RepoServer},
     AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
@@ -89,10 +89,8 @@ impl Core {
         extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
-        let inventory_check = self
-            .launch_inventory_check_by_profile_id(&profile_id)
-            .await?;
-        validate_launch_compatibility(&inventory_check)?;
+        let local_check = self.launch_local_check_by_profile_id(&profile_id).await?;
+        validate_launch_compatibility(&local_check)?;
         let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
         let extra_args_os: Option<Vec<OsString>> =
             extra_args.map(|v| v.into_iter().map(OsString::from).collect());
@@ -129,21 +127,18 @@ impl Core {
         Ok((profile, settings))
     }
 
-    async fn launch_inventory_check_by_profile_id(
+    async fn launch_local_check_by_profile_id(
         &self,
         profile_id: &ProfileId,
-    ) -> Result<InventoryCheckReport, ApiError> {
-        let (profile, settings) = self.load_profile_and_settings(profile_id).await?;
+    ) -> Result<LocalFileReport, ApiError> {
+        let (profile, _settings) = self.load_profile_and_settings(profile_id).await?;
         let state_root =
             profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
 
-        check_inventory::check_inventory_with_scope(
+        local_files::check(
             &profile,
-            &settings,
             &state_root,
-            OperationPublisher::silent(profile_id.clone(), OperationKind::CheckInventory),
-            flux::VerificationScope::Changed,
-            false,
+            OperationPublisher::silent(profile_id.clone(), OperationKind::Check),
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -583,8 +578,8 @@ fn non_empty_string(s: &str) -> Option<String> {
     }
 }
 
-fn validate_launch_compatibility(report: &InventoryCheckReport) -> Result<(), ApiError> {
-    if report.manifest_health == ManifestHealth::Exact {
+fn validate_launch_compatibility(report: &LocalFileReport) -> Result<(), ApiError> {
+    if report.health == LocalFileHealth::Clean {
         return Ok(());
     }
 
@@ -592,7 +587,7 @@ fn validate_launch_compatibility(report: &InventoryCheckReport) -> Result<(), Ap
         "launch_incompatible",
         format!(
             "launch blocked: manifest health {:?}; run Sync",
-            report.manifest_health
+            report.health
         ),
     ))
 }
@@ -644,7 +639,7 @@ mod tests {
         select_join_server, validate_launch_compatibility, ActionKind,
     };
     use fleet_arma3::LaunchMethod;
-    use fleet_domain::health::{InventoryCheckReport, ManifestHealth};
+    use fleet_domain::health::{LocalFileHealth, LocalFileReport};
     use fleet_domain::types::{ProfileServerInfo, RepoServer};
     use fleet_domain::{AppSettings, Profile};
     use std::ffi::OsString;
@@ -807,14 +802,13 @@ mod tests {
 
     #[test]
     fn validate_launch_compatibility_rejects_missing_or_modified() {
-        let err = validate_launch_compatibility(&InventoryCheckReport {
+        let err = validate_launch_compatibility(&LocalFileReport {
             profile_id: "p1".to_string(),
-            manifest_health: ManifestHealth::MissingDestination,
-            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::MissingDestination,
             checked_at_unix_ms: 0,
             missing_paths_count: 0,
             modified_paths_count: 0,
-            unexpected_paths: Vec::new(),
         })
         .expect_err("must reject incompatible");
         assert_eq!(err.code, "launch_incompatible");

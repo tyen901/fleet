@@ -2,19 +2,12 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum ManifestHealth {
+pub enum LocalFileHealth {
     Unknown,
     MissingDestination,
     InventoryUnavailable,
     Missing,
-    Different,
-    Exact,
-    InvalidProfile,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum UnexpectedHealth {
-    NotChecked,
+    Dirty,
     Clean,
-    Present,
+    InvalidProfile,
 }

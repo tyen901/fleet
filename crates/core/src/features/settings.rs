@@ -9,7 +9,7 @@ pub enum SettingsField {
     Arma3CustomLaunchTemplate,
     Arma3DefaultArgs,
     TelemetryConsent,
-    AutoAssessOnStartup,
+    AutoCheckProfilesOnStartup,
     AutoCheckOnStartup,
     ShowProfileIcons,
 }
@@ -50,9 +50,10 @@ fn settings_field_spec(field: SettingsField) -> SettingsFieldSpec {
                 settings.privacy.telemetry_consent != defaults.privacy.telemetry_consent
             },
         },
-        SettingsField::AutoAssessOnStartup => SettingsFieldSpec {
+        SettingsField::AutoCheckProfilesOnStartup => SettingsFieldSpec {
             is_non_default: |settings, defaults| {
-                settings.startup.auto_assess_on_startup != defaults.startup.auto_assess_on_startup
+                settings.startup.auto_check_profiles_on_startup
+                    != defaults.startup.auto_check_profiles_on_startup
             },
         },
         SettingsField::AutoCheckOnStartup => SettingsFieldSpec {
@@ -154,13 +155,12 @@ fn settings_changed_after_normalize(before: &AppSettings, after: &AppSettings) -
         SettingsField::Arma3CustomLaunchTemplate,
         SettingsField::Arma3DefaultArgs,
         SettingsField::TelemetryConsent,
-        SettingsField::AutoAssessOnStartup,
+        SettingsField::AutoCheckProfilesOnStartup,
         SettingsField::AutoCheckOnStartup,
         SettingsField::ShowProfileIcons,
     ]
     .into_iter()
     .any(|field| settings_field_is_non_default(field, after, before))
-        || before.sync.local_state_ignore_rules != after.sync.local_state_ignore_rules
 }
 
 #[cfg(test)]
@@ -181,10 +181,6 @@ mod tests {
         assert_eq!(
             actual.arma3.arma3_launch_method,
             expected.arma3.arma3_launch_method
-        );
-        assert_eq!(
-            actual.sync.local_state_ignore_rules,
-            expected.sync.local_state_ignore_rules
         );
     }
 
@@ -208,7 +204,7 @@ mod tests {
             core.settings_save(base).await.expect("seed settings");
 
             let mut a = core.load_settings().await.expect("load A");
-            a.startup.auto_assess_on_startup = false;
+            a.startup.auto_check_profiles_on_startup = false;
             let mut b = core.load_settings().await.expect("load B");
             b.privacy.telemetry_consent = TelemetryPreference::Allowed;
 
@@ -228,13 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_assess_on_startup_reports_non_default() {
+    fn auto_check_profiles_on_startup_reports_non_default() {
         let defaults = effective_settings_defaults();
         let mut settings = defaults.clone();
-        settings.startup.auto_assess_on_startup = !defaults.startup.auto_assess_on_startup;
+        settings.startup.auto_check_profiles_on_startup =
+            !defaults.startup.auto_check_profiles_on_startup;
 
         assert!(settings_field_is_non_default(
-            SettingsField::AutoAssessOnStartup,
+            SettingsField::AutoCheckProfilesOnStartup,
             &settings,
             &defaults,
         ));

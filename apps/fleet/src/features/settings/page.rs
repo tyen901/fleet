@@ -123,8 +123,8 @@ pub fn Settings() -> Element {
         &settings,
         &defaults,
     );
-    let is_auto_assess_on_startup_non_default = fleet_core::settings_field_is_non_default(
-        SettingsField::AutoAssessOnStartup,
+    let is_auto_check_profiles_non_default = fleet_core::settings_field_is_non_default(
+        SettingsField::AutoCheckProfilesOnStartup,
         &settings,
         &defaults,
     );
@@ -212,11 +212,14 @@ pub fn Settings() -> Element {
         dirty_for_telemetry.set(true);
     };
 
-    let mut draft_for_auto_assess = draft;
-    let mut dirty_for_auto_assess = dirty;
-    let on_toggle_auto_assess_on_startup = move |next: bool| {
-        draft_for_auto_assess.write().startup.auto_assess_on_startup = next;
-        dirty_for_auto_assess.set(true);
+    let mut draft_for_profile_check = draft;
+    let mut dirty_for_profile_check = dirty;
+    let on_toggle_profile_check = move |next: bool| {
+        draft_for_profile_check
+            .write()
+            .startup
+            .auto_check_profiles_on_startup = next;
+        dirty_for_profile_check.set(true);
     };
 
     let mut draft_for_auto_check = draft;
@@ -258,9 +261,9 @@ pub fn Settings() -> Element {
             SettingsField::TelemetryConsent => {
                 settings.privacy.telemetry_consent = defaults_for_reset.privacy.telemetry_consent;
             }
-            SettingsField::AutoAssessOnStartup => {
-                settings.startup.auto_assess_on_startup =
-                    defaults_for_reset.startup.auto_assess_on_startup;
+            SettingsField::AutoCheckProfilesOnStartup => {
+                settings.startup.auto_check_profiles_on_startup =
+                    defaults_for_reset.startup.auto_check_profiles_on_startup;
             }
             SettingsField::AutoCheckOnStartup => {
                 settings.updates.auto_check_on_startup =
@@ -361,9 +364,9 @@ pub fn Settings() -> Element {
                     )}
 
                     {startup_section(
-                        settings.startup.auto_assess_on_startup,
-                        is_auto_assess_on_startup_non_default,
-                        on_toggle_auto_assess_on_startup,
+                        settings.startup.auto_check_profiles_on_startup,
+                        is_auto_check_profiles_non_default,
+                        on_toggle_profile_check,
                         settings.updates.auto_check_on_startup,
                         is_auto_check_on_startup_non_default,
                         on_toggle_auto_check_on_startup,

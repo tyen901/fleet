@@ -5,7 +5,7 @@ use super::{load_profile, start_operation};
 
 pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Result<()> {
     let profile = load_profile(core, profile_id).await?;
-    let session_id = start_operation(core, profile.id.clone(), OperationKind::Sync, "sync").await?;
+    let session_id = start_operation(core, profile.id, OperationKind::Sync, "sync").await?;
 
     let report = run_sync_session(
         core,
@@ -18,12 +18,9 @@ pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Re
 
     println!("---");
     println!("done");
-    println!("manifest_health: {:?}", report.inventory.manifest_health);
+    println!("local_health: {:?}", report.local.health);
     println!("repo_freshness: {:?}", report.repo.freshness);
-    println!(
-        "unexpected_health: {:?}",
-        report.inventory.unexpected_health
-    );
+    println!("local_state: {:?}", report.local.verification);
 
     Ok(())
 }

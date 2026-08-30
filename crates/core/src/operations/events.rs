@@ -1,4 +1,4 @@
-use fleet_domain::health::{InventoryCheckReport, OperationKind, RepoCheckReport, SyncReport};
+use fleet_domain::health::{CheckReport, LocalFileReport, OperationKind, SyncReport};
 use fleet_domain::{ApiError, ProfileId};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -49,23 +49,16 @@ pub enum OperationStage {
     LoadingExpectedState,
     ScanningDisk,
     VerifyingInventory,
-    PreparingInventory,
     Sync,
     CleaningUp,
-    Auditing,
     Finalizing,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum ProgressScope {
-    InventoryEnumerate,
-    InventoryMetadata,
     InventoryVerify,
     MaterializationBytes,
     MaterializationFiles,
-    Cleanup,
-    AuditEnumerate,
-    AuditVerify,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
@@ -96,8 +89,7 @@ pub struct ProgressMetric {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub enum OperationOutput {
-    CheckRepo(RepoCheckReport),
-    CheckInventory(InventoryCheckReport),
-    CleanupUnexpectedFiles(InventoryCheckReport),
+    Check(CheckReport),
+    Validate(LocalFileReport),
     Sync(SyncReport),
 }

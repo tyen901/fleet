@@ -1,4 +1,3 @@
-use crate::default_inventory_ignore_rules;
 use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
@@ -376,15 +375,15 @@ pub struct RuntimeSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct StartupSettings {
-    /// If true, automatically assess the selected profile once after app startup.
+    /// If true, automatically check profiles once after app startup.
     #[serde(default = "default_true")]
-    pub auto_assess_on_startup: bool,
+    pub auto_check_profiles_on_startup: bool,
 }
 
 impl Default for StartupSettings {
     fn default() -> Self {
         Self {
-            auto_assess_on_startup: true,
+            auto_check_profiles_on_startup: true,
         }
     }
 }
@@ -404,21 +403,6 @@ impl Default for UpdateSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct SyncSettings {
-    /// .gitignore-style patterns (one per line) applied to inventory scan/check paths.
-    #[serde(default = "default_local_state_ignore_rules")]
-    pub local_state_ignore_rules: String,
-}
-
-impl Default for SyncSettings {
-    fn default() -> Self {
-        Self {
-            local_state_ignore_rules: default_local_state_ignore_rules(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 pub struct AppSettings {
     #[serde(flatten)]
@@ -433,16 +417,10 @@ pub struct AppSettings {
     pub startup: StartupSettings,
     #[serde(flatten)]
     pub updates: UpdateSettings,
-    #[serde(flatten)]
-    pub sync: SyncSettings,
 }
 
 fn default_true() -> bool {
     true
-}
-
-fn default_local_state_ignore_rules() -> String {
-    default_inventory_ignore_rules()
 }
 
 pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
@@ -453,50 +431,5 @@ pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
         .arma3
         .arma3_launch_method
         .normalize_for_current_platform();
-    settings.sync.local_state_ignore_rules = settings
-        .sync
-        .local_state_ignore_rules
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| line.replace('\\', "/"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if settings.sync.local_state_ignore_rules.is_empty() {
-        settings.sync.local_state_ignore_rules = default_local_state_ignore_rules();
-    }
     settings
-}
-
-#[cfg(test)]
-mod settings_tests {
-    use super::{
-        default_local_state_ignore_rules, normalize_app_settings, AppSettings, SyncSettings,
-    };
-    use crate::default_inventory_ignore_rules;
-
-    #[test]
-    fn settings_default_ignore_rules_match_inventory_default() {
-        assert_eq!(
-            default_local_state_ignore_rules(),
-            default_inventory_ignore_rules()
-        );
-        assert_eq!(
-            SyncSettings::default().local_state_ignore_rules,
-            default_inventory_ignore_rules()
-        );
-    }
-
-    #[test]
-    fn normalize_app_settings_restores_canonical_ignore_rules_when_empty() {
-        let mut settings = AppSettings::default();
-        settings.sync.local_state_ignore_rules = " \n # comment only \n ".to_string();
-
-        let normalized = normalize_app_settings(settings);
-
-        assert_eq!(
-            normalized.sync.local_state_ignore_rules,
-            default_inventory_ignore_rules()
-        );
-    }
 }

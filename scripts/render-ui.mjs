@@ -201,9 +201,8 @@ async function seedDummyConfig() {
     show_profile_icons: false,
     telemetry_consent: false,
     debug_log_to_disk: false,
-    auto_assess_on_startup: false,
+    auto_check_profiles_on_startup: false,
     auto_check_on_startup: false,
-    local_state_ignore_rules: '',
   };
   const profiles = {
     profiles: [
@@ -459,7 +458,7 @@ async function runFlow(client) {
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
 
   await client.click('[aria-label="Profile details"]');
-  await client.waitFor(`document.body.innerText.includes('Full sync')`, 'profile overview');
+  await client.waitFor(`document.body.innerText.includes('Validate')`, 'profile overview');
   await client.waitFor(
     `[...document.querySelectorAll('.page-footer button')]
       .some((button) => button.textContent.trim() === 'Cancel')`,
@@ -473,8 +472,8 @@ async function runFlow(client) {
       hasReadyState: document.body.innerText.includes('Ready to play'),
       hasLaunchOrJoin: [...document.querySelectorAll('button')]
         .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
-      hasSyncCheck: [...syncSection.querySelectorAll('.field-row__title')]
-        .some((heading) => heading.textContent.trim() === 'Check for updates'),
+      syncActions: [...syncSection.querySelectorAll('.field-row__title')]
+        .map((heading) => heading.textContent.trim()),
       // Read mode uses the real controls, locked rather than replaced.
       readonlyInputs: [...document.querySelectorAll('.form-field .field__input')]
         .every((input) => input.readOnly),
@@ -506,7 +505,8 @@ async function runFlow(client) {
     !profileOverviewLayout.hasNoHeader ||
     profileOverviewLayout.hasReadyState ||
     profileOverviewLayout.hasLaunchOrJoin ||
-    !profileOverviewLayout.hasSyncCheck ||
+    profileOverviewLayout.syncActions.join(',') !==
+      'Check profile,Sync profile,Validate local files' ||
     !profileOverviewLayout.readonlyInputs ||
     profileOverviewLayout.readonlyInputCount !== 4 ||
     profileOverviewLayout.inlineRowHeights.join(',') !== '34' ||
@@ -620,14 +620,10 @@ async function runFlow(client) {
   })()`);
 
   await client.clickText('Cancel');
-  await client.waitFor(`document.body.innerText.includes('Full sync')`, 'profile read mode');
+  await client.waitFor(`document.body.innerText.includes('Validate')`, 'profile read mode');
 
-  await client.clickText('Full sync');
-  await client.waitFor(`document.querySelector('.inline-confirm')`, 'full sync confirmation');
-  await delay(600);
-  await client.capture('10-full-sync-confirm.png');
-  await client.clickText('Start');
-  await client.waitFor(`document.querySelector('.sync-panel')`, 'full sync progress', 15_000);
+  await client.clickText('Sync');
+  await client.waitFor(`document.querySelector('.sync-panel')`, 'sync progress', 15_000);
   // FLEET_SIMULATE_SYNC drives a scripted sequence that parks at
   // FLEET_SIMULATE_SYNC_HOLD_PERCENT, so this capture is reproducible and no
   // content is actually downloaded.
@@ -636,7 +632,7 @@ async function runFlow(client) {
     'simulated sync at 50%',
     15_000,
   );
-  await client.capture('11-sync-progress.png');
+  await client.capture('10-sync-progress.png');
 }
 
 await seedDummyConfig();

@@ -2,7 +2,7 @@ use crate::operations::events::{
     OperationNoticeLevel, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
     OperationStage,
 };
-use crate::operations::{check_inventory, check_repo, cleanup, simulated, sync, OperationOutput};
+use crate::operations::{check, simulated, sync, validate, OperationOutput};
 use crate::state::{
     apply_operation_progress, apply_operation_stage, ensure_profile_runtime_mut,
     recompute_profile_status, ActiveOperationState, OperationOutcomeState, OperationTerminalStatus,
@@ -84,7 +84,6 @@ impl OperationRuntime {
             }
         }
 
-        let settings = core.read_state(|state| state.settings.clone());
         let state_root = crate::profile_state_root_dir()
             .map_err(|err| ApiError::new("state_root", err.to_string()))?;
         let session_id = core.allocate_session_id();
@@ -124,52 +123,26 @@ impl OperationRuntime {
         let rt = self.clone();
         self.tracker.spawn(async move {
             let out = match operation {
-                OperationKind::CheckRepo => {
-                    check_repo::check_repo(&profile, &settings, &state_root, publisher.clone())
+                OperationKind::Check => {
+                    check::check(&profile, &state_root, publisher.clone(), cancel.clone())
                         .await
-                        .map(OperationOutput::CheckRepo)
+                        .map(OperationOutput::Check)
                 }
-                OperationKind::CheckInventory => check_inventory::check_inventory(
-                    &profile,
-                    &settings,
-                    &state_root,
-                    publisher.clone(),
-                    cancel.clone(),
-                )
-                .await
-                .map(OperationOutput::CheckInventory),
-                OperationKind::CleanupUnexpectedFiles => cleanup::cleanup_unexpected_files(
-                    &profile,
-                    &settings,
-                    &state_root,
-                    publisher.clone(),
-                    cancel.clone(),
-                )
-                .await
-                .map(OperationOutput::CleanupUnexpectedFiles),
-                OperationKind::Sync | OperationKind::FullSync if simulated::is_enabled() => {
+                OperationKind::Validate => {
+                    validate::validate(&profile, &state_root, publisher.clone(), cancel.clone())
+                        .await
+                        .map(OperationOutput::Validate)
+                }
+                OperationKind::Sync if simulated::is_enabled() => {
                     simulated::sync(&profile, publisher.clone(), cancel.clone())
                         .await
                         .map(OperationOutput::Sync)
                 }
-                OperationKind::Sync => sync::sync(
-                    &profile,
-                    &settings,
-                    &state_root,
-                    publisher.clone(),
-                    cancel.clone(),
-                )
-                .await
-                .map(OperationOutput::Sync),
-                OperationKind::FullSync => sync::full_sync(
-                    &profile,
-                    &settings,
-                    &state_root,
-                    publisher.clone(),
-                    cancel.clone(),
-                )
-                .await
-                .map(OperationOutput::Sync),
+                OperationKind::Sync => {
+                    sync::sync(&profile, &state_root, publisher.clone(), cancel.clone())
+                        .await
+                        .map(OperationOutput::Sync)
+                }
             };
             rt.finish(&core, session_id, out);
         });
@@ -210,6 +183,7 @@ impl OperationRuntime {
         if record.cancel.is_cancelled() {
             core.update_state(|state| {
                 if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
+                    invalidate_local_state_after_incomplete_operation(runtime, record.operation);
                     runtime.active = None;
                     runtime.last_operation = Some(OperationOutcomeState {
                         session_id,
@@ -236,19 +210,7 @@ impl OperationRuntime {
             Ok(output) => {
                 core.update_state(|state| {
                     if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                        match &output {
-                            OperationOutput::CheckRepo(report) => {
-                                runtime.repo_check = Some(report.clone())
-                            }
-                            OperationOutput::CheckInventory(report)
-                            | OperationOutput::CleanupUnexpectedFiles(report) => {
-                                runtime.inventory_check = Some(report.clone())
-                            }
-                            OperationOutput::Sync(report) => {
-                                runtime.repo_check = Some(report.repo.clone());
-                                runtime.inventory_check = Some(report.inventory.clone());
-                            }
-                        }
+                        apply_successful_output(runtime, &output);
                         runtime.active = None;
                         runtime.last_error = None;
                         runtime.last_operation = Some(OperationOutcomeState {
@@ -277,6 +239,10 @@ impl OperationRuntime {
             Err(error) => {
                 core.update_state(|state| {
                     if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
+                        invalidate_local_state_after_incomplete_operation(
+                            runtime,
+                            record.operation,
+                        );
                         runtime.active = None;
                         runtime.last_error = Some(error.clone());
                         runtime.last_operation = Some(OperationOutcomeState {
@@ -365,6 +331,40 @@ impl OperationRuntime {
                 return Err(ApiError::new("internal", "session terminal channel closed"));
             }
         }
+    }
+}
+
+fn apply_successful_output(
+    runtime: &mut crate::state::ProfileRuntimeState,
+    output: &OperationOutput,
+) {
+    match output {
+        OperationOutput::Check(report) => {
+            runtime.repo_check = Some(report.repo.clone());
+            runtime.local_state = Some(report.local.clone());
+            if report.local.health != fleet_domain::LocalFileHealth::Clean {
+                runtime.validation = None;
+            }
+        }
+        OperationOutput::Validate(report) => {
+            runtime.local_state = Some(report.clone());
+            runtime.validation = Some(report.clone());
+        }
+        OperationOutput::Sync(report) => {
+            runtime.repo_check = Some(report.repo.clone());
+            runtime.local_state = Some(report.local.clone());
+            runtime.validation = None;
+        }
+    }
+}
+
+fn invalidate_local_state_after_incomplete_operation(
+    runtime: &mut crate::state::ProfileRuntimeState,
+    operation: OperationKind,
+) {
+    if operation == OperationKind::Sync {
+        runtime.local_state = None;
+        runtime.validation = None;
     }
 }
 
@@ -459,5 +459,98 @@ impl OperationPublisher {
             seq: self.seq.fetch_add(1, Ordering::Relaxed),
             kind,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_successful_output, invalidate_local_state_after_incomplete_operation};
+    use crate::operations::OperationOutput;
+    use crate::state::ProfileRuntimeState;
+    use fleet_domain::health::{
+        CheckReport, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
+        VerificationKind,
+    };
+    use fleet_domain::LocalFileHealth;
+
+    fn local_report(verification: VerificationKind, health: LocalFileHealth) -> LocalFileReport {
+        LocalFileReport {
+            profile_id: "profile".to_string(),
+            verification,
+            health,
+            checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+        }
+    }
+
+    fn repo_report() -> RepoCheckReport {
+        RepoCheckReport {
+            profile_id: "profile".to_string(),
+            local_revision: Some("revision".to_string()),
+            remote_revision: Some("revision".to_string()),
+            freshness: RepoCheckFreshness::UpToDate,
+            checked_at_unix_ms: 1,
+        }
+    }
+
+    #[test]
+    fn user_story_incomplete_sync_invalidates_all_local_clean_evidence() {
+        let mut runtime = ProfileRuntimeState::new("profile".to_string(), 0);
+        runtime.local_state = Some(local_report(
+            VerificationKind::Materialized,
+            LocalFileHealth::Clean,
+        ));
+        runtime.validation = Some(local_report(
+            VerificationKind::ByteExact,
+            LocalFileHealth::Clean,
+        ));
+
+        invalidate_local_state_after_incomplete_operation(&mut runtime, OperationKind::Sync);
+
+        assert!(runtime.local_state.is_none());
+        assert!(runtime.validation.is_none());
+    }
+
+    #[test]
+    fn user_story_clean_fast_check_preserves_current_byte_validation() {
+        let mut runtime = ProfileRuntimeState::new("profile".to_string(), 0);
+        runtime.validation = Some(local_report(
+            VerificationKind::ByteExact,
+            LocalFileHealth::Clean,
+        ));
+        let check = OperationOutput::Check(CheckReport {
+            profile_id: "profile".to_string(),
+            repo: repo_report(),
+            local: local_report(VerificationKind::Fast, LocalFileHealth::Clean),
+        });
+
+        apply_successful_output(&mut runtime, &check);
+
+        assert_eq!(
+            runtime
+                .validation
+                .as_ref()
+                .map(|report| report.verification),
+            Some(VerificationKind::ByteExact)
+        );
+    }
+
+    #[test]
+    fn user_story_dirty_fast_check_invalidates_prior_byte_validation() {
+        let mut runtime = ProfileRuntimeState::new("profile".to_string(), 0);
+        runtime.validation = Some(local_report(
+            VerificationKind::ByteExact,
+            LocalFileHealth::Clean,
+        ));
+        let check = OperationOutput::Check(CheckReport {
+            profile_id: "profile".to_string(),
+            repo: repo_report(),
+            local: local_report(VerificationKind::Fast, LocalFileHealth::Dirty),
+        });
+
+        apply_successful_output(&mut runtime, &check);
+
+        assert!(runtime.validation.is_none());
     }
 }

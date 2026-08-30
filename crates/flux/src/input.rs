@@ -185,15 +185,6 @@ pub fn swifty_repo_to_materialization_input(
     })
 }
 
-pub fn expected_file_paths(input: &MaterializationInput) -> BTreeSet<String> {
-    input
-        .manifest
-        .files
-        .iter()
-        .map(|file| file.path.as_str().to_string())
-        .collect()
-}
-
 fn validate_swifty_file(
     mod_m: &swifty_artifacts::SrfMod,
     file: &swifty_artifacts::SrfFile,

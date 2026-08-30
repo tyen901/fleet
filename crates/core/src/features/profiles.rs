@@ -2,8 +2,7 @@ use crate::core::run_config_blocking;
 use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
-use fleet_domain::health::InventoryCheckReport;
-use fleet_domain::{ManifestHealth, Profile, ProfileId, ProfileSourceKind, RepoServer};
+use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
@@ -338,21 +337,12 @@ impl Core {
             let core = self.clone();
             let profile_id = saved.id.clone();
             tokio::spawn(async move {
-                let repo_session = core
-                    .start_operation(
-                        profile_id.clone(),
-                        fleet_domain::health::OperationKind::CheckRepo,
-                    )
+                let check = core
+                    .start_operation(profile_id, fleet_domain::health::OperationKind::Check)
                     .await;
-                if let Ok(session_id) = repo_session {
+                if let Ok(session_id) = check {
                     let _ = core.await_finished(session_id).await;
                 }
-                let _ = core
-                    .start_operation(
-                        profile_id,
-                        fleet_domain::health::OperationKind::CheckInventory,
-                    )
-                    .await;
             });
         }
         info!(
@@ -538,37 +528,16 @@ fn canonical_profile_server(
 }
 
 fn cached_repo_revision(cache: &swifty_repo::RepoCacheBlob) -> Option<String> {
-    if let Some(revision) = cache
+    cache
         .repo_json_checksum
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        return Some(revision.to_string());
-    }
-
-    let checksum = cache.repo.checksum.trim();
-    if !checksum.is_empty() {
-        return Some(checksum.to_string());
-    }
-
-    // Some legacy cache blobs may not have repo_json_checksum/repo.checksum.
-    // Fall back to a deterministic server fingerprint so server identity remains stable.
-    let mut server_fingerprint = cache
-        .repo
-        .servers
-        .iter()
-        .map(|server| {
-            format!(
-                "{}:{}:{}",
-                server.address.trim().to_ascii_lowercase(),
-                server.port,
-                server.password.trim()
-            )
+        .or_else(|| {
+            let checksum = cache.repo.checksum.trim();
+            (!checksum.is_empty()).then_some(checksum)
         })
-        .collect::<Vec<_>>();
-    server_fingerprint.sort();
-    Some(format!("servers:{}", server_fingerprint.join("|")))
+        .map(ToString::to_string)
 }
 
 pub(crate) fn load_cached_repo_server_snapshot_blocking(
@@ -618,33 +587,6 @@ pub(crate) fn set_profile_repo_servers_runtime(
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
     runtime.repo_servers = servers;
     runtime.repo_servers_loaded = loaded;
-}
-
-pub(crate) fn seed_missing_destination_inventory_hint(
-    runtime: &mut crate::state::ProfileRuntimeState,
-    profile: &Profile,
-    now_ms: u64,
-) {
-    if runtime.inventory_check.is_some() {
-        return;
-    }
-
-    let Ok(destination) = profile.dest_path() else {
-        return;
-    };
-    if destination.exists() {
-        return;
-    }
-
-    runtime.inventory_check = Some(InventoryCheckReport {
-        profile_id: profile.id.clone(),
-        manifest_health: ManifestHealth::MissingDestination,
-        unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
-        checked_at_unix_ms: now_ms,
-        missing_paths_count: 0,
-        modified_paths_count: 0,
-        unexpected_paths: Vec::new(),
-    });
 }
 
 fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, crate::ApiError> {
@@ -736,15 +678,12 @@ fn normalize_additional_mod_folders(paths: &[String]) -> Vec<String> {
 }
 
 fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64) {
-    let profile = state.profiles.get(profile_id).cloned();
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
     runtime.repo_check = None;
-    runtime.inventory_check = None;
+    runtime.local_state = None;
+    runtime.validation = None;
     runtime.last_error = None;
     runtime.active = None;
-    if let Some(profile) = profile.as_ref() {
-        seed_missing_destination_inventory_hint(runtime, profile, now_ms);
-    }
     recompute_profile_status(state, profile_id);
 }
 
@@ -773,13 +712,12 @@ mod tests {
     use super::{
         canonical_profile_server, clear_profile_check_state, normalize_additional_mod_folders,
         normalize_destination_for_compare, profile_path_context_changed,
-        seed_missing_destination_inventory_hint,
     };
     use crate::state::AppState;
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use crate::Core;
     use fleet_domain::health::{
-        InventoryCheckReport, ManifestHealth, RepoCheckFreshness, RepoCheckReport,
+        LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::types::ProfileServerInfo;
     use fleet_domain::{ApiError, Profile};
@@ -814,22 +752,6 @@ mod tests {
         let normalized = normalize_additional_mod_folders(&paths);
 
         assert_eq!(normalized, vec!["@ace".to_string(), "@acre2".to_string()]);
-    }
-
-    #[test]
-    fn seed_missing_destination_inventory_hint_sets_repairable_health() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let profile = sample_profile("p1", &tempdir.path().join("missing").to_string_lossy());
-        let mut runtime = crate::state::ProfileRuntimeState::new(profile.id.clone(), 5, true);
-
-        seed_missing_destination_inventory_hint(&mut runtime, &profile, 5);
-
-        let report = runtime
-            .inventory_check
-            .as_ref()
-            .expect("missing destination hint");
-        assert_eq!(report.manifest_health, ManifestHealth::MissingDestination);
-        assert_eq!(report.checked_at_unix_ms, 5);
     }
 
     #[test]
@@ -869,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_profile_check_state_removes_stale_checks_and_reseeds_missing_destination_hint() {
+    fn user_story_profile_path_change_discards_all_stale_local_evidence() {
         let mut state = AppState::default();
         let profile_id = "p1".to_string();
 
@@ -894,18 +816,18 @@ mod tests {
                     freshness: RepoCheckFreshness::Unknown,
                     checked_at_unix_ms: 10,
                 }),
-                inventory_check: Some(InventoryCheckReport {
+                local_state: Some(LocalFileReport {
                     profile_id: profile_id.clone(),
-                    manifest_health: ManifestHealth::Different,
-                    unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
+                    verification: fleet_domain::VerificationKind::Fast,
+                    health: LocalFileHealth::Dirty,
                     checked_at_unix_ms: 10,
                     missing_paths_count: 0,
                     modified_paths_count: 0,
-                    unexpected_paths: Vec::new(),
                 }),
+                validation: None,
                 active: Some(crate::state::ActiveOperationState::new(
                     7,
-                    fleet_domain::health::OperationKind::CheckInventory,
+                    fleet_domain::health::OperationKind::Check,
                     10,
                 )),
                 last_operation: None,
@@ -923,16 +845,11 @@ mod tests {
             .get(&profile_id)
             .expect("profile runtime");
         assert!(updated.repo_check.is_none());
-        assert_eq!(
-            updated
-                .inventory_check
-                .as_ref()
-                .map(|report| &report.manifest_health),
-            Some(&ManifestHealth::MissingDestination)
-        );
+        assert!(updated.local_state.is_none());
+        assert!(updated.validation.is_none());
         assert!(updated.last_error.is_none());
         assert!(updated.active.is_none());
-        assert_eq!(updated.status.last_check_ms, 42);
+        assert_eq!(updated.status.last_check_ms, 0);
     }
 
     #[test]

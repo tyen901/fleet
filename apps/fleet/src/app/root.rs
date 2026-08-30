@@ -49,10 +49,7 @@ pub fn AppRoot() -> Element {
                 let Some(info) = runtime.last_operation.as_ref() else {
                     continue;
                 };
-                if !matches!(
-                    info.operation,
-                    OperationKind::Sync | OperationKind::FullSync
-                ) {
+                if !matches!(info.operation, OperationKind::Sync) {
                     continue;
                 }
                 if latest
