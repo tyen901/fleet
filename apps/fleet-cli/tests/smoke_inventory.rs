@@ -144,11 +144,11 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "expected profile creation output, got: {out}"
     );
 
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("repo_check:")
             && out.contains("local_check:")
-            && out.contains("health: InventoryUnavailable")
+            && out.contains("health: ExpectedStateUnavailable")
             && out.contains("sync_required: true"),
         "expected profile check output, got: {out}"
     );
@@ -161,7 +161,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         server.example_file_bytes()
     );
 
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("verification: Fast")
             && out.contains("health: Clean")
@@ -171,7 +171,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let unmanaged_file = dest_root.join("user-owned-not-managed.txt");
     fs::write(&unmanaged_file, b"not part of the managed manifest").expect("write unmanaged file");
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("verification: Fast") && out.contains("health: Clean"),
         "a rapid check must inspect managed paths without walking unrelated files, got: {out}"
@@ -182,7 +182,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     let repo_cache_dir = profile_state_dir.join("repo_cache");
     let installed_cache = snapshot_files(&repo_cache_dir);
     server.set_repo_available(false);
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("freshness: Error")
             && out.contains("health: Clean")
@@ -215,7 +215,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "the drift scenario must not be detectable from file length alone"
     );
 
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("health: Dirty")
             && out.contains("modified_paths: 1")
@@ -230,14 +230,14 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "sync must repair a changed managed file"
     );
 
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("health: Clean") && out.contains("modified_paths: 0"),
         "expected repaired profile check output, got: {out}"
     );
 
     server.publish_update();
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("freshness: UpdateAvailable")
             && out.contains("update_available: true")
@@ -253,7 +253,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "sync must pull and materialize the published repository update"
     );
 
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("freshness: UpToDate")
             && out.contains("update_available: false")
@@ -269,13 +269,13 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     assert!(inventory_db.exists(), "inventory db missing");
 
     fs::write(&inventory_db, b"corrupt inventory").expect("corrupt inventory database");
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("health: InventoryUnavailable") && out.contains("sync_required: true"),
         "a rapid check must request sync when durable facts are unavailable, got: {out}"
     );
     run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
-    let out = run_cmd(&bin, &["profile", "check", profile_id], &envs);
+    let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
         out.contains("health: Clean") && out.contains("modified_paths: 0"),
         "sync must recreate corrupt local knowledge and return to a clean state, got: {out}"

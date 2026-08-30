@@ -27,7 +27,7 @@ fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
     )
 }
 
-fn local_state_description(report: &fleet_core::LocalFileReport) -> String {
+fn local_file_description(report: &fleet_core::LocalFileReport) -> String {
     use fleet_core::{LocalFileHealth, VerificationKind};
 
     match (&report.verification, &report.health) {
@@ -47,6 +47,9 @@ fn local_state_description(report: &fleet_core::LocalFileReport) -> String {
             "Installed version materialized".to_string()
         }
         (_, LocalFileHealth::MissingDestination) => "Local folder is missing".to_string(),
+        (_, LocalFileHealth::ExpectedStateUnavailable) => {
+            "Expected repository state is unavailable; sync will fetch it".to_string()
+        }
         (_, LocalFileHealth::InventoryUnavailable) => {
             "Local inventory is unavailable; sync will rebuild it".to_string()
         }
@@ -134,76 +137,32 @@ pub fn ProfileView(id: String) -> Element {
         .map(|status| status.actions.sync_enabled)
         .unwrap_or(false);
     let check_description = runtime
-        .and_then(|runtime| runtime.local_state.as_ref())
-        .map(local_state_description)
+        .and_then(|runtime| runtime.check.as_ref())
+        .map(local_file_description)
         .unwrap_or_else(|| "Compare local file metadata with the last known state".to_string());
     let validation_description = runtime
         .and_then(|runtime| runtime.validation.as_ref())
-        .map(local_state_description)
+        .map(local_file_description)
         .unwrap_or_else(|| "Read every managed file and verify its bytes".to_string());
-
-    let last_sync_failure = runtime
+    let sync_description = runtime
+        .and_then(|runtime| runtime.materialization.as_ref())
+        .map(local_file_description)
+        .unwrap_or_else(|| "Install, update, or repair managed files".to_string());
+    let operation_notice = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
-        .filter(|outcome| matches!(outcome.operation, fleet_core::OperationKind::Sync))
-        .and_then(|outcome| match outcome.status {
-            fleet_core::OperationTerminalStatus::Failed => Some((
-                "Sync failed",
-                outcome
-                    .error
-                    .as_ref()
-                    .map(|err| err.message.clone())
-                    .or_else(|| outcome.message.clone())
-                    .unwrap_or_else(|| "The last sync did not complete.".to_string()),
-                "Retry",
-            )),
-            fleet_core::OperationTerminalStatus::Canceled => Some((
-                "Sync cancelled",
-                "Sync stopped. Run it again to finish updating the profile.".to_string(),
-                "Restart sync",
-            )),
-            fleet_core::OperationTerminalStatus::Succeeded => None,
-        });
-    let last_read_failure = runtime
-        .and_then(|runtime| runtime.last_operation.as_ref())
-        .filter(|outcome| {
-            matches!(
-                outcome.operation,
-                fleet_core::OperationKind::Check | fleet_core::OperationKind::Validate
-            )
-        })
-        .and_then(|outcome| {
-            let failure_message = || {
-                outcome
-                    .error
-                    .as_ref()
-                    .map(|error| error.message.clone())
-                    .or_else(|| outcome.message.clone())
-                    .unwrap_or_else(|| "The operation did not complete.".to_string())
-            };
-            match (outcome.operation, &outcome.status) {
-                (fleet_core::OperationKind::Check, fleet_core::OperationTerminalStatus::Failed) => {
-                    Some(("Check failed", failure_message()))
-                }
-                (
-                    fleet_core::OperationKind::Validate,
-                    fleet_core::OperationTerminalStatus::Failed,
-                ) => Some(("Validation failed", failure_message())),
-                (
-                    fleet_core::OperationKind::Check,
-                    fleet_core::OperationTerminalStatus::Canceled,
-                ) => Some((
-                    "Check cancelled",
-                    "No new local file state was recorded.".to_string(),
-                )),
-                (
-                    fleet_core::OperationKind::Validate,
-                    fleet_core::OperationTerminalStatus::Canceled,
-                ) => Some((
-                    "Validation cancelled",
-                    "No new local file state was recorded.".to_string(),
-                )),
-                _ => None,
-            }
+        .filter(|outcome| outcome.status != fleet_core::OperationTerminalStatus::Succeeded)
+        .map(|outcome| {
+            let title = status
+                .as_ref()
+                .map(|status| status.headline.label())
+                .unwrap_or("Operation stopped");
+            let message = outcome
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .or_else(|| outcome.message.clone())
+                .unwrap_or_else(|| "The operation did not complete.".to_string());
+            (title, message)
         });
 
     let bridge_for_check = bridge.clone();
@@ -249,10 +208,6 @@ pub fn ProfileView(id: String) -> Element {
         );
     });
 
-    let start_sync_for_retry = start_sync.clone();
-    let on_sync_retry = move |_: MouseEvent| {
-        start_sync_for_retry();
-    };
     let start_sync_for_action = start_sync.clone();
     let on_sync_action = move |_: MouseEvent| {
         start_sync_for_action();
@@ -668,23 +623,10 @@ pub fn ProfileView(id: String) -> Element {
                     }
 
                     if !editing() {
-                        if let Some((title, message)) = last_read_failure.clone() {
+                        if let Some((title, message)) = operation_notice.clone() {
                             section { class: "profile-view__result",
                                 h3 { class: "profile-view__result-title", "{title}" }
                                 p { class: "profile-view__result-message", "{message}" }
-                            }
-                        }
-
-                        if let Some((title, message, action_label)) = last_sync_failure.clone() {
-                            section { class: "profile-view__result",
-                                h3 { class: "profile-view__result-title", "{title}" }
-                                p { class: "profile-view__result-message", "{message}" }
-                                Button {
-                                    variant: ButtonVariant::Primary,
-                                    disabled: !sync_enabled || any_active,
-                                    onclick: on_sync_retry,
-                                    "{action_label}"
-                                }
                             }
                         }
 
@@ -692,7 +634,7 @@ pub fn ProfileView(id: String) -> Element {
                             SectionHeader {
                                 title: "Sync".to_string(),
                                 subtitle: Some(format!(
-                                    "Check: {check_description}. Validate: {validation_description}."
+                                    "Check: {check_description}. Validate: {validation_description}. Sync: {sync_description}."
                                 )),
                             }
                             FieldRow {
@@ -809,7 +751,8 @@ fn render_sync_mode(
         .map(|progress| !progress.stage.determinate)
         .unwrap_or(true);
     let phase = progress
-        .map(|progress| stage_phase_label(progress.active_stage))
+        .and_then(|progress| progress.status_text.as_deref())
+        .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
         .unwrap_or("Checking");
     let percent_label = percent
         .map(|value| format!("{value}%"))

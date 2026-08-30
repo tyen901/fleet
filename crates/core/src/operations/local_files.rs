@@ -1,5 +1,3 @@
-use crate::operations::progress::FluxProgressObserver;
-use crate::operations::{OperationPublisher, OperationStage};
 use fleet_domain::health::{LocalFileReport, VerificationKind};
 use fleet_domain::{LocalFileHealth, Profile, ProfileSourceKind};
 use fleet_inventory::FleetInventoryProvider;
@@ -25,30 +23,29 @@ impl ReadKind {
 pub(crate) async fn check(
     profile: &Profile,
     state_root: &Path,
-    publisher: OperationPublisher,
     cancel: CancellationToken,
+    progress: Option<fleet_flux::ProgressObserverRef>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, publisher, cancel, ReadKind::Check).await
+    check_or_validate(profile, state_root, cancel, progress, ReadKind::Check).await
 }
 
 pub(crate) async fn validate(
     profile: &Profile,
     state_root: &Path,
-    publisher: OperationPublisher,
     cancel: CancellationToken,
+    progress: Option<fleet_flux::ProgressObserverRef>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, publisher, cancel, ReadKind::Validate).await
+    check_or_validate(profile, state_root, cancel, progress, ReadKind::Validate).await
 }
 
 async fn check_or_validate(
     profile: &Profile,
     state_root: &Path,
-    publisher: OperationPublisher,
     cancel: CancellationToken,
+    progress: Option<fleet_flux::ProgressObserverRef>,
     read_kind: ReadKind,
 ) -> Result<LocalFileReport, crate::ApiError> {
     let verification_kind = read_kind.evidence();
-    publisher.stage(OperationStage::Validating);
     let dest = match profile.dest_path() {
         Ok(path) => path,
         Err(_) => {
@@ -69,61 +66,63 @@ async fn check_or_validate(
     let ProfileSourceKind::Http(repo_url) = profile
         .validated_source_kind()
         .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
-    let paths = fleet_domain::FleetPaths::for_profile(state_root.to_path_buf(), &profile.id);
-    let _lock = crate::operations::support::locking::acquire_lock(paths.profile.inventory.lock)
-        .await
-        .map_err(|error| crate::ApiError::new("inventory_locked", error.to_string()))?;
+    let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
+    let inventory_db = fleet_domain::inventory_db_path(state_root, &profile.id);
 
-    publisher.stage(OperationStage::LoadingExpectedState);
-    let Some(input) =
-        fleet_flux::load_cached_swifty_materialization_input(repo_url, &paths.profile.repo_cache)
-            .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
+    let Some(input) = fleet_flux::load_cached_swifty_materialization_input(repo_url, &repo_cache)
+        .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
     else {
         return Ok(report(
             profile,
             verification_kind,
-            LocalFileHealth::InventoryUnavailable,
+            LocalFileHealth::ExpectedStateUnavailable,
         ));
     };
-    let inventory = match FleetInventoryProvider::open_existing(&paths.profile.inventory.db) {
+    let inventory = match FleetInventoryProvider::open_existing(&inventory_db) {
         Ok(inventory) => Arc::new(inventory),
-        Err(_) => {
+        Err(
+            fleet_inventory::InventoryError::Missing
+            | fleet_inventory::InventoryError::Incompatible
+            | fleet_inventory::InventoryError::CorruptDatabase,
+        ) => {
             return Ok(report(
                 profile,
                 verification_kind,
                 LocalFileHealth::InventoryUnavailable,
             ))
         }
+        Err(error) => return Err(crate::ApiError::new("inventory", error.to_string())),
     };
     if cancel.is_cancelled() {
         return Err(crate::ApiError::new("canceled", "canceled"));
     }
 
-    let progress = Arc::new(FluxProgressObserver::new(publisher.clone()));
     let result = match read_kind {
         ReadKind::Check => {
-            publisher.stage(OperationStage::ScanningDisk);
             let checked =
-                fleet_flux::check_target(&dest, inventory, &input, cancel.clone(), Some(progress))
+                fleet_flux::check_target(&dest, inventory, &input, cancel.clone(), progress)
                     .await
                     .map_err(|error| operation_error("local_check", &cancel, error))?;
-            report_from_target_check(profile, &checked)
+            report_from_counts(
+                profile,
+                VerificationKind::Fast,
+                checked.missing_paths_count,
+                checked.modified_paths_count,
+            )
         }
         ReadKind::Validate => {
-            let verified = fleet_flux::verify_manifest(
-                &dest,
-                inventory,
-                &input,
-                flux::VerificationScope::All,
-                cancel.clone(),
-                Some(progress),
+            let verified =
+                fleet_flux::verify_manifest(&dest, inventory, &input, cancel.clone(), progress)
+                    .await
+                    .map_err(|error| operation_error("inventory_validation", &cancel, error))?;
+            report_from_counts(
+                profile,
+                VerificationKind::ByteExact,
+                verified.missing_paths_count,
+                verified.modified_paths_count,
             )
-            .await
-            .map_err(|error| operation_error("inventory_validation", &cancel, error))?;
-            report_from_validation(profile, &verified)
         }
     };
-    publisher.stage(OperationStage::Finalizing);
     Ok(result)
 }
 
@@ -137,47 +136,6 @@ fn operation_error(
     } else {
         crate::ApiError::new(code, error.to_string())
     }
-}
-
-fn report_from_target_check(profile: &Profile, checked: &flux::TargetCheck) -> LocalFileReport {
-    let missing_paths_count = checked
-        .files
-        .iter()
-        .filter(|file| file.state == flux::TargetFileState::Missing)
-        .count() as u64;
-    let modified_paths_count = checked
-        .files
-        .iter()
-        .filter(|file| file.state == flux::TargetFileState::Dirty)
-        .count() as u64;
-    report_from_counts(
-        profile,
-        VerificationKind::Fast,
-        missing_paths_count,
-        modified_paths_count,
-    )
-}
-
-fn report_from_validation(
-    profile: &Profile,
-    verification: &flux::ManifestVerification,
-) -> LocalFileReport {
-    let missing_paths_count = verification
-        .files
-        .iter()
-        .filter(|file| file.state == flux::ManifestFileState::Missing)
-        .count() as u64;
-    let modified_paths_count = verification
-        .files
-        .iter()
-        .filter(|file| file.state == flux::ManifestFileState::Different)
-        .count() as u64;
-    report_from_counts(
-        profile,
-        VerificationKind::ByteExact,
-        missing_paths_count,
-        modified_paths_count,
-    )
 }
 
 fn report_from_counts(

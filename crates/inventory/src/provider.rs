@@ -4,9 +4,10 @@ use std::{
 };
 
 use flux::{
-    FluxError, FluxErrorKind, FluxResult, InventoryReader, LocalFileFact, LocalSegmentLookupResult,
-    ManagedInventoryBatch, ManagedInventoryWriter, ManagedPathBatch, SegmentKey, TargetPath,
-    VerifiedFactBatch, VerifiedFactWriter,
+    CheckInventory, ExpectedFileFact, ExpectedStateAssessment, FluxError, FluxErrorKind,
+    FluxResult, InventoryReader, LocalFileFact, LocalSegmentLookupResult, ManagedInventoryBatch,
+    ManagedInventoryWriter, ManagedPathBatch, SegmentKey, TargetPath, VerifiedFactBatch,
+    VerifiedFactWriter,
 };
 use futures_util::{future::BoxFuture, stream::BoxStream, FutureExt};
 use tokio::task::JoinError;
@@ -71,6 +72,22 @@ impl InventoryReader for FleetInventoryProvider {
         batch_size: usize,
     ) -> BoxStream<'static, FluxResult<ManagedPathBatch>> {
         sqlite::managed_path_batches(self.db_path.as_ref().clone(), batch_size)
+    }
+}
+
+impl CheckInventory for FleetInventoryProvider {
+    fn assess_expected_state<'a>(
+        &'a self,
+        expected: &'a [ExpectedFileFact],
+    ) -> BoxFuture<'a, FluxResult<ExpectedStateAssessment>> {
+        let db_path = self.db_path.clone();
+        let expected = expected.to_vec();
+        async move {
+            tokio::task::spawn_blocking(move || sqlite::assess_expected_state(&db_path, &expected))
+                .await
+                .map_err(read_spawn_error)?
+        }
+        .boxed()
     }
 }
 

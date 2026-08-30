@@ -62,10 +62,16 @@ fn row_sync_state(
     let phase = match progress.primary_metric.as_ref() {
         Some(metric) => format!(
             "{} · {}",
-            stage_phase_label(progress.active_stage),
+            progress
+                .status_text
+                .as_deref()
+                .unwrap_or_else(|| stage_phase_label(progress.active_stage)),
             metric.rendered
         ),
-        None => stage_phase_label(progress.active_stage).to_string(),
+        None => progress
+            .status_text
+            .clone()
+            .unwrap_or_else(|| stage_phase_label(progress.active_stage).to_string()),
     };
     RowSyncState {
         phase,
@@ -525,6 +531,7 @@ mod tests {
             fleet_core::LocalFileHealth::Missing,
             fleet_core::LocalFileHealth::Dirty,
             fleet_core::LocalFileHealth::MissingDestination,
+            fleet_core::LocalFileHealth::ExpectedStateUnavailable,
             fleet_core::LocalFileHealth::InventoryUnavailable,
         ] {
             let status = fleet_core::ProfileStatusState {

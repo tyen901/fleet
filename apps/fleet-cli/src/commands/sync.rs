@@ -20,7 +20,7 @@ pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Re
     println!("done");
     println!("local_health: {:?}", report.local.health);
     println!("repo_freshness: {:?}", report.repo.freshness);
-    println!("local_state: {:?}", report.local.verification);
+    println!("local_verification: {:?}", report.local.verification);
 
     Ok(())
 }

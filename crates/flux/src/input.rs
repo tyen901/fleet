@@ -21,10 +21,15 @@ pub fn swifty_profile_fingerprint() -> ProfileFingerprint {
 
 #[derive(Clone)]
 pub struct MaterializationInput {
-    pub manifest: ValidatedManifest,
-    pub store_index: SwiftyStoreIndex,
-    pub total_bytes: u64,
-    pub file_count: usize,
+    pub(crate) manifest: ValidatedManifest,
+    pub(crate) store_index: SwiftyStoreIndex,
+    pub(crate) revision: Option<String>,
+}
+
+impl MaterializationInput {
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -34,7 +39,6 @@ pub struct SwiftyStoreIndex {
 
 #[derive(Clone)]
 pub struct SwiftyStoreObject {
-    pub target_path: TargetPath,
     pub source_url: String,
     pub object_path: ObjectPath,
     pub parts: Vec<SwiftyStorePart>,
@@ -45,7 +49,6 @@ pub struct SwiftyStorePart {
     pub key: SegmentKey,
     pub validation: ValidationSpec,
     pub object_range: Range<u64>,
-    pub target_range: Range<u64>,
 }
 
 pub async fn load_swifty_materialization_input(
@@ -62,10 +65,14 @@ pub async fn load_swifty_materialization_input(
     let resolver = swifty_repo::DefaultModSrfResolver;
 
     let started_at = Instant::now();
-    let swifty_repo::RepoSyncResult { repo, mods, .. } =
-        swifty_repo::sync_repo_metadata(repo_url, &store, &resolver, downloads, sink.clone())
-            .await
-            .with_context(|| format!("sync swifty repo metadata {repo_url}"))?;
+    let swifty_repo::RepoSyncResult {
+        repo,
+        mods,
+        revision,
+        ..
+    } = swifty_repo::sync_repo_metadata(repo_url, &store, &resolver, downloads, sink.clone())
+        .await
+        .with_context(|| format!("sync swifty repo metadata {repo_url}"))?;
     debug!(
         elapsed_ms = started_at.elapsed().as_millis(),
         mods = mods.len(),
@@ -74,8 +81,10 @@ pub async fn load_swifty_materialization_input(
         "synced swifty repo metadata"
     );
 
-    swifty_repo_to_materialization_input(repo_url, &repo, &mods)
-        .context("transform swifty repo -> flux materialization input")
+    let mut input = swifty_repo_to_materialization_input(repo_url, &repo, &mods)
+        .context("transform swifty repo -> flux materialization input")?;
+    input.revision = revision;
+    Ok(input)
 }
 
 pub fn load_cached_swifty_materialization_input(
@@ -88,12 +97,15 @@ pub fn load_cached_swifty_materialization_input(
         return Ok(None);
     };
 
+    let revision = swifty_repo::repo_blob_revision(&cache);
     let mods = cache
         .mods
         .into_iter()
         .map(|(name, cached)| (name, cached.manifest))
         .collect::<BTreeMap<_, _>>();
-    swifty_repo_to_materialization_input(repo_url, &cache.repo, &mods).map(Some)
+    let mut input = swifty_repo_to_materialization_input(repo_url, &cache.repo, &mods)?;
+    input.revision = revision;
+    Ok(Some(input))
 }
 
 pub fn swifty_repo_to_materialization_input(
@@ -111,8 +123,6 @@ pub fn swifty_repo_to_materialization_input(
         profile,
     })];
     let mut store_index = SwiftyStoreIndex::default();
-    let mut total_bytes = 0_u64;
-    let mut file_count = 0_usize;
     let mut files_seen = BTreeSet::<String>::new();
 
     let ordered_mod_names = repo
@@ -162,13 +172,9 @@ pub fn swifty_repo_to_materialization_input(
                     key,
                     validation,
                     object_range: part.start..part.start + part.length,
-                    target_range,
                 });
             }
-            total_bytes = total_bytes.saturating_add(file.length);
-            file_count += 1;
             store_index.objects.push(SwiftyStoreObject {
-                target_path,
                 source_url,
                 object_path: ObjectPath::parse(&rel)?,
                 parts,
@@ -180,8 +186,7 @@ pub fn swifty_repo_to_materialization_input(
     Ok(MaterializationInput {
         manifest,
         store_index,
-        total_bytes,
-        file_count,
+        revision: None,
     })
 }
 
@@ -226,7 +231,7 @@ fn swifty_segment_key(raw_md5: &[u8; 16], len: u64) -> Result<SegmentKey> {
 }
 
 fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<String> {
-    let normalized = fleet_domain::normalize_rel_slashes(raw_path);
+    let normalized = raw_path.replace('\\', "/");
     if normalized.starts_with('/') {
         anyhow::bail!(
             "invalid swifty mod.srf file path (must be relative): mod={} path={}",
@@ -298,13 +303,10 @@ mod tests {
             swifty_repo_to_materialization_input("https://example.com/repo.json", &repo, &mods)
                 .expect("convert");
 
-        assert_eq!(input.file_count, 1);
-        assert_eq!(input.total_bytes, 5);
         assert_eq!(input.manifest.files[0].path.as_str(), "@mod/addons/a.pbo");
         assert_eq!(input.manifest.files[0].segments.len(), 1);
         assert_eq!(input.store_index.objects.len(), 1);
         let object = &input.store_index.objects[0];
-        assert_eq!(object.target_path.as_str(), "@mod/addons/a.pbo");
         assert_eq!(object.object_path.as_ref(), "@mod/addons/a.pbo");
         assert_eq!(object.source_url, "https://example.com/@mod/addons/a.pbo");
         assert_eq!(object.parts[0].object_range, 0..5);

@@ -222,6 +222,7 @@ pub struct RepoSyncResult {
     pub fetched_mods: Vec<String>,
     pub reused_mods: Vec<String>,
     pub freshness: RepoFreshness,
+    pub revision: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +230,7 @@ pub enum RepoFreshness {
     Unknown,
     UpToDate,
     UpdateAvailable,
+    Error,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,12 +526,14 @@ pub async fn sync_repo_metadata(
             .context("save cache")?;
     }
 
+    let revision = repo_blob_revision(&cache);
     Ok(RepoSyncResult {
         repo: remote_repo,
         mods: output_mods,
         fetched_mods,
         reused_mods,
         freshness,
+        revision,
     })
 }
 
@@ -544,7 +548,7 @@ pub async fn probe_repo_freshness(
     let repo_headers =
         build_conditional_headers(cache_opt.as_ref().and_then(|c| c.repo_http.as_ref()))?;
     let repo_id = repo_manifest_id(repo_url);
-    let repo_fetch = fetch_repo_json(
+    let repo_fetch = match fetch_repo_json(
         downloads,
         repo_id.as_str(),
         repo_url,
@@ -553,7 +557,17 @@ pub async fn probe_repo_freshness(
         repo_id.as_str(),
         "probe repo manifest",
     )
-    .await?;
+    .await
+    {
+        Ok(fetch) => fetch,
+        Err(_) => {
+            return Ok(RepoProbeResult {
+                local_revision,
+                remote_revision: None,
+                freshness: RepoFreshness::Error,
+            });
+        }
+    };
 
     match (cache_opt, repo_fetch) {
         (Some(cache), RepoJsonFetch::NotModified) => Ok(RepoProbeResult {
