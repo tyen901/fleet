@@ -136,7 +136,7 @@ pub fn ProfileView(id: String) -> Element {
         .as_ref()
         .map(|status| status.actions.sync_enabled)
         .unwrap_or(false);
-    let update_available = repo_update_available(status.as_ref(), check_running);
+    let update_available = repo_update_available(status.as_ref(), any_active);
     let sync_action_title = if update_available {
         "Update profile"
     } else {

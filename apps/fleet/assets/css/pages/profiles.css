@@ -97,13 +97,6 @@
   animation: spin 0.9s linear infinite;
 }
 
-.profile-row__detail {
-  color: var(--clr-text-muted);
-  font-family: var(--mono);
-  font-size: var(--text-caption);
-  white-space: nowrap;
-}
-
 .profile-row__actions {
   display: flex;
   align-items: center;

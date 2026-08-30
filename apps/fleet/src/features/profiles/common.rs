@@ -194,9 +194,9 @@ pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> 
 
 pub(crate) fn repo_update_available(
     status: Option<&fleet_core::ProfileStatusState>,
-    check_running: bool,
+    operation_active: bool,
 ) -> bool {
-    !check_running
+    !operation_active
         && status.is_some_and(|status| {
             status.repo_freshness == Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
         })
