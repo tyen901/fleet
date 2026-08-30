@@ -5,13 +5,12 @@ use tracing::info;
 
 use crate::app::router::Route;
 use crate::features::profiles::common::{
-    local_files_need_sync, profile_icon_src, repo_update_available, stage_phase_label,
-    start_profile_operation,
+    local_files_need_sync, profile_icon_src, repo_update_available, start_profile_operation,
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
-use crate::style::{Button, ButtonVariant, IconButton, InlineChoice, PageFooter, ProgressBar};
+use crate::style::{Button, ButtonVariant, IconButton, InlineChoice, PageFooter};
 use icondata::{BsGear, BsPlusLg, BsThreeDots};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -27,28 +26,17 @@ struct PendingStart {
 }
 
 #[derive(Clone, PartialEq)]
-struct RowSyncState {
-    phase: String,
-    percent: Option<u64>,
-    indeterminate: bool,
-    session_id: Option<u64>,
-    cancel_enabled: bool,
-}
-
-#[derive(Clone, PartialEq)]
 struct ProfileRowViewState {
     id: String,
     name: String,
     icon_src: Option<String>,
     status_label: Option<String>,
-    status_detail: Option<String>,
     start_disabled: bool,
     launch_loading: bool,
     join_loading: bool,
     check_running: bool,
     update_available: bool,
     update_enabled: bool,
-    sync: Option<RowSyncState>,
 }
 
 fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
@@ -56,34 +44,6 @@ fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
         kind,
         fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
     )
-}
-
-fn row_sync_state(
-    runtime: &fleet_core::ProfileRuntimeState,
-    progress: &fleet_core::ProfileOperationProgressState,
-) -> RowSyncState {
-    let percent = progress.stage.percent;
-    let phase = match progress.primary_metric.as_ref() {
-        Some(metric) => format!(
-            "{} · {}",
-            progress
-                .status_text
-                .as_deref()
-                .unwrap_or_else(|| stage_phase_label(progress.active_stage)),
-            metric.rendered
-        ),
-        None => progress
-            .status_text
-            .clone()
-            .unwrap_or_else(|| stage_phase_label(progress.active_stage).to_string()),
-    };
-    RowSyncState {
-        phase,
-        percent,
-        indeterminate: !progress.stage.determinate,
-        session_id: runtime.active.as_ref().map(|active| active.session_id),
-        cancel_enabled: runtime.status.actions.cancel_enabled,
-    }
 }
 
 fn profile_row_view_state(
@@ -101,28 +61,15 @@ fn profile_row_view_state(
         .map(|active| active.operation);
     let exclusive_active = active_operation.is_some_and(exclusive_operation);
 
-    let sync = runtime.filter(|_| exclusive_active).and_then(|runtime| {
-        runtime
-            .status
-            .progress
-            .as_ref()
-            .map(|progress| row_sync_state(runtime, progress))
-    });
-
     // A profile with nothing wrong shows no status at all.
     let status_label = status
         .map(|status| status.headline)
         .filter(|headline| headline.is_noteworthy())
         .map(|headline| headline.label().to_string());
-    let status_detail = sync.as_ref().map(|sync| match sync.percent {
-        Some(percent) => format!("{} · {percent}%", sync.phase),
-        None => sync.phase.clone(),
-    });
-
     let launch_loading = launching_profile_id == Some(profile_id);
     let join_loading = joining_profile_id == Some(profile_id);
     let check_running = active_operation == Some(fleet_core::OperationKind::Check);
-    let update_available = repo_update_available(status, check_running);
+    let update_available = repo_update_available(status, active_operation.is_some());
     let start_disabled = status.map(|status| !status.can_launch).unwrap_or(true)
         || exclusive_active
         || launch_loading
@@ -133,14 +80,12 @@ fn profile_row_view_state(
         name: profile_name.to_string(),
         icon_src: profile.and_then(|profile| profile_icon_src(&snapshot.settings, profile)),
         status_label,
-        status_detail,
         start_disabled,
         launch_loading,
         join_loading,
         check_running,
         update_available,
         update_enabled: status.is_some_and(|status| status.actions.sync_enabled),
-        sync,
     }
 }
 
@@ -283,12 +228,16 @@ pub fn Profiles() -> Element {
     let mut pending_start_for_sync = pending_start;
     let bridge_for_sync = bridge.clone();
     let toasts_for_sync = toasts.clone();
+    let nav_for_sync = nav;
     let on_start_sync = EventHandler::new(move |_: MouseEvent| {
         let pending = pending_start_for_sync();
         pending_start_for_sync.set(None);
         let Some(pending) = pending else {
             return;
         };
+        let _ = nav_for_sync.push(Route::ProfileView {
+            id: pending.profile_id.clone(),
+        });
         start_profile_operation(
             bridge_for_sync.clone(),
             toasts_for_sync.clone(),
@@ -418,6 +367,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
     let profile_id_for_launch = row.id.clone();
     let profile_id_for_join = row.id.clone();
     let profile_id_for_update = row.id.clone();
+    let nav_for_update = nav;
     let on_start = props.on_start;
 
     let launch_label = if row.launch_loading {
@@ -460,9 +410,6 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                             span { "{status_label}" }
                         }
                     }
-                    if let Some(detail) = row.status_detail.clone() {
-                        div { class: "profile-row__detail", "{detail}" }
-                    }
                 }
             }
             div { class: "profile-row__actions",
@@ -472,80 +419,59 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                     } else {
                         "profile-row__buttons"
                     },
-                    if let Some(sync) = row.sync.as_ref() {
+                    if row.update_available {
                         Button {
-                            variant: ButtonVariant::Secondary,
-                            disabled: !sync.cancel_enabled || sync.session_id.is_none(),
+                            variant: ButtonVariant::Primary,
+                            disabled: !row.update_enabled || props.confirm_open,
                             onclick: {
                                 let bridge = bridge.clone();
-                                let session_id = sync.session_id;
+                                let toasts = toasts.clone();
                                 move |_| {
-                                    if let Some(session_id) = session_id {
-                                        let _ = bridge.core().cancel_session(session_id);
-                                    }
+                                    let profile_id = profile_id_for_update.clone();
+                                    let _ = nav_for_update.push(Route::ProfileView {
+                                        id: profile_id.clone(),
+                                    });
+                                    start_profile_operation(
+                                        bridge.clone(),
+                                        toasts.clone(),
+                                        profile_id,
+                                        fleet_core::OperationKind::Sync,
+                                        "update",
+                                        "start_update_failed",
+                                        "Update failed",
+                                    );
                                 }
                             },
-                            "Cancel"
+                            "Update"
                         }
-                    } else {
-                        if row.update_available {
-                            Button {
-                                variant: ButtonVariant::Primary,
-                                disabled: !row.update_enabled || props.confirm_open,
-                                onclick: {
-                                    let bridge = bridge.clone();
-                                    let toasts = toasts.clone();
-                                    move |_| {
-                                        start_profile_operation(
-                                            bridge.clone(),
-                                            toasts.clone(),
-                                            profile_id_for_update.clone(),
-                                            fleet_core::OperationKind::Sync,
-                                            "update",
-                                            "start_update_failed",
-                                            "Update failed",
-                                        );
-                                    }
-                                },
-                                "Update"
-                            }
-                        }
-                        Button {
-                            variant: if row.update_available {
-                                ButtonVariant::Secondary
-                            } else {
-                                ButtonVariant::Primary
-                            },
-                            disabled: row.start_disabled || props.confirm_open,
-                            loading: row.launch_loading,
-                            onclick: move |_| {
-                                on_start.call((profile_id_for_launch.clone(), PendingStartKind::Launch));
-                            },
-                            "{launch_label}"
-                        }
-                        Button {
-                            variant: ButtonVariant::Secondary,
-                            disabled: row.start_disabled || props.confirm_open,
-                            loading: row.join_loading,
-                            onclick: move |_| {
-                                on_start.call((profile_id_for_join.clone(), PendingStartKind::Join));
-                            },
-                            "{join_label}"
-                        }
+                    }
+                    Button {
+                        variant: if row.update_available {
+                            ButtonVariant::Secondary
+                        } else {
+                            ButtonVariant::Primary
+                        },
+                        disabled: row.start_disabled || props.confirm_open,
+                        loading: row.launch_loading,
+                        onclick: move |_| {
+                            on_start.call((profile_id_for_launch.clone(), PendingStartKind::Launch));
+                        },
+                        "{launch_label}"
+                    }
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        disabled: row.start_disabled || props.confirm_open,
+                        loading: row.join_loading,
+                        onclick: move |_| {
+                            on_start.call((profile_id_for_join.clone(), PendingStartKind::Join));
+                        },
+                        "{join_label}"
                     }
                 }
                 IconButton {
                     icon: BsThreeDots,
                     label: "Profile details".to_string(),
                     onclick: open_profile,
-                }
-            }
-            if let Some(sync) = row.sync.as_ref() {
-                div { class: "profile-row__progress",
-                    ProgressBar {
-                        percent: sync.percent,
-                        indeterminate: sync.indeterminate,
-                    }
                 }
             }
             if props.confirm_open {
