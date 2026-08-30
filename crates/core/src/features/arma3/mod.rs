@@ -132,57 +132,17 @@ impl Core {
         &self,
         profile_id: &ProfileId,
     ) -> Result<InventoryCheckReport, ApiError> {
-        if let Some(report) = self.read_state(|state| {
-            state
-                .profile_runtime_by_id
-                .get(profile_id)
-                .and_then(|runtime| runtime.inventory_check.clone())
-        }) {
-            return Ok(report);
-        }
-
-        if self.profile_has_active_repo_check(profile_id) {
-            return self
-                .launch_inventory_check_from_cached_repo(profile_id)
-                .await;
-        }
-
-        let session_id = self
-            .start_operation(profile_id.clone(), OperationKind::CheckInventory)
-            .await?;
-
-        self.await_inventory_check(session_id).await
-    }
-
-    fn profile_has_active_repo_check(&self, profile_id: &ProfileId) -> bool {
-        self.read_state(|state| {
-            state
-                .profile_runtime_by_id
-                .get(profile_id)
-                .and_then(|runtime| runtime.active.as_ref())
-                .is_some_and(|active| active.operation == OperationKind::CheckRepo)
-        })
-    }
-
-    async fn launch_inventory_check_from_cached_repo(
-        &self,
-        profile_id: &ProfileId,
-    ) -> Result<InventoryCheckReport, ApiError> {
         let (profile, settings) = self.load_profile_and_settings(profile_id).await?;
         let state_root =
             profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
-        if !cached_repo_blob_exists(&state_root, &profile)? {
-            return Err(ApiError::new(
-                "profile_busy",
-                "profile already has an active operation",
-            ));
-        }
 
-        check_inventory::check_inventory(
+        check_inventory::check_inventory_with_mode(
             &profile,
             &settings,
             &state_root,
             OperationPublisher::silent(profile_id.clone(), OperationKind::CheckInventory),
+            fleet_inventory::InventoryReconcileMode::Incremental,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
     }
@@ -496,14 +456,6 @@ fn discover_mods_from_repo(profile: &Profile, root: &Path) -> Result<Vec<PathBuf
     Ok(out)
 }
 
-fn cached_repo_blob_exists(state_root: &Path, profile: &Profile) -> Result<bool, ApiError> {
-    let ProfileSourceKind::Http(repo_url) = profile
-        .validated_source_kind()
-        .map_err(|err| ApiError::new("invalid_profile", err.to_string()))?;
-    let cache_root = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    Ok(swifty_repo::repo_cache_blob_path(&cache_root, repo_url).is_file())
-}
-
 // Additional mod folders are appended to the mod list verbatim; the game
 // resolves them, Fleet does not.
 fn additional_mod_folders(profile: &Profile) -> Vec<PathBuf> {
@@ -686,8 +638,8 @@ impl CommandSpec {
 #[cfg(test)]
 mod tests {
     use super::{
-        additional_mod_folders, append_unique_paths, build_args, cached_repo_blob_exists,
-        resolve_launch_mode, select_join_server, validate_launch_compatibility, ActionKind,
+        additional_mod_folders, append_unique_paths, build_args, resolve_launch_mode,
+        select_join_server, validate_launch_compatibility, ActionKind,
     };
     use fleet_arma3::LaunchMethod;
     use fleet_domain::health::{InventoryCheckReport, LocalStateHealth};
@@ -710,32 +662,6 @@ mod tests {
             destination: "/tmp".into(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn cached_repo_blob_exists_only_when_profile_cache_file_is_present() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let state_root = temp.path().join("profile_state");
-        let profile = default_profile();
-
-        assert!(
-            !cached_repo_blob_exists(&state_root, &profile).expect("cache probe"),
-            "missing cache should not count as last known repo state"
-        );
-
-        let cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
-        std::fs::create_dir_all(&cache_root).expect("create cache dir");
-        let fleet_domain::ProfileSourceKind::Http(repo_url) = profile.source_kind();
-        std::fs::write(
-            swifty_repo::repo_cache_blob_path(&cache_root, repo_url),
-            b"{}",
-        )
-        .expect("write cache blob");
-
-        assert!(
-            cached_repo_blob_exists(&state_root, &profile).expect("cache probe"),
-            "present repo cache should count as last known repo state"
-        );
     }
 
     #[test]
@@ -883,9 +809,9 @@ mod tests {
             profile_id: "p1".to_string(),
             local_health: LocalStateHealth::MissingDestination,
             checked_at_unix_ms: 0,
-            expected_missing_in_inventory_count: 0,
-            inventory_unexpected_paths_count: 0,
-            unexpected_delete_paths: Vec::new(),
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+            unexpected_paths: Vec::new(),
         })
         .expect_err("must reject incompatible");
         assert_eq!(err.code, "launch_incompatible");

@@ -10,58 +10,55 @@ use rusqlite::{params, Connection};
 use crate::row::{finalized_to_local, local_file_from_rows, segment_hit_from_row, to_i64};
 use crate::schema::{map_sqlite_error, open_conn};
 use crate::{
-    InventoryAuditReport, InventoryDesiredFile, InventoryError, InventoryObservedFile,
-    InventoryRefreshPlan, InventoryRefreshReport, InventoryRefreshWrite,
+    InventoryAssessment, InventoryDesiredFile, InventoryError, InventoryObservedFile,
+    InventoryReconcileMode, InventoryReconcilePlan, InventoryReconcileReport,
+    InventoryReconcileWrite,
 };
 
-pub(crate) fn plan_refresh(
+pub(crate) fn plan_reconcile(
     db_path: &Path,
     observed: &[InventoryObservedFile],
     desired: &[InventoryDesiredFile],
-) -> Result<InventoryRefreshPlan, InventoryError> {
+    mode: InventoryReconcileMode,
+) -> Result<InventoryReconcilePlan, InventoryError> {
     let mut conn = open_conn(db_path)?;
     let tx = conn.transaction().map_err(map_sqlite_error)?;
     create_observed_and_desired(&tx)?;
     insert_observed_files(&tx, observed)?;
     insert_desired_files(&tx, desired)?;
     tx.execute_batch(
-        "CREATE TEMP TABLE kept_reusable_paths AS
+        "CREATE TEMP TABLE kept_reusable_paths (
+             rel_path TEXT PRIMARY KEY NOT NULL
+         ) WITHOUT ROWID;",
+    )
+    .map_err(map_sqlite_error)?;
+    tx.execute(
+        "INSERT INTO kept_reusable_paths(rel_path)
          SELECT o.rel_path
          FROM observed_files o
          JOIN managed_paths mp ON mp.rel_path = o.rel_path
          JOIN files f ON f.path_id = mp.id
-         WHERE f.len = o.len
+         WHERE ?1 = 0
+           AND f.len = o.len
            AND f.modified_secs = o.modified_secs
-           AND f.modified_nanos = o.modified_nanos;",
+           AND f.modified_nanos = o.modified_nanos",
+        params![matches!(mode, InventoryReconcileMode::Full) as i64],
     )
     .map_err(map_sqlite_error)?;
 
     let managed_paths = observed.iter().map(|item| item.path.clone()).collect();
-
-    let mut kept_reusable_facts = Vec::new();
-    let mut stmt = tx
-        .prepare(
-            "SELECT rel_path
-             FROM kept_reusable_paths
-             ORDER BY rel_path ASC",
-        )
-        .map_err(map_sqlite_error)?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(map_sqlite_error)?;
-    for row in rows {
-        kept_reusable_facts.push(target_path(row.map_err(map_sqlite_error)?)?);
-    }
-    drop(stmt);
 
     let mut scan_candidate_positions = Vec::new();
     let mut stmt = tx
         .prepare(
             "SELECT o.position
              FROM observed_files o
-             JOIN desired_files d ON d.rel_path = o.rel_path
+             LEFT JOIN desired_files d ON d.rel_path = o.rel_path
+             LEFT JOIN managed_paths mp ON mp.rel_path = o.rel_path
+             LEFT JOIN files f ON f.path_id = mp.id
              LEFT JOIN kept_reusable_paths k ON k.rel_path = o.rel_path
              WHERE k.rel_path IS NULL
+               AND (d.rel_path IS NOT NULL OR f.path_id IS NOT NULL)
              ORDER BY o.position ASC",
         )
         .map_err(map_sqlite_error)?;
@@ -76,80 +73,71 @@ pub(crate) fn plan_refresh(
     drop(stmt);
 
     let mut remove_reusable_facts = Vec::new();
-    let mut missing_stale_paths = Vec::new();
-    let mut modified_stale_paths = Vec::new();
     let mut stmt = tx
         .prepare(
-            "SELECT mp.rel_path,
-                    CASE WHEN o.rel_path IS NULL THEN 'missing' ELSE 'modified' END AS stale_kind
+            "SELECT mp.rel_path
              FROM files f
              JOIN managed_paths mp ON mp.id = f.path_id
-             LEFT JOIN kept_reusable_paths k ON k.rel_path = mp.rel_path
              LEFT JOIN observed_files o ON o.rel_path = mp.rel_path
-             WHERE k.rel_path IS NULL
+             WHERE o.rel_path IS NULL
              ORDER BY mp.rel_path ASC",
         )
         .map_err(map_sqlite_error)?;
     let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
+        .query_map([], |row| row.get::<_, String>(0))
         .map_err(map_sqlite_error)?;
     for row in rows {
-        let (rel_path, kind) = row.map_err(map_sqlite_error)?;
-        remove_reusable_facts.push(target_path(rel_path.clone())?);
-        match kind.as_str() {
-            "missing" => missing_stale_paths.push(rel_path),
-            "modified" => modified_stale_paths.push(rel_path),
-            _ => return Err(InventoryError::CorruptDatabase),
-        }
+        remove_reusable_facts.push(target_path(row.map_err(map_sqlite_error)?)?);
     }
     drop(stmt);
     tx.commit().map_err(map_sqlite_error)?;
 
-    Ok(InventoryRefreshPlan {
+    Ok(InventoryReconcilePlan {
         managed_paths,
-        kept_reusable_facts,
         scan_candidate_positions,
         remove_reusable_facts,
-        missing_stale_paths,
-        modified_stale_paths,
     })
 }
 
-pub(crate) fn audit_observed_files(
+pub(crate) fn assess_expected(
     db_path: &Path,
-    observed: &[InventoryObservedFile],
-) -> Result<InventoryAuditReport, InventoryError> {
+    desired: &[InventoryDesiredFile],
+) -> Result<InventoryAssessment, InventoryError> {
     let mut conn = open_conn(db_path)?;
     let tx = conn.transaction().map_err(map_sqlite_error)?;
-    create_observed_files(&tx)?;
-    insert_observed_files(&tx, observed)?;
-
-    let observed_paths = observed
-        .iter()
-        .map(|item| item.path.as_str().to_string())
-        .collect::<Vec<_>>();
-    let mut report = InventoryAuditReport {
-        observed_paths,
-        ..Default::default()
-    };
+    create_desired_files(&tx)?;
+    insert_desired_files(&tx, desired)?;
+    let mut report = InventoryAssessment::default();
 
     let mut stmt = tx
         .prepare(
             "WITH classified AS (
-                 SELECT mp.rel_path,
-                        CASE
-                          WHEN o.rel_path IS NULL THEN 'missing'
-                          WHEN f.len != o.len
-                            OR f.modified_secs != o.modified_secs
-                            OR f.modified_nanos != o.modified_nanos
-                          THEN 'modified'
-                          ELSE 'valid'
-                        END AS status
-                 FROM files f
-                 JOIN managed_paths mp ON mp.id = f.path_id
-                 LEFT JOIN observed_files o ON o.rel_path = mp.rel_path
+                 SELECT d.rel_path,
+                         CASE
+                           WHEN mp.id IS NULL THEN 'missing'
+                           WHEN f.path_id IS NULL OR f.len != d.size_bytes
+                           THEN 'modified'
+                           WHEN (SELECT count(*) FROM file_segments s WHERE s.path_id = f.path_id)
+                              != (SELECT count(*) FROM desired_segments ds WHERE ds.rel_path = d.rel_path)
+                           THEN 'modified'
+                           WHEN EXISTS (
+                               SELECT 1
+                               FROM desired_segments ds
+                               LEFT JOIN file_segments s
+                                 ON s.path_id = f.path_id
+                                AND s.segment_index = ds.segment_index
+                               WHERE ds.rel_path = d.rel_path
+                                 AND (s.path_id IS NULL
+                                   OR s.range_start != ds.range_start
+                                   OR s.range_len != ds.range_len
+                                   OR s.profile_fingerprint != ds.profile_fingerprint
+                                   OR s.identity_bytes != ds.identity_bytes)
+                           ) THEN 'modified'
+                           ELSE 'exact'
+                         END AS status
+                 FROM desired_files d
+                 LEFT JOIN managed_paths mp ON mp.rel_path = d.rel_path
+                 LEFT JOIN files f ON f.path_id = mp.id
              )
              SELECT rel_path, status
              FROM classified
@@ -164,21 +152,37 @@ pub(crate) fn audit_observed_files(
     for row in rows {
         let (rel_path, status) = row.map_err(map_sqlite_error)?;
         match status.as_str() {
-            "valid" => report.valid_reusable_paths.push(rel_path),
-            "missing" => report.missing_reusable_paths.push(rel_path),
-            "modified" => report.modified_reusable_paths.push(rel_path),
+            "exact" => report.exact_paths.push(rel_path),
+            "missing" => report.missing_paths.push(rel_path),
+            "modified" => report.modified_paths.push(rel_path),
             _ => return Err(InventoryError::CorruptDatabase),
         }
+    }
+    drop(stmt);
+    let mut stmt = tx
+        .prepare(
+            "SELECT mp.rel_path
+             FROM managed_paths mp
+             LEFT JOIN desired_files d ON d.rel_path = mp.rel_path
+             WHERE d.rel_path IS NULL
+             ORDER BY mp.rel_path",
+        )
+        .map_err(map_sqlite_error)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(map_sqlite_error)?;
+    for row in rows {
+        report.unexpected_paths.push(row.map_err(map_sqlite_error)?);
     }
     drop(stmt);
     tx.commit().map_err(map_sqlite_error)?;
     Ok(report)
 }
 
-pub(crate) fn apply_refresh(
+pub(crate) fn apply_reconcile(
     db_path: &Path,
-    write: InventoryRefreshWrite,
-) -> Result<InventoryRefreshReport, InventoryError> {
+    write: InventoryReconcileWrite,
+) -> Result<InventoryReconcileReport, InventoryError> {
     for fact in &write.upsert_facts {
         fact.validate_basic()
             .map_err(|error| InventoryError::Message(error.to_string()))?;
@@ -187,19 +191,19 @@ pub(crate) fn apply_refresh(
     let mut conn = open_conn(db_path)?;
     let tx = conn.transaction().map_err(map_sqlite_error)?;
     tx.execute_batch(
-        "CREATE TEMP TABLE refresh_managed_paths (
+        "CREATE TEMP TABLE reconcile_managed_paths (
              rel_path TEXT PRIMARY KEY NOT NULL
          ) WITHOUT ROWID;
-         CREATE TEMP TABLE refresh_remove_paths (
+         CREATE TEMP TABLE reconcile_remove_paths (
              rel_path TEXT PRIMARY KEY NOT NULL
          ) WITHOUT ROWID;
-         CREATE TEMP TABLE refresh_upsert_files (
+         CREATE TEMP TABLE reconcile_upsert_files (
              rel_path TEXT PRIMARY KEY NOT NULL,
              len INTEGER NOT NULL,
              modified_secs INTEGER NOT NULL,
              modified_nanos INTEGER NOT NULL
          ) WITHOUT ROWID;
-         CREATE TEMP TABLE refresh_upsert_segments (
+         CREATE TEMP TABLE reconcile_upsert_segments (
              rel_path TEXT NOT NULL,
              segment_index INTEGER NOT NULL,
              range_start INTEGER NOT NULL,
@@ -210,36 +214,36 @@ pub(crate) fn apply_refresh(
          ) WITHOUT ROWID;",
     )
     .map_err(map_sqlite_error)?;
-    insert_target_paths(&tx, "refresh_managed_paths", &write.managed_paths)?;
-    insert_target_paths(&tx, "refresh_remove_paths", &write.remove_reusable_facts)?;
+    insert_target_paths(&tx, "reconcile_managed_paths", &write.managed_paths)?;
+    insert_target_paths(&tx, "reconcile_remove_paths", &write.remove_reusable_facts)?;
     insert_local_file_facts(
         &tx,
-        "refresh_upsert_files",
-        "refresh_upsert_segments",
+        "reconcile_upsert_files",
+        "reconcile_upsert_segments",
         &write.upsert_facts,
     )
     .map_err(|error| InventoryError::Message(error.to_string()))?;
 
     tx.execute_batch(
         "DELETE FROM managed_paths
-         WHERE rel_path NOT IN (SELECT rel_path FROM refresh_managed_paths);
+         WHERE rel_path NOT IN (SELECT rel_path FROM reconcile_managed_paths);
 
          INSERT OR IGNORE INTO managed_paths(rel_path)
-         SELECT rel_path FROM refresh_managed_paths;
+         SELECT rel_path FROM reconcile_managed_paths;
 
          DELETE FROM files
          WHERE path_id IN (
              SELECT mp.id
              FROM managed_paths mp
-             JOIN refresh_remove_paths r ON r.rel_path = mp.rel_path
+             JOIN reconcile_remove_paths r ON r.rel_path = mp.rel_path
          );
 
          INSERT OR IGNORE INTO managed_paths(rel_path)
-         SELECT rel_path FROM refresh_upsert_files;
+         SELECT rel_path FROM reconcile_upsert_files;
 
          INSERT INTO files(path_id, len, modified_secs, modified_nanos)
          SELECT mp.id, u.len, u.modified_secs, u.modified_nanos
-         FROM refresh_upsert_files u
+         FROM reconcile_upsert_files u
          JOIN managed_paths mp ON mp.rel_path = u.rel_path
          WHERE true
          ON CONFLICT(path_id) DO UPDATE SET
@@ -251,7 +255,7 @@ pub(crate) fn apply_refresh(
          WHERE path_id IN (
              SELECT mp.id
              FROM managed_paths mp
-             JOIN refresh_upsert_files u ON u.rel_path = mp.rel_path
+             JOIN reconcile_upsert_files u ON u.rel_path = mp.rel_path
          );
 
          INSERT INTO file_segments(
@@ -268,12 +272,12 @@ pub(crate) fn apply_refresh(
                 s.range_len,
                 s.profile_fingerprint,
                 s.identity_bytes
-         FROM refresh_upsert_segments s
+         FROM reconcile_upsert_segments s
          JOIN managed_paths mp ON mp.rel_path = s.rel_path;",
     )
     .map_err(map_sqlite_error)?;
     tx.commit().map_err(map_sqlite_error)?;
-    Ok(InventoryRefreshReport::from_write(&write))
+    Ok(InventoryReconcileReport::from_write(&write))
 }
 
 pub(crate) fn apply_terminal_batch(
@@ -689,21 +693,8 @@ fn insert_requested_paths(conn: &Connection, paths: &[TargetPath]) -> Result<(),
 }
 
 fn create_observed_and_desired(conn: &Connection) -> Result<(), InventoryError> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE observed_files (
-             position INTEGER PRIMARY KEY NOT NULL,
-             rel_path TEXT NOT NULL,
-             len INTEGER NOT NULL,
-             modified_secs INTEGER NOT NULL,
-             modified_nanos INTEGER NOT NULL
-         ) WITHOUT ROWID;
-
-         CREATE TEMP TABLE desired_files (
-             rel_path TEXT PRIMARY KEY NOT NULL,
-             size_bytes INTEGER NOT NULL
-         ) WITHOUT ROWID;",
-    )
-    .map_err(map_sqlite_error)
+    create_observed_files(conn)?;
+    create_desired_files(conn)
 }
 
 fn create_observed_files(conn: &Connection) -> Result<(), InventoryError> {
@@ -714,6 +705,26 @@ fn create_observed_files(conn: &Connection) -> Result<(), InventoryError> {
              len INTEGER NOT NULL,
              modified_secs INTEGER NOT NULL,
              modified_nanos INTEGER NOT NULL
+         ) WITHOUT ROWID;",
+    )
+    .map_err(map_sqlite_error)
+}
+
+fn create_desired_files(conn: &Connection) -> Result<(), InventoryError> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE desired_files (
+             rel_path TEXT NOT NULL,
+             size_bytes INTEGER NOT NULL,
+             PRIMARY KEY (rel_path)
+         ) WITHOUT ROWID;
+         CREATE TEMP TABLE desired_segments (
+             rel_path TEXT NOT NULL,
+             segment_index INTEGER NOT NULL,
+             range_start INTEGER NOT NULL,
+             range_len INTEGER NOT NULL,
+             profile_fingerprint BLOB NOT NULL,
+             identity_bytes BLOB NOT NULL,
+             PRIMARY KEY (rel_path, segment_index)
          ) WITHOUT ROWID;",
     )
     .map_err(map_sqlite_error)
@@ -734,7 +745,7 @@ fn insert_observed_files(
         stmt.execute(params![
             position as i64,
             item.path.as_str(),
-            to_i64(item.len, "len")?,
+            to_i64(item.freshness.len, "len")?,
             item.freshness.modified_secs,
             i64::from(item.freshness.modified_nanos),
         ])
@@ -750,12 +761,32 @@ fn insert_desired_files(
     let mut stmt = conn
         .prepare_cached("INSERT INTO desired_files(rel_path, size_bytes) VALUES (?1, ?2)")
         .map_err(map_sqlite_error)?;
+    let mut segment_stmt = conn
+        .prepare_cached(
+            "INSERT INTO desired_segments(
+                rel_path, segment_index, range_start, range_len,
+                profile_fingerprint, identity_bytes
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .map_err(map_sqlite_error)?;
     for file in desired {
         stmt.execute(params![
             file.path.as_str(),
             to_i64(file.size_bytes, "size_bytes")?,
         ])
         .map_err(map_sqlite_error)?;
+        for (index, segment) in file.segments.iter().enumerate() {
+            segment_stmt
+                .execute(params![
+                    file.path.as_str(),
+                    index as i64,
+                    to_i64(segment.range.start, "range_start")?,
+                    to_i64(segment.range.end - segment.range.start, "range_len")?,
+                    segment.key.profile.bytes().as_slice(),
+                    segment.key.identity.bytes(),
+                ])
+                .map_err(map_sqlite_error)?;
+        }
     }
     Ok(())
 }
@@ -801,16 +832,11 @@ fn insert_local_file_facts(
     let mut segment_stmt = conn
         .prepare_cached(&format!(
             "INSERT INTO {segment_table}(
-                rel_path,
-                segment_index,
-                range_start,
-                range_len,
-                profile_fingerprint,
-                identity_bytes
+                rel_path, segment_index, range_start, range_len,
+                profile_fingerprint, identity_bytes
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
         ))
         .map_err(sql_update_error)?;
-
     for fact in facts {
         file_stmt
             .execute(params![

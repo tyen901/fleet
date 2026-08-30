@@ -22,7 +22,7 @@ pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Re
     println!("repo_freshness: {:?}", report.repo.freshness);
     println!(
         "remaining_unexpected_files: {}",
-        report.inventory.unexpected_delete_paths.len()
+        report.inventory.unexpected_paths.len()
     );
 
     Ok(())

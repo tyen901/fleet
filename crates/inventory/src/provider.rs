@@ -20,16 +20,6 @@ impl FleetInventoryProvider {
             inventory: Arc::new(MaterializationInventory::open(db_path)?),
         })
     }
-
-    pub fn from_inventory(inventory: MaterializationInventory) -> Self {
-        Self {
-            inventory: Arc::new(inventory),
-        }
-    }
-
-    pub fn inventory(&self) -> &MaterializationInventory {
-        &self.inventory
-    }
 }
 
 impl LocalInventory for FleetInventoryProvider {

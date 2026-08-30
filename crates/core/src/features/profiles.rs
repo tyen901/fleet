@@ -640,9 +640,9 @@ pub(crate) fn seed_missing_destination_inventory_hint(
         profile_id: profile.id.clone(),
         local_health: LocalStateHealth::MissingDestination,
         checked_at_unix_ms: now_ms,
-        expected_missing_in_inventory_count: 0,
-        inventory_unexpected_paths_count: 0,
-        unexpected_delete_paths: Vec::new(),
+        missing_paths_count: 0,
+        modified_paths_count: 0,
+        unexpected_paths: Vec::new(),
     });
 }
 
@@ -897,9 +897,9 @@ mod tests {
                     profile_id: profile_id.clone(),
                     local_health: LocalStateHealth::ProbeFailed,
                     checked_at_unix_ms: 10,
-                    expected_missing_in_inventory_count: 0,
-                    inventory_unexpected_paths_count: 0,
-                    unexpected_delete_paths: Vec::new(),
+                    missing_paths_count: 0,
+                    modified_paths_count: 0,
+                    unexpected_paths: Vec::new(),
                 }),
                 active: Some(crate::state::ActiveOperationState::new(
                     7,

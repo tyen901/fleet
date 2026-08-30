@@ -43,12 +43,9 @@ pub struct InventoryCheckReport {
     pub profile_id: ProfileId,
     pub local_health: LocalStateHealth,
     pub checked_at_unix_ms: u64,
-    #[serde(default)]
-    pub expected_missing_in_inventory_count: u64,
-    #[serde(default)]
-    pub inventory_unexpected_paths_count: u64,
-    #[serde(default)]
-    pub unexpected_delete_paths: Vec<String>,
+    pub missing_paths_count: u64,
+    pub modified_paths_count: u64,
+    pub unexpected_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
