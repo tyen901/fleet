@@ -1,298 +1,143 @@
-use crate::operations::local_state::{self, LocalInventorySnapshot};
-use crate::operations::support::locking;
+use crate::operations::local_state::{self, LocalContentSnapshot, LocalReconcileJob};
 use crate::operations::{
     OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressScope,
     ProgressUnit,
 };
 use fleet_domain::health::InventoryCheckReport;
 use fleet_domain::{AppSettings, LocalStateHealth, Profile, ProfileSourceKind};
-use fleet_inventory::{InventoryError, MaterializationInventory};
-use std::collections::BTreeSet;
+use fleet_inventory::{InventoryError, InventoryReconcileMode, MaterializationInventory};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn check_inventory(
     profile: &Profile,
     settings: &AppSettings,
     state_root: &Path,
     publisher: OperationPublisher,
+    cancel: CancellationToken,
+) -> Result<InventoryCheckReport, crate::ApiError> {
+    check_inventory_with_mode(
+        profile,
+        settings,
+        state_root,
+        publisher,
+        InventoryReconcileMode::Full,
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn check_inventory_with_mode(
+    profile: &Profile,
+    settings: &AppSettings,
+    state_root: &Path,
+    publisher: OperationPublisher,
+    mode: InventoryReconcileMode,
+    cancel: CancellationToken,
 ) -> Result<InventoryCheckReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
-    let dest_path = match profile
-        .dest_path()
-        .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))
-    {
+    let dest = match profile.dest_path() {
         Ok(path) => path,
         Err(_) => {
-            publisher.stage(OperationStage::Finalizing);
             return Ok(invalid_report(
                 &profile.id,
                 LocalStateHealth::InvalidProfile,
-            ));
+            ))
         }
     };
-    if profile.validated_source_kind().is_err() {
+    let ProfileSourceKind::Http(repo_url) = profile
+        .validated_source_kind()
+        .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
+    let paths = fleet_domain::FleetPaths::for_profile(state_root.to_path_buf(), &profile.id);
+    let _lock = crate::operations::support::locking::acquire_lock(paths.profile.inventory.lock)
+        .await
+        .map_err(|error| crate::ApiError::new("inventory_locked", error.to_string()))?;
+
+    publisher.stage(OperationStage::LoadingExpectedState);
+    let Some(input) =
+        fleet_flux::load_cached_swifty_materialization_input(repo_url, &paths.profile.repo_cache)
+            .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
+    else {
         publisher.stage(OperationStage::Finalizing);
         return Ok(invalid_report(
             &profile.id,
-            LocalStateHealth::InvalidProfile,
+            LocalStateHealth::LocalStateMissing,
         ));
-    }
-    let paths = fleet_domain::FleetPaths::for_profile(state_root.to_path_buf(), &profile.id);
-    match locking::is_locked(&paths.profile.inventory.lock).await {
-        Ok(true) => {
-            publisher.stage(OperationStage::Finalizing);
-            return Ok(invalid_report(&profile.id, LocalStateHealth::Blocked));
-        }
-        Ok(false) => {}
-        Err(_) => {
-            publisher.stage(OperationStage::Finalizing);
-            return Ok(invalid_report(&profile.id, LocalStateHealth::ProbeFailed));
-        }
-    }
-
-    publisher.stage(OperationStage::LoadingExpectedState);
-    let inventory = match MaterializationInventory::open(&paths.profile.inventory.db) {
-        Ok(inventory) => inventory,
-        Err(err) if err.is_corrupted_database() => {
-            publisher.stage(OperationStage::Finalizing);
-            return Ok(invalid_report(
-                &profile.id,
-                LocalStateHealth::InventoryCorrupt,
-            ));
-        }
-        Err(err) => return Err(crate::ApiError::new("inventory", err.to_string())),
     };
-
-    let snapshot =
-        match scan_and_verify_snapshot(&inventory, profile, settings, &dest_path, &publisher).await
-        {
-            Ok(snapshot) => snapshot,
-            Err(err) if err.code == "inventory_corrupt" => {
-                publisher.stage(OperationStage::Finalizing);
-                return Ok(invalid_report(
-                    &profile.id,
-                    LocalStateHealth::InventoryCorrupt,
-                ));
-            }
-            Err(err) => return Err(err),
-        };
-    let expected_paths = load_cached_expected_paths(profile, &paths.profile.repo_cache);
-    publisher.stage(OperationStage::Finalizing);
-    Ok(build_inventory_check_report(
-        &snapshot,
-        manifest_cleanup_assessment(&snapshot, expected_paths.as_ref()),
-    ))
-}
-
-async fn scan_and_verify_snapshot(
-    inventory: &MaterializationInventory,
-    profile: &Profile,
-    settings: &AppSettings,
-    dest_path: &Path,
-    publisher: &OperationPublisher,
-) -> Result<LocalInventorySnapshot, crate::ApiError> {
-    if !dest_path.exists() {
-        return Ok(LocalInventorySnapshot {
-            assessment: local_state::LocalStateAssessment {
-                profile_id: profile.id.clone(),
-                health: LocalStateHealth::MissingDestination,
-                checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-            },
-            observed_paths: Vec::new(),
-            reusable_paths: Vec::new(),
-            missing_reusable_paths: Vec::new(),
-            modified_reusable_paths: Vec::new(),
-        });
-    }
-
-    publisher.stage(OperationStage::ScanningDisk);
-    let (scan_tx, mut scan_rx) = mpsc::unbounded_channel();
-    let scan_inventory = inventory.clone();
-    let scan_dest = dest_path.to_path_buf();
-    let scan_ignore = settings.sync.local_state_ignore_rules.clone();
-    let scan_handle = tokio::task::spawn_blocking(move || {
-        local_state::scan_disk_state(
-            &scan_inventory,
-            &scan_dest,
-            &scan_ignore,
-            Some(Arc::new(move |progress| {
-                let _ = scan_tx.send(progress);
-            })),
-        )
-    });
-    while !scan_handle.is_finished() {
-        if let Some(progress) = scan_rx.recv().await {
-            emit_scan_progress(publisher, progress);
-        } else {
-            break;
-        }
-    }
-    let disk_state = scan_handle
-        .await
-        .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?
-        .map_err(map_inventory_scan_error)?;
-    while let Ok(progress) = scan_rx.try_recv() {
-        emit_scan_progress(publisher, progress);
-    }
-
-    publisher.stage(OperationStage::VerifyingInventory);
-    let (verify_tx, mut verify_rx) = mpsc::unbounded_channel();
-    let verify_inventory = inventory.clone();
-    let verify_handle = tokio::task::spawn_blocking(move || {
-        local_state::verify_local_file_facts(
-            &verify_inventory,
-            disk_state,
-            Some(Arc::new(move |progress| {
-                let _ = verify_tx.send(progress);
-            })),
-        )
-    });
-    while !verify_handle.is_finished() {
-        if let Some(progress) = verify_rx.recv().await {
-            emit_verify_progress(publisher, progress);
-        } else {
-            break;
-        }
-    }
-    let audit = verify_handle
-        .await
-        .map_err(|err| crate::ApiError::new("inventory", err.to_string()))?
-        .map_err(map_inventory_scan_error)?;
-    while let Ok(progress) = verify_rx.try_recv() {
-        emit_verify_progress(publisher, progress);
-    }
-
-    let health =
-        if audit.missing_reusable_paths.is_empty() && audit.modified_reusable_paths.is_empty() {
-            LocalStateHealth::Ready
-        } else {
-            LocalStateHealth::LocalDrift
-        };
-
-    Ok(LocalInventorySnapshot {
-        assessment: local_state::LocalStateAssessment {
+    let inventory = MaterializationInventory::open(&paths.profile.inventory.db)
+        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
+    let snapshot = run_reconcile(
+        LocalReconcileJob {
+            inventory,
             profile_id: profile.id.clone(),
-            health,
-            checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+            dest,
+            manifest: input.manifest,
+            ignore_rules: settings.sync.local_state_ignore_rules.clone(),
+            mode,
+            cancel,
         },
-        observed_paths: audit.observed_paths,
-        reusable_paths: audit.valid_reusable_paths,
-        missing_reusable_paths: audit.missing_reusable_paths,
-        modified_reusable_paths: audit.modified_reusable_paths,
-    })
+        publisher.clone(),
+    )
+    .await?;
+    publisher.stage(OperationStage::Finalizing);
+    Ok(report_from_snapshot(&snapshot))
 }
 
-fn map_inventory_scan_error(err: InventoryError) -> crate::ApiError {
-    if err.is_corrupted_database() {
-        crate::ApiError::new("inventory_corrupt", err.to_string())
-    } else {
-        crate::ApiError::new("inventory", err.to_string())
-    }
+pub(crate) async fn run_reconcile(
+    job: LocalReconcileJob,
+    publisher: OperationPublisher,
+) -> Result<LocalContentSnapshot, crate::ApiError> {
+    publisher.stage(OperationStage::ScanningDisk);
+    local_state::reconcile_inventory(
+        job,
+        Some(Arc::new({
+            let publisher = publisher.clone();
+            move |event| emit_progress(&publisher, event)
+        })),
+    )
+    .await
+    .map_err(map_inventory_error)
 }
 
-pub(crate) fn load_cached_expected_paths(
-    profile: &Profile,
-    repo_cache_dir: &Path,
-) -> Option<BTreeSet<String>> {
-    let ProfileSourceKind::Http(repo_url) = profile.validated_source_kind().ok()?;
-    match fleet_flux::load_cached_swifty_materialization_input(repo_url, repo_cache_dir) {
-        Ok(Some(input)) => Some(fleet_flux::expected_file_paths(&input)),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ManifestCleanupAssessment {
-    pub(crate) expected_missing_in_inventory_count: u64,
-    pub(crate) cleanup_candidates: Vec<String>,
-}
-
-pub(crate) fn manifest_cleanup_assessment(
-    snapshot: &LocalInventorySnapshot,
-    expected_paths: Option<&BTreeSet<String>>,
-) -> ManifestCleanupAssessment {
-    let Some(expected_paths) = expected_paths else {
-        return ManifestCleanupAssessment::default();
-    };
-    let inventory_paths = snapshot
-        .reusable_paths
-        .iter()
-        .chain(snapshot.missing_reusable_paths.iter())
-        .chain(snapshot.modified_reusable_paths.iter())
-        .map(|path| fleet_domain::normalize_rel_slashes(path))
-        .collect::<BTreeSet<_>>();
-    let inventory_present_paths = snapshot
-        .reusable_paths
-        .iter()
-        .chain(snapshot.modified_reusable_paths.iter())
-        .map(|path| fleet_domain::normalize_rel_slashes(path))
-        .collect::<BTreeSet<_>>();
-    let expected_missing = expected_paths
-        .iter()
-        .filter(|path| !inventory_paths.contains(*path))
-        .count() as u64;
-    let mut cleanup_candidates = snapshot
-        .observed_paths
-        .iter()
-        .filter_map(|path| {
-            let normalized = fleet_domain::normalize_rel_slashes(path);
-            (!expected_paths.contains(&normalized)).then_some(path.clone())
-        })
-        .collect::<Vec<_>>();
-    cleanup_candidates.extend(
-        snapshot
-            .reusable_paths
-            .iter()
-            .chain(snapshot.modified_reusable_paths.iter())
-            .filter(|path| {
-                let normalized = fleet_domain::normalize_rel_slashes(path);
-                inventory_present_paths.contains(&normalized)
-                    && !expected_paths.contains(&normalized)
-            })
-            .cloned(),
-    );
-    cleanup_candidates.sort();
-    cleanup_candidates.dedup();
-    ManifestCleanupAssessment {
-        expected_missing_in_inventory_count: expected_missing,
-        cleanup_candidates,
-    }
-}
-
-fn emit_scan_progress(publisher: &OperationPublisher, progress: local_state::WalkProgress) {
+fn emit_progress(publisher: &OperationPublisher, progress: local_state::ReconcileProgress) {
     match progress {
-        local_state::WalkProgress::Enumerating { files_matched, .. } => {
+        local_state::ReconcileProgress::Walking { files, bytes } => {
             publisher.progress(OperationProgressEvent {
                 stage: OperationStage::ScanningDisk,
                 scope: ProgressScope::InventoryEnumerate,
-                status_text: Some("Enumerating files".to_string()),
+                status_text: Some("Reconciling local files".to_string()),
                 primary: ProgressMetric {
                     label: Some("Files".to_string()),
-                    done: Some(files_matched),
-                    total: None,
+                    done: Some(files),
+                    total: Some(files),
                     unit: ProgressUnit::Files,
                 },
-                secondary: None,
+                secondary: Some(ProgressMetric {
+                    label: Some("Bytes".to_string()),
+                    done: Some(bytes),
+                    total: Some(bytes),
+                    unit: ProgressUnit::Bytes,
+                }),
                 throughput_bytes_per_sec: None,
                 eta_seconds: None,
             });
         }
-        local_state::WalkProgress::Metadata {
+        local_state::ReconcileProgress::Scanning {
             files_done,
             files_total,
             bytes_done,
             bytes_total,
         } => {
+            publisher.stage(OperationStage::VerifyingInventory);
             publisher.progress(OperationProgressEvent {
-                stage: OperationStage::ScanningDisk,
-                scope: ProgressScope::InventoryMetadata,
-                status_text: Some("Reading file metadata".to_string()),
+                stage: OperationStage::VerifyingInventory,
+                scope: ProgressScope::InventoryVerify,
+                status_text: Some("Validating local content".to_string()),
                 primary: ProgressMetric {
                     label: Some("Bytes".to_string()),
                     done: Some(bytes_done),
-                    total: bytes_total,
+                    total: Some(bytes_total),
                     unit: ProgressUnit::Bytes,
                 },
                 secondary: Some(ProgressMetric {
@@ -305,49 +150,40 @@ fn emit_scan_progress(publisher: &OperationPublisher, progress: local_state::Wal
                 eta_seconds: None,
             });
         }
+        local_state::ReconcileProgress::Finalizing => {}
     }
 }
 
-fn emit_verify_progress(publisher: &OperationPublisher, progress: local_state::VerifyProgress) {
-    publisher.progress(OperationProgressEvent {
-        stage: OperationStage::VerifyingInventory,
-        scope: ProgressScope::InventoryVerify,
-        status_text: Some("Verifying managed files".to_string()),
-        primary: ProgressMetric {
-            label: Some("Reusable files".to_string()),
-            done: Some(progress.files_done),
-            total: Some(progress.files_total),
-            unit: ProgressUnit::Files,
-        },
-        secondary: Some(ProgressMetric {
-            label: Some("Missing + modified".to_string()),
-            done: Some(progress.missing_count + progress.modified_count),
-            total: Some(progress.files_total),
-            unit: ProgressUnit::Files,
-        }),
-        throughput_bytes_per_sec: None,
-        eta_seconds: None,
-    });
-}
-
-pub(crate) fn build_inventory_check_report(
-    snapshot: &LocalInventorySnapshot,
-    cleanup: ManifestCleanupAssessment,
-) -> InventoryCheckReport {
-    let mut local_health = snapshot.assessment.health.clone();
-    if !preserve_assessed_local_health(&local_health)
-        && (cleanup.expected_missing_in_inventory_count > 0
-            || !cleanup.cleanup_candidates.is_empty())
-    {
-        local_health = LocalStateHealth::LocalDrift;
-    }
+pub(crate) fn report_from_snapshot(snapshot: &LocalContentSnapshot) -> InventoryCheckReport {
     InventoryCheckReport {
-        profile_id: snapshot.assessment.profile_id.clone(),
+        profile_id: snapshot.profile_id.clone(),
+        local_health: snapshot.health.clone(),
+        checked_at_unix_ms: snapshot.checked_at_unix_ms,
+        missing_paths_count: snapshot.missing_paths.len() as u64,
+        modified_paths_count: snapshot.modified_paths.len() as u64,
+        unexpected_paths: snapshot.unexpected_paths.clone(),
+    }
+}
+
+pub(crate) fn report_from_assessment(
+    profile_id: &str,
+    assessment: fleet_inventory::InventoryAssessment,
+) -> InventoryCheckReport {
+    let local_health = if assessment.missing_paths.is_empty()
+        && assessment.modified_paths.is_empty()
+        && assessment.unexpected_paths.is_empty()
+    {
+        LocalStateHealth::Ready
+    } else {
+        LocalStateHealth::LocalDrift
+    };
+    InventoryCheckReport {
+        profile_id: profile_id.to_string(),
         local_health,
-        checked_at_unix_ms: snapshot.assessment.checked_at_unix_ms,
-        expected_missing_in_inventory_count: cleanup.expected_missing_in_inventory_count,
-        inventory_unexpected_paths_count: cleanup.cleanup_candidates.len() as u64,
-        unexpected_delete_paths: cleanup.cleanup_candidates,
+        checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
+        missing_paths_count: assessment.missing_paths.len() as u64,
+        modified_paths_count: assessment.modified_paths.len() as u64,
+        unexpected_paths: assessment.unexpected_paths,
     }
 }
 
@@ -356,20 +192,15 @@ fn invalid_report(profile_id: &str, local_health: LocalStateHealth) -> Inventory
         profile_id: profile_id.to_string(),
         local_health,
         checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
-        expected_missing_in_inventory_count: 0,
-        inventory_unexpected_paths_count: 0,
-        unexpected_delete_paths: Vec::new(),
+        missing_paths_count: 0,
+        modified_paths_count: 0,
+        unexpected_paths: Vec::new(),
     }
 }
 
-fn preserve_assessed_local_health(local_health: &LocalStateHealth) -> bool {
-    matches!(
-        local_health,
-        LocalStateHealth::Blocked
-            | LocalStateHealth::InvalidProfile
-            | LocalStateHealth::ProbeFailed
-            | LocalStateHealth::InventoryCorrupt
-            | LocalStateHealth::LocalStateMissing
-            | LocalStateHealth::MissingDestination
-    )
+fn map_inventory_error(error: InventoryError) -> crate::ApiError {
+    match error {
+        InventoryError::Canceled => crate::ApiError::new("canceled", "canceled"),
+        error => crate::ApiError::new("inventory", error.to_string()),
+    }
 }

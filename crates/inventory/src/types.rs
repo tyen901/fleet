@@ -1,7 +1,13 @@
-use flux::{FreshnessProof, LocalFileFact, TargetPath};
+use flux::{FreshnessProof, LocalFileFact, LocalFileSegmentFact, TargetPath};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InventoryReconcileMode {
+    Incremental,
+    Full,
+}
 
 #[derive(Clone, Debug, Default)]
-pub struct InventoryRefreshWrite {
+pub struct InventoryReconcileWrite {
     pub managed_paths: Vec<TargetPath>,
     pub upsert_facts: Vec<LocalFileFact>,
     pub remove_reusable_facts: Vec<TargetPath>,
@@ -10,7 +16,6 @@ pub struct InventoryRefreshWrite {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InventoryObservedFile {
     pub path: TargetPath,
-    pub len: u64,
     pub freshness: FreshnessProof,
 }
 
@@ -18,36 +23,34 @@ pub struct InventoryObservedFile {
 pub struct InventoryDesiredFile {
     pub path: TargetPath,
     pub size_bytes: u64,
+    pub segments: Vec<LocalFileSegmentFact>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InventoryRefreshPlan {
+pub struct InventoryReconcilePlan {
     pub managed_paths: Vec<TargetPath>,
-    pub kept_reusable_facts: Vec<TargetPath>,
     pub scan_candidate_positions: Vec<usize>,
     pub remove_reusable_facts: Vec<TargetPath>,
-    pub missing_stale_paths: Vec<String>,
-    pub modified_stale_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InventoryAuditReport {
-    pub observed_paths: Vec<String>,
-    pub valid_reusable_paths: Vec<String>,
-    pub missing_reusable_paths: Vec<String>,
-    pub modified_reusable_paths: Vec<String>,
+pub struct InventoryAssessment {
+    pub exact_paths: Vec<String>,
+    pub missing_paths: Vec<String>,
+    pub modified_paths: Vec<String>,
+    pub unexpected_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct InventoryRefreshReport {
+pub struct InventoryReconcileReport {
     pub managed_paths_written: u64,
     pub reusable_facts_removed: u64,
     pub reusable_facts_upserted: u64,
     pub reusable_segments_upserted: u64,
 }
 
-impl InventoryRefreshReport {
-    pub fn from_write(write: &InventoryRefreshWrite) -> Self {
+impl InventoryReconcileReport {
+    pub fn from_write(write: &InventoryReconcileWrite) -> Self {
         Self {
             managed_paths_written: write.managed_paths.len() as u64,
             reusable_facts_removed: write.remove_reusable_facts.len() as u64,
@@ -63,18 +66,14 @@ impl InventoryRefreshReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InventoryError {
-    #[error("Local inventory database is corrupted. Run Sync to repair inventory.")]
+    #[error("local inventory database is corrupt and could not be rebuilt")]
     CorruptDatabase,
     #[error("local inventory lock is currently held by another running operation")]
     Locked,
+    #[error("canceled")]
+    Canceled,
     #[error("{0}")]
     Message(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-impl InventoryError {
-    pub fn is_corrupted_database(&self) -> bool {
-        matches!(self, Self::CorruptDatabase)
-    }
 }

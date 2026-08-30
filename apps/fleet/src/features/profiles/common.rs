@@ -189,7 +189,6 @@ pub(crate) fn inventory_out_of_sync(status: &fleet_core::ProfileStatusState) -> 
         fleet_core::LocalStateHealth::LocalDrift
             | fleet_core::LocalStateHealth::MissingDestination
             | fleet_core::LocalStateHealth::LocalStateMissing
-            | fleet_core::LocalStateHealth::InventoryCorrupt
     )
 }
 

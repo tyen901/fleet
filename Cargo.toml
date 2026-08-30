@@ -91,7 +91,6 @@ sha1 = "0.10.6"  # Swifty repo checksum
 sha2 = "0.10.9"  # SHA-256 for InstallationId
 
 # Concurrency
-rayon             = "1.11.0"
 crossbeam-channel = "0.5.15"
 
 # Filesystem / OS

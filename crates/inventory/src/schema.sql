@@ -1,5 +1,5 @@
 PRAGMA foreign_keys = ON;
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 
 CREATE TABLE IF NOT EXISTS managed_paths (
     id INTEGER PRIMARY KEY NOT NULL,

@@ -134,6 +134,7 @@ impl OperationRuntime {
                     &settings,
                     &state_root,
                     publisher.clone(),
+                    cancel.clone(),
                 )
                 .await
                 .map(OperationOutput::CheckInventory),
@@ -142,6 +143,7 @@ impl OperationRuntime {
                     &settings,
                     &state_root,
                     publisher.clone(),
+                    cancel.clone(),
                 )
                 .await
                 .map(OperationOutput::CleanupUnexpectedFiles),

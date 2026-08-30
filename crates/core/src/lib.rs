@@ -28,7 +28,6 @@ pub use fleet_domain::{
     ApiError, AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
     DEFAULT_ARMA3_ARGS,
 };
-pub use fleet_domain::{LocalStateProgress, LocalStateStage, LocalStateStatus};
 pub use operations::{
     OperationNoticeLevel, OperationOutput, OperationProgressEvent, OperationSessionEvent,
     OperationSessionEventKind, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,

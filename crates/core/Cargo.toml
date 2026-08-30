@@ -12,7 +12,6 @@ fleet-flux = { workspace = true }
 flux = { workspace = true }
 prodash = { workspace = true }
 swifty-repo = { workspace = true }
-swifty_artifacts = { workspace = true }
 directories = { workspace = true }
 fleet-arma3 = { workspace = true }
 shell-words = { workspace = true }
@@ -25,7 +24,6 @@ tempfile = { workspace = true }
 atomic-write-file = { workspace = true }
 fs2 = { workspace = true }
 ignore = { workspace = true }
-rayon = { workspace = true }
 thiserror = { workspace = true }
 futures-util = { workspace = true }
 sentry = { workspace = true, features = ["logs", "tracing"] }
@@ -38,5 +36,4 @@ rand = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
-bytes = { workspace = true }
 futures = { workspace = true }

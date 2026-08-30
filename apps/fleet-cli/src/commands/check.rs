@@ -89,15 +89,16 @@ pub(crate) fn print_check_report(
         "  checked_at_unix_ms: {}",
         inventory_report.checked_at_unix_ms
     );
+    println!("  missing_paths: {}", inventory_report.missing_paths_count);
     println!(
-        "  expected_missing_in_inventory: {}",
-        inventory_report.expected_missing_in_inventory_count
+        "  modified_paths: {}",
+        inventory_report.modified_paths_count
     );
     println!(
         "  unexpected_paths: {}",
-        inventory_report.unexpected_delete_paths.len()
+        inventory_report.unexpected_paths.len()
     );
-    for path in &inventory_report.unexpected_delete_paths {
+    for path in &inventory_report.unexpected_paths {
         println!("    - {path}");
     }
 
@@ -106,9 +107,7 @@ pub(crate) fn print_check_report(
 
     if matches!(
         inventory_report.local_health,
-        LocalStateHealth::MissingDestination
-            | LocalStateHealth::LocalStateMissing
-            | LocalStateHealth::InventoryCorrupt
+        LocalStateHealth::MissingDestination | LocalStateHealth::LocalStateMissing
     ) && has_repo_source
     {
         let repair_reason = match &inventory_report.local_health {
@@ -121,14 +120,14 @@ pub(crate) fn print_check_report(
     }
 
     if inventory_report.local_health == LocalStateHealth::LocalDrift
-        && inventory_report.unexpected_delete_paths.is_empty()
+        && inventory_report.unexpected_paths.is_empty()
     {
         println!(
             "local_drift_detected: true (modified/missing files likely; run sync to materialize)"
         );
     }
 
-    if has_repo_source && !inventory_report.unexpected_delete_paths.is_empty() {
+    if has_repo_source && !inventory_report.unexpected_paths.is_empty() {
         println!("sync_can_remove_unexpected_files: true");
     }
 }

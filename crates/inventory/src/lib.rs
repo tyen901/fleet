@@ -17,6 +17,7 @@ pub use path::target_path_from_relative_path;
 pub use provider::FleetInventoryProvider;
 pub use store::MaterializationInventory;
 pub use types::{
-    InventoryAuditReport, InventoryDesiredFile, InventoryError, InventoryObservedFile,
-    InventoryRefreshPlan, InventoryRefreshReport, InventoryRefreshWrite,
+    InventoryAssessment, InventoryDesiredFile, InventoryError, InventoryObservedFile,
+    InventoryReconcileMode, InventoryReconcilePlan, InventoryReconcileReport,
+    InventoryReconcileWrite,
 };
