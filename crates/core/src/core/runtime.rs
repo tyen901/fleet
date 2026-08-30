@@ -27,7 +27,7 @@ async fn run_core_loop(core: Core) {
         }
     };
     let profile_ids: Vec<_> = initial.profiles.keys().cloned().collect();
-    let auto_check_on_startup = initial.settings.startup.auto_assess_on_startup;
+    let auto_check_on_startup = initial.settings.startup.auto_check_profiles_on_startup;
     core.replace_state(initial);
 
     for profile_id in &profile_ids {
@@ -36,24 +36,14 @@ async fn run_core_loop(core: Core) {
             let core_for_checks = core.clone();
             let profile_id_for_checks = profile_id.clone();
             tokio::spawn(async move {
-                if let Ok(repo_session) = core_for_checks
-                    .start_operation(
-                        profile_id_for_checks.clone(),
-                        fleet_domain::health::OperationKind::CheckRepo,
-                    )
-                    .await
-                {
-                    let _ = core_for_checks.await_finished(repo_session).await;
-                }
-
-                if let Ok(inventory_session) = core_for_checks
+                if let Ok(session) = core_for_checks
                     .start_operation(
                         profile_id_for_checks,
-                        fleet_domain::health::OperationKind::CheckInventory,
+                        fleet_domain::health::OperationKind::Check,
                     )
                     .await
                 {
-                    let _ = core_for_checks.await_finished(inventory_session).await;
+                    let _ = core_for_checks.await_finished(session).await;
                 }
             });
         }
@@ -78,17 +68,8 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
 
     let now = fleet_domain::time::now_unix_ms();
     let mut profile_runtime_by_id = BTreeMap::new();
-    for (profile_id, profile) in &profiles {
-        let mut runtime = crate::state::ProfileRuntimeState::new(
-            profile_id.clone(),
-            now,
-            !profile.source.trim().is_empty(),
-        );
-        crate::features::profiles::seed_missing_destination_inventory_hint(
-            &mut runtime,
-            profile,
-            now,
-        );
+    for profile_id in profiles.keys() {
+        let runtime = crate::state::ProfileRuntimeState::new(profile_id.clone(), now);
         profile_runtime_by_id.insert(profile_id.clone(), runtime);
     }
 

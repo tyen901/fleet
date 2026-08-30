@@ -1,8 +1,8 @@
 use crate::operations::progress::FluxProgressObserver;
 use crate::operations::support::repo_cache::{commit_staged_repo_cache, prepare_staged_repo_cache};
-use crate::operations::{check_inventory, OperationPublisher, OperationStage};
-use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport};
-use fleet_domain::{AppSettings, ManifestHealth, Profile, ProfileSourceKind};
+use crate::operations::{local_files, OperationPublisher, OperationStage};
+use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
+use fleet_domain::{LocalFileHealth, Profile, ProfileSourceKind};
 use fleet_inventory::FleetInventoryProvider;
 use std::path::Path;
 use std::sync::Arc;
@@ -10,47 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn sync(
     profile: &Profile,
-    settings: &AppSettings,
     state_root: &Path,
     publisher: OperationPublisher,
     cancel: CancellationToken,
-) -> Result<SyncReport, crate::ApiError> {
-    sync_with_scope(
-        profile,
-        settings,
-        state_root,
-        publisher,
-        cancel,
-        flux::VerificationScope::Changed,
-    )
-    .await
-}
-
-pub(crate) async fn full_sync(
-    profile: &Profile,
-    settings: &AppSettings,
-    state_root: &Path,
-    publisher: OperationPublisher,
-    cancel: CancellationToken,
-) -> Result<SyncReport, crate::ApiError> {
-    sync_with_scope(
-        profile,
-        settings,
-        state_root,
-        publisher,
-        cancel,
-        flux::VerificationScope::All,
-    )
-    .await
-}
-
-async fn sync_with_scope(
-    profile: &Profile,
-    _settings: &AppSettings,
-    state_root: &Path,
-    publisher: OperationPublisher,
-    cancel: CancellationToken,
-    scope: flux::VerificationScope,
 ) -> Result<SyncReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     let dest = profile
@@ -89,7 +51,7 @@ async fn sync_with_scope(
         &dest,
         inventory,
         input,
-        scope,
+        flux::VerificationScope::Changed,
         cancel.clone(),
         Some(progress),
     )
@@ -108,7 +70,11 @@ async fn sync_with_scope(
     Ok(SyncReport {
         profile_id: profile.id.clone(),
         repo: repo_report_from_cache(profile, repo_url, &paths.profile.repo_cache),
-        inventory: check_inventory::report(profile, ManifestHealth::Exact),
+        local: local_files::report(
+            profile,
+            VerificationKind::Materialized,
+            LocalFileHealth::Clean,
+        ),
     })
 }
 

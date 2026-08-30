@@ -37,9 +37,9 @@ Use the automated render flow after UI or CSS changes. It runs Fleet at a fixed 
 
 1. Close other development instances of Fleet, then build the native app with `cargo build -p fleet`.
 2. Run `npm run render:ui` from the workspace root; it builds first, because CSS is embedded with `include_str!` and a CSS-only edit will not appear otherwise. Node.js 22 or newer and the WebView2 runtime are required.
-3. Inspect every PNG in `target/ui-render/captures/`. The flow captures onboarding, profiles, settings top and bottom, new profile, profile overview, edit profile, the additional-mod list before and after Add, full-sync confirmation and progress, and delete confirmation.
+3. Inspect every PNG in `target/ui-render/captures/`. The flow captures onboarding, profiles, settings top and bottom, new profile, profile overview, edit profile, the additional-mod list before and after Add, sync progress, and delete confirmation.
 
-Sync progress is simulated, not real. The runner sets `FLEET_SIMULATE_SYNC=1`, which makes sync and full sync emit a scripted progress sequence and return an up-to-date report without touching the network, repo cache, inventory, or profile destination. `FLEET_SIMULATE_SYNC_HOLD_PERCENT` parks that sequence at a given percentage until the operation is cancelled, so the progress capture is reproducible. Neither variable is set outside the render flow.
+Sync progress is simulated, not real. The runner sets `FLEET_SIMULATE_SYNC=1`, which makes sync emit a scripted progress sequence and return an up-to-date report without touching the network, repo cache, inventory, or profile destination. `FLEET_SIMULATE_SYNC_HOLD_PERCENT` parks that sequence at a given percentage until the operation is cancelled, so the progress capture is reproducible. Neither variable is set outside the render flow.
 
 The runner creates isolated dummy `settings.json`, `profiles.json`, profile files, and inventory state under `target/ui-render/`; it sets `FLEET_CONFIG_DIR` only for the child process and never reads or writes the normal user config directory. The dummy profile points at the closed loopback endpoint `http://127.0.0.1:9/repo.json`, so the render flow does not depend on a live repository. Override the disposable root with `FLEET_UI_TEST_ROOT` or the debugging port with `FLEET_UI_TEST_CDP_PORT` when required; never point `FLEET_UI_TEST_ROOT` at real Fleet configuration or profile data.
 
@@ -154,11 +154,13 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
   - `await_finished(session_id)`
 - Runtime operation state is per-profile in `AppState.profile_runtime_by_id`.
 - Operation events are observational only; terminal completion is read from the core session registry.
-- Supported operation kinds are `CheckRepo`, `CheckInventory`, `Sync`, and `CleanupUnexpectedFiles`.
-- `CheckInventory` is read-only and reports local state and whether sync or cleanup is required.
+- Supported operation kinds are `Check`, `Validate`, and `Sync`.
+- `Check` concurrently probes remote repo freshness and runs Flux's metadata-only local check against the installed expected manifest and durable facts. It does not read file content or write inventory facts.
+- `Validate` runs Flux's byte-correct verification across every managed file and refreshes reusable observed facts.
 - `Sync` is the primary materialization and self-heal path. It calls `fleet_flux::materialize(...)` directly; Flux owns typed live materialization progress.
-- `CleanupUnexpectedFiles` deletes approved unexpected candidates only, preserves protected root entries, updates inventory, and returns a reassessed inventory report.
-- Inventory corruption is surfaced by `CheckInventory` and repaired by `Sync`.
+- `Sync` removes obsolete previously managed paths; unrelated unmanaged files are not enumerated or maintained.
+- Failed or cancelled `Sync` invalidates prior runtime local-clean evidence.
+- Inventory corruption is surfaced by `Check`/`Validate` and repaired by `Sync`.
 - Check and sync logic may read materialization inventory facts, but must not push operational state back into inventory.
 - Flux entry-point ownership:
   - `crates/flux` is the only Fleet crate that should convert Fleet/Swifty shapes into Flux materialization inputs or call `flux::materialize`.

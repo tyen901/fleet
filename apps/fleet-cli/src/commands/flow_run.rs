@@ -1,5 +1,5 @@
 use crate::ui::progress::spawn_flow_printer;
-use fleet_core::{Core, InventoryCheckReport, OperationOutput, RepoCheckReport, SyncReport};
+use fleet_core::{CheckReport, Core, LocalFileReport, OperationOutput, SyncReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FlowOutput {
@@ -58,24 +58,24 @@ pub(crate) async fn run_sync_session(
     }
 }
 
-pub(crate) async fn run_inventory_check_session(
+pub(crate) async fn run_check_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<InventoryCheckReport> {
+) -> anyhow::Result<CheckReport> {
     match run_flow_session(core, session_id, options).await? {
-        OperationOutput::CheckInventory(report) => Ok(report),
-        _ => Err(anyhow::anyhow!("internal: expected inventory check result")),
+        OperationOutput::Check(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected check result")),
     }
 }
 
-pub(crate) async fn run_repo_check_session(
+pub(crate) async fn run_validation_session(
     core: &Core,
     session_id: u64,
     options: FlowRunOptions,
-) -> anyhow::Result<RepoCheckReport> {
+) -> anyhow::Result<LocalFileReport> {
     match run_flow_session(core, session_id, options).await? {
-        OperationOutput::CheckRepo(report) => Ok(report),
-        _ => Err(anyhow::anyhow!("internal: expected repo check result")),
+        OperationOutput::Validate(report) => Ok(report),
+        _ => Err(anyhow::anyhow!("internal: expected validation result")),
     }
 }

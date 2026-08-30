@@ -1,5 +1,5 @@
 use crate::types::ProfileId;
-pub use crate::{ManifestHealth, UnexpectedHealth};
+pub use crate::LocalFileHealth;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -13,11 +13,23 @@ pub enum RepoCheckFreshness {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum OperationKind {
-    CheckRepo,
-    CheckInventory,
-    CleanupUnexpectedFiles,
+    Check,
+    Validate,
     Sync,
-    FullSync,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct CheckReport {
+    pub profile_id: ProfileId,
+    pub repo: RepoCheckReport,
+    pub local: LocalFileReport,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub enum VerificationKind {
+    Fast,
+    ByteExact,
+    Materialized,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
@@ -39,19 +51,18 @@ pub struct RepoCheckReport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub struct InventoryCheckReport {
+pub struct LocalFileReport {
     pub profile_id: ProfileId,
-    pub manifest_health: ManifestHealth,
-    pub unexpected_health: UnexpectedHealth,
+    pub verification: VerificationKind,
+    pub health: LocalFileHealth,
     pub checked_at_unix_ms: u64,
     pub missing_paths_count: u64,
     pub modified_paths_count: u64,
-    pub unexpected_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct SyncReport {
     pub profile_id: ProfileId,
     pub repo: RepoCheckReport,
-    pub inventory: InventoryCheckReport,
+    pub local: LocalFileReport,
 }

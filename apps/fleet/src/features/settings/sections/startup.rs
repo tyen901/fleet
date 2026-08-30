@@ -4,36 +4,36 @@ use fleet_core::SettingsField;
 
 use super::field_reset::FieldResetButton;
 
-pub(crate) fn startup_section<FToggleAutoAssessOnStartup, FToggleAutoCheckOnStartup>(
-    auto_assess_on_startup_checked: bool,
-    is_auto_assess_on_startup_non_default: bool,
-    mut on_toggle_auto_assess_on_startup: FToggleAutoAssessOnStartup,
+pub(crate) fn startup_section<FToggleProfileCheck, FToggleFleetUpdateCheck>(
+    auto_check_profiles_on_startup: bool,
+    is_auto_check_profiles_non_default: bool,
+    mut on_toggle_profile_check: FToggleProfileCheck,
     auto_check_on_startup_checked: bool,
     is_auto_check_on_startup_non_default: bool,
-    mut on_toggle_auto_check_on_startup: FToggleAutoCheckOnStartup,
+    mut on_toggle_fleet_update_check: FToggleFleetUpdateCheck,
     on_reset: EventHandler<SettingsField>,
 ) -> Element
 where
-    FToggleAutoAssessOnStartup: FnMut(bool) + Clone + 'static,
-    FToggleAutoCheckOnStartup: FnMut(bool) + Clone + 'static,
+    FToggleProfileCheck: FnMut(bool) + Clone + 'static,
+    FToggleFleetUpdateCheck: FnMut(bool) + Clone + 'static,
 {
     rsx! {
         Section {
             SectionHeader { title: "Startup".to_string() }
             FieldRow {
-                FieldRowMeta { title: "Assess profiles on startup".to_string() }
+                FieldRowMeta { title: "Check profiles on startup".to_string() }
                 FieldRowActions {
                     FieldResetButton {
-                        field: SettingsField::AutoAssessOnStartup,
-                        show: is_auto_assess_on_startup_non_default,
+                        field: SettingsField::AutoCheckProfilesOnStartup,
+                        show: is_auto_check_profiles_non_default,
                         on_reset,
                     }
                     input {
                         r#type: "checkbox",
                         class: "check",
-                        checked: auto_assess_on_startup_checked,
+                        checked: auto_check_profiles_on_startup,
                         onchange: move |evt| {
-                            on_toggle_auto_assess_on_startup(evt.checked());
+                            on_toggle_profile_check(evt.checked());
                         },
                     }
                 }
@@ -52,7 +52,7 @@ where
                         class: "check",
                         checked: auto_check_on_startup_checked,
                         onchange: move |evt| {
-                            on_toggle_auto_check_on_startup(evt.checked());
+                            on_toggle_fleet_update_check(evt.checked());
                         },
                     }
                 }

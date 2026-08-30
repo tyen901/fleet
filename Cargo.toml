@@ -31,9 +31,9 @@ fleet-arma3              = { path = "crates/arma3" }
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
 # Flux contract pinned to the exact published revision
-flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
-flux-inventory          = { git = "https://github.com/tyen901/flux6.git", package = "flux-inventory", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
-flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", rev = "8d7a07e5d3f2c061d49dce172c412d4ac901d60a" }
+flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", rev = "d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec" }
+flux-inventory          = { git = "https://github.com/tyen901/flux6.git", package = "flux-inventory", rev = "d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec" }
+flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", rev = "d112db46b4ccf8a0ba4e50b0bbffd9f0899671ec" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }

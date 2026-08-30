@@ -2,7 +2,7 @@ use crate::operations::{
     OperationOutput, OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit,
 };
 use fleet_domain::health::{
-    InventoryCheckReport, ManifestHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
+    LocalFileHealth, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
 use fleet_domain::sync::SyncSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
@@ -29,7 +29,9 @@ pub struct ProfileRuntimeState {
     #[serde(default)]
     pub repo_check: Option<RepoCheckReport>,
     #[serde(default)]
-    pub inventory_check: Option<InventoryCheckReport>,
+    pub local_state: Option<LocalFileReport>,
+    #[serde(default)]
+    pub validation: Option<LocalFileReport>,
     #[serde(default)]
     pub active: Option<ActiveOperationState>,
     #[serde(default)]
@@ -44,11 +46,12 @@ pub struct ProfileRuntimeState {
 }
 
 impl ProfileRuntimeState {
-    pub fn new(profile_id: ProfileId, now_ms: u64, has_repo_source: bool) -> Self {
+    pub fn new(profile_id: ProfileId, now_ms: u64) -> Self {
         let mut state = Self {
             profile_id,
             repo_check: None,
-            inventory_check: None,
+            local_state: None,
+            validation: None,
             active: None,
             last_operation: None,
             last_error: None,
@@ -56,12 +59,12 @@ impl ProfileRuntimeState {
             repo_servers_loaded: false,
             status: ProfileStatusState::unknown(now_ms),
         };
-        state.recompute_status(has_repo_source);
+        state.recompute_status();
         state
     }
 
-    pub fn recompute_status(&mut self, has_repo_source: bool) {
-        self.status = derive_profile_status(self, has_repo_source);
+    pub fn recompute_status(&mut self) {
+        self.status = derive_profile_status(self);
     }
 }
 
@@ -112,17 +115,16 @@ pub struct OperationOutcomeState {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
-    CleaningUp,
     Checking,
+    Validating,
     UpdateAvailable,
     ReadyToPlay,
     NeedsSync,
     MissingDestination,
-    NeedsRecovery,
     ActionRequired,
-    InSync,
-    SyncNotRequired,
     UpdateCheckFailed,
+    CheckFailed,
+    ValidationFailed,
     #[default]
     StatusUnknown,
 }
@@ -130,26 +132,22 @@ pub enum ProfileStatusHeadline {
 impl ProfileStatusHeadline {
     /// Whether this state is worth showing at all.
     pub fn is_noteworthy(self) -> bool {
-        !matches!(
-            self,
-            Self::ReadyToPlay | Self::InSync | Self::SyncNotRequired | Self::StatusUnknown
-        )
+        !matches!(self, Self::ReadyToPlay | Self::StatusUnknown)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Syncing => "Syncing",
-            Self::CleaningUp => "Cleaning up",
             Self::Checking => "Checking",
+            Self::Validating => "Validating",
             Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
             Self::NeedsSync => "Needs sync",
             Self::MissingDestination => "Local folder missing",
-            Self::NeedsRecovery => "Needs recovery",
             Self::ActionRequired => "Action required",
-            Self::InSync => "In sync",
-            Self::SyncNotRequired => "Sync not required",
             Self::UpdateCheckFailed => "Update check failed",
+            Self::CheckFailed => "Check failed",
+            Self::ValidationFailed => "Validation failed",
             Self::StatusUnknown => "Status unknown",
         }
     }
@@ -169,27 +167,16 @@ pub enum ProfileStatusBadge {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
-pub enum ProfileRecommendedAction {
-    #[default]
-    Sync,
-    CheckInventory,
-    CheckRepo,
-    CleanupUnexpectedFiles,
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
-    pub cleanup_enabled: bool,
-    pub check_inventory_enabled: bool,
-    pub check_repo_enabled: bool,
+    pub check_enabled: bool,
+    pub validate_enabled: bool,
     pub cancel_enabled: bool,
 
     pub sync_running: bool,
-    pub cleanup_running: bool,
-    pub check_inventory_running: bool,
-    pub check_repo_running: bool,
+    pub check_running: bool,
+    pub validate_running: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -260,14 +247,12 @@ pub struct ProfileStatusState {
     pub severity: ProfileStatusSeverity,
     #[serde(default)]
     pub badge: Option<ProfileStatusBadge>,
-    pub recommended_action: ProfileRecommendedAction,
     pub actions: ProfileActionAvailability,
     #[serde(default)]
     pub progress: Option<ProfileOperationProgressState>,
-    pub manifest_health: ManifestHealth,
+    pub local_health: LocalFileHealth,
     pub repo_freshness: Option<RepoCheckFreshness>,
     pub has_error: bool,
-    pub unexpected_path_count: u64,
     pub last_check_ms: u64,
     pub can_launch: bool,
 }
@@ -278,19 +263,16 @@ impl ProfileStatusState {
             headline: ProfileStatusHeadline::StatusUnknown,
             severity: ProfileStatusSeverity::Warning,
             badge: None,
-            recommended_action: ProfileRecommendedAction::CheckInventory,
             actions: ProfileActionAvailability {
-                check_inventory_enabled: true,
-                check_repo_enabled: true,
-                cleanup_enabled: false,
+                check_enabled: true,
+                validate_enabled: true,
                 sync_enabled: true,
                 ..ProfileActionAvailability::default()
             },
             progress: None,
-            manifest_health: ManifestHealth::Unknown,
+            local_health: LocalFileHealth::Unknown,
             repo_freshness: None,
             has_error: false,
-            unexpected_path_count: 0,
             last_check_ms: now_ms,
             can_launch: false,
         }
@@ -302,29 +284,15 @@ pub fn ensure_profile_runtime_mut<'a>(
     profile_id: &str,
     now_ms: u64,
 ) -> &'a mut ProfileRuntimeState {
-    let has_repo_source = state
-        .profiles
-        .get(profile_id)
-        .map(|profile| !profile.source.trim().is_empty())
-        .unwrap_or(false);
-
     state
         .profile_runtime_by_id
         .entry(profile_id.to_string())
-        .or_insert_with(|| {
-            ProfileRuntimeState::new(profile_id.to_string(), now_ms, has_repo_source)
-        })
+        .or_insert_with(|| ProfileRuntimeState::new(profile_id.to_string(), now_ms))
 }
 
 pub fn recompute_profile_status(state: &mut AppState, profile_id: &str) {
-    let has_repo_source = state
-        .profiles
-        .get(profile_id)
-        .map(|profile| !profile.source.trim().is_empty())
-        .unwrap_or(false);
-
     if let Some(runtime) = state.profile_runtime_by_id.get_mut(profile_id) {
-        runtime.recompute_status(has_repo_source);
+        runtime.recompute_status();
     }
 }
 
@@ -339,24 +307,16 @@ pub fn recompute_all_profile_statuses(state: &mut AppState) {
     }
 }
 
-fn derive_profile_status(
-    runtime: &ProfileRuntimeState,
-    has_repo_source: bool,
-) -> ProfileStatusState {
-    let manifest_health = runtime
-        .inventory_check
+fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
+    let local_health = runtime
+        .local_state
         .as_ref()
-        .map(|report| report.manifest_health.clone())
-        .unwrap_or(ManifestHealth::Unknown);
+        .map(|report| report.health.clone())
+        .unwrap_or(LocalFileHealth::Unknown);
     let repo_freshness = runtime
         .repo_check
         .as_ref()
         .map(|report| report.freshness.clone());
-    let unexpected_path_count = runtime
-        .inventory_check
-        .as_ref()
-        .map(|report| report.unexpected_paths.len() as u64)
-        .unwrap_or(0);
     let last_check_ms = runtime
         .repo_check
         .as_ref()
@@ -364,7 +324,7 @@ fn derive_profile_status(
         .into_iter()
         .chain(
             runtime
-                .inventory_check
+                .local_state
                 .as_ref()
                 .map(|report| report.checked_at_unix_ms),
         )
@@ -375,66 +335,48 @@ fn derive_profile_status(
     let operation_active = active_operation.is_some();
     let exclusive_operation_active = matches!(
         active_operation,
-        Some(OperationKind::Sync | OperationKind::FullSync | OperationKind::CleanupUnexpectedFiles)
+        Some(OperationKind::Validate | OperationKind::Sync)
     );
 
-    let sync_running = matches!(
-        active_operation,
-        Some(OperationKind::Sync | OperationKind::FullSync)
-    );
-    let cleanup_running = matches!(
-        active_operation,
-        Some(OperationKind::CleanupUnexpectedFiles)
-    );
-    let check_inventory_running = matches!(active_operation, Some(OperationKind::CheckInventory));
-    let check_repo_running = matches!(active_operation, Some(OperationKind::CheckRepo));
+    let sync_running = matches!(active_operation, Some(OperationKind::Sync));
+    let check_running = matches!(active_operation, Some(OperationKind::Check));
+    let validate_running = matches!(active_operation, Some(OperationKind::Validate));
     let can_run_actions = !operation_active;
-    let hard_blocked = manifest_health == ManifestHealth::InvalidProfile;
-    let sync_blocked = manifest_health == ManifestHealth::InvalidProfile;
-    let has_error = manifest_health == ManifestHealth::InvalidProfile
-        || matches!(repo_freshness, Some(RepoCheckFreshness::Error));
-
-    let recommended_action = if matches!(
-        manifest_health,
-        ManifestHealth::Unknown | ManifestHealth::InvalidProfile
-    ) {
-        ProfileRecommendedAction::CheckInventory
-    } else if matches!(
-        manifest_health,
-        ManifestHealth::Missing
-            | ManifestHealth::Different
-            | ManifestHealth::MissingDestination
-            | ManifestHealth::InventoryUnavailable
-    ) {
-        ProfileRecommendedAction::Sync
-    } else if unexpected_path_count > 0 {
-        ProfileRecommendedAction::CleanupUnexpectedFiles
-    } else if has_repo_source && matches!(repo_freshness, None | Some(RepoCheckFreshness::Unknown))
-    {
-        ProfileRecommendedAction::CheckRepo
-    } else {
-        ProfileRecommendedAction::Sync
-    };
+    let hard_blocked = local_health == LocalFileHealth::InvalidProfile;
+    let sync_blocked = local_health == LocalFileHealth::InvalidProfile;
+    let invalid_profile = local_health == LocalFileHealth::InvalidProfile;
+    let repo_check_failed = matches!(repo_freshness, Some(RepoCheckFreshness::Error));
+    let failed_operation = runtime.last_operation.as_ref().and_then(|outcome| {
+        (outcome.status == OperationTerminalStatus::Failed).then_some(outcome.operation)
+    });
+    let check_failed = failed_operation == Some(OperationKind::Check);
+    let validation_failed = failed_operation == Some(OperationKind::Validate);
 
     let headline = if sync_running {
         ProfileStatusHeadline::Syncing
-    } else if cleanup_running {
-        ProfileStatusHeadline::CleaningUp
-    } else if check_inventory_running || check_repo_running {
+    } else if validate_running {
+        ProfileStatusHeadline::Validating
+    } else if check_running {
         ProfileStatusHeadline::Checking
-    } else if has_error {
+    } else if invalid_profile {
         ProfileStatusHeadline::ActionRequired
+    } else if check_failed {
+        ProfileStatusHeadline::CheckFailed
+    } else if validation_failed {
+        ProfileStatusHeadline::ValidationFailed
+    } else if repo_check_failed {
+        ProfileStatusHeadline::UpdateCheckFailed
     } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
         ProfileStatusHeadline::UpdateAvailable
     } else {
-        match manifest_health {
-            ManifestHealth::Exact => ProfileStatusHeadline::ReadyToPlay,
-            ManifestHealth::Missing | ManifestHealth::Different => ProfileStatusHeadline::NeedsSync,
-            ManifestHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
-            ManifestHealth::InventoryUnavailable => ProfileStatusHeadline::NeedsSync,
-            ManifestHealth::InvalidProfile => ProfileStatusHeadline::ActionRequired,
-            ManifestHealth::Unknown => match repo_freshness {
-                Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::InSync,
+        match local_health {
+            LocalFileHealth::Clean => ProfileStatusHeadline::ReadyToPlay,
+            LocalFileHealth::Missing | LocalFileHealth::Dirty => ProfileStatusHeadline::NeedsSync,
+            LocalFileHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
+            LocalFileHealth::InventoryUnavailable => ProfileStatusHeadline::NeedsSync,
+            LocalFileHealth::InvalidProfile => ProfileStatusHeadline::ActionRequired,
+            LocalFileHealth::Unknown => match repo_freshness {
+                Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::StatusUnknown,
                 Some(RepoCheckFreshness::Error) => ProfileStatusHeadline::UpdateCheckFailed,
                 Some(RepoCheckFreshness::Unknown) | None => ProfileStatusHeadline::StatusUnknown,
                 Some(RepoCheckFreshness::UpdateAvailable) => ProfileStatusHeadline::UpdateAvailable,
@@ -444,21 +386,20 @@ fn derive_profile_status(
 
     let severity = match headline {
         ProfileStatusHeadline::ReadyToPlay
-        | ProfileStatusHeadline::InSync
-        | ProfileStatusHeadline::SyncNotRequired
-        | ProfileStatusHeadline::CleaningUp
         | ProfileStatusHeadline::Checking
+        | ProfileStatusHeadline::Validating
         | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
         | ProfileStatusHeadline::MissingDestination
         | ProfileStatusHeadline::UpdateAvailable
         | ProfileStatusHeadline::StatusUnknown => ProfileStatusSeverity::Warning,
-        ProfileStatusHeadline::NeedsRecovery
-        | ProfileStatusHeadline::ActionRequired
-        | ProfileStatusHeadline::UpdateCheckFailed => ProfileStatusSeverity::Error,
+        ProfileStatusHeadline::ActionRequired
+        | ProfileStatusHeadline::UpdateCheckFailed
+        | ProfileStatusHeadline::CheckFailed
+        | ProfileStatusHeadline::ValidationFailed => ProfileStatusSeverity::Error,
     };
 
-    let badge = if has_error {
+    let badge = if invalid_profile || repo_check_failed || check_failed || validation_failed {
         Some(ProfileStatusBadge::Error)
     } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
         Some(ProfileStatusBadge::UpdateAvailable)
@@ -468,31 +409,27 @@ fn derive_profile_status(
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
-        cleanup_enabled: can_run_actions && unexpected_path_count > 0 && !hard_blocked,
-        check_inventory_enabled: can_run_actions,
-        check_repo_enabled: can_run_actions && !hard_blocked,
+        check_enabled: can_run_actions && !hard_blocked,
+        validate_enabled: can_run_actions && !hard_blocked,
         cancel_enabled: operation_active,
         sync_running,
-        cleanup_running,
-        check_inventory_running,
-        check_repo_running,
+        check_running,
+        validate_running,
     };
-    let can_launch = !exclusive_operation_active && manifest_health == ManifestHealth::Exact;
+    let can_launch = !exclusive_operation_active && local_health == LocalFileHealth::Clean;
 
     ProfileStatusState {
         headline,
         severity,
         badge,
-        recommended_action,
         actions,
         progress: runtime
             .active
             .as_ref()
             .map(|active| active.progress.clone()),
-        manifest_health,
+        local_health,
         repo_freshness,
-        has_error,
-        unexpected_path_count,
+        has_error: invalid_profile || repo_check_failed || check_failed || validation_failed,
         last_check_ms,
         can_launch,
     }
@@ -525,50 +462,37 @@ pub fn stage_label(stage: OperationStage) -> &'static str {
         OperationStage::LoadingExpectedState => "Loading expected state",
         OperationStage::ScanningDisk => "Scanning disk",
         OperationStage::VerifyingInventory => "Verifying inventory",
-        OperationStage::PreparingInventory => "Preparing inventory",
         OperationStage::Sync => "Sync",
-        OperationStage::CleaningUp => "Cleaning up",
-        OperationStage::Auditing => "Auditing",
+        OperationStage::CleaningUp => "Removing obsolete managed files",
         OperationStage::Finalizing => "Finalizing",
     }
 }
 
-const CHECK_INVENTORY_PLAN: &[OperationStage] = &[
+const CHECK_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
     OperationStage::ScanningDisk,
-    OperationStage::VerifyingInventory,
     OperationStage::Finalizing,
 ];
-const CLEANUP_UNEXPECTED_FILES_PLAN: &[OperationStage] = &[
+const VALIDATE_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
-    OperationStage::ScanningDisk,
     OperationStage::VerifyingInventory,
-    OperationStage::CleaningUp,
-    OperationStage::Finalizing,
-];
-const CHECK_REPO_PLAN: &[OperationStage] = &[
-    OperationStage::Validating,
-    OperationStage::LoadingExpectedState,
     OperationStage::Finalizing,
 ];
 const SYNC_PLAN: &[OperationStage] = &[
     OperationStage::Validating,
     OperationStage::LoadingExpectedState,
-    OperationStage::PreparingInventory,
     OperationStage::Sync,
     OperationStage::CleaningUp,
-    OperationStage::Auditing,
     OperationStage::Finalizing,
 ];
 
 pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
     match operation {
-        OperationKind::CheckInventory => CHECK_INVENTORY_PLAN,
-        OperationKind::CheckRepo => CHECK_REPO_PLAN,
-        OperationKind::CleanupUnexpectedFiles => CLEANUP_UNEXPECTED_FILES_PLAN,
-        OperationKind::Sync | OperationKind::FullSync => SYNC_PLAN,
+        OperationKind::Check => CHECK_PLAN,
+        OperationKind::Validate => VALIDATE_PLAN,
+        OperationKind::Sync => SYNC_PLAN,
     }
 }
 
@@ -670,13 +594,14 @@ pub(crate) fn apply_operation_stage(
 mod tests {
     use super::{
         apply_operation_progress, apply_operation_stage, derive_profile_status,
-        ensure_profile_runtime_mut, AppState, ProfileOperationProgressState, ProfileStatusHeadline,
+        ensure_profile_runtime_mut, AppState, OperationOutcomeState, OperationTerminalStatus,
+        ProfileOperationProgressState, ProfileStatusHeadline,
     };
     use crate::operations::{
         OperationProgressEvent, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
     };
     use fleet_domain::health::{
-        InventoryCheckReport, ManifestHealth, OperationKind, RepoCheckFreshness, RepoCheckReport,
+        LocalFileHealth, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
     use std::collections::BTreeSet;
@@ -689,7 +614,7 @@ mod tests {
             &mut progress,
             &completed,
             &OperationProgressEvent {
-                stage: OperationStage::PreparingInventory,
+                stage: OperationStage::VerifyingInventory,
                 scope: ProgressScope::InventoryVerify,
                 status_text: None,
                 primary: ProgressMetric {
@@ -717,49 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_files_recommend_cleanup_when_manifest_is_exact() {
-        let mut state = AppState::default();
-        state.profiles.insert(
-            "p1".to_string(),
-            Profile {
-                id: "p1".to_string(),
-                name: "Profile".to_string(),
-                source: "https://example.com/repo.json".to_string(),
-                destination: "/tmp/profile".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
-        runtime.inventory_check = Some(InventoryCheckReport {
-            profile_id: "p1".to_string(),
-            manifest_health: ManifestHealth::Exact,
-            unexpected_health: fleet_domain::UnexpectedHealth::Present,
-            checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
-            unexpected_paths: vec!["extra.txt".to_string()],
-        });
-        runtime.repo_check = Some(RepoCheckReport {
-            profile_id: "p1".to_string(),
-            local_revision: Some("abc".to_string()),
-            remote_revision: Some("abc".to_string()),
-            freshness: RepoCheckFreshness::UpToDate,
-            checked_at_unix_ms: 1,
-        });
-
-        let status = derive_profile_status(
-            state.profile_runtime_by_id.get("p1").expect("runtime"),
-            true,
-        );
-        assert_eq!(status.headline, ProfileStatusHeadline::ReadyToPlay);
-        assert_eq!(
-            status.recommended_action,
-            super::ProfileRecommendedAction::CleanupUnexpectedFiles
-        );
-    }
-
-    #[test]
     fn missing_destination_recommends_sync_and_keeps_launch_blocked() {
         let mut state = AppState::default();
         state.profiles.insert(
@@ -774,25 +656,17 @@ mod tests {
         );
 
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
-        runtime.inventory_check = Some(InventoryCheckReport {
+        runtime.local_state = Some(LocalFileReport {
             profile_id: "p1".to_string(),
-            manifest_health: ManifestHealth::MissingDestination,
-            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::MissingDestination,
             checked_at_unix_ms: 1,
             missing_paths_count: 0,
             modified_paths_count: 0,
-            unexpected_paths: Vec::new(),
         });
 
-        let status = derive_profile_status(
-            state.profile_runtime_by_id.get("p1").expect("runtime"),
-            true,
-        );
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::MissingDestination);
-        assert_eq!(
-            status.recommended_action,
-            super::ProfileRecommendedAction::Sync
-        );
         assert!(status.actions.sync_enabled);
         assert!(!status.can_launch);
         assert!(!status.has_error);
@@ -813,14 +687,13 @@ mod tests {
         );
 
         let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
-        runtime.inventory_check = Some(InventoryCheckReport {
+        runtime.local_state = Some(LocalFileReport {
             profile_id: "p1".to_string(),
-            manifest_health: ManifestHealth::Different,
-            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
             missing_paths_count: 0,
             modified_paths_count: 0,
-            unexpected_paths: Vec::new(),
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
@@ -830,10 +703,7 @@ mod tests {
             checked_at_unix_ms: 1,
         });
 
-        let status = derive_profile_status(
-            state.profile_runtime_by_id.get("p1").expect("runtime"),
-            true,
-        );
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::UpdateAvailable);
     }
 
@@ -858,11 +728,73 @@ mod tests {
             1,
         ));
 
-        let status = derive_profile_status(
-            state.profile_runtime_by_id.get("p1").expect("runtime"),
-            true,
-        );
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::Syncing);
+    }
+
+    #[test]
+    fn user_story_validation_running_is_visible_and_blocks_launch() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.local_state = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::Clean,
+            checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+        });
+        runtime.active = Some(super::ActiveOperationState::new(
+            1,
+            OperationKind::Validate,
+            1,
+        ));
+
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
+
+        assert_eq!(status.headline, ProfileStatusHeadline::Validating);
+        assert!(status.actions.validate_running);
+        assert!(!status.can_launch);
+    }
+
+    #[test]
+    fn user_story_byte_corruption_is_represented_as_repairable_local_state() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.local_state = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::ByteExact,
+            health: LocalFileHealth::Dirty,
+            checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 1,
+        });
+
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
+
+        assert_eq!(status.headline, ProfileStatusHeadline::NeedsSync);
+        assert!(status.actions.sync_enabled);
+        assert!(!status.can_launch);
     }
 
     #[test]
@@ -879,24 +811,65 @@ mod tests {
             },
         );
 
-        for operation in [OperationKind::CheckRepo, OperationKind::CheckInventory] {
-            let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
-            runtime.inventory_check = Some(InventoryCheckReport {
-                profile_id: "p1".to_string(),
-                manifest_health: ManifestHealth::Exact,
-                unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
-                checked_at_unix_ms: 1,
-                missing_paths_count: 0,
-                modified_paths_count: 0,
-                unexpected_paths: Vec::new(),
-            });
-            runtime.active = Some(super::ActiveOperationState::new(1, operation, 1));
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.local_state = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::Clean,
+            checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+        });
+        runtime.active = Some(super::ActiveOperationState::new(1, OperationKind::Check, 1));
 
-            let status = derive_profile_status(
-                state.profile_runtime_by_id.get("p1").expect("runtime"),
-                true,
-            );
-            assert!(status.can_launch);
+        let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
+        assert!(status.can_launch);
+    }
+
+    #[test]
+    fn user_story_failed_check_or_validation_replaces_stale_ready_headline() {
+        let mut state = AppState::default();
+        state.profiles.insert(
+            "p1".to_string(),
+            Profile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: "/tmp/profile".to_string(),
+                ..Default::default()
+            },
+        );
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 1);
+        runtime.local_state = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::Clean,
+            checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
+        });
+
+        for (operation, expected) in [
+            (OperationKind::Check, ProfileStatusHeadline::CheckFailed),
+            (
+                OperationKind::Validate,
+                ProfileStatusHeadline::ValidationFailed,
+            ),
+        ] {
+            runtime.last_operation = Some(OperationOutcomeState {
+                session_id: 1,
+                operation,
+                status: OperationTerminalStatus::Failed,
+                updated_at_unix_ms: 2,
+                message: Some("read failed".to_string()),
+                summary: None,
+                error: Some(crate::ApiError::new("read_failed", "read failed")),
+            });
+
+            let status = derive_profile_status(runtime);
+            assert_eq!(status.headline, expected);
+            assert!(status.has_error);
+            assert!(status.can_launch, "prior clean evidence remains usable");
         }
     }
 }

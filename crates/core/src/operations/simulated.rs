@@ -9,7 +9,8 @@ use crate::operations::{
     ProgressUnit,
 };
 use fleet_domain::health::{
-    InventoryCheckReport, ManifestHealth, RepoCheckFreshness, RepoCheckReport, SyncReport,
+    LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport, SyncReport,
+    VerificationKind,
 };
 use fleet_domain::Profile;
 use std::time::Duration;
@@ -84,14 +85,13 @@ pub(crate) async fn sync(
             freshness: RepoCheckFreshness::UpToDate,
             checked_at_unix_ms: checked_at,
         },
-        inventory: InventoryCheckReport {
+        local: LocalFileReport {
             profile_id: profile.id.clone(),
-            manifest_health: ManifestHealth::Exact,
-            unexpected_health: fleet_domain::UnexpectedHealth::NotChecked,
+            verification: VerificationKind::Materialized,
+            health: LocalFileHealth::Clean,
             checked_at_unix_ms: checked_at,
             missing_paths_count: 0,
             modified_paths_count: 0,
-            unexpected_paths: Vec::new(),
         },
     })
 }

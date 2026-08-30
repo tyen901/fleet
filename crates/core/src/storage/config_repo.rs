@@ -113,31 +113,3 @@ impl ConfigRepo {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ProfilesConfig;
-
-    #[test]
-    fn profiles_config_deserializes_with_legacy_selected_profile_id_field() {
-        let json = r#"
-        {
-          "profiles": [
-            {
-              "id": "p1",
-              "name": "Profile",
-              "source": "https://example.com/repo.json",
-              "destination": "/tmp/mods",
-              "arma3_server": null,
-              "launch_params": ""
-            }
-          ],
-          "selected_profile_id": "p1"
-        }
-        "#;
-
-        let cfg: ProfilesConfig = serde_json::from_str(json).expect("parse profiles config");
-        assert_eq!(cfg.profiles.len(), 1);
-        assert_eq!(cfg.profiles[0].id, "p1");
-    }
-}

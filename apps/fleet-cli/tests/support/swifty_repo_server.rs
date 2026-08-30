@@ -20,6 +20,7 @@ pub struct ExampleSwiftyRepoServer {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
     revision: Arc<AtomicUsize>,
+    repo_available: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -29,6 +30,7 @@ impl ExampleSwiftyRepoServer {
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
         let revision = Arc::new(AtomicUsize::new(0));
+        let repo_available = Arc::new(AtomicBool::new(true));
         let repos = Arc::new([
             ExampleSwiftyRepo::new(
                 "0000000000000000000000000000000000000000",
@@ -46,13 +48,15 @@ impl ExampleSwiftyRepoServer {
         let handle = {
             let stop = Arc::clone(&stop);
             let revision = Arc::clone(&revision);
-            thread::spawn(move || serve(listener, repos, revision, stop))
+            let repo_available = Arc::clone(&repo_available);
+            thread::spawn(move || serve(listener, repos, revision, repo_available, stop))
         };
 
         Ok(Self {
             addr,
             stop,
             revision,
+            repo_available,
             handle: Some(handle),
         })
     }
@@ -76,6 +80,10 @@ impl ExampleSwiftyRepoServer {
 
     pub fn publish_update(&self) {
         self.revision.store(1, Ordering::Release);
+    }
+
+    pub fn set_repo_available(&self, available: bool) {
+        self.repo_available.store(available, Ordering::Release);
     }
 }
 
@@ -152,9 +160,14 @@ impl ExampleSwiftyRepo {
         }
     }
 
-    fn response(&self, request: &str) -> Vec<u8> {
+    fn response(&self, request: &str, repo_available: bool) -> Vec<u8> {
         let request = HttpRequest::parse(request);
         let (status, content_type, body) = match request.path.as_str() {
+            "/repo.json" if !repo_available => (
+                "503 Service Unavailable",
+                "text/plain",
+                b"repository unavailable".to_vec(),
+            ),
             "/repo.json" => (
                 "200 OK",
                 "application/json",
@@ -230,6 +243,7 @@ fn serve(
     listener: TcpListener,
     repos: Arc<[ExampleSwiftyRepo; 2]>,
     revision: Arc<AtomicUsize>,
+    repo_available: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) {
     for stream in listener.incoming() {
@@ -249,7 +263,7 @@ fn serve(
 
         let request = String::from_utf8_lossy(&request[..bytes_read]);
         let selected = revision.load(Ordering::Acquire).min(repos.len() - 1);
-        let response = repos[selected].response(&request);
+        let response = repos[selected].response(&request, repo_available.load(Ordering::Acquire));
         let _ = stream.write_all(&response);
         let _ = stream.flush();
     }
