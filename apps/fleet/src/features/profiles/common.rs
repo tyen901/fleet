@@ -192,6 +192,16 @@ pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> 
     )
 }
 
+pub(crate) fn repo_update_available(
+    status: Option<&fleet_core::ProfileStatusState>,
+    check_running: bool,
+) -> bool {
+    !check_running
+        && status.is_some_and(|status| {
+            status.repo_freshness == Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
+        })
+}
+
 pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> String {
     if server.port == 0 {
         server.address.clone()
@@ -304,7 +314,7 @@ pub(crate) fn build_profile_edit_candidate(
 
 #[cfg(test)]
 mod tests {
-    use super::build_profile_edit_candidate;
+    use super::{build_profile_edit_candidate, repo_update_available};
 
     #[test]
     fn profile_edit_candidate_differs_when_name_changes() {
@@ -331,5 +341,18 @@ mod tests {
         assert_ne!(candidate.name, profile.name);
         assert_eq!(candidate.source, profile.source);
         assert_eq!(candidate.destination, profile.destination);
+    }
+
+    #[test]
+    fn user_story_update_action_appears_only_after_check_detects_an_update() {
+        let mut status = fleet_core::ProfileStatusState::unknown(0);
+        assert!(!repo_update_available(Some(&status), false));
+
+        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpToDate);
+        assert!(!repo_update_available(Some(&status), false));
+
+        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpdateAvailable);
+        assert!(repo_update_available(Some(&status), false));
+        assert!(!repo_update_available(Some(&status), true));
     }
 }
