@@ -3,7 +3,10 @@ mod profile;
 mod runner;
 mod source;
 
-pub use flux::{MaterializationPhase, ProgressObserver, ProgressObserverRef, ProgressSnapshot};
+pub use flux::{
+    MaterializationPhase, ProgressObserver, ProgressObserverRef, ProgressSnapshot,
+    TransferProgressSnapshot,
+};
 pub use input::{
     load_cached_swifty_materialization_input, load_swifty_materialization_input,
     MaterializationInput,

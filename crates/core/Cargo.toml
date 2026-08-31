@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 specta = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+indicatif = { workspace = true }
 sentry = { workspace = true, features = ["logs", "tracing"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

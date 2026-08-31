@@ -21,6 +21,7 @@ const ENV_HOLD_PERCENT: &str = "FLEET_SIMULATE_SYNC_HOLD_PERCENT";
 const TOTAL_FILES: u64 = 20;
 const TOTAL_BYTES: u64 = 400 * 1024 * 1024;
 const STEP_DELAY: Duration = Duration::from_millis(120);
+const CANCEL_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) fn is_enabled() -> bool {
     std::env::var(ENV_FLAG).is_ok_and(|value| value == "1")
@@ -44,31 +45,32 @@ pub(crate) async fn sync(
 
     for step in 0..=TOTAL_FILES {
         if cancel.is_cancelled() {
-            return Err(crate::ApiError::new("cancelled", "operation cancelled"));
+            return Err(crate::ApiError::new("canceled", "operation canceled"));
         }
         let done_bytes = TOTAL_BYTES * step / TOTAL_FILES;
         publisher.progress(OperationProgressEvent {
             stage: OperationStage::Sync,
             scope: ProgressScope::MaterializationBytes,
-            status_text: Some("Downloading content".to_string()),
+            status_text: Some("Syncing files".to_string()),
             primary: ProgressMetric {
-                label: Some("Content".to_string()),
+                label: Some("Installed".to_string()),
                 done: Some(done_bytes),
                 total: Some(TOTAL_BYTES),
                 unit: ProgressUnit::Bytes,
             },
             secondary: Some(ProgressMetric {
-                label: Some("Files".to_string()),
-                done: Some(step),
-                total: Some(TOTAL_FILES),
-                unit: ProgressUnit::Files,
+                label: Some("Downloaded".to_string()),
+                done: Some(done_bytes),
+                total: Some(TOTAL_BYTES),
+                unit: ProgressUnit::Bytes,
             }),
             throughput_bytes_per_sec: Some(12 * 1024 * 1024),
             eta_seconds: Some(TOTAL_FILES - step),
         });
         if hold_percent() == Some(step * 100 / TOTAL_FILES) {
             cancel.cancelled().await;
-            return Err(crate::ApiError::new("cancelled", "operation cancelled"));
+            tokio::time::sleep(CANCEL_DELAY).await;
+            return Err(crate::ApiError::new("canceled", "operation canceled"));
         }
         tokio::time::sleep(STEP_DELAY).await;
     }

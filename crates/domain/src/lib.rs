@@ -3,7 +3,6 @@ pub mod filesystem;
 pub mod hash;
 pub mod health;
 pub mod paths;
-pub mod progress_estimator;
 pub mod time;
 pub mod types;
 pub mod utils;
@@ -14,7 +13,6 @@ pub use health::{
     RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind,
 };
 pub use paths::{inventory_db_path, profile_state_dir, profile_state_key, repo_cache_dir};
-pub use progress_estimator::ThroughputEstimator;
 pub use types::{
     normalize_app_settings, ApiError, AppSettings, Arma3LaunchMethod, Arma3Settings,
     PrivacySettings, Profile, ProfileId, ProfileSourceKind, RepoServer, RuntimeSettings,

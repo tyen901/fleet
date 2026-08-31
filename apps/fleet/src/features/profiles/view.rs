@@ -99,6 +99,7 @@ pub fn ProfileView(id: String) -> Element {
     let exclusive_active = active_operation.is_some_and(exclusive_operation);
     let any_active = active_operation.is_some();
     let session_id = active.map(|active| active.session_id);
+    let stopping = active.is_some_and(|active| active.cancel_requested);
     let progress = status.as_ref().and_then(|status| status.progress.clone());
 
     let nav_for_back = nav;
@@ -109,6 +110,7 @@ pub fn ProfileView(id: String) -> Element {
             &bridge,
             progress.as_ref(),
             session_id,
+            stopping,
             status
                 .as_ref()
                 .map(|status| status.actions.cancel_enabled)
@@ -751,22 +753,40 @@ fn render_sync_mode(
     bridge: &FleetBridge,
     progress: Option<&fleet_core::ProfileOperationProgressState>,
     session_id: Option<u64>,
+    stopping: bool,
     cancel_enabled: bool,
 ) -> Element {
-    let percent = progress.and_then(|progress| progress.stage.percent);
-    let indeterminate = progress
-        .map(|progress| !progress.stage.determinate)
-        .unwrap_or(true);
-    let phase = progress
-        .and_then(|progress| progress.status_text.as_deref())
-        .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
-        .unwrap_or("Checking");
-    let percent_label = percent
-        .map(|value| format!("{value}%"))
-        .unwrap_or_else(|| "--".to_string());
+    let percent = (!stopping)
+        .then(|| progress.and_then(|progress| progress.stage.percent))
+        .flatten();
+    let indeterminate = stopping
+        || progress
+            .map(|progress| !progress.stage.determinate)
+            .unwrap_or(true);
+    let phase = if stopping {
+        "Stopping sync"
+    } else {
+        progress
+            .and_then(|progress| progress.status_text.as_deref())
+            .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
+            .unwrap_or("Preparing sync")
+    };
+    let percent_label = percent.map(|value| format!("{value}%"));
 
     let primary_metric = progress.and_then(|progress| progress.primary_metric.clone());
     let secondary_metric = progress.and_then(|progress| progress.secondary_metric.clone());
+    let primary_amount = primary_metric
+        .as_ref()
+        .map(|metric| format!("{} {}", metric.label, metric.rendered));
+    let secondary_amount = secondary_metric.as_ref().and_then(|metric| {
+        metric.done.map(|done| {
+            format!(
+                "{} {}",
+                metric.label,
+                fleet_domain::utils::format_bytes(done)
+            )
+        })
+    });
     let rate = progress
         .and_then(|progress| progress.throughput_bytes_per_sec)
         .map(format_speed);
@@ -788,21 +808,27 @@ fn render_sync_mode(
                     section { class: "sync-panel",
                         div { class: "sync-panel__head",
                             div { class: "sync-panel__phase", "{phase}" }
-                            div { class: "sync-panel__percent", "{percent_label}" }
+                            if let Some(percent_label) = percent_label.as_ref() {
+                                div { class: "sync-panel__percent", "{percent_label}" }
+                            }
                         }
                         ProgressBar { percent, indeterminate }
-                        if let Some(metric) = primary_metric.as_ref() {
-                            div { class: "sync-panel__count mono", "{metric.rendered}" }
+                        if !stopping {
+                            if let Some(primary_amount) = primary_amount.as_ref() {
+                                div { class: "sync-panel__count mono", "{primary_amount}" }
+                            }
                         }
-                        div { class: "sync-panel__stats",
-                            if let Some(metric) = secondary_metric.as_ref() {
-                                span { class: "mono", "{metric.rendered}" }
-                            }
-                            if let Some(rate) = rate.as_ref() {
-                                span { class: "mono", "{rate}" }
-                            }
-                            if let Some(remaining) = remaining.as_ref() {
-                                span { class: "mono", "Remaining {remaining}" }
+                        if !stopping {
+                            div { class: "sync-panel__stats",
+                                if let Some(secondary_amount) = secondary_amount.as_ref() {
+                                    span { class: "mono", "{secondary_amount}" }
+                                }
+                                if let Some(rate) = rate.as_ref() {
+                                    span { class: "mono", "{rate}" }
+                                }
+                                if let Some(remaining) = remaining.as_ref() {
+                                    span { class: "mono", "Remaining {remaining}" }
+                                }
                             }
                         }
                     }
@@ -814,8 +840,9 @@ fn render_sync_mode(
                     Button {
                         variant: ButtonVariant::Secondary,
                         disabled: !cancel_enabled || session_id.is_none(),
+                        loading: stopping,
                         onclick: on_cancel_sync,
-                        "Cancel"
+                        if stopping { "Stopping" } else { "Cancel" }
                     }
                 }),
             }

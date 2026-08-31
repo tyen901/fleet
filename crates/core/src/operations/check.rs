@@ -3,7 +3,6 @@ use crate::operations::{check_repo, local_files, OperationPublisher, OperationSt
 use fleet_domain::health::CheckReport;
 use fleet_domain::Profile;
 use std::path::Path;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn check(
@@ -14,7 +13,8 @@ pub(crate) async fn check(
 ) -> Result<CheckReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     publisher.stage(OperationStage::LoadingExpectedState);
-    let progress = Arc::new(FluxProgressObserver::new(publisher.clone()));
+    let (progress, progress_receiver) =
+        FluxProgressObserver::channel(fleet_domain::OperationKind::Check);
 
     let work = async {
         tokio::join!(
@@ -26,7 +26,7 @@ pub(crate) async fn check(
         _ = cancellation.cancelled() => {
             return Err(crate::ApiError::new("canceled", "canceled"));
         }
-        result = work => result,
+        result = progress_receiver.observe(publisher.clone(), work) => result,
     };
     publisher.stage(OperationStage::Finalizing);
     Ok(CheckReport {
