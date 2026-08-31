@@ -73,6 +73,8 @@ pub struct ActiveOperationState {
     pub progress: ProfileOperationProgressState,
     #[serde(default)]
     pub completed_stages: BTreeSet<OperationStage>,
+    #[serde(default)]
+    pub cancel_requested: bool,
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
 }
@@ -84,6 +86,7 @@ impl ActiveOperationState {
             operation,
             progress: ProfileOperationProgressState::new(operation, now_ms),
             completed_stages: BTreeSet::new(),
+            cancel_requested: false,
             started_at_unix_ms: now_ms,
             updated_at_unix_ms: now_ms,
         }
@@ -112,6 +115,7 @@ pub enum ProfileStatusHeadline {
     Syncing,
     Checking,
     Validating,
+    Stopping,
     UpdateAvailable,
     ReadyToPlay,
     NeedsSync,
@@ -139,6 +143,7 @@ impl ProfileStatusHeadline {
             Self::Syncing => "Syncing",
             Self::Checking => "Checking",
             Self::Validating => "Validating",
+            Self::Stopping => "Stopping",
             Self::UpdateAvailable => "Update Required",
             Self::ReadyToPlay => "Ready to play",
             Self::NeedsSync => "Needs sync",
@@ -365,6 +370,10 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
     let sync_running = matches!(active_operation, Some(OperationKind::Sync));
     let check_running = matches!(active_operation, Some(OperationKind::Check));
     let validate_running = matches!(active_operation, Some(OperationKind::Validate));
+    let cancel_requested = runtime
+        .active
+        .as_ref()
+        .is_some_and(|active| active.cancel_requested);
     let can_run_actions = !operation_active;
     let hard_blocked = local_health == LocalFileHealth::InvalidProfile;
     let sync_blocked = local_health == LocalFileHealth::InvalidProfile;
@@ -380,7 +389,9 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         (outcome.status == OperationTerminalStatus::Canceled).then_some(outcome.operation)
     });
 
-    let headline = if sync_running {
+    let headline = if cancel_requested {
+        ProfileStatusHeadline::Stopping
+    } else if sync_running {
         ProfileStatusHeadline::Syncing
     } else if validate_running {
         ProfileStatusHeadline::Validating
@@ -425,6 +436,7 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         ProfileStatusHeadline::ReadyToPlay
         | ProfileStatusHeadline::Checking
         | ProfileStatusHeadline::Validating
+        | ProfileStatusHeadline::Stopping
         | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
         ProfileStatusHeadline::NeedsSync
         | ProfileStatusHeadline::MissingDestination
@@ -454,7 +466,7 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         sync_enabled: can_run_actions && !sync_blocked,
         check_enabled: can_run_actions && !hard_blocked,
         validate_enabled: can_run_actions && !hard_blocked,
-        cancel_enabled: operation_active,
+        cancel_enabled: operation_active && !cancel_requested,
         sync_running,
         check_running,
         validate_running,
@@ -786,6 +798,20 @@ mod tests {
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::Syncing);
+    }
+
+    #[test]
+    fn cancellation_request_immediately_exposes_stopping_state() {
+        let mut runtime = super::ProfileRuntimeState::new("p1".to_string(), 1);
+        let mut active = super::ActiveOperationState::new(1, OperationKind::Sync, 1);
+        active.cancel_requested = true;
+        runtime.active = Some(active);
+
+        let status = derive_profile_status(&runtime);
+
+        assert_eq!(status.headline, ProfileStatusHeadline::Stopping);
+        assert!(!status.actions.cancel_enabled);
+        assert!(!status.can_launch);
     }
 
     #[test]

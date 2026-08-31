@@ -308,18 +308,29 @@ impl OperationRuntime {
         });
     }
 
-    pub(crate) fn cancel(&self, session_id: u64) -> CancelResult {
-        let sessions = self.sessions.lock().unwrap();
-        if let Some(record) = sessions.get(&session_id) {
-            if record.terminal_rx.borrow().is_some() || record.cancel.is_cancelled() {
-                CancelResult::AlreadyTerminal
-            } else {
-                record.cancel.cancel();
-                CancelResult::Requested
-            }
-        } else {
-            CancelResult::NotFound
+    pub(crate) fn cancel(&self, core: &Core, session_id: u64) -> CancelResult {
+        let Some(record) = self.sessions.lock().unwrap().get(&session_id).cloned() else {
+            return CancelResult::NotFound;
+        };
+        if record.terminal_rx.borrow().is_some() || record.cancel.is_cancelled() {
+            return CancelResult::AlreadyTerminal;
         }
+
+        let now = fleet_domain::time::now_unix_ms();
+        core.update_state(|state| {
+            if let Some(active) = state
+                .profile_runtime_by_id
+                .get_mut(&record.profile_id)
+                .and_then(|runtime| runtime.active.as_mut())
+                .filter(|active| active.session_id == session_id)
+            {
+                active.cancel_requested = true;
+                active.updated_at_unix_ms = now;
+            }
+            recompute_profile_status(state, &record.profile_id);
+        });
+        record.cancel.cancel();
+        CancelResult::Requested
     }
 
     pub(crate) async fn await_finished(

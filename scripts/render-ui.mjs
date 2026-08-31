@@ -633,6 +633,14 @@ async function runFlow(client) {
     15_000,
   );
   await client.capture('10-sync-progress.png');
+  await client.clickText('Cancel');
+  await client.waitFor(
+    `document.body.innerText.includes('Stopping sync') &&
+      [...document.querySelectorAll('button')]
+        .some((button) => button.textContent.trim() === 'Stopping')`,
+    'immediate stopping state',
+  );
+  await client.capture('11-sync-stopping.png');
 }
 
 await seedDummyConfig();

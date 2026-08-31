@@ -128,7 +128,7 @@ impl Core {
     }
 
     pub fn cancel_session(&self, session_id: u64) -> Result<CancelResult, ApiError> {
-        Ok(self.operation_runtime().cancel(session_id))
+        Ok(self.operation_runtime().cancel(self, session_id))
     }
 
     async fn ensure_profile_loaded_for_start(&self, profile_id: &str) -> Result<(), ApiError> {

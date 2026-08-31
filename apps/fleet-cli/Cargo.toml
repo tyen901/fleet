@@ -9,7 +9,7 @@ fleet-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
-indicatif = "0.17.11"
+indicatif = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
