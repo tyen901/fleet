@@ -43,22 +43,20 @@ pub(crate) async fn sync(
     );
 
     publisher.stage(OperationStage::Sync);
-    let progress = Arc::new(FluxProgressObserver::new(publisher.clone()));
-    fleet_flux::materialize(
-        &dest,
-        inventory,
-        input,
-        cancel.clone(),
-        Some(progress as fleet_flux::ProgressObserverRef),
-    )
-    .await
-    .map_err(|error| {
-        if cancel.is_cancelled() {
-            crate::ApiError::new("canceled", "canceled")
-        } else {
-            crate::ApiError::new("sync_failed", error.to_string())
-        }
-    })?;
+    let (progress, progress_receiver) =
+        FluxProgressObserver::channel(fleet_domain::OperationKind::Sync);
+    let materialization =
+        fleet_flux::materialize(&dest, inventory, input, cancel.clone(), Some(progress));
+    progress_receiver
+        .observe(publisher.clone(), materialization)
+        .await
+        .map_err(|error| {
+            if cancel.is_cancelled() {
+                crate::ApiError::new("canceled", "canceled")
+            } else {
+                crate::ApiError::new("sync_failed", error.to_string())
+            }
+        })?;
     publisher.stage(OperationStage::Finalizing);
     Ok(SyncReport {
         profile_id: profile.id.clone(),

@@ -111,7 +111,7 @@
   gap: var(--space-2);
 }
 
-.profile-row__buttons--with-update {
+.profile-row__buttons--with-sync {
   width: 268px;
 }
 
