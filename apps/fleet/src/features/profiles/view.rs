@@ -744,9 +744,10 @@ fn render_sync_mode(
 
     let primary_metric = progress.and_then(|progress| progress.primary_metric.clone());
     let secondary_metric = progress.and_then(|progress| progress.secondary_metric.clone());
-    let primary_amount = primary_metric
-        .as_ref()
-        .map(|metric| format!("{} {}", metric.label, metric.rendered));
+    let primary_amount = primary_metric.as_ref().map(|metric| match metric.unit {
+        fleet_core::ProgressUnit::Files => metric.rendered.clone(),
+        fleet_core::ProgressUnit::Bytes => format!("{} {}", metric.label, metric.rendered),
+    });
     let secondary_amount = secondary_metric.as_ref().and_then(|metric| {
         metric.done.map(|done| {
             format!(
