@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::command::{LaunchCommand, LaunchMethod};
@@ -28,8 +27,6 @@ pub struct LaunchRequest {
     pub args: Vec<String>,
     /// Local mod directories.
     pub mods: ModList,
-    /// Additional env vars.
-    pub env: BTreeMap<String, String>,
 }
 
 impl LaunchRequest {
@@ -38,7 +35,6 @@ impl LaunchRequest {
             method,
             args: Vec::new(),
             mods,
-            env: BTreeMap::new(),
         }
     }
 }
@@ -87,11 +83,8 @@ impl Launcher {
         // Add user args
         args.extend(req.args.clone());
 
-        // Env
-        let env = req.env.clone();
-
         // Validate executable availability when chosen
-        let executable = match req.method {
+        let program = match req.method {
             LaunchMethod::Arma3Exe => self.install.executable_path()?.display().to_string(),
             LaunchMethod::SteamNative => {
                 let Some(path) = resolve_bin("steam", steam_fallbacks()) else {
@@ -101,12 +94,7 @@ impl Launcher {
             }
         };
 
-        Ok(LaunchCommand {
-            method: req.method,
-            executable,
-            args,
-            env,
-        })
+        Ok(LaunchCommand { program, args })
     }
 }
 
@@ -155,11 +143,6 @@ fn steam_fallbacks() -> &'static [&'static str] {
     }
 }
 
-/// Check whether the Steam executable is available via PATH or common fallbacks.
-pub fn steam_available() -> bool {
-    resolve_bin("steam", steam_fallbacks()).is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Arma3Install, LaunchMethod, LaunchRequest, Launcher};
@@ -179,10 +162,7 @@ mod tests {
         req.args = vec!["-noSplash".to_string()];
 
         let cmd = launcher.build_command(&req).expect("build command");
-        assert!(cmd
-            .executable
-            .to_ascii_lowercase()
-            .ends_with("arma3_x64.exe"));
+        assert!(cmd.program.to_ascii_lowercase().ends_with("arma3_x64.exe"));
         assert_eq!(cmd.args, vec!["-noSplash".to_string()]);
     }
 
@@ -200,9 +180,6 @@ mod tests {
         let req = LaunchRequest::new(LaunchMethod::Arma3Exe, ModList::new(Vec::new()));
 
         let cmd = launcher.build_command(&req).expect("build command");
-        assert!(cmd
-            .executable
-            .to_ascii_lowercase()
-            .ends_with("arma3_x64.exe"));
+        assert!(cmd.program.to_ascii_lowercase().ends_with("arma3_x64.exe"));
     }
 }
