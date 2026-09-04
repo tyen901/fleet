@@ -1,4 +1,3 @@
-pub mod download;
 pub mod filesystem;
 pub mod hash;
 pub mod health;
@@ -7,7 +6,6 @@ pub mod time;
 pub mod types;
 pub mod utils;
 
-pub use download::{DownloadEvent, DownloadPhase};
 pub use health::{
     CheckReport, LocalFileHealth, LocalFileReport, OperationKind, OperationSessionId,
     RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind,
