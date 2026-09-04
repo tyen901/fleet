@@ -25,7 +25,7 @@ pub struct ArmaLaunchResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ActionKind {
+enum ActionKind {
     Launch,
     Join,
 }
@@ -33,26 +33,6 @@ pub enum ActionKind {
 impl Core {
     pub fn arma3_detect_install_dir(&self) -> Option<PathBuf> {
         detect_arma3_install_path()
-    }
-
-    pub fn arma3_launch(
-        &self,
-        profile: &Profile,
-        settings: &AppSettings,
-        extra_args: Option<Vec<String>>,
-        dry_run: bool,
-    ) -> Result<ArmaLaunchResult, ApiError> {
-        arma3_execute(profile, settings, ActionKind::Launch, extra_args, dry_run)
-    }
-
-    pub fn arma3_join(
-        &self,
-        profile: &Profile,
-        settings: &AppSettings,
-        extra_args: Option<Vec<String>>,
-        dry_run: bool,
-    ) -> Result<ArmaLaunchResult, ApiError> {
-        arma3_execute(profile, settings, ActionKind::Join, extra_args, dry_run)
     }
 
     pub async fn arma3_launch_by_profile_id(
@@ -94,10 +74,7 @@ impl Core {
             .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
         self.ensure_arma3_settings(&mut settings).await?;
 
-        match action {
-            ActionKind::Launch => self.arma3_launch(&profile, &settings, extra_args, dry_run),
-            ActionKind::Join => self.arma3_join(&profile, &settings, extra_args, dry_run),
-        }
+        arma3_execute(&profile, &settings, action, extra_args, dry_run)
     }
 
     async fn launch_local_check(&self, profile: &Profile) -> Result<LocalFileReport, ApiError> {
