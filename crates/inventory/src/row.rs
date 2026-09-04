@@ -5,23 +5,16 @@ use flux::{
 
 use crate::InventoryError;
 
-pub(crate) fn local_file_from_rows(
+pub(crate) fn local_file_from_file_row(
     rel_path: String,
     len: i64,
     version_token: Vec<u8>,
-    rows: Vec<(i64, i64, Vec<u8>, Vec<u8>)>,
 ) -> FluxResult<LocalFileFact> {
     let len = read_u64(len, "file length")?;
-    let segments = rows
-        .into_iter()
-        .map(|(start, range_len, profile, identity)| {
-            segment_from_row(start, range_len, profile, identity)
-        })
-        .collect::<FluxResult<Vec<_>>>()?;
     Ok(LocalFileFact {
         path: stored_target_path(rel_path)?,
         version: TargetFileVersion::from_storage(len, version_token)?,
-        segments,
+        segments: Vec::new(),
     })
 }
 

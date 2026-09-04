@@ -1,9 +1,9 @@
 use fleet_inventory::FleetInventoryProvider;
 use flux::{
-    CheckInventory, ExpectedFileFact, InventoryReader, LocalFileFact, LocalFileSegmentFact,
-    ManagedInventoryBatch, ManagedInventoryChange, ManagedInventoryWriter, OpaqueSegmentIdentity,
-    ProfileFingerprint, SegmentKey, TargetFileVersion, TargetPath, ValidationSpec,
-    VerifiedFactBatch, VerifiedFactChange, VerifiedFactWriter,
+    CheckInventory, ExpectedFileFact, FluxErrorKind, InventoryReader, LocalFileFact,
+    LocalFileSegmentFact, ManagedInventoryBatch, ManagedInventoryChange, ManagedInventoryWriter,
+    OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey, TargetFileVersion, TargetPath,
+    ValidationSpec, VerifiedFactBatch, VerifiedFactChange, VerifiedFactWriter,
 };
 use futures_util::StreamExt;
 
@@ -82,6 +82,38 @@ async fn fact_and_managed_path_mutations_have_distinct_ownership_semantics() {
         .expect("delete managed path");
     assert_eq!(lookup_file(&inventory, &managed.path).await, None);
     assert!(managed_paths(&inventory, 1).await.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_batch_paths_fail_without_replacing_existing_fact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("inventory.sqlite");
+    let inventory = FleetInventoryProvider::open_or_recreate(&db_path).expect("open inventory");
+    let original = fact("observed/addon.pbo", 1);
+
+    inventory
+        .apply_verified_batch(VerifiedFactBatch {
+            changes: vec![VerifiedFactChange::Upsert(original.clone())],
+        })
+        .await
+        .expect("persist original fact");
+
+    let error = inventory
+        .apply_verified_batch(VerifiedFactBatch {
+            changes: vec![
+                VerifiedFactChange::Upsert(fact("observed/addon.pbo", 2)),
+                VerifiedFactChange::Remove(original.path.clone()),
+            ],
+        })
+        .await
+        .expect_err("reject duplicate paths");
+
+    assert_eq!(error.kind, FluxErrorKind::InventoryUpdateFailed);
+    assert_eq!(error.message, "inventory batch contains duplicate paths");
+    assert_eq!(
+        lookup_file(&inventory, &original.path).await,
+        Some(original)
+    );
 }
 
 #[tokio::test]
