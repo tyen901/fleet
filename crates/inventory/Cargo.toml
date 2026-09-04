@@ -5,8 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = { workspace = true }
-camino = { workspace = true }
-fleet-domain = { workspace = true }
 flux = { workspace = true }
 futures-util = { workspace = true }
 rusqlite = { workspace = true }
