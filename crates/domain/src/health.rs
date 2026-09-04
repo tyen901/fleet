@@ -1,10 +1,9 @@
 use crate::types::ProfileId;
 use serde::{Deserialize, Serialize};
-use specta::Type;
 
 pub type OperationSessionId = u64;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum LocalFileHealth {
     Unknown,
     MissingDestination,
@@ -16,7 +15,7 @@ pub enum LocalFileHealth {
     InvalidProfile,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RepoCheckFreshness {
     Unknown,
     UpToDate,
@@ -24,35 +23,35 @@ pub enum RepoCheckFreshness {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OperationKind {
     Check,
     Validate,
     Sync,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckReport {
     pub profile_id: ProfileId,
     pub repo: RepoCheckReport,
     pub local: LocalFileReport,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VerificationKind {
     Fast,
     ByteExact,
     Materialized,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CancelResult {
     Requested,
     AlreadyTerminal,
     NotFound,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepoCheckReport {
     pub profile_id: ProfileId,
     #[serde(default)]
@@ -63,7 +62,7 @@ pub struct RepoCheckReport {
     pub checked_at_unix_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LocalFileReport {
     pub profile_id: ProfileId,
     pub verification: VerificationKind,
@@ -73,7 +72,7 @@ pub struct LocalFileReport {
     pub modified_paths_count: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncReport {
     pub profile_id: ProfileId,
     pub repo: RepoCheckReport,

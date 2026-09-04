@@ -2,18 +2,11 @@
 
 ## Apps -> Core boundary
 
-In `apps/` (UI + CLI), the only workspace crates that may be used for domain behaviour are:
-
-- `fleet-core`
-- cross-cutting utilities like `fleet-log`
-
-Everything else (`fleet-domain`, `fleet-inventory`, `fleet-download`,
-`fleet-flux`, `swifty-repo`, `fleet-arma3`, etc.) is internal and only used via
-`fleet-core`.
-
-`fleet-core` exposes a single public facade (`Core`) for all app interactions
-(state subscription, commands, operation session control). Apps should not access
-internal layers or shims inside core.
+`fleet-core` is the app facade for commands, state subscription, and operation
+session control. Apps may also use `fleet-domain` value types and pure validation
+that their forms need. The operational crates (`fleet-inventory`,
+`fleet-download`, `fleet-flux`, `swifty-repo`, and `fleet-arma3`) stay behind
+core, which exposes no internal-layer shims.
 
 ## Operation model (authoritative)
 
@@ -24,10 +17,10 @@ Operation execution is operation-centric and keyed by a single shared type:
 - `fleet-core` owns operation lifecycle APIs:
   - `start_operation(profile_id, operation_kind) -> session_id`
   - `cancel_session(session_id)`
-- `OperationRuntime` is the only lifecycle owner. It uses Tokio/tokio-util
-  primitives for generic mechanics: `CancellationToken` for cancellation,
-  `TaskTracker` for spawned operation lifecycle, `watch` for terminal results,
-  and `broadcast` for session events.
+  - `await_finished(session_id)`
+- `OperationRuntime` is the only lifecycle owner. It keeps session records and
+  per-profile busy ownership in memory, uses `CancellationToken` for
+  cancellation, `watch` for terminal results, and `broadcast` for session events.
 - `OperationPublisher` is the only operation stage/progress/notice publisher.
   It emits `OperationSessionEvent` and mirrors progress into
   `AppState.profile_runtime_by_id[profile].active.progress`.
@@ -38,8 +31,9 @@ Operation execution is operation-centric and keyed by a single shared type:
   file content or mutates inventory.
 - `Validate` reads every managed file through Flux, verifies its bytes against
   the installed expected manifest, and refreshes reusable observed facts.
-- `Sync` is the primary self-heal path. Flux holds one target session across
-  verification, planning, materialization, deletion, and terminal ownership updates.
+- `Sync` is the primary self-heal path. Flux owns verification, planning,
+  materialization, and managed-path deletion; core owns the Fleet session's
+  terminal result.
 - A failed or cancelled `Sync` invalidates prior local-clean runtime evidence.
 - Inventory corruption is surfaced by `Check`/`Validate` and repaired by `Sync`.
 - Arbitrary unmanaged files are outside Fleet's maintenance scope. `Sync` removes
@@ -63,7 +57,7 @@ The operation system is split into purpose-built crates with strict dependency r
   - Owns Swifty-to-Flux input conversion, Swifty content profile/store source wiring, and calls `flux::materialize` directly.
   - Passes Flux's typed progress snapshots into Fleet's operation event model.
 - `swifty-repo`: Swifty repo cache, repo metadata sync/probe, and cached repo access.
-  - Owns repo freshness checks and cache fallback. Fleet crates should not duplicate Swifty cache logic.
+  - Owns repo freshness checks and cache fallback. Metadata downloads and parsing overlap with bounded concurrency, and cache publication is atomic. Fleet crates should not duplicate this logic.
 - `fleet-inventory`: durable materialization facts database for the managed target scope.
   - Persists the current managed target-relative path snapshot, reusable local file facts, and reusable segment metadata required for local reuse.
   - The managed-path snapshot may contain paths that do not have reusable file facts.
@@ -96,7 +90,6 @@ fleet-core
 
 fleet-flux        (ONLY Fleet crate with Flux materialization/runtime ownership)
   ├─ fleet-inventory
-  ├─ fleet-domain
   ├─ fleet-download
   ├─ swifty-repo
   ├─ flux

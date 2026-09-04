@@ -1,10 +1,10 @@
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport};
-use fleet_domain::{Profile, ProfileSourceKind};
+use fleet_domain::{validated_repo_url, Profile};
 use std::path::Path;
 
 pub(crate) async fn check_repo(profile: &Profile, state_root: &Path) -> RepoCheckReport {
-    let repo_url = match profile.validated_source_kind() {
-        Ok(ProfileSourceKind::Http(repo_url)) => repo_url,
+    let repo_url = match validated_repo_url(&profile.source) {
+        Ok(repo_url) => repo_url,
         Err(_) => {
             return error_report(profile, None);
         }
