@@ -74,7 +74,6 @@ pub fn init(config: LoggingConfig) -> anyhow::Result<()> {
         .with(target_filter)
         .with(file_layer)
         .with(stdout_layer)
-        .with(sentry::integrations::tracing::layer())
         .try_init()
         .map_err(anyhow::Error::new)?;
 
