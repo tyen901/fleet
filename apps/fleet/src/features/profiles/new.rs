@@ -3,7 +3,7 @@ use tracing::{error, info};
 
 use crate::app::router::Route;
 use crate::features::profiles::{
-    common::{new_profile_from_draft, save_profile_and_update_state, ProfileFormField},
+    common::{new_profile_from_draft, ProfileFormField},
     draft::ProfileDraft,
     PROFILE_NAME_PLACEHOLDER, PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER,
 };
@@ -44,25 +44,17 @@ pub fn NewProfile() -> Element {
             create_loading.set(true);
             let profile = new_profile_from_draft(&draft);
             let bridge = bridge.clone();
-            let store = store.clone();
             let toasts = toasts.clone();
 
             spawn(async move {
                 info!(op = "ui_profile_create", "profile create requested");
-                match save_profile_and_update_state(
-                    bridge.clone(),
-                    store,
-                    toasts,
-                    profile,
-                    "Create profile failed",
-                )
-                .await
-                {
+                match bridge.core().profile_save(profile).await {
                     Ok(saved) => {
                         let _ = nav.push(Route::ProfileView { id: saved.id });
                     }
                     Err(err) => {
                         create_loading.set(false);
+                        toasts.push_api_error("Create profile failed", &err);
                         error!(
                             op = "ui_profile_create",
                             outcome = "failed",
