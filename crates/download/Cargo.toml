@@ -6,10 +6,12 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 atomic-write-file = { workspace = true }
-fleet-domain = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 reqwest-retry = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

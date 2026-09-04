@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,10 +9,8 @@ use flux::{
 use futures_util::{future::BoxFuture, FutureExt};
 use object_store::http::HttpBuilder;
 use object_store::{ClientOptions, ObjectStore};
-use percent_encoding::percent_decode_str;
-use url::Url;
 
-use crate::input::{swifty_profile_fingerprint, SwiftyStoreIndex, SwiftyStoreObject};
+use crate::input::{swifty_profile_fingerprint, SwiftyStoreIndex};
 
 struct SwiftyStoreSource {
     source_id: String,
@@ -21,58 +19,48 @@ struct SwiftyStoreSource {
 }
 
 pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<StoreSourceRef>> {
-    let mut by_base_url = BTreeMap::<String, Vec<SwiftyStoreObject>>::new();
+    if index.objects.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let source_id = format!("swifty:{}", index.base_url);
+    let store_url = index.base_url.trim_end_matches('/');
+    let store = HttpBuilder::new()
+        .with_url(store_url)
+        .with_client_options(ClientOptions::new().with_allow_http(true))
+        .build()
+        .context("build Swifty HTTP object store")?;
+    let mut hits_by_key = HashMap::new();
     for object in index.objects {
-        by_base_url
-            .entry(store_base_url(&object)?)
-            .or_default()
-            .push(object);
+        for part in object.parts {
+            let occurrence = StoreOccurrence {
+                source_id: source_id.clone(),
+                object: object.object_path.clone(),
+                object_range: part.object_range.clone(),
+                key: part.key.clone(),
+                validation: part.validation.clone(),
+            };
+            hits_by_key
+                .entry(part.key)
+                .or_insert_with(Vec::new)
+                .push(occurrence);
+        }
+    }
+    for hits in hits_by_key.values_mut() {
+        hits.sort_by(|a, b| {
+            a.object
+                .as_ref()
+                .cmp(b.object.as_ref())
+                .then_with(|| a.object_range.start.cmp(&b.object_range.start))
+                .then_with(|| a.object_range.end.cmp(&b.object_range.end))
+        });
     }
 
-    let mut sources = Vec::with_capacity(by_base_url.len());
-    for (base_url, objects) in by_base_url {
-        let source_id = format!("swifty:{base_url}");
-        let store = HttpBuilder::new()
-            .with_url(base_url.clone())
-            .with_client_options(ClientOptions::new().with_allow_http(true))
-            .build()
-            .context("build Swifty HTTP object store")?;
-
-        let mut hits_by_key = HashMap::new();
-        for object in objects {
-            for part in object.parts {
-                let occurrence = StoreOccurrence {
-                    source_id: source_id.clone(),
-                    object: object.object_path.clone(),
-                    object_range: part.object_range.clone(),
-                    key: part.key.clone(),
-                    validation: part.validation.clone(),
-                };
-                hits_by_key
-                    .entry(part.key)
-                    .or_insert_with(Vec::new)
-                    .push(occurrence);
-            }
-        }
-
-        for hits in hits_by_key.values_mut() {
-            hits.sort_by(|a, b| {
-                a.object
-                    .as_ref()
-                    .cmp(b.object.as_ref())
-                    .then_with(|| a.object_range.start.cmp(&b.object_range.start))
-                    .then_with(|| a.object_range.end.cmp(&b.object_range.end))
-            });
-        }
-
-        sources.push(Arc::new(SwiftyStoreSource {
-            source_id,
-            store: Arc::new(store),
-            hits_by_key,
-        }) as StoreSourceRef);
-    }
-
-    Ok(sources)
+    Ok(vec![Arc::new(SwiftyStoreSource {
+        source_id,
+        store: Arc::new(store),
+        hits_by_key,
+    }) as StoreSourceRef])
 }
 
 impl StoreSource for SwiftyStoreSource {
@@ -104,14 +92,16 @@ impl StoreSource for SwiftyStoreSource {
             let mut results = Vec::with_capacity(requests.len());
             for request in requests {
                 let mut hits = Vec::new();
-                if let Some(candidates) = self.hits_by_key.get(&request.key) {
-                    for hit in candidates {
-                        if hit.validation == request.validation
-                            && (hit.object_range.end - hit.object_range.start) == request.len
-                        {
-                            hits.push(hit.clone());
-                            if hits.len() >= limit_per_key {
-                                break;
+                if limit_per_key > 0 {
+                    if let Some(candidates) = self.hits_by_key.get(&request.key) {
+                        for hit in candidates {
+                            if hit.validation == request.validation
+                                && (hit.object_range.end - hit.object_range.start) == request.len
+                            {
+                                hits.push(hit.clone());
+                                if hits.len() >= limit_per_key {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -127,36 +117,19 @@ impl StoreSource for SwiftyStoreSource {
     }
 }
 
-fn store_base_url(object: &SwiftyStoreObject) -> Result<String> {
-    let url = Url::parse(&object.source_url)?;
-    let suffix = object.object_path.as_ref();
-    let path = percent_decode_str(url.path())
-        .decode_utf8()
-        .context("decode source_url path")?;
-
-    if !path.ends_with(suffix) {
-        return Err(anyhow::anyhow!(
-            "source_url path {} does not end with object_path {}",
-            path,
-            suffix
-        ));
-    }
-
-    let base_path = path[..path.len() - suffix.len()].to_string();
-
-    let mut base_url = url;
-    base_url.set_path(&base_path);
-    base_url.set_query(None);
-    base_url.set_fragment(None);
-    Ok(base_url.to_string())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::Uri;
+    use axum::routing::get;
+    use axum::{body::Body, response::Response, Router};
     use flux::{
         OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey, SourceLookupRequest, ValidationSpec,
     };
     use object_store::path::Path as ObjectPath;
+    use object_store::ObjectStoreExt;
 
     use super::*;
     use crate::input::{
@@ -166,6 +139,7 @@ mod tests {
     #[test]
     fn empty_store_index_creates_no_sources() {
         let sources = build_store_sources(SwiftyStoreIndex {
+            base_url: "https://a.example/base/".to_string(),
             objects: Vec::new(),
         })
         .expect("build sources");
@@ -173,53 +147,37 @@ mod tests {
         assert!(sources.is_empty());
     }
 
-    #[test]
-    fn store_sources_are_grouped_by_base_url() {
-        let index = SwiftyStoreIndex {
-            objects: vec![
-                object("https://a.example/mods/one.pbo", "mods/one.pbo"),
-                object("https://b.example/mods/two.pbo", "mods/two.pbo"),
-                object("https://a.example/mods/three.pbo", "mods/three.pbo"),
-            ],
-        };
+    #[tokio::test]
+    async fn store_source_escapes_special_object_names_under_encoded_base_path() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/{*path}", get(record_request))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind server");
+        let address = listener.local_addr().expect("server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve requests");
+        });
+        let object_path = "@mod/addons/a % #.pbo";
+        let sources = build_store_sources(SwiftyStoreIndex {
+            base_url: format!("http://{address}/base%20path/"),
+            objects: vec![object(object_path)],
+        })
+        .expect("build source");
 
-        let sources = build_store_sources(index).expect("build sources");
-        let ids = sources
-            .iter()
-            .map(|source| source.id().to_string())
-            .collect::<Vec<_>>();
+        sources[0]
+            .object_store()
+            .get(&ObjectPath::parse(object_path).expect("object path"))
+            .await
+            .expect("get object");
 
         assert_eq!(
-            ids,
-            vec![
-                "swifty:https://a.example/".to_string(),
-                "swifty:https://b.example/".to_string()
-            ]
+            requests.lock().expect("requests lock").as_slice(),
+            ["/base%20path/@mod/addons/a%20%25%20%23.pbo"]
         );
-    }
-
-    #[test]
-    fn source_url_object_path_mismatch_is_rejected() {
-        let index = SwiftyStoreIndex {
-            objects: vec![object("https://a.example/mods/one.pbo", "other/one.pbo")],
-        };
-
-        assert!(build_store_sources(index).is_err());
-    }
-
-    #[test]
-    fn percent_encoded_source_url_path_matches_decoded_object_path() {
-        let index = SwiftyStoreIndex {
-            objects: vec![object(
-                "https://a.example/@rksl/docs/home%20-%20rksl%20studios%20community.url",
-                "@rksl/docs/home - rksl studios community.url",
-            )],
-        };
-
-        let sources = build_store_sources(index).expect("build sources");
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].id(), "swifty:https://a.example/");
+        server.abort();
     }
 
     #[tokio::test]
@@ -227,16 +185,8 @@ mod tests {
         let first = key(1, 1);
         let second = key(2, 1);
         let source = only_source(vec![
-            object_with_key(
-                "https://a.example/mods/one.pbo",
-                "mods/one.pbo",
-                first.clone(),
-            ),
-            object_with_key(
-                "https://a.example/mods/two.pbo",
-                "mods/two.pbo",
-                second.clone(),
-            ),
+            object_with_key("mods/one.pbo", first.clone()),
+            object_with_key("mods/two.pbo", second.clone()),
         ]);
         let requests = vec![request(second.clone()), request(first.clone())];
 
@@ -256,16 +206,8 @@ mod tests {
     async fn lookup_many_respects_limit_per_key() {
         let key = key(1, 1);
         let source = only_source(vec![
-            object_with_key(
-                "https://a.example/mods/two.pbo",
-                "mods/two.pbo",
-                key.clone(),
-            ),
-            object_with_key(
-                "https://a.example/mods/one.pbo",
-                "mods/one.pbo",
-                key.clone(),
-            ),
+            object_with_key("mods/two.pbo", key.clone()),
+            object_with_key("mods/one.pbo", key.clone()),
         ]);
         let requests = vec![request(key)];
 
@@ -279,8 +221,24 @@ mod tests {
         assert_eq!(results[0].hits[0].object.as_ref(), "mods/one.pbo");
     }
 
+    #[tokio::test]
+    async fn lookup_many_returns_no_hits_when_limit_is_zero() {
+        let key = key(1, 1);
+        let source = only_source(vec![object_with_key("mods/one.pbo", key.clone())]);
+        let results = source
+            .lookup_many(swifty_profile_fingerprint(), &[request(key)], 0)
+            .await
+            .expect("lookup");
+
+        assert!(results[0].hits.is_empty());
+    }
+
     fn only_source(objects: Vec<SwiftyStoreObject>) -> StoreSourceRef {
-        let sources = build_store_sources(SwiftyStoreIndex { objects }).expect("build sources");
+        let sources = build_store_sources(SwiftyStoreIndex {
+            base_url: "https://a.example/".to_string(),
+            objects,
+        })
+        .expect("build sources");
         assert_eq!(sources.len(), 1);
         sources.into_iter().next().expect("source")
     }
@@ -297,19 +255,18 @@ mod tests {
         }
     }
 
-    fn object(source_url: &str, object_path: &str) -> SwiftyStoreObject {
-        object_with_key(source_url, object_path, key(1, 1))
+    fn object(object_path: &str) -> SwiftyStoreObject {
+        object_with_key(object_path, key(1, 1))
     }
 
-    fn object_with_key(source_url: &str, object_path: &str, key: SegmentKey) -> SwiftyStoreObject {
+    fn object_with_key(object_path: &str, key: SegmentKey) -> SwiftyStoreObject {
         let validation = ValidationSpec {
             profile: key.profile,
             key: key.clone(),
             len: 1,
         };
         SwiftyStoreObject {
-            source_url: source_url.to_string(),
-            object_path: ObjectPath::from(object_path),
+            object_path: ObjectPath::parse(object_path).expect("object path"),
             parts: vec![SwiftyStorePart {
                 key,
                 validation,
@@ -325,5 +282,13 @@ mod tests {
             len,
         )
         .expect("segment key")
+    }
+
+    async fn record_request(State(requests): State<Arc<Mutex<Vec<String>>>>, uri: Uri) -> Response {
+        requests
+            .lock()
+            .expect("requests lock")
+            .push(uri.path().to_string());
+        Response::new(Body::from("object"))
     }
 }
