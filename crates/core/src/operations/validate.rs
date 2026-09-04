@@ -13,9 +13,15 @@ pub(crate) async fn validate(
 ) -> Result<LocalFileReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     publisher.stage(OperationStage::LoadingExpectedState);
-    let (progress, progress_receiver) =
+    let (progress, hash_progress, progress_receiver) =
         FluxProgressObserver::channel(fleet_domain::OperationKind::Validate);
-    let validation = local_files::validate(profile, state_root, cancellation, Some(progress));
+    let validation = local_files::validate(
+        profile,
+        state_root,
+        cancellation,
+        Some(progress),
+        Some(hash_progress),
+    );
     let report = progress_receiver
         .observe(publisher.clone(), validation)
         .await?;
