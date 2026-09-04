@@ -4,36 +4,26 @@ use fleet_domain::health::{
 };
 use fleet_domain::OperationSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
-use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Type)]
+#[derive(Clone, Debug, Default, Type)]
 pub struct AppState {
-    #[serde(default)]
     pub version: u64,
     pub settings: AppSettings,
     pub profiles: BTreeMap<ProfileId, Profile>,
-    #[serde(default)]
     pub profile_runtime_by_id: BTreeMap<ProfileId, ProfileRuntimeState>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileRuntimeState {
     pub profile_id: ProfileId,
-    #[serde(default)]
     pub repo_check: Option<RepoCheckReport>,
-    #[serde(default)]
     pub check: Option<LocalFileReport>,
-    #[serde(default)]
     pub validation: Option<LocalFileReport>,
-    #[serde(default)]
     pub materialization: Option<LocalFileReport>,
-    #[serde(default)]
     pub active: Option<ActiveOperationState>,
-    #[serde(default)]
     pub last_operation: Option<OperationOutcomeState>,
-    #[serde(default)]
     pub repo_servers: Vec<RepoServer>,
     pub status: ProfileStatusState,
 }
@@ -60,12 +50,11 @@ impl ProfileRuntimeState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ActiveOperationState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
     pub progress: ProfileOperationProgressState,
-    #[serde(default)]
     pub cancel_requested: bool,
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
@@ -84,14 +73,14 @@ impl ActiveOperationState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub enum OperationTerminalStatus {
     Succeeded,
     Failed,
     Canceled,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct OperationOutcomeState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
@@ -101,7 +90,7 @@ pub struct OperationOutcomeState {
     pub error: Option<ApiError>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
     Checking,
@@ -152,7 +141,7 @@ impl ProfileStatusHeadline {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
     pub check_enabled: bool,
@@ -164,13 +153,13 @@ pub struct ProfileActionAvailability {
     pub validate_running: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub struct UiProgressBarState {
     pub determinate: bool,
     pub percent: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub struct UiProgressMetric {
     pub label: String,
     pub done: Option<u64>,
@@ -179,12 +168,11 @@ pub struct UiProgressMetric {
     pub rendered: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
     pub last_updated_at_unix_ms: u64,
     pub active_stage: OperationStage,
-    #[serde(default)]
     pub status_text: Option<String>,
     pub stage: UiProgressBarState,
     pub primary_metric: Option<UiProgressMetric>,
@@ -213,11 +201,10 @@ impl ProfileOperationProgressState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileStatusState {
     pub headline: ProfileStatusHeadline,
     pub actions: ProfileActionAvailability,
-    #[serde(default)]
     pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalFileHealth,
     pub repo_freshness: Option<RepoCheckFreshness>,

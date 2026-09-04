@@ -41,15 +41,11 @@ pub(crate) async fn run_flow_session(
 
     cancel_task.abort();
     if let Some(handle) = progress_handle {
-        stop_progress_printer(handle).await;
+        handle.abort();
+        let _ = handle.await;
     }
 
     result
-}
-
-async fn stop_progress_printer(handle: tokio::task::JoinHandle<()>) {
-    handle.abort();
-    let _ = handle.await;
 }
 
 pub(crate) async fn run_sync_session(
@@ -87,17 +83,115 @@ pub(crate) async fn run_validation_session(
 
 #[cfg(test)]
 mod tests {
-    use super::stop_progress_printer;
-    use crate::ui::progress::spawn_flow_printer;
+    use super::{run_sync_session, FlowOutput, FlowRunOptions};
+    use fleet_core::{Core, OperationKind, OperationSessionEventKind, Profile};
+    use fleet_domain::AppSettings;
+    use std::ffi::OsString;
+    use std::sync::OnceLock;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn completion_does_not_wait_for_a_missed_terminal_event() {
-        let (_events, receiver) = tokio::sync::broadcast::channel(1);
-        let printer = spawn_flow_printer(42, receiver, true);
+    static ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-        tokio::time::timeout(Duration::from_millis(100), stop_progress_printer(printer))
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_session_does_not_wait_for_a_missed_terminal_event() {
+        let _lock = ENV_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let temp_dir = tempfile::tempdir().expect("test config directory");
+        let config_dir = EnvVarGuard::set("FLEET_CONFIG_DIR", temp_dir.path());
+        let mut settings = AppSettings::default();
+        settings.startup.auto_check_profiles_on_startup = false;
+        let profile = Profile {
+            id: "p1".to_string(),
+            name: "Profile".to_string(),
+            source: "https://example.com/repo.json".to_string(),
+            destination: temp_dir.path().join("profile").display().to_string(),
+            ..Default::default()
+        };
+        std::fs::write(
+            temp_dir.path().join("settings.json"),
+            serde_json::to_vec(&settings).expect("serialize settings"),
+        )
+        .expect("write settings");
+        std::fs::write(
+            temp_dir.path().join("profiles.json"),
+            serde_json::to_vec(&serde_json::json!({ "profiles": [profile] }))
+                .expect("serialize profiles"),
+        )
+        .expect("write profiles");
+        let _simulate_sync = EnvVarGuard::set("FLEET_SIMULATE_SYNC", "1");
+        let core = Core::new_in_current_runtime_default().expect("core");
+        let mut state = core.subscribe_state();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.borrow().version == 0 || !state.borrow().profiles.contains_key("p1") {
+                state
+                    .changed()
+                    .await
+                    .expect("core state channel must stay open");
+            }
+        })
+        .await
+        .expect("core must load the fixture");
+
+        let mut events = core.subscribe_events();
+        let session_id = core
+            .start_operation("p1".to_string(), OperationKind::Sync)
             .await
-            .expect("completion must stop the printer without a terminal event");
+            .expect("start sync");
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("sync must finish")
+                .expect("event channel must stay open");
+            if event.session_id == session_id
+                && matches!(
+                    event.kind,
+                    OperationSessionEventKind::Finished { .. }
+                        | OperationSessionEventKind::Failed { .. }
+                        | OperationSessionEventKind::Canceled
+                )
+            {
+                break;
+            }
+        }
+
+        let report = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_sync_session(
+                &core,
+                session_id,
+                FlowRunOptions {
+                    output: FlowOutput::Progress { no_progress: true },
+                },
+            ),
+        )
+        .await
+        .expect("completed session must not wait for the printer");
+        assert_eq!(report.expect("sync output").profile_id, "p1");
+        drop(config_dir);
     }
 }

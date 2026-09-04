@@ -7,7 +7,6 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
-use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
 
 #[derive(Props, Clone, PartialEq)]
@@ -153,25 +152,6 @@ pub(crate) fn new_profile_from_draft(
     }
 }
 
-pub(crate) async fn save_profile_and_update_state(
-    bridge: FleetBridge,
-    mut store: AppStore,
-    toasts: ToastStore,
-    profile: fleet_core::Profile,
-    failure_title: &'static str,
-) -> Result<fleet_core::Profile, fleet_core::ApiError> {
-    match bridge.core().profile_save(profile).await {
-        Ok(saved) => {
-            store.state.set(bridge.get_snapshot());
-            Ok(saved)
-        }
-        Err(error) => {
-            toasts.push_api_error(failure_title, &error);
-            Err(error)
-        }
-    }
-}
-
 pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
     format!("{}/s", fleet_domain::utils::format_bytes(bytes_per_sec))
 }
@@ -250,12 +230,8 @@ pub(crate) async fn start_profile_operation_request(
     {
         Ok(session_id) => {
             let core = bridge.core();
-            spawn(async move {
-                if let Err(error) = core.await_finished(session_id).await {
-                    if error.code != "canceled" {
-                        toasts.push_api_error(fail_title, &error);
-                    }
-                }
+            tokio::spawn(async move {
+                let _ = core.await_finished(session_id).await;
             });
             true
         }

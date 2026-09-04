@@ -16,6 +16,7 @@ tracing = { workspace = true }
 fleet-domain = { workspace = true }
 serde_json = { workspace = true }
 swifty_artifacts = { workspace = true }
+tempfile = { workspace = true }
 
 [[bin]]
 name = "fleet-cli"

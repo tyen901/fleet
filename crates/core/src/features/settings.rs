@@ -105,7 +105,6 @@ impl Core {
         self.update_state(|state| {
             state.settings = settings;
             state.profiles = profiles;
-            state.selected_profile_id = None;
             state.profile_runtime_by_id.clear();
         });
 
