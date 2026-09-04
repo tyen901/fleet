@@ -2,7 +2,6 @@ use crate::style::{Button, ButtonVariant, InlineConfirm, PageFooter};
 use dioxus::prelude::*;
 use directories::ProjectDirs;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
-use fleet_domain::TelemetryPreference;
 
 use crate::app::router::Route;
 use crate::services::bridge::FleetBridge;
@@ -16,8 +15,7 @@ use crate::stores::update_store::{
 
 use super::actions::spawn_settings_task;
 use super::sections::{
-    advanced_section, game_section, general_section, privacy_section, startup_section,
-    updates_section,
+    advanced_section, game_section, general_section, startup_section, updates_section,
 };
 
 #[component]
@@ -92,7 +90,7 @@ pub fn Settings() -> Element {
         spawn_settings_task(toasts, "Restart setup", async move {
             let mut settings = bridge.get_snapshot().settings.clone();
             settings.ui.onboarding_completed = false;
-            bridge.core().settings_save(settings).await?;
+            bridge.core().save_settings(settings).await?;
             let _ = nav.push(Route::Onboarding {});
             Ok(())
         });
@@ -110,11 +108,6 @@ pub fn Settings() -> Element {
     );
     let is_arma3_default_args_non_default = fleet_core::settings_field_is_non_default(
         SettingsField::Arma3DefaultArgs,
-        &settings,
-        &defaults,
-    );
-    let is_telemetry_non_default = fleet_core::settings_field_is_non_default(
-        SettingsField::TelemetryConsent,
         &settings,
         &defaults,
     );
@@ -201,17 +194,6 @@ pub fn Settings() -> Element {
         dirty_for_default_args.set(true);
     };
 
-    let mut draft_for_telemetry = draft;
-    let mut dirty_for_telemetry = dirty;
-    let on_toggle_telemetry = move |next: bool| {
-        draft_for_telemetry.write().privacy.telemetry_consent = if next {
-            TelemetryPreference::Allowed
-        } else {
-            TelemetryPreference::Denied
-        };
-        dirty_for_telemetry.set(true);
-    };
-
     let mut draft_for_profile_check = draft;
     let mut dirty_for_profile_check = dirty;
     let on_toggle_profile_check = move |next: bool| {
@@ -257,9 +239,6 @@ pub fn Settings() -> Element {
             SettingsField::Arma3DefaultArgs => {
                 settings.arma3.arma3_default_args =
                     defaults_for_reset.arma3.arma3_default_args.clone();
-            }
-            SettingsField::TelemetryConsent => {
-                settings.privacy.telemetry_consent = defaults_for_reset.privacy.telemetry_consent;
             }
             SettingsField::AutoCheckProfilesOnStartup => {
                 settings.startup.auto_check_profiles_on_startup =
@@ -323,7 +302,7 @@ pub fn Settings() -> Element {
         let nav = nav_for_save;
         let settings = draft();
         spawn(async move {
-            match bridge.core().settings_save(settings).await {
+            match bridge.core().save_settings(settings).await {
                 Ok(()) => {
                     let _ = nav.push(Route::Profiles {});
                 }
@@ -370,13 +349,6 @@ pub fn Settings() -> Element {
                         settings.updates.auto_check_on_startup,
                         is_auto_check_on_startup_non_default,
                         on_toggle_auto_check_on_startup,
-                        on_reset,
-                    )}
-
-                    {privacy_section(
-                        settings.privacy.telemetry_consent.is_enabled(),
-                        is_telemetry_non_default,
-                        on_toggle_telemetry,
                         on_reset,
                     )}
 
