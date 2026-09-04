@@ -52,13 +52,14 @@ pub async fn verify_manifest(
     input: &MaterializationInput,
     cancel: CancellationToken,
     progress: Option<flux::ProgressObserverRef>,
+    hash_progress: Option<crate::HashProgressObserverRef>,
 ) -> Result<LocalAssessment> {
     let verified = flux::verify_manifest(flux::VerifyManifestRequest {
         target: flux::TargetSpec {
             root: dest.to_path_buf(),
         },
         manifest: input.manifest.clone(),
-        profile: Arc::new(SwiftyFluxProfile),
+        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
         inventory,
         scope: flux::VerificationScope::All,
         progress,
@@ -86,8 +87,9 @@ pub async fn materialize(
     input: MaterializationInput,
     cancel: CancellationToken,
     progress: Option<flux::ProgressObserverRef>,
+    hash_progress: Option<crate::HashProgressObserverRef>,
 ) -> Result<()> {
-    let profile: flux::ContentProfileRef = Arc::new(SwiftyFluxProfile);
+    let profile: flux::ContentProfileRef = Arc::new(SwiftyFluxProfile::new(hash_progress));
     let stores = build_store_sources(input.store_index)?;
     let mut context = flux::MaterializeContext::new();
     context.cancellation = cancel.clone();

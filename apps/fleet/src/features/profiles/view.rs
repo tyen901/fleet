@@ -762,6 +762,9 @@ fn render_sync_mode(
     let remaining = progress
         .and_then(|progress| progress.eta_seconds)
         .map(format_clock);
+    let approximate_remaining = progress.is_some_and(|progress| {
+        progress.active_stage == fleet_core::OperationStage::VerifyingInventory
+    });
 
     let bridge_for_cancel = bridge.clone();
     let on_cancel_sync = move |_: MouseEvent| {
@@ -796,7 +799,11 @@ fn render_sync_mode(
                                     span { class: "mono", "{rate}" }
                                 }
                                 if let Some(remaining) = remaining.as_ref() {
-                                    span { class: "mono", "Remaining {remaining}" }
+                                    if approximate_remaining {
+                                        span { class: "mono", "About {remaining} remaining" }
+                                    } else {
+                                        span { class: "mono", "Remaining {remaining}" }
+                                    }
                                 }
                             }
                         }
