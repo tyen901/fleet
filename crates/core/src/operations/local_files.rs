@@ -26,7 +26,7 @@ pub(crate) async fn check(
     cancel: CancellationToken,
     progress: Option<fleet_flux::ProgressObserverRef>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, progress, ReadKind::Check).await
+    check_or_validate(profile, state_root, cancel, progress, None, ReadKind::Check).await
 }
 
 pub(crate) async fn validate(
@@ -34,8 +34,17 @@ pub(crate) async fn validate(
     state_root: &Path,
     cancel: CancellationToken,
     progress: Option<fleet_flux::ProgressObserverRef>,
+    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, progress, ReadKind::Validate).await
+    check_or_validate(
+        profile,
+        state_root,
+        cancel,
+        progress,
+        hash_progress,
+        ReadKind::Validate,
+    )
+    .await
 }
 
 async fn check_or_validate(
@@ -43,6 +52,7 @@ async fn check_or_validate(
     state_root: &Path,
     cancel: CancellationToken,
     progress: Option<fleet_flux::ProgressObserverRef>,
+    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
     read_kind: ReadKind,
 ) -> Result<LocalFileReport, crate::ApiError> {
     let verification_kind = read_kind.evidence();
@@ -110,10 +120,16 @@ async fn check_or_validate(
             )
         }
         ReadKind::Validate => {
-            let verified =
-                fleet_flux::verify_manifest(&dest, inventory, &input, cancel.clone(), progress)
-                    .await
-                    .map_err(|error| operation_error("inventory_validation", &cancel, error))?;
+            let verified = fleet_flux::verify_manifest(
+                &dest,
+                inventory,
+                &input,
+                cancel.clone(),
+                progress,
+                hash_progress,
+            )
+            .await
+            .map_err(|error| operation_error("inventory_validation", &cancel, error))?;
             report_from_counts(
                 profile,
                 VerificationKind::ByteExact,
