@@ -14,8 +14,7 @@ pub use health::{
 };
 pub use paths::{inventory_db_path, profile_state_dir, profile_state_key, repo_cache_dir};
 pub use types::{
-    normalize_app_settings, ApiError, AppSettings, Arma3LaunchMethod, Arma3Settings,
-    PrivacySettings, Profile, ProfileId, ProfileSourceKind, RepoServer, RuntimeSettings,
-    TelemetryPreference, UiSettings, UpdateSettings, DEFAULT_ARMA3_ARGS,
-    INVENTORY_REBUILD_REQUIRED_CODE,
+    normalize_app_settings, ApiError, AppSettings, Arma3LaunchMethod, Arma3Settings, Profile,
+    ProfileId, ProfileSourceKind, RepoServer, RuntimeSettings, UiSettings, UpdateSettings,
+    DEFAULT_ARMA3_ARGS,
 };
