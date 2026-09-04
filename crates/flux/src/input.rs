@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use fleet_download::{DownloadEventSink, DownloadService};
+use fleet_download::DownloadService;
 use flux::{
     ManifestHeader, ManifestRecord, OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey,
     TargetPath, ValidatedManifest, ValidationSpec,
@@ -32,14 +32,14 @@ impl MaterializationInput {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SwiftyStoreIndex {
+    pub base_url: String,
     pub objects: Vec<SwiftyStoreObject>,
 }
 
 #[derive(Clone)]
 pub struct SwiftyStoreObject {
-    pub source_url: String,
     pub object_path: ObjectPath,
     pub parts: Vec<SwiftyStorePart>,
 }
@@ -55,22 +55,19 @@ pub async fn load_swifty_materialization_input(
     repo_url: &str,
     repo_cache_dir: &Path,
     downloads: &DownloadService,
-    sink: Option<DownloadEventSink>,
 ) -> Result<MaterializationInput> {
     let span =
         debug_span!("sync.load_materialization_input_from_swifty_repo", repo_url = %repo_url);
     let _g = span.enter();
 
     let store = swifty_repo::FsRepoCacheStore::new(repo_cache_dir.to_path_buf());
-    let resolver = swifty_repo::DefaultModSrfResolver;
-
     let started_at = Instant::now();
     let swifty_repo::RepoSyncResult {
         repo,
         mods,
         revision,
         ..
-    } = swifty_repo::sync_repo_metadata(repo_url, &store, &resolver, downloads, sink.clone())
+    } = swifty_repo::sync_repo_metadata(repo_url, &store, downloads)
         .await
         .with_context(|| format!("sync swifty repo metadata {repo_url}"))?;
     debug!(
@@ -122,7 +119,10 @@ pub fn swifty_repo_to_materialization_input(
         manifest_id: Uuid::new_v4(),
         profile,
     })];
-    let mut store_index = SwiftyStoreIndex::default();
+    let mut store_index = SwiftyStoreIndex {
+        base_url: base_url.to_string(),
+        objects: Vec::new(),
+    };
     let mut files_seen = BTreeSet::<String>::new();
 
     let ordered_mod_names = repo
@@ -144,10 +144,6 @@ pub fn swifty_repo_to_materialization_input(
                 anyhow::bail!("duplicate target path in Swifty metadata: {rel}");
             }
             let target_path = TargetPath::new(&rel)?;
-            let source_url = base_url
-                .join(&rel)
-                .with_context(|| format!("join mod file url {rel}"))?
-                .to_string();
             records.push(ManifestRecord::File {
                 path: target_path.clone(),
                 len: file.length,
@@ -175,7 +171,6 @@ pub fn swifty_repo_to_materialization_input(
                 });
             }
             store_index.objects.push(SwiftyStoreObject {
-                source_url,
                 object_path: ObjectPath::parse(&rel)?,
                 parts,
             });
@@ -290,7 +285,7 @@ mod tests {
                 name: "@mod".to_string(),
                 checksum: swifty_artifacts::Md5Digest::default(),
                 files: vec![swifty_artifacts::SrfFile {
-                    path: "addons\\a.pbo".to_string(),
+                    path: "addons\\a % #.pbo".to_string(),
                     length: 5,
                     checksum,
                     r#type: None,
@@ -299,16 +294,25 @@ mod tests {
             },
         )]);
 
-        let input =
-            swifty_repo_to_materialization_input("https://example.com/repo.json", &repo, &mods)
-                .expect("convert");
+        let input = swifty_repo_to_materialization_input(
+            "https://example.com/base%20path/repo.json",
+            &repo,
+            &mods,
+        )
+        .expect("convert");
 
-        assert_eq!(input.manifest.files[0].path.as_str(), "@mod/addons/a.pbo");
+        assert_eq!(
+            input.manifest.files[0].path.as_str(),
+            "@mod/addons/a % #.pbo"
+        );
         assert_eq!(input.manifest.files[0].segments.len(), 1);
         assert_eq!(input.store_index.objects.len(), 1);
         let object = &input.store_index.objects[0];
-        assert_eq!(object.object_path.as_ref(), "@mod/addons/a.pbo");
-        assert_eq!(object.source_url, "https://example.com/@mod/addons/a.pbo");
+        assert_eq!(object.object_path.as_ref(), "@mod/addons/a % #.pbo");
+        assert_eq!(
+            input.store_index.base_url,
+            "https://example.com/base%20path/"
+        );
         assert_eq!(object.parts[0].object_range, 0..5);
         assert_eq!(
             object.parts[0].key.identity.bytes(),
