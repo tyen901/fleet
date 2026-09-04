@@ -54,7 +54,6 @@ mod tests {
     fn boot_prefers_onboarding_when_not_completed() {
         let mut state = AppState::default();
         state.settings.ui.onboarding_completed = false;
-        state.selected_profile_id = Some("p1".to_string());
         assert_eq!(resolve_boot_target(&state), BootTarget::Onboarding);
     }
 }

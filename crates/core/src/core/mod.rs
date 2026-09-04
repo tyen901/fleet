@@ -103,22 +103,6 @@ impl Core {
         self.inner.next_session_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub async fn start_operations_for_profiles(
-        &self,
-        profile_ids: Vec<ProfileId>,
-        operations: Vec<OperationKind>,
-    ) -> Vec<(ProfileId, OperationKind, ApiError)> {
-        let mut failures = Vec::new();
-        for profile_id in profile_ids {
-            for operation in operations.iter().copied() {
-                if let Err(err) = self.start_operation(profile_id.clone(), operation).await {
-                    failures.push((profile_id.clone(), operation, err));
-                }
-            }
-        }
-        failures
-    }
-
     pub async fn start_operation(
         &self,
         profile_id: ProfileId,

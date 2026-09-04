@@ -7,8 +7,7 @@ use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressScope,
-    ProgressUnit,
+    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressUnit,
 };
 
 const UI_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -86,7 +85,6 @@ impl FluxProgressReceiver {
             };
             return OperationProgressEvent {
                 stage: OperationStage::VerifyingInventory,
-                scope: ProgressScope::InventoryVerify,
                 status_text: Some(status_text.to_string()),
                 primary: ProgressMetric {
                     label: None,
@@ -127,7 +125,6 @@ impl FluxProgressReceiver {
         let Some(transfer) = snapshot.transfer else {
             return OperationProgressEvent {
                 stage,
-                scope: ProgressScope::MaterializationFiles,
                 status_text: Some(status_text.to_string()),
                 primary: ProgressMetric {
                     label: None,
@@ -162,7 +159,6 @@ impl FluxProgressReceiver {
 
         OperationProgressEvent {
             stage,
-            scope: ProgressScope::MaterializationBytes,
             status_text: Some(status_text.to_string()),
             primary: ProgressMetric {
                 label: Some("Installed".to_string()),
