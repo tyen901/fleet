@@ -14,7 +14,6 @@ use fleet_domain::{
 };
 use serde::Serialize;
 use specta::Type;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -22,8 +21,6 @@ use tracing::info;
 pub struct ArmaLaunchResult {
     pub program: String,
     pub args: Vec<String>,
-    pub cwd: Option<String>,
-    pub env: Vec<(String, String)>,
     pub pid: Option<u32>,
 }
 
@@ -38,15 +35,11 @@ impl Core {
         detect_arma3_install_path()
     }
 
-    pub fn arma3_steam_available(&self) -> bool {
-        fleet_arma3::steam_available()
-    }
-
     pub fn arma3_launch(
         &self,
         profile: &Profile,
         settings: &AppSettings,
-        extra_args: Option<Vec<OsString>>,
+        extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
         arma3_execute(profile, settings, ActionKind::Launch, extra_args, dry_run)
@@ -56,7 +49,7 @@ impl Core {
         &self,
         profile: &Profile,
         settings: &AppSettings,
-        extra_args: Option<Vec<OsString>>,
+        extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
         arma3_execute(profile, settings, ActionKind::Join, extra_args, dry_run)
@@ -89,54 +82,30 @@ impl Core {
         extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
-        let local_check = self.launch_local_check_by_profile_id(&profile_id).await?;
-        validate_launch_compatibility(&local_check)?;
-        let (profile, settings) = self.load_profile_and_settings(&profile_id).await?;
-        let extra_args_os: Option<Vec<OsString>> =
-            extra_args.map(|v| v.into_iter().map(OsString::from).collect());
-
-        let result = match action {
-            ActionKind::Launch => self.arma3_launch(&profile, &settings, extra_args_os, dry_run),
-            ActionKind::Join => self.arma3_join(&profile, &settings, extra_args_os, dry_run),
-        };
-
-        if let Ok(settings) = self.load_settings().await {
-            self.update_state(|state| {
-                state.settings = settings;
-            });
-        }
-
-        result
-    }
-
-    async fn load_profile_and_settings(
-        &self,
-        profile_id: &ProfileId,
-    ) -> Result<(Profile, AppSettings), ApiError> {
         let profile = self
-            .load_profile(profile_id)
+            .load_profile(&profile_id)
             .await
             .map_err(|e| ApiError::new("not_found", e.to_string()))?;
-
+        let local_check = self.launch_local_check(&profile).await?;
+        validate_launch_compatibility(&local_check)?;
         let mut settings = self
             .load_settings()
             .await
             .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
         self.ensure_arma3_settings(&mut settings).await?;
 
-        Ok((profile, settings))
+        match action {
+            ActionKind::Launch => self.arma3_launch(&profile, &settings, extra_args, dry_run),
+            ActionKind::Join => self.arma3_join(&profile, &settings, extra_args, dry_run),
+        }
     }
 
-    async fn launch_local_check_by_profile_id(
-        &self,
-        profile_id: &ProfileId,
-    ) -> Result<LocalFileReport, ApiError> {
-        let (profile, _settings) = self.load_profile_and_settings(profile_id).await?;
+    async fn launch_local_check(&self, profile: &Profile) -> Result<LocalFileReport, ApiError> {
         let state_root =
             profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
 
         local_files::check(
-            &profile,
+            profile,
             &state_root,
             tokio_util::sync::CancellationToken::new(),
             None,
@@ -164,10 +133,10 @@ fn arma3_execute(
     profile: &Profile,
     settings: &AppSettings,
     kind: ActionKind,
-    extra_args: Option<Vec<OsString>>,
+    extra_args: Option<Vec<String>>,
     dry_run: bool,
 ) -> Result<ArmaLaunchResult, ApiError> {
-    let built = build_launch(profile, settings, kind, extra_args.unwrap_or_default())
+    let command = build_launch(profile, settings, kind, extra_args.unwrap_or_default())
         .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
 
     let pid = if dry_run {
@@ -180,26 +149,19 @@ fn arma3_execute(
             profile_destination = %profile.destination,
             action = ?kind,
             launch_method = ?settings.arma3.arma3_launch_method,
-            program = %built.spec.program,
-            args = ?built.spec.args,
+            program = %command.program,
+            args = ?command.args,
             "arma3 launch command"
         );
-        let child = built
-            .spec
+        let child = command
             .spawn()
-            .map_err(|e| ApiError::new("launch_failed", e))?;
+            .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
         Some(child.id())
     };
 
     Ok(ArmaLaunchResult {
-        program: built.spec.program.clone(),
-        args: built.spec.args.clone(),
-        cwd: built
-            .spec
-            .cwd
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        env: built.spec.env.clone(),
+        program: command.program,
+        args: command.args,
         pid,
     })
 }
@@ -208,8 +170,8 @@ fn build_launch(
     profile: &Profile,
     settings: &AppSettings,
     kind: ActionKind,
-    extra_args: Vec<OsString>,
-) -> Result<LaunchPlan, Arma3Error> {
+    extra_args: Vec<String>,
+) -> Result<LaunchCommand, Arma3Error> {
     let game_dir = resolve_game_dir(settings)?;
     let resolved_mode = resolve_launch_mode(settings)?;
 
@@ -225,13 +187,11 @@ fn build_launch(
 
     let launcher = Launcher::new(install);
     let base_command = launcher.build_command(&req)?;
-    let spec = if let Some(template) = resolved_mode.custom_template {
-        build_template_command(&template, &base_command)?
+    if let Some(template) = resolved_mode.custom_template {
+        build_template_command(&template, &base_command)
     } else {
-        CommandSpec::from_launch_command(&base_command)
-    };
-
-    Ok(LaunchPlan { spec })
+        Ok(base_command)
+    }
 }
 
 fn resolve_game_dir(settings: &AppSettings) -> Result<PathBuf, Arma3Error> {
@@ -330,7 +290,7 @@ fn build_args(
     profile: &Profile,
     settings: &AppSettings,
     kind: ActionKind,
-    extra_args: Vec<OsString>,
+    extra_args: Vec<String>,
 ) -> Result<Vec<String>, Arma3Error> {
     let mut args = if !profile.launch_params.trim().is_empty() {
         parse_args(&profile.launch_params)?
@@ -338,10 +298,9 @@ fn build_args(
         parse_args(&settings.arma3.arma3_default_args)?
     };
 
-    let has_connect_override = extra_args.iter().any(|a| {
-        let s = a.to_string_lossy();
-        s.starts_with("-connect=") || s == "-connect"
-    });
+    let has_connect_override = extra_args
+        .iter()
+        .any(|argument| argument.starts_with("-connect=") || argument == "-connect");
 
     if kind == ActionKind::Join && !has_connect_override {
         if let Some(server) = resolve_join_server(profile)? {
@@ -353,9 +312,7 @@ fn build_args(
         }
     }
 
-    for arg in extra_args {
-        args.push(arg.to_string_lossy().to_string());
-    }
+    args.extend(extra_args);
 
     Ok(args)
 }
@@ -489,73 +446,85 @@ fn parse_args(args: &str) -> Result<Vec<String>, Arma3Error> {
     Ok(parts)
 }
 
-fn build_template_command(template: &str, base: &LaunchCommand) -> Result<CommandSpec, Arma3Error> {
-    let tokens = shell_words::split(template).map_err(|e| {
-        Arma3Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            e.to_string(),
-        ))
-    })?;
+fn build_template_command(
+    template: &str,
+    base: &LaunchCommand,
+) -> Result<LaunchCommand, Arma3Error> {
+    let (args, mods): (Vec<_>, Vec<_>) = base
+        .args
+        .iter()
+        .cloned()
+        .partition(|argument| !argument.starts_with("-mod="));
+    let mut expanded =
+        expand_custom_launch_template(template, &args, &mods).map_err(|message| {
+            Arma3Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                message,
+            ))
+        })?;
+    let program = expanded.remove(0);
+
+    Ok(LaunchCommand {
+        program,
+        args: expanded,
+    })
+}
+
+fn expand_custom_launch_template(
+    template: &str,
+    args: &[String],
+    mods: &[String],
+) -> Result<Vec<String>, &'static str> {
+    let tokens = shell_words::split(template).map_err(|_| "Template has invalid quoting.")?;
     if tokens.is_empty() {
-        return Err(Arma3Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "launch template is empty",
-        )));
+        return Err("Template is required.");
     }
 
-    let uses_args = tokens.iter().any(|t| t == "$ARGS" || t == "${ARGS}");
-    let uses_mods = tokens.iter().any(|t| t == "$MODS" || t == "${MODS}");
+    let uses_args = tokens
+        .iter()
+        .any(|token| token == "$ARGS" || token == "${ARGS}");
+    let uses_mods = tokens
+        .iter()
+        .any(|token| token == "$MODS" || token == "${MODS}");
     if !uses_args || !uses_mods {
-        return Err(Arma3Error::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "custom launch template must include $ARGS and $MODS",
-        )));
+        return Err("Template must include $ARGS and $MODS.");
     }
-    let mod_arg = base.args.iter().find(|a| a.starts_with("-mod=")).cloned();
 
-    let mut out: Vec<String> = Vec::new();
+    let mut expanded = Vec::new();
     for token in tokens {
         match token.as_str() {
-            "$ARGS" | "${ARGS}" => {
-                let iter = base.args.iter().filter(|a| {
-                    if uses_mods {
-                        !a.starts_with("-mod=")
-                    } else {
-                        true
-                    }
-                });
-                out.extend(iter.cloned());
-            }
-            "$MODS" | "${MODS}" => {
-                if let Some(mods) = mod_arg.clone() {
-                    out.push(mods);
-                }
-            }
-            _ => out.push(token),
+            "$ARGS" | "${ARGS}" => expanded.extend(args.iter().cloned()),
+            "$MODS" | "${MODS}" => expanded.extend(mods.iter().cloned()),
+            _ => expanded.push(token),
         }
     }
 
-    if !uses_args {
-        out.extend(base.args.iter().cloned());
-    } else if !uses_mods {
-        if let Some(mods) = mod_arg {
-            if !out.iter().any(|a| a.starts_with("-mod=")) {
-                out.push(mods);
-            }
-        }
+    if expanded.is_empty() {
+        return Err("Template expansion must include a program.");
     }
+    Ok(expanded)
+}
 
-    let program = out.remove(0);
-    Ok(CommandSpec {
-        program,
-        args: out,
-        env: base
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-        cwd: None,
-    })
+pub fn custom_launch_template_preview(template: &str) -> Result<String, &'static str> {
+    let args = custom_template_preview_args();
+    let mods = vec!["-mod=@cba_a;@ace;@rhsusf".to_string()];
+    expand_custom_launch_template(template, &args, &mods).map(shell_words::join)
+}
+
+fn custom_template_preview_args() -> Vec<String> {
+    let launch_args = ["-noPause", "-noSplash", "-skipIntro", "-noLauncher"];
+    #[cfg(target_os = "windows")]
+    {
+        launch_args.into_iter().map(str::to_string).collect()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ["-applaunch", "107410", "-nolauncher"]
+            .into_iter()
+            .chain(launch_args)
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 fn non_empty_path(s: &str) -> Option<PathBuf> {
@@ -590,57 +559,17 @@ fn validate_launch_compatibility(report: &LocalFileReport) -> Result<(), ApiErro
     ))
 }
 
-#[derive(Debug, Clone)]
-struct LaunchPlan {
-    spec: CommandSpec,
-}
-
-#[derive(Debug, Clone)]
-struct CommandSpec {
-    program: String,
-    args: Vec<String>,
-    cwd: Option<PathBuf>,
-    env: Vec<(String, String)>,
-}
-
-impl CommandSpec {
-    fn from_launch_command(plan: &LaunchCommand) -> Self {
-        Self {
-            program: plan.executable.clone(),
-            args: plan.args.clone(),
-            cwd: None,
-            env: plan
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        }
-    }
-
-    fn spawn(&self) -> Result<std::process::Child, String> {
-        let mut cmd = std::process::Command::new(&self.program);
-        cmd.args(&self.args);
-        if let Some(cwd) = &self.cwd {
-            cmd.current_dir(cwd);
-        }
-        for (k, v) in &self.env {
-            cmd.env(k, v);
-        }
-        cmd.spawn().map_err(|e| e.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        additional_mod_folders, append_unique_paths, build_args, resolve_launch_mode,
+        additional_mod_folders, append_unique_paths, build_args, build_template_command,
+        custom_launch_template_preview, expand_custom_launch_template, resolve_launch_mode,
         select_join_server, validate_launch_compatibility, ActionKind,
     };
     use fleet_arma3::LaunchMethod;
     use fleet_domain::health::{LocalFileHealth, LocalFileReport};
     use fleet_domain::types::{ProfileServerInfo, RepoServer};
     use fleet_domain::{AppSettings, Profile};
-    use std::ffi::OsString;
     use std::path::PathBuf;
 
     fn default_settings() -> AppSettings {
@@ -699,7 +628,7 @@ mod tests {
         });
 
         let settings = default_settings();
-        let extra = vec![OsString::from("-connect=1.2.3.4")];
+        let extra = vec!["-connect=1.2.3.4".to_string()];
         let args = build_args(&profile, &settings, ActionKind::Join, extra).unwrap();
         assert!(args.contains(&"-connect=1.2.3.4".to_string()));
         assert!(!args.contains(&"-connect=127.0.0.1".to_string()));
@@ -796,6 +725,62 @@ mod tests {
         assert_eq!(resolved.wrapper_method, LaunchMethod::Arma3Exe);
         #[cfg(not(target_os = "windows"))]
         assert_eq!(resolved.wrapper_method, LaunchMethod::SteamNative);
+    }
+
+    #[test]
+    fn custom_template_expands_braced_tokens_without_dropping_mods() {
+        let base = fleet_arma3::LaunchCommand {
+            program: "steam".to_string(),
+            args: vec![
+                "-applaunch".to_string(),
+                "107410".to_string(),
+                "-mod=@cba_a;@ace".to_string(),
+                "-noSplash".to_string(),
+            ],
+        };
+
+        let command =
+            build_template_command("runner ${ARGS} ${MODS}", &base).expect("template command");
+
+        assert_eq!(command.program, "runner");
+        assert_eq!(
+            command.args,
+            vec!["-applaunch", "107410", "-noSplash", "-mod=@cba_a;@ace"]
+        );
+    }
+
+    #[test]
+    fn custom_template_without_a_literal_program_returns_an_error() {
+        assert_eq!(
+            expand_custom_launch_template("$ARGS $MODS", &[], &[]).unwrap_err(),
+            "Template expansion must include a program."
+        );
+    }
+
+    #[test]
+    fn custom_template_preview_uses_the_execution_expansion_rules() {
+        let preview =
+            custom_launch_template_preview("runner $ARGS ${MODS}").expect("template preview");
+
+        assert!(preview.starts_with("runner "));
+        assert!(preview.contains("-mod=@cba_a;@ace;@rhsusf"));
+        assert_eq!(
+            custom_launch_template_preview("runner $ARGS").unwrap_err(),
+            "Template must include $ARGS and $MODS."
+        );
+
+        let quoted_preview =
+            custom_launch_template_preview("'C:/Program Files/Runner.exe' $ARGS $MODS")
+                .expect("quoted template preview");
+        let quoted_tokens = shell_words::split(&quoted_preview).expect("quoted preview parses");
+        assert_eq!(
+            quoted_tokens.first(),
+            Some(&"C:/Program Files/Runner.exe".to_string())
+        );
+        assert_eq!(
+            quoted_tokens.last(),
+            Some(&"-mod=@cba_a;@ace;@rhsusf".to_string())
+        );
     }
 
     #[test]
