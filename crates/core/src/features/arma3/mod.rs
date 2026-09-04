@@ -148,9 +148,7 @@ impl Core {
         if settings.arma3.arma3_game_dir.trim().is_empty() {
             if let Some(path) = self.arma3_detect_install_dir() {
                 settings.arma3.arma3_game_dir = path.to_string_lossy().to_string();
-                self.save_settings(settings.clone())
-                    .await
-                    .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
+                self.save_settings(settings.clone()).await?;
             } else {
                 return Err(ApiError::new(
                     "arma3_not_found",

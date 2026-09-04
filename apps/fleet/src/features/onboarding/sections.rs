@@ -1,6 +1,5 @@
 use crate::style::{
-    Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowInline, FieldRowMeta, PageFooter,
-    Section,
+    Button, ButtonVariant, FieldRow, FieldRowInline, FieldRowMeta, PageFooter, Section,
 };
 use dioxus::prelude::*;
 
@@ -8,7 +7,6 @@ use crate::features::shared::browse_field::BrowseField;
 
 pub(crate) fn onboarding_form_section<FDetect, FFinish>(
     mut game_dir: Signal<String>,
-    mut telemetry: Signal<bool>,
     on_detect: FDetect,
     on_finish: FFinish,
     finish_disabled: bool,
@@ -23,7 +21,7 @@ where
                 div { class: "page__inner onboard-page__inner",
                     h1 { class: "onboard-page__brand-title", "Fleet" }
                     p { class: "onboard-page__subtitle",
-                        "Set up your Arma 3 location and privacy preferences. You can change these later in Settings."
+                        "Set up your Arma 3 location. You can change this later in Settings."
                     }
 
                     Section {
@@ -41,22 +39,6 @@ where
                                             variant: ButtonVariant::Secondary,
                                             onclick: on_detect,
                                             "Auto"
-                                        }
-                                    }
-                                }
-
-                        FieldRow {
-                                    FieldRowMeta {
-                                        title: "Share usage data".to_string(),
-                                    }
-                                    FieldRowActions {
-                                        input {
-                                            r#type: "checkbox",
-                                            class: "check",
-                                            checked: telemetry(),
-                                            onchange: move |evt| {
-                                                telemetry.set(evt.checked());
-                                            },
                                         }
                                     }
                                 }
