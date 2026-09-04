@@ -127,35 +127,12 @@ pub fn Settings() -> Element {
         &defaults,
     );
 
-    let custom_args_preview = if cfg!(target_os = "windows") {
-        "-noPause -noSplash -skipIntro -noLauncher"
-    } else {
-        "-applaunch 107410 -nolauncher -noPause -noSplash -skipIntro -noLauncher"
-    };
-    let custom_mods_preview = "-mod=@cba_a;@ace;@rhsusf";
     let custom_template = settings.arma3.arma3_custom_launch_template.trim();
     let custom_default_template = defaults.arma3.arma3_custom_launch_template.clone();
-    let uses_args = custom_template.contains("$ARGS") || custom_template.contains("${ARGS}");
-    let uses_mods = custom_template.contains("$MODS") || custom_template.contains("${MODS}");
-    let mut custom_preview = custom_template
-        .replace("${ARGS}", custom_args_preview)
-        .replace("$ARGS", custom_args_preview)
-        .replace("${MODS}", custom_mods_preview)
-        .replace("$MODS", custom_mods_preview);
-    if !uses_args && !custom_template.is_empty() {
-        custom_preview = format!("{custom_preview} {custom_args_preview}");
-    }
-    if !uses_mods && !custom_template.is_empty() {
-        custom_preview = format!("{custom_preview} {custom_mods_preview}");
-    }
+    let custom_template_result = fleet_core::custom_launch_template_preview(custom_template);
+    let custom_preview = custom_template_result.clone().unwrap_or_default();
     let custom_template_error = if settings.arma3.arma3_launch_method == Arma3LaunchMethod::Custom {
-        if custom_template.is_empty() {
-            Some("Template is required.")
-        } else if !uses_args || !uses_mods {
-            Some("Template must include $ARGS and $MODS.")
-        } else {
-            None
-        }
+        custom_template_result.err()
     } else {
         None
     };

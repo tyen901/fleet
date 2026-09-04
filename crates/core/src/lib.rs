@@ -9,7 +9,7 @@ mod storage;
 mod test_support;
 
 pub use core::Core;
-pub use features::arma3::{server_join_args, ArmaLaunchResult};
+pub use features::arma3::{custom_launch_template_preview, server_join_args, ArmaLaunchResult};
 pub use features::profiles::{is_destination_unique, validate_profile_name, validate_repo_url};
 pub use features::settings::{
     effective_settings_defaults, settings_field_is_non_default, SettingsField,
