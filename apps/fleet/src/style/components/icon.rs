@@ -1,37 +1,18 @@
 use dioxus::prelude::*;
 use icondata::Icon;
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum IconSize {
-    Sm,
-    Md,
-}
-
 #[derive(Props, Clone, PartialEq)]
 pub struct IconProps {
     pub icon: Icon,
-    #[props(default = IconSize::Md)]
-    pub size: IconSize,
-    #[props(default = false)]
-    pub spin: bool,
 }
 
 #[component]
 pub fn AppIcon(props: IconProps) -> Element {
     let data = props.icon;
-    let size_class = match props.size {
-        IconSize::Sm => "ico ico--sm",
-        IconSize::Md => "ico",
-    };
-    let class = if props.spin {
-        format!("{size_class} ico--spin")
-    } else {
-        size_class.to_string()
-    };
 
     rsx! {
         svg {
-            class: "{class}",
+            class: "ico",
             width: "{data.width.unwrap_or(\"24\")}",
             height: "{data.height.unwrap_or(\"24\")}",
             view_box: "{data.view_box.unwrap_or(\"0 0 24 24\")}",

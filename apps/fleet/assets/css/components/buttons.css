@@ -1,16 +1,7 @@
 .ico {
-  width: 18px;
-  height: 18px;
-  display: block;
-}
-
-.ico--sm {
   width: 14px;
   height: 14px;
-}
-
-.ico--spin {
-  animation: spin 4s linear infinite;
+  display: block;
 }
 
 @keyframes spin {
@@ -145,7 +136,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ico--spin,
   .btn__spinner {
     animation: none;
   }
