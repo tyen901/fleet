@@ -110,7 +110,7 @@ pub(crate) fn profile_icon_src(
 
     let state_root = fleet_core::profile_state_root_dir().ok()?;
     let repo_cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
-    let icon_path = swifty_repo::repo_cache_asset_path(&repo_cache_root, repo_url, "icon.png");
+    let icon_path = swifty_repo::repo_icon_cache_path(&repo_cache_root, repo_url);
     if !icon_path.is_file() {
         return None;
     }

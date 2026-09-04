@@ -31,8 +31,3 @@ pub use operations::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
     OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
 };
-
-pub mod download {
-    pub use fleet_domain::{DownloadEvent, DownloadPhase};
-    pub use fleet_download::*;
-}
