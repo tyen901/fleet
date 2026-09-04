@@ -118,10 +118,6 @@ fn card_sync_action(
     }
 }
 
-fn profile_requires_sync(status: Option<&fleet_core::ProfileStatusState>) -> bool {
-    status.is_some_and(local_files_need_sync)
-}
-
 fn spawn_game_start(
     bridge: FleetBridge,
     toasts: ToastStore,
@@ -404,10 +400,11 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{card_sync_action, profile_requires_sync, CardSyncAction};
+    use super::{card_sync_action, CardSyncAction};
+    use crate::features::profiles::common::local_files_need_sync;
 
     #[test]
-    fn profile_requires_sync_for_local_repair_states() {
+    fn local_files_need_sync_for_local_repair_states() {
         for local_health in [
             fleet_core::LocalFileHealth::Missing,
             fleet_core::LocalFileHealth::Dirty,
@@ -419,12 +416,12 @@ mod tests {
                 local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
-            assert!(profile_requires_sync(Some(&status)));
+            assert!(local_files_need_sync(&status));
         }
     }
 
     #[test]
-    fn profile_does_not_require_sync_for_ready_or_unknown() {
+    fn local_files_need_sync_excludes_ready_and_unknown_states() {
         for local_health in [
             fleet_core::LocalFileHealth::Clean,
             fleet_core::LocalFileHealth::Unknown,
@@ -433,7 +430,7 @@ mod tests {
                 local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
-            assert!(!profile_requires_sync(Some(&status)));
+            assert!(!local_files_need_sync(&status));
         }
     }
 
