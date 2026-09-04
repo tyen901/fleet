@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,6 +12,7 @@ const configRoot = path.join(testRoot, 'config');
 const captureRoot = path.join(testRoot, 'captures');
 const profileRoot = path.join(testRoot, 'profile');
 const cdpPort = Number(process.env.FLEET_UI_TEST_CDP_PORT ?? 9333);
+const cdpHost = '127.0.0.1';
 const previewWidth = 420;
 const previewHeight = 560;
 const executable = path.join(
@@ -21,6 +23,30 @@ const executable = path.join(
 );
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+if (!Number.isInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535) {
+  throw new Error('FLEET_UI_TEST_CDP_PORT must be an integer from 1 to 65535');
+}
+
+function ensureCdpPortAvailable() {
+  const server = createServer();
+  return new Promise((resolve, reject) => {
+    server.once('error', (error) => {
+      if (error?.code === 'EADDRINUSE') {
+        reject(
+          new Error(
+            `Fleet UI renderer cannot use CDP port ${cdpPort}: it is already in use. Set FLEET_UI_TEST_CDP_PORT to an unused port and rerun.`,
+          ),
+        );
+      } else {
+        reject(error);
+      }
+    });
+    server.listen({ host: cdpHost, port: cdpPort, exclusive: true }, () => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+}
 
 class CdpClient {
   constructor(socket) {
@@ -176,9 +202,7 @@ class CdpClient {
 async function clearDirectoryContents(directory) {
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
   await Promise.all(
-    entries.map((entry) =>
-      rm(path.join(directory, entry.name), { recursive: true, force: true }),
-    ),
+    entries.map((entry) => rm(path.join(directory, entry.name), { recursive: true, force: true })),
   );
 }
 
@@ -226,16 +250,23 @@ async function waitForTarget(timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+      const response = await fetch(`http://${cdpHost}:${cdpPort}/json/list`);
       const targets = await response.json();
-      const target = targets.find((candidate) => candidate.type === 'page');
+      const target = targets.find(
+        (candidate) =>
+          candidate.type === 'page' &&
+          candidate.title === 'Dioxus app' &&
+          candidate.url === 'http://dioxus.index.html/',
+      );
       if (target?.webSocketDebuggerUrl) return target.webSocketDebuggerUrl;
     } catch {
       // Fleet or WebView2 is still starting.
     }
     await delay(150);
   }
-  throw new Error('Fleet WebView2 debugging target did not become available');
+  throw new Error(
+    'Fleet WebView2 debugging target did not become available with the expected Dioxus title and URL',
+  );
 }
 
 async function runFlow(client) {
@@ -641,6 +672,7 @@ async function runFlow(client) {
   await client.capture('11-sync-stopping.png');
 }
 
+await ensureCdpPortAvailable();
 await seedDummyConfig();
 
 const child = spawn(executable, [], {
