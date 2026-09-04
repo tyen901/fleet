@@ -12,7 +12,7 @@ pub(crate) async fn check_repo(profile: &Profile, state_root: &Path) -> RepoChec
     let repo_cache_dir = fleet_domain::repo_cache_dir(state_root, &profile.id);
     let store = swifty_repo::FsRepoCacheStore::new(repo_cache_dir.clone());
     let downloads = fleet_download::DownloadService::new_default();
-    match swifty_repo::probe_repo_freshness(repo_url, &store, &downloads, None).await {
+    match swifty_repo::probe_repo_freshness(repo_url, &store, &downloads).await {
         Ok(probe) => RepoCheckReport {
             profile_id: profile.id.clone(),
             local_revision: probe.local_revision,
