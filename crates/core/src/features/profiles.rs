@@ -63,23 +63,6 @@ impl Core {
         res
     }
 
-    pub async fn profile_set_selected(
-        &self,
-        profile_id: Option<ProfileId>,
-    ) -> Result<(), crate::ApiError> {
-        if let Some(ref requested_id) = profile_id {
-            let exists = self.read_state(|state| state.profiles.contains_key(requested_id));
-            if !exists {
-                return Err(crate::ApiError::new("not_found", requested_id.clone()));
-            }
-        }
-
-        self.update_state(|state| {
-            state.selected_profile_id = profile_id.clone();
-        });
-        Ok(())
-    }
-
     async fn save_profile_with_semantics(
         &self,
         profile: Profile,
@@ -295,7 +278,7 @@ impl Core {
             } else {
                 let _ = ensure_profile_runtime_mut(state, &pid, now);
             }
-            set_profile_repo_servers_runtime(state, &pid, Vec::new(), false);
+            set_profile_repo_servers_runtime(state, &pid, Vec::new());
             recompute_profile_status(state, &pid);
         });
         self.spawn_profile_repo_cache_refresh(saved.id.clone());
@@ -343,13 +326,6 @@ impl Core {
         self.update_state(|state| {
             state.profiles.remove(&profile_id);
             state.profile_runtime_by_id.remove(&profile_id);
-            if state
-                .selected_profile_id
-                .as_ref()
-                .is_some_and(|selected_id| selected_id == &profile_id)
-            {
-                state.selected_profile_id = None;
-            }
         });
         info!(
             op = "profile_delete",
@@ -393,7 +369,7 @@ impl Core {
 
         let servers_for_state = servers.clone();
         self.update_state(|state| {
-            set_profile_repo_servers_runtime(state, &profile_id, servers_for_state, true);
+            set_profile_repo_servers_runtime(state, &profile_id, servers_for_state);
         });
 
         Ok(())
@@ -439,12 +415,10 @@ pub(crate) fn set_profile_repo_servers_runtime(
     state: &mut AppState,
     profile_id: &str,
     servers: Vec<RepoServer>,
-    loaded: bool,
 ) {
     let now_ms = fleet_domain::time::now_unix_ms();
     let runtime = ensure_profile_runtime_mut(state, profile_id, now_ms);
     runtime.repo_servers = servers;
-    runtime.repo_servers_loaded = loaded;
 }
 
 fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, crate::ApiError> {
@@ -690,7 +664,6 @@ mod tests {
                 )),
                 last_operation: None,
                 repo_servers: Vec::new(),
-                repo_servers_loaded: false,
                 status: crate::state::ProfileStatusState::unknown(10),
             },
         );
@@ -743,53 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_set_selected_does_not_persist_in_profiles_config() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
-            let profile = sample_profile("p1", "/tmp/p1");
-            core.profile_save(profile).await.expect("save profile");
-            core.profile_set_selected(Some("p1".to_string()))
-                .await
-                .expect("set selected");
-
-            let cfg = core.list_profiles().await.expect("list profiles");
-            assert_eq!(cfg.profiles.len(), 1);
-            assert_eq!(cfg.profiles[0].id, "p1");
-        });
-    }
-
-    #[test]
-    fn profile_set_selected_rejects_unknown_profile_id() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
-            let err = core
-                .profile_set_selected(Some("missing".to_string()))
-                .await
-                .expect_err("set selected should fail");
-            assert_eq!(err.code, "not_found");
-            assert_eq!(err.message, "missing");
-        });
-    }
-
-    #[test]
     fn load_profile_prefers_loaded_state_before_config_reload() {
         let _guard = ENV_VAR_LOCK.lock().expect("env lock");
 
@@ -816,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_selected_profile_removes_profile_from_config() {
+    fn deleting_profile_removes_profile_from_config() {
         let _guard = ENV_VAR_LOCK.lock().expect("env lock");
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -830,10 +756,6 @@ mod tests {
             let core = Core::spawn_threaded_default().expect("core");
             let profile = sample_profile("p1", "/tmp/p1");
             core.profile_save(profile).await.expect("save profile");
-            core.profile_set_selected(Some("p1".to_string()))
-                .await
-                .expect("set selected");
-
             core.profile_delete("p1".to_string())
                 .await
                 .expect("delete profile");

@@ -1,6 +1,5 @@
 use super::Core;
 use crate::state::AppState;
-use crate::storage::config_root_dir;
 use std::collections::BTreeMap;
 use tracing::warn;
 
@@ -62,10 +61,6 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
         profiles.insert(p.id.clone(), p);
     }
 
-    if let Ok(config_root) = config_root_dir() {
-        let _ = std::fs::remove_file(config_root.join("runtime_state.json"));
-    }
-
     let now = fleet_domain::time::now_unix_ms();
     let mut profile_runtime_by_id = BTreeMap::new();
     for profile_id in profiles.keys() {
@@ -77,7 +72,6 @@ async fn load_initial_state(core: &Core) -> anyhow::Result<AppState> {
         version: 0,
         settings,
         profiles,
-        selected_profile_id: None,
         profile_runtime_by_id,
     })
 }
