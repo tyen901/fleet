@@ -3,12 +3,6 @@
 version = 4
 
 [[package]]
-name = "Inflector"
-version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -483,12 +477,6 @@ dependencies = [
  "libc",
  "system-deps",
 ]
-
-[[package]]
-name = "camino"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e629a66d692cb9ff1a1c664e41771b3dcaf961985a9774c0eb0bd1b51cf60a48"
 
 [[package]]
 name = "cap-primitives"
@@ -1812,9 +1800,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
- "chrono",
  "dioxus",
- "dioxus-logger",
  "dioxus-router",
  "directories",
  "dotenvy",
@@ -1823,10 +1809,8 @@ dependencies = [
  "icondata",
  "image",
  "open",
- "reqwest 0.13.4",
  "rfd",
  "semver",
- "serde",
  "swifty-repo",
  "tokio",
  "tracing",
@@ -1853,6 +1837,7 @@ dependencies = [
  "indicatif",
  "serde_json",
  "swifty_artifacts",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1871,11 +1856,9 @@ dependencies = [
  "fleet-inventory",
  "indicatif",
  "rand 0.8.5",
- "regex",
  "serde",
  "serde_json",
  "shell-words",
- "specta",
  "swifty-repo",
  "tempfile",
  "tokio",
@@ -1891,10 +1874,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
- "serde_json",
  "sha1",
- "specta",
- "tempfile",
  "url",
 ]
 
@@ -1904,7 +1884,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "atomic-write-file",
- "fleet-domain",
+ "axum",
  "futures-util",
  "reqwest 0.13.4",
  "reqwest-middleware",
@@ -1918,18 +1898,16 @@ name = "fleet-flux"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bytes",
- "fleet-domain",
  "fleet-download",
  "fleet-inventory",
  "flux",
  "flux-content",
  "futures-util",
  "object_store",
- "percent-encoding",
  "swifty-repo",
  "swifty_artifacts",
- "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1942,8 +1920,6 @@ name = "fleet-inventory"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "camino",
- "fleet-domain",
  "flux",
  "futures-util",
  "rusqlite",
@@ -2911,10 +2887,6 @@ checksum = "412c95f764f89aad1a8505aa4273d931b66d5a26d1e6609a37243784a9128ad9"
 dependencies = [
  "icondata_bs",
  "icondata_core",
- "icondata_fa",
- "icondata_io",
- "icondata_ri",
- "icondata_wi",
 ]
 
 [[package]]
@@ -2931,42 +2903,6 @@ name = "icondata_core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c97be924215abd5e630d84e95a47c710138a6559b4c55039f4f33aa897fa859"
-
-[[package]]
-name = "icondata_fa"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0108c409b3c06be1124a377b827922ad6091cb9eb467d521ea1cb3b1c3d7a76"
-dependencies = [
- "icondata_core",
-]
-
-[[package]]
-name = "icondata_io"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7886629becd205d6f035dc084b68d2b9cc5ba8b03714f2c533c921ed98c6525a"
-dependencies = [
- "icondata_core",
-]
-
-[[package]]
-name = "icondata_ri"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b1851b5662f59b888ba24595886a9e6b6f5c11151b3640ee1875810f7544865"
-dependencies = [
- "icondata_core",
-]
-
-[[package]]
-name = "icondata_wi"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "352f5a5df000eabb35894cec75048e97a46d738ebdaf1e060670b0cf473a2419"
-dependencies = [
- "icondata_core",
-]
 
 [[package]]
 name = "icu_collections"
@@ -5819,28 +5755,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "specta"
-version = "2.0.0-rc.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab7f01e9310a820edd31c80fde3cae445295adde21a3f9416517d7d65015b971"
-dependencies = [
- "specta-macros",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "specta-macros"
-version = "2.0.0-rc.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0074b9e30ed84c6924eb63ad8d2fe71cdc82628525d84b1fcb1f2fd40676517"
-dependencies = [
- "Inflector",
- "proc-macro2",
- "quote",
- "syn 2.0.114",
-]
-
-[[package]]
 name = "sqlite-wasm-rs"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5947,11 +5861,11 @@ dependencies = [
  "axum",
  "fleet-domain",
  "fleet-download",
+ "futures-util",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "swifty_artifacts",
- "tempfile",
  "tokio",
  "tracing",
  "url",

@@ -1,8 +1,7 @@
 use fleet_domain::health::{CheckReport, LocalFileReport, OperationKind, SyncReport};
 use fleet_domain::{ApiError, ProfileId};
-use specta::Type;
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct OperationSessionEvent {
     pub session_id: u64,
     pub profile_id: ProfileId,
@@ -12,7 +11,7 @@ pub struct OperationSessionEvent {
     pub kind: OperationSessionEventKind,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub enum OperationSessionEventKind {
     Started,
     Stage { stage: OperationStage },
@@ -22,7 +21,7 @@ pub enum OperationSessionEventKind {
     Canceled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OperationStage {
     Validating,
     LoadingExpectedState,
@@ -32,13 +31,13 @@ pub enum OperationStage {
     Finalizing,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressUnit {
     Bytes,
     Files,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct OperationProgressEvent {
     pub stage: OperationStage,
     pub status_text: Option<String>,
@@ -48,7 +47,7 @@ pub struct OperationProgressEvent {
     pub eta_seconds: Option<u64>,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct ProgressMetric {
     pub label: Option<String>,
     pub done: Option<u64>,
@@ -56,7 +55,7 @@ pub struct ProgressMetric {
     pub unit: ProgressUnit,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub enum OperationOutput {
     Check(CheckReport),
     Validate(LocalFileReport),

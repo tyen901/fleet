@@ -1,4 +1,5 @@
-use fleet_core::{is_destination_unique, validate_profile_name, validate_repo_url, AppState};
+use fleet_core::{is_destination_unique, validate_profile_name, AppState};
+use fleet_domain::validated_repo_url;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProfileDraft {
@@ -43,7 +44,7 @@ impl ProfileDraft {
 
     pub fn validate(&self, state: &AppState, ignore_id: Option<&str>) -> ProfileDraftValidation {
         let name_ok = validate_profile_name(&self.name);
-        let repo_ok = self.source.trim().is_empty() || validate_repo_url(&self.source);
+        let repo_ok = self.source.trim().is_empty() || validated_repo_url(&self.source).is_ok();
         let folder_ok = !self.destination.trim().is_empty()
             && is_destination_unique(state, &self.destination, ignore_id);
         ProfileDraftValidation {
@@ -74,5 +75,37 @@ mod tests {
         let draft =
             ProfileDraft::from_fields("Alpha One", "https://example.com/repo.json", "/tmp/alpha");
         assert!(draft.validate(&state, None).is_valid());
+    }
+
+    #[test]
+    fn draft_uses_domain_source_validation_and_core_destination_conflicts() {
+        let mut state = fleet_core::AppState::default();
+        state.profiles.insert(
+            "other".to_string(),
+            fleet_core::Profile {
+                id: "other".to_string(),
+                name: "Other".to_string(),
+                source: "https://example.com/repo.json".to_string(),
+                destination: if cfg!(windows) {
+                    "C:\\Fleet\\Mods".to_string()
+                } else {
+                    "/tmp/fleet/mods".to_string()
+                },
+                ..Default::default()
+            },
+        );
+        let draft = ProfileDraft::from_fields(
+            "Alpha One",
+            "https://example.com/manifests/alpha.json?revision=4",
+            if cfg!(windows) {
+                " c:/fleet/mods/// "
+            } else {
+                " /tmp/fleet/mods/// "
+            },
+        );
+
+        let validation = draft.validate(&state, None);
+        assert!(validation.repo_ok);
+        assert!(!validation.folder_ok);
     }
 }
