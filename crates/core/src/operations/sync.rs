@@ -30,7 +30,6 @@ pub(crate) async fn sync(
             repo_url,
             &repo_cache,
             &downloads,
-            None,
         ) => result.map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?,
         () = cancel.cancelled() => return Err(crate::ApiError::new("canceled", "canceled")),
     };
