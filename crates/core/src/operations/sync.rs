@@ -1,7 +1,7 @@
 use crate::operations::progress::FluxProgressObserver;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
-use fleet_domain::{LocalFileHealth, Profile, ProfileSourceKind};
+use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
 use fleet_inventory::FleetInventoryProvider;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,8 +17,7 @@ pub(crate) async fn sync(
     let dest = profile
         .dest_path()
         .map_err(|error| crate::ApiError::new("invalid_profile", error.to_string()))?;
-    let ProfileSourceKind::Http(repo_url) = profile
-        .validated_source_kind()
+    let repo_url = validated_repo_url(&profile.source)
         .map_err(|_| crate::ApiError::new("invalid_profile", "invalid profile source"))?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
     let inventory_db = fleet_domain::inventory_db_path(state_root, &profile.id);
