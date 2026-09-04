@@ -4,10 +4,9 @@ use fleet_domain::health::{
 };
 use fleet_domain::OperationSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
-use specta::Type;
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Default, Type)]
+#[derive(Clone, Debug, Default)]
 pub struct AppState {
     pub version: u64,
     pub settings: AppSettings,
@@ -15,7 +14,7 @@ pub struct AppState {
     pub profile_runtime_by_id: BTreeMap<ProfileId, ProfileRuntimeState>,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct ProfileRuntimeState {
     pub profile_id: ProfileId,
     pub repo_check: Option<RepoCheckReport>,
@@ -50,7 +49,7 @@ impl ProfileRuntimeState {
     }
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct ActiveOperationState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
@@ -73,14 +72,14 @@ impl ActiveOperationState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationTerminalStatus {
     Succeeded,
     Failed,
     Canceled,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct OperationOutcomeState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
@@ -90,7 +89,7 @@ pub struct OperationOutcomeState {
     pub error: Option<ApiError>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
     Checking,
@@ -141,7 +140,7 @@ impl ProfileStatusHeadline {
     }
 }
 
-#[derive(Clone, Debug, Default, Type)]
+#[derive(Clone, Debug, Default)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
     pub check_enabled: bool,
@@ -153,13 +152,13 @@ pub struct ProfileActionAvailability {
     pub validate_running: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiProgressBarState {
     pub determinate: bool,
     pub percent: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiProgressMetric {
     pub label: String,
     pub done: Option<u64>,
@@ -168,7 +167,7 @@ pub struct UiProgressMetric {
     pub rendered: String,
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
     pub last_updated_at_unix_ms: u64,
@@ -201,7 +200,7 @@ impl ProfileOperationProgressState {
     }
 }
 
-#[derive(Clone, Debug, Type)]
+#[derive(Clone, Debug)]
 pub struct ProfileStatusState {
     pub headline: ProfileStatusHeadline,
     pub actions: ProfileActionAvailability,

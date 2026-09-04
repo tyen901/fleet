@@ -1,5 +1,5 @@
 use fleet_domain::health::{LocalFileReport, VerificationKind};
-use fleet_domain::{LocalFileHealth, Profile, ProfileSourceKind};
+use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
 use fleet_inventory::FleetInventoryProvider;
 use std::path::Path;
 use std::sync::Arc;
@@ -63,8 +63,7 @@ async fn check_or_validate(
             LocalFileHealth::MissingDestination,
         ));
     }
-    let ProfileSourceKind::Http(repo_url) = profile
-        .validated_source_kind()
+    let repo_url = validated_repo_url(&profile.source)
         .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
     let inventory_db = fleet_domain::inventory_db_path(state_root, &profile.id);
