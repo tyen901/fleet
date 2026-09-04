@@ -6,7 +6,7 @@ use crate::app::router::Route;
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
     format_speed, profile_not_found_page, repo_update_available, save_profile_and_update_state,
-    select_profile_in_background, stage_phase_label, start_profile_operation, ProfileFormField,
+    stage_phase_label, start_profile_operation, ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
@@ -83,14 +83,6 @@ pub fn ProfileView(id: String) -> Element {
     let Some(profile) = snapshot.profiles.get(&id).cloned() else {
         return profile_not_found_page(nav);
     };
-
-    {
-        let bridge = bridge.clone();
-        let profile_id = profile.id.clone();
-        use_effect(move || {
-            select_profile_in_background(bridge.clone(), profile_id.clone());
-        });
-    }
 
     let runtime = snapshot.profile_runtime_by_id.get(&profile.id);
     let status = runtime.map(|entry| entry.status.clone());
@@ -368,12 +360,11 @@ pub fn ProfileView(id: String) -> Element {
                     store,
                     toasts,
                     next,
-                    "Health re-check could not start.",
+                    "Save profile failed",
                 )
                 .await
                 {
                     Ok(saved) => {
-                        select_profile_in_background(bridge.clone(), saved.id);
                         save_loading.set(false);
                         editing.set(false);
                     }

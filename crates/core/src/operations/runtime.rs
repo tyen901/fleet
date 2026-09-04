@@ -14,14 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 #[derive(Clone)]
 pub(crate) struct OperationRuntime {
     events_tx: broadcast::Sender<OperationSessionEvent>,
     sessions: Arc<Mutex<HashMap<u64, SessionRecord>>>,
     active_profiles: Arc<Mutex<HashSet<ProfileId>>>,
-    tracker: TaskTracker,
 }
 
 pub(crate) struct ProfileMutationGuard {
@@ -72,7 +70,6 @@ impl OperationRuntime {
             events_tx,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             active_profiles: Arc::new(Mutex::new(HashSet::new())),
-            tracker: TaskTracker::new(),
         }
     }
 
@@ -152,7 +149,7 @@ impl OperationRuntime {
         publisher.emit_raw(OperationSessionEventKind::Started);
 
         let rt = self.clone();
-        self.tracker.spawn(async move {
+        tokio::spawn(async move {
             let out = match operation {
                 OperationKind::Check => {
                     check::check(&profile, &state_root, publisher.clone(), cancel.clone())
@@ -418,11 +415,7 @@ impl OperationPublisher {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
             if let Some(active) = runtime.active.as_mut() {
-                let previous = active.progress.active_stage;
-                if previous != stage {
-                    active.completed_stages.insert(previous);
-                }
-                apply_operation_stage(&mut active.progress, &active.completed_stages, stage);
+                apply_operation_stage(&mut active.progress, stage);
                 active.updated_at_unix_ms = now;
                 active.progress.last_updated_at_unix_ms = now;
             }
@@ -439,16 +432,7 @@ impl OperationPublisher {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
             if let Some(active) = runtime.active.as_mut() {
-                let previous = active.progress.active_stage;
-                if previous != progress.stage {
-                    active.completed_stages.insert(previous);
-                }
-                apply_operation_progress(
-                    &mut active.progress,
-                    &active.completed_stages,
-                    &progress,
-                    now,
-                );
+                apply_operation_progress(&mut active.progress, &progress, now);
                 active.updated_at_unix_ms = now;
             }
             recompute_profile_status(state, &profile_id);

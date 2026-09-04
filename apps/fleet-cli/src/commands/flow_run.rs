@@ -41,10 +41,15 @@ pub(crate) async fn run_flow_session(
 
     cancel_task.abort();
     if let Some(handle) = progress_handle {
-        let _ = handle.await;
+        stop_progress_printer(handle).await;
     }
 
     result
+}
+
+async fn stop_progress_printer(handle: tokio::task::JoinHandle<()>) {
+    handle.abort();
+    let _ = handle.await;
 }
 
 pub(crate) async fn run_sync_session(
@@ -77,5 +82,22 @@ pub(crate) async fn run_validation_session(
     match run_flow_session(core, session_id, options).await? {
         OperationOutput::Validate(report) => Ok(report),
         _ => Err(anyhow::anyhow!("internal: expected validation result")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_progress_printer;
+    use crate::ui::progress::spawn_flow_printer;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn completion_does_not_wait_for_a_missed_terminal_event() {
+        let (_events, receiver) = tokio::sync::broadcast::channel(1);
+        let printer = spawn_flow_printer(42, receiver, true);
+
+        tokio::time::timeout(Duration::from_millis(100), stop_progress_printer(printer))
+            .await
+            .expect("completion must stop the printer without a terminal event");
     }
 }

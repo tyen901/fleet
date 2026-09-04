@@ -3,10 +3,7 @@ use tracing::{error, info};
 
 use crate::app::router::Route;
 use crate::features::profiles::{
-    common::{
-        new_profile_from_draft, save_profile_and_update_state, select_profile_in_background,
-        ProfileFormField,
-    },
+    common::{new_profile_from_draft, save_profile_and_update_state, ProfileFormField},
     draft::ProfileDraft,
     PROFILE_NAME_PLACEHOLDER, PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER,
 };
@@ -57,12 +54,11 @@ pub fn NewProfile() -> Element {
                     store,
                     toasts,
                     profile,
-                    "Health re-check could not start. Use Retry Check.",
+                    "Create profile failed",
                 )
                 .await
                 {
                     Ok(saved) => {
-                        select_profile_in_background(bridge.clone(), saved.id.clone());
                         let _ = nav.push(Route::ProfileView { id: saved.id });
                     }
                     Err(err) => {

@@ -27,7 +27,6 @@ pub enum OperationSessionEventKind {
 pub enum OperationStage {
     Validating,
     LoadingExpectedState,
-    ScanningDisk,
     VerifyingInventory,
     Sync,
     RemovingObsoleteFiles,
@@ -35,23 +34,14 @@ pub enum OperationStage {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum ProgressScope {
-    InventoryVerify,
-    MaterializationBytes,
-    MaterializationFiles,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub enum ProgressUnit {
     Bytes,
     Files,
-    Paths,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct OperationProgressEvent {
     pub stage: OperationStage,
-    pub scope: ProgressScope,
     pub status_text: Option<String>,
     pub primary: ProgressMetric,
     pub secondary: Option<ProgressMetric>,

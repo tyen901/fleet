@@ -11,7 +11,6 @@ fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
                 Some(match progress.primary.unit {
                     ProgressUnit::Bytes => format!("Progress: {done}/{total} bytes"),
                     ProgressUnit::Files => format!("Progress: {done}/{total} files"),
-                    ProgressUnit::Paths => format!("Progress: {done}/{total} paths"),
                 })
             } else {
                 progress.status_text.clone()
@@ -80,9 +79,7 @@ pub fn spawn_flow_printer(
                 OperationSessionEventKind::Progress { progress } => {
                     match progress.primary.unit {
                         ProgressUnit::Bytes => progress_pb.set_style(style_bar.clone()),
-                        ProgressUnit::Files | ProgressUnit::Paths => {
-                            progress_pb.set_style(style_file_bar.clone())
-                        }
+                        ProgressUnit::Files => progress_pb.set_style(style_file_bar.clone()),
                     }
                     if let Some(total) = progress.primary.total {
                         progress_pb.set_length(total);
