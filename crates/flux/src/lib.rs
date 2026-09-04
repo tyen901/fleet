@@ -11,4 +11,5 @@ pub use input::{
     load_cached_swifty_materialization_input, load_swifty_materialization_input,
     MaterializationInput,
 };
+pub use profile::{HashProgressObserver, HashProgressObserverRef};
 pub use runner::{check_target, materialize, verify_manifest, LocalAssessment};
