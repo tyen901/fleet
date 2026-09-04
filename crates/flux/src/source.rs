@@ -24,7 +24,7 @@ pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<StoreSo
     }
 
     let source_id = format!("swifty:{}", index.base_url);
-    let store_url = index.base_url.trim_end_matches('/');
+    let store_url = index.base_url.strip_suffix('/').unwrap_or(&index.base_url);
     let store = HttpBuilder::new()
         .with_url(store_url)
         .with_client_options(ClientOptions::new().with_allow_http(true))
@@ -162,7 +162,7 @@ mod tests {
         });
         let object_path = "@mod/addons/a % #.pbo";
         let sources = build_store_sources(SwiftyStoreIndex {
-            base_url: format!("http://{address}/base%20path/"),
+            base_url: format!("http://{address}/base%20path//"),
             objects: vec![object(object_path)],
         })
         .expect("build source");
@@ -175,7 +175,7 @@ mod tests {
 
         assert_eq!(
             requests.lock().expect("requests lock").as_slice(),
-            ["/base%20path/@mod/addons/a%20%25%20%23.pbo"]
+            ["/base%20path//@mod/addons/a%20%25%20%23.pbo"]
         );
         server.abort();
     }
