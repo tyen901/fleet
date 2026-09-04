@@ -88,7 +88,7 @@ pub async fn materialize(
     progress: Option<flux::ProgressObserverRef>,
 ) -> Result<()> {
     let profile: flux::ContentProfileRef = Arc::new(SwiftyFluxProfile);
-    let stores = build_store_sources(input.store_index.clone())?;
+    let stores = build_store_sources(input.store_index)?;
     let mut context = flux::MaterializeContext::new();
     context.cancellation = cancel.clone();
     context.progress = progress;
