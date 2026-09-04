@@ -5,8 +5,8 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
-    format_speed, profile_not_found_page, repo_update_available, save_profile_and_update_state,
-    select_profile_in_background, stage_phase_label, start_profile_operation, ProfileFormField,
+    format_speed, profile_not_found_page, repo_update_available, stage_phase_label,
+    start_profile_operation, ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
@@ -83,14 +83,6 @@ pub fn ProfileView(id: String) -> Element {
     let Some(profile) = snapshot.profiles.get(&id).cloned() else {
         return profile_not_found_page(nav);
     };
-
-    {
-        let bridge = bridge.clone();
-        let profile_id = profile.id.clone();
-        use_effect(move || {
-            select_profile_in_background(bridge.clone(), profile_id.clone());
-        });
-    }
 
     let runtime = snapshot.profile_runtime_by_id.get(&profile.id);
     let status = runtime.map(|entry| entry.status.clone());
@@ -178,28 +170,15 @@ pub fn ProfileView(id: String) -> Element {
     let toasts_for_check = toasts.clone();
     let profile_id_for_check = profile.id.clone();
     let on_check_for_updates = move |_: MouseEvent| {
-        let bridge = bridge_for_check.clone();
-        let toasts = toasts_for_check.clone();
-        let profile_id = profile_id_for_check.clone();
-        spawn(async move {
-            info!(profile_id = %profile_id, "profile check requested");
-            match bridge
-                .core()
-                .start_operation(profile_id, fleet_core::OperationKind::Check)
-                .await
-            {
-                Ok(session_id) => {
-                    if let Err(error) = bridge.core().await_finished(session_id).await {
-                        toasts.push_api_error("Check failed", &error);
-                    }
-                }
-                Err(err) => {
-                    if err.code != "profile_busy" {
-                        toasts.push_api_error("Check failed", &err);
-                    }
-                }
-            }
-        });
+        start_profile_operation(
+            bridge_for_check.clone(),
+            toasts_for_check.clone(),
+            profile_id_for_check.clone(),
+            fleet_core::OperationKind::Check,
+            "check",
+            "start_check_failed",
+            "Check failed",
+        );
     };
 
     let bridge_for_start_sync = bridge.clone();
@@ -348,7 +327,6 @@ pub fn ProfileView(id: String) -> Element {
 
     let on_save = {
         let bridge = bridge.clone();
-        let store = store.clone();
         let toasts = toasts.clone();
         let profile = profile.clone();
         let next = next_profile.clone();
@@ -358,27 +336,18 @@ pub fn ProfileView(id: String) -> Element {
             }
             save_loading.set(true);
             let bridge = bridge.clone();
-            let store = store.clone();
             let toasts = toasts.clone();
             let next = next.clone();
             spawn(async move {
                 info!(op = "profile_edit_save", profile_id = %next.id, "profile edit save requested");
-                match save_profile_and_update_state(
-                    bridge.clone(),
-                    store,
-                    toasts,
-                    next,
-                    "Health re-check could not start.",
-                )
-                .await
-                {
-                    Ok(saved) => {
-                        select_profile_in_background(bridge.clone(), saved.id);
+                match bridge.core().profile_save(next).await {
+                    Ok(_) => {
                         save_loading.set(false);
                         editing.set(false);
                     }
                     Err(err) => {
                         save_loading.set(false);
+                        toasts.push_api_error("Save profile failed", &err);
                         error!(
                             op = "profile_edit_save",
                             outcome = "failed",

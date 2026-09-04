@@ -10,19 +10,13 @@ use crate::features::profiles::common::{
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
-use crate::style::{Button, ButtonVariant, IconButton, InlineChoice, PageFooter};
+use crate::style::{Button, ButtonVariant, IconButton, PageFooter};
 use icondata::{BsGear, BsPlusLg, BsThreeDots};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum PendingStartKind {
+enum GameStartKind {
     Launch,
     Join,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct PendingStart {
-    profile_id: String,
-    kind: PendingStartKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,65 +118,27 @@ fn card_sync_action(
     }
 }
 
-fn use_select_initial_profile(
-    bridge: FleetBridge,
-    selected_profile_id: Option<String>,
-    first_profile_id: Option<String>,
-) {
-    use_effect(use_reactive(
-        (&selected_profile_id, &first_profile_id),
-        move |(selected_profile_id, first_profile_id)| {
-            if selected_profile_id.is_some() {
-                return;
-            }
-            let Some(first_profile_id) = first_profile_id.clone() else {
-                return;
-            };
-
-            let bridge = bridge.clone();
-            spawn(async move {
-                let _ = bridge
-                    .core()
-                    .profile_set_selected(Some(first_profile_id.clone()))
-                    .await;
-            });
-        },
-    ));
-}
-
-fn selected_profile_requires_sync(status: Option<&fleet_core::ProfileStatusState>) -> bool {
-    status.is_some_and(local_files_need_sync)
-}
-
-fn profile_requires_sync(snapshot: &fleet_core::AppState, profile_id: &str) -> bool {
-    snapshot
-        .profile_runtime_by_id
-        .get(profile_id)
-        .map(|runtime| selected_profile_requires_sync(Some(&runtime.status)))
-        .unwrap_or(false)
-}
-
 fn spawn_game_start(
     bridge: FleetBridge,
     toasts: ToastStore,
     profile_id: String,
-    kind: PendingStartKind,
+    kind: GameStartKind,
     mut loading: Signal<Option<String>>,
 ) {
     spawn(async move {
         let action = match kind {
-            PendingStartKind::Launch => "launch",
-            PendingStartKind::Join => "join",
+            GameStartKind::Launch => "launch",
+            GameStartKind::Join => "join",
         };
         info!(profile_id = %profile_id, action, "arma3 start requested from profiles");
         let result = match kind {
-            PendingStartKind::Launch => {
+            GameStartKind::Launch => {
                 bridge
                     .core()
                     .arma3_launch_by_profile_id(profile_id.clone(), None, false)
                     .await
             }
-            PendingStartKind::Join => {
+            GameStartKind::Join => {
                 bridge
                     .core()
                     .arma3_join_by_profile_id(profile_id.clone(), None, false)
@@ -199,8 +155,8 @@ fn spawn_game_start(
             }
             Err(err) => {
                 let title = match kind {
-                    PendingStartKind::Launch => "Launch failed",
-                    PendingStartKind::Join => "Join failed",
+                    GameStartKind::Launch => "Launch failed",
+                    GameStartKind::Join => "Join failed",
                 };
                 toasts.push_api_error(title, &err);
             }
@@ -217,7 +173,6 @@ pub fn Profiles() -> Element {
     let nav = use_navigator();
     let launching_profile_id = use_signal(|| None::<String>);
     let joining_profile_id = use_signal(|| None::<String>);
-    let pending_start = use_signal(|| None::<PendingStart>);
 
     let snapshot = (store.state)();
     let mut profiles = snapshot
@@ -226,74 +181,6 @@ pub fn Profiles() -> Element {
         .map(|profile| (profile.id.clone(), profile.name.clone()))
         .collect::<Vec<_>>();
     profiles.sort_by_key(|(_, name)| name.to_lowercase());
-
-    let selected_profile_id = snapshot
-        .selected_profile_id
-        .clone()
-        .filter(|profile_id| snapshot.profiles.contains_key(profile_id));
-
-    use_select_initial_profile(
-        bridge.clone(),
-        selected_profile_id,
-        profiles.first().map(|(id, _)| id.clone()),
-    );
-
-    let mut pending_start_for_primary = pending_start;
-    let bridge_for_primary = bridge.clone();
-    let toasts_for_primary = toasts.clone();
-    let on_start_anyway = EventHandler::new(move |_: MouseEvent| {
-        let pending = pending_start_for_primary();
-        pending_start_for_primary.set(None);
-        let Some(pending) = pending else {
-            return;
-        };
-        let loading = match pending.kind {
-            PendingStartKind::Launch => launching_profile_id,
-            PendingStartKind::Join => joining_profile_id,
-        };
-        spawn_game_start(
-            bridge_for_primary.clone(),
-            toasts_for_primary.clone(),
-            pending.profile_id,
-            pending.kind,
-            loading,
-        );
-    });
-
-    let mut pending_start_for_sync = pending_start;
-    let bridge_for_sync = bridge.clone();
-    let toasts_for_sync = toasts.clone();
-    let nav_for_sync = nav;
-    let on_start_sync = EventHandler::new(move |_: MouseEvent| {
-        let pending = pending_start_for_sync();
-        pending_start_for_sync.set(None);
-        let Some(pending) = pending else {
-            return;
-        };
-        let bridge = bridge_for_sync.clone();
-        let toasts = toasts_for_sync.clone();
-        spawn(async move {
-            let profile_id = pending.profile_id;
-            if start_profile_operation_request(
-                bridge,
-                toasts,
-                profile_id.clone(),
-                fleet_core::OperationKind::Sync,
-                "sync",
-                "start_sync_failed",
-                "Sync failed",
-            )
-            .await
-            {
-                let _ = nav_for_sync.push(Route::ProfileView { id: profile_id });
-            }
-        });
-    });
-
-    let mut pending_start_for_cancel = pending_start;
-    let on_cancel_pending_start = EventHandler::new(move |_: MouseEvent| {
-        pending_start_for_cancel.set(None);
-    });
 
     let rows = profiles
         .iter()
@@ -323,25 +210,14 @@ pub fn Profiles() -> Element {
                         for row in rows {
                             ProfileRow {
                                 key: "{row.id}",
-                                confirm_open: pending_start()
-                                    .is_some_and(|pending| pending.profile_id == row.id),
-                                on_start_anyway: on_start_anyway,
-                                on_start_sync: on_start_sync,
-                                on_cancel_start: on_cancel_pending_start,
                                 row,
                                 on_start: {
-                                    let snapshot = snapshot.clone();
                                     let bridge = bridge.clone();
                                     let toasts = toasts.clone();
-                                    let mut pending_start = pending_start;
-                                    move |(profile_id, kind): (String, PendingStartKind)| {
-                                        if profile_requires_sync(&snapshot, &profile_id) {
-                                            pending_start.set(Some(PendingStart { profile_id, kind }));
-                                            return;
-                                        }
+                                    move |(profile_id, kind): (String, GameStartKind)| {
                                         let loading = match kind {
-                                            PendingStartKind::Launch => launching_profile_id,
-                                            PendingStartKind::Join => joining_profile_id,
+                                            GameStartKind::Launch => launching_profile_id,
+                                            GameStartKind::Join => joining_profile_id,
                                         };
                                         spawn_game_start(
                                             bridge.clone(),
@@ -383,12 +259,7 @@ pub fn Profiles() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct ProfileRowProps {
     row: ProfileRowViewState,
-    on_start: EventHandler<(String, PendingStartKind)>,
-    /// Set on the one row whose start is waiting on a sync decision.
-    confirm_open: bool,
-    on_start_anyway: EventHandler<MouseEvent>,
-    on_start_sync: EventHandler<MouseEvent>,
-    on_cancel_start: EventHandler<MouseEvent>,
+    on_start: EventHandler<(String, GameStartKind)>,
 }
 
 #[component]
@@ -463,7 +334,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                     if let Some(sync_action) = row.sync_action {
                         Button {
                             variant: ButtonVariant::Primary,
-                            disabled: !row.sync_enabled || props.confirm_open,
+                            disabled: !row.sync_enabled,
                             onclick: {
                                 let bridge = bridge.clone();
                                 let toasts = toasts.clone();
@@ -500,19 +371,19 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                         } else {
                             ButtonVariant::Primary
                         },
-                        disabled: row.start_disabled || props.confirm_open,
+                        disabled: row.start_disabled,
                         loading: row.launch_loading,
                         onclick: move |_| {
-                            on_start.call((profile_id_for_launch.clone(), PendingStartKind::Launch));
+                            on_start.call((profile_id_for_launch.clone(), GameStartKind::Launch));
                         },
                         "{launch_label}"
                     }
                     Button {
                         variant: ButtonVariant::Secondary,
-                        disabled: row.start_disabled || props.confirm_open,
+                        disabled: row.start_disabled,
                         loading: row.join_loading,
                         onclick: move |_| {
-                            on_start.call((profile_id_for_join.clone(), PendingStartKind::Join));
+                            on_start.call((profile_id_for_join.clone(), GameStartKind::Join));
                         },
                         "{join_label}"
                     }
@@ -523,32 +394,17 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                     onclick: open_profile,
                 }
             }
-            if props.confirm_open {
-                div { class: "profile-row__confirm",
-                    InlineChoice {
-                        open: true,
-                        message: "This profile needs a sync first.".to_string(),
-                        primary_label: "Start anyway".to_string(),
-                        secondary_label: "Sync".to_string(),
-                        cancel_label: "Cancel".to_string(),
-                        primary_variant: ButtonVariant::Danger,
-                        secondary_variant: ButtonVariant::Primary,
-                        on_primary: move |evt| props.on_start_anyway.call(evt),
-                        on_secondary: move |evt| props.on_start_sync.call(evt),
-                        on_cancel: move |evt| props.on_cancel_start.call(evt),
-                    }
-                }
-            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{card_sync_action, selected_profile_requires_sync, CardSyncAction};
+    use super::{card_sync_action, CardSyncAction};
+    use crate::features::profiles::common::local_files_need_sync;
 
     #[test]
-    fn selected_profile_requires_sync_for_local_repair_states() {
+    fn local_files_need_sync_for_local_repair_states() {
         for local_health in [
             fleet_core::LocalFileHealth::Missing,
             fleet_core::LocalFileHealth::Dirty,
@@ -560,12 +416,12 @@ mod tests {
                 local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
-            assert!(selected_profile_requires_sync(Some(&status)));
+            assert!(local_files_need_sync(&status));
         }
     }
 
     #[test]
-    fn selected_profile_does_not_require_sync_for_ready_or_unknown() {
+    fn local_files_need_sync_excludes_ready_and_unknown_states() {
         for local_health in [
             fleet_core::LocalFileHealth::Clean,
             fleet_core::LocalFileHealth::Unknown,
@@ -574,7 +430,7 @@ mod tests {
                 local_health,
                 ..fleet_core::ProfileStatusState::unknown(0)
             };
-            assert!(!selected_profile_requires_sync(Some(&status)));
+            assert!(!local_files_need_sync(&status));
         }
     }
 

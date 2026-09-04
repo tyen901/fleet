@@ -5,8 +5,7 @@
 //! cache, the inventory, or the profile destination.
 
 use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressScope,
-    ProgressUnit,
+    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressUnit,
 };
 use fleet_domain::health::{
     LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport, SyncReport,
@@ -50,7 +49,6 @@ pub(crate) async fn sync(
         let done_bytes = TOTAL_BYTES * step / TOTAL_FILES;
         publisher.progress(OperationProgressEvent {
             stage: OperationStage::Sync,
-            scope: ProgressScope::MaterializationBytes,
             status_text: Some("Syncing files".to_string()),
             primary: ProgressMetric {
                 label: Some("Installed".to_string()),

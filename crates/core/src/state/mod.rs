@@ -4,42 +4,27 @@ use fleet_domain::health::{
 };
 use fleet_domain::OperationSessionId;
 use fleet_domain::{ApiError, AppSettings, Profile, ProfileId, RepoServer};
-use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, Type)]
+#[derive(Clone, Debug, Default, Type)]
 pub struct AppState {
-    #[serde(default)]
     pub version: u64,
     pub settings: AppSettings,
     pub profiles: BTreeMap<ProfileId, Profile>,
-    #[serde(default)]
-    pub selected_profile_id: Option<ProfileId>,
-
-    #[serde(default)]
     pub profile_runtime_by_id: BTreeMap<ProfileId, ProfileRuntimeState>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileRuntimeState {
     pub profile_id: ProfileId,
-    #[serde(default)]
     pub repo_check: Option<RepoCheckReport>,
-    #[serde(default)]
     pub check: Option<LocalFileReport>,
-    #[serde(default)]
     pub validation: Option<LocalFileReport>,
-    #[serde(default)]
     pub materialization: Option<LocalFileReport>,
-    #[serde(default)]
     pub active: Option<ActiveOperationState>,
-    #[serde(default)]
     pub last_operation: Option<OperationOutcomeState>,
-    #[serde(default)]
     pub repo_servers: Vec<RepoServer>,
-    #[serde(default)]
-    pub repo_servers_loaded: bool,
     pub status: ProfileStatusState,
 }
 
@@ -54,7 +39,6 @@ impl ProfileRuntimeState {
             active: None,
             last_operation: None,
             repo_servers: Vec::new(),
-            repo_servers_loaded: false,
             status: ProfileStatusState::unknown(now_ms),
         };
         state.recompute_status();
@@ -66,14 +50,11 @@ impl ProfileRuntimeState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ActiveOperationState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
     pub progress: ProfileOperationProgressState,
-    #[serde(default)]
-    pub completed_stages: BTreeSet<OperationStage>,
-    #[serde(default)]
     pub cancel_requested: bool,
     pub started_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
@@ -85,7 +66,6 @@ impl ActiveOperationState {
             session_id,
             operation,
             progress: ProfileOperationProgressState::new(operation, now_ms),
-            completed_stages: BTreeSet::new(),
             cancel_requested: false,
             started_at_unix_ms: now_ms,
             updated_at_unix_ms: now_ms,
@@ -93,14 +73,14 @@ impl ActiveOperationState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub enum OperationTerminalStatus {
     Succeeded,
     Failed,
     Canceled,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct OperationOutcomeState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
@@ -110,7 +90,7 @@ pub struct OperationOutcomeState {
     pub error: Option<ApiError>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Type, Default)]
 pub enum ProfileStatusHeadline {
     Syncing,
     Checking,
@@ -161,21 +141,7 @@ impl ProfileStatusHeadline {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type, Default)]
-pub enum ProfileStatusSeverity {
-    #[default]
-    Info,
-    Warning,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
-pub enum ProfileStatusBadge {
-    UpdateAvailable,
-    Error,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Default, Type)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
     pub check_enabled: bool,
@@ -187,13 +153,13 @@ pub struct ProfileActionAvailability {
     pub validate_running: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub struct UiProgressBarState {
     pub determinate: bool,
     pub percent: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, PartialEq, Eq, Type)]
 pub struct UiProgressMetric {
     pub label: String,
     pub done: Option<u64>,
@@ -202,28 +168,12 @@ pub struct UiProgressMetric {
     pub rendered: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub enum UiOperationStepStatus {
-    Pending,
-    Active,
-    Complete,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct UiOperationStepState {
-    pub stage: OperationStage,
-    pub label: String,
-    pub status: UiOperationStepStatus,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
     pub last_updated_at_unix_ms: u64,
     pub active_stage: OperationStage,
-    #[serde(default)]
     pub status_text: Option<String>,
-    pub steps: Vec<UiOperationStepState>,
     pub stage: UiProgressBarState,
     pub primary_metric: Option<UiProgressMetric>,
     pub secondary_metric: Option<UiProgressMetric>,
@@ -239,7 +189,6 @@ impl ProfileOperationProgressState {
             last_updated_at_unix_ms: now_ms,
             active_stage,
             status_text: None,
-            steps: build_operation_steps(operation, Some(active_stage), &BTreeSet::new()),
             stage: UiProgressBarState {
                 determinate: false,
                 percent: None,
@@ -252,14 +201,10 @@ impl ProfileOperationProgressState {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Type)]
 pub struct ProfileStatusState {
     pub headline: ProfileStatusHeadline,
-    pub severity: ProfileStatusSeverity,
-    #[serde(default)]
-    pub badge: Option<ProfileStatusBadge>,
     pub actions: ProfileActionAvailability,
-    #[serde(default)]
     pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalFileHealth,
     pub repo_freshness: Option<RepoCheckFreshness>,
@@ -272,8 +217,6 @@ impl ProfileStatusState {
     pub fn unknown(now_ms: u64) -> Self {
         Self {
             headline: ProfileStatusHeadline::StatusUnknown,
-            severity: ProfileStatusSeverity::Warning,
-            badge: None,
             actions: ProfileActionAvailability {
                 check_enabled: true,
                 validate_enabled: true,
@@ -304,17 +247,6 @@ pub fn ensure_profile_runtime_mut<'a>(
 pub fn recompute_profile_status(state: &mut AppState, profile_id: &str) {
     if let Some(runtime) = state.profile_runtime_by_id.get_mut(profile_id) {
         runtime.recompute_status();
-    }
-}
-
-pub fn recompute_all_profile_statuses(state: &mut AppState) {
-    let profile_ids = state
-        .profile_runtime_by_id
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    for profile_id in profile_ids {
-        recompute_profile_status(state, &profile_id);
     }
 }
 
@@ -432,36 +364,6 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         }
     };
 
-    let severity = match headline {
-        ProfileStatusHeadline::ReadyToPlay
-        | ProfileStatusHeadline::Checking
-        | ProfileStatusHeadline::Validating
-        | ProfileStatusHeadline::Stopping
-        | ProfileStatusHeadline::Syncing => ProfileStatusSeverity::Info,
-        ProfileStatusHeadline::NeedsSync
-        | ProfileStatusHeadline::MissingDestination
-        | ProfileStatusHeadline::UpdateAvailable
-        | ProfileStatusHeadline::StatusUnknown
-        | ProfileStatusHeadline::CheckCanceled
-        | ProfileStatusHeadline::ValidationCanceled
-        | ProfileStatusHeadline::SyncCanceled => ProfileStatusSeverity::Warning,
-        ProfileStatusHeadline::ActionRequired
-        | ProfileStatusHeadline::UpdateCheckFailed
-        | ProfileStatusHeadline::CheckFailed
-        | ProfileStatusHeadline::ValidationFailed
-        | ProfileStatusHeadline::SyncFailed => ProfileStatusSeverity::Error,
-    };
-
-    let badge =
-        if invalid_profile || repo_check_failed || check_failed || validation_failed || sync_failed
-        {
-            Some(ProfileStatusBadge::Error)
-        } else if matches!(repo_freshness, Some(RepoCheckFreshness::UpdateAvailable)) {
-            Some(ProfileStatusBadge::UpdateAvailable)
-        } else {
-            None
-        };
-
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !sync_blocked,
         check_enabled: can_run_actions && !hard_blocked,
@@ -482,8 +384,6 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
 
     ProfileStatusState {
         headline,
-        severity,
-        badge,
         actions,
         progress: runtime
             .active
@@ -507,10 +407,8 @@ fn format_metric(metric: &ProgressMetric) -> String {
             format!("{} / {}", format_bytes(done), format_bytes(total))
         }
         (Some(done), Some(total), ProgressUnit::Files) => format!("{done} / {total} files"),
-        (Some(done), Some(total), ProgressUnit::Paths) => format!("{done} / {total} paths"),
         (Some(done), None, ProgressUnit::Bytes) => format!("{} processed", format_bytes(done)),
         (Some(done), None, ProgressUnit::Files) => format!("{done} files"),
-        (Some(done), None, ProgressUnit::Paths) => format!("{done} paths"),
         _ => metric
             .label
             .clone()
@@ -526,39 +424,10 @@ pub fn stage_label(stage: OperationStage) -> &'static str {
     match stage {
         OperationStage::Validating => "Validating",
         OperationStage::LoadingExpectedState => "Loading expected state",
-        OperationStage::ScanningDisk => "Scanning disk",
         OperationStage::VerifyingInventory => "Verifying inventory",
         OperationStage::Sync => "Sync",
         OperationStage::RemovingObsoleteFiles => "Removing obsolete managed files",
         OperationStage::Finalizing => "Finalizing",
-    }
-}
-
-const CHECK_PLAN: &[OperationStage] = &[
-    OperationStage::Validating,
-    OperationStage::LoadingExpectedState,
-    OperationStage::ScanningDisk,
-    OperationStage::Finalizing,
-];
-const VALIDATE_PLAN: &[OperationStage] = &[
-    OperationStage::Validating,
-    OperationStage::LoadingExpectedState,
-    OperationStage::VerifyingInventory,
-    OperationStage::Finalizing,
-];
-const SYNC_PLAN: &[OperationStage] = &[
-    OperationStage::Validating,
-    OperationStage::LoadingExpectedState,
-    OperationStage::Sync,
-    OperationStage::RemovingObsoleteFiles,
-    OperationStage::Finalizing,
-];
-
-pub fn stage_plan(operation: OperationKind) -> &'static [OperationStage] {
-    match operation {
-        OperationKind::Check => CHECK_PLAN,
-        OperationKind::Validate => VALIDATE_PLAN,
-        OperationKind::Sync => SYNC_PLAN,
     }
 }
 
@@ -573,38 +442,11 @@ fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
     Some((done as f64 / total as f64).clamp(0.0, 1.0))
 }
 
-fn build_operation_steps(
-    operation: OperationKind,
-    active_stage: Option<OperationStage>,
-    completed_stages: &BTreeSet<OperationStage>,
-) -> Vec<UiOperationStepState> {
-    stage_plan(operation)
-        .iter()
-        .copied()
-        .map(|stage| {
-            let status = if active_stage == Some(stage) {
-                UiOperationStepStatus::Active
-            } else if completed_stages.contains(&stage) {
-                UiOperationStepStatus::Complete
-            } else {
-                UiOperationStepStatus::Pending
-            };
-
-            UiOperationStepState {
-                stage,
-                label: stage_label(stage).to_string(),
-                status,
-            }
-        })
-        .collect()
-}
-
 pub fn metric_from_progress(metric: &ProgressMetric) -> UiProgressMetric {
     UiProgressMetric {
         label: metric.label.clone().unwrap_or_else(|| match metric.unit {
             ProgressUnit::Bytes => "Bytes".to_string(),
             ProgressUnit::Files => "Files".to_string(),
-            ProgressUnit::Paths => "Paths".to_string(),
         }),
         done: metric.done,
         total: metric.total,
@@ -615,7 +457,6 @@ pub fn metric_from_progress(metric: &ProgressMetric) -> UiProgressMetric {
 
 pub fn apply_operation_progress(
     progress_state: &mut ProfileOperationProgressState,
-    completed_stages: &BTreeSet<OperationStage>,
     progress: &OperationProgressEvent,
     now_ms: u64,
 ) {
@@ -624,11 +465,6 @@ pub fn apply_operation_progress(
     progress_state.status_text = progress.status_text.clone();
     progress_state.primary_metric = Some(metric_from_progress(&progress.primary));
     progress_state.secondary_metric = progress.secondary.as_ref().map(metric_from_progress);
-    progress_state.steps = build_operation_steps(
-        progress_state.operation,
-        Some(progress.stage),
-        completed_stages,
-    );
     let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
     progress_state.stage = UiProgressBarState {
         determinate: active_fraction.is_some(),
@@ -641,13 +477,10 @@ pub fn apply_operation_progress(
 
 pub(crate) fn apply_operation_stage(
     progress_state: &mut ProfileOperationProgressState,
-    completed_stages: &BTreeSet<OperationStage>,
     stage: OperationStage,
 ) {
     progress_state.active_stage = stage;
     progress_state.status_text = None;
-    progress_state.steps =
-        build_operation_steps(progress_state.operation, Some(stage), completed_stages);
     progress_state.stage = UiProgressBarState {
         determinate: false,
         percent: None,
@@ -665,25 +498,19 @@ mod tests {
         ensure_profile_runtime_mut, AppState, OperationOutcomeState, OperationTerminalStatus,
         ProfileOperationProgressState, ProfileStatusHeadline,
     };
-    use crate::operations::{
-        OperationProgressEvent, OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
-    };
+    use crate::operations::{OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit};
     use fleet_domain::health::{
         LocalFileHealth, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
-    use std::collections::BTreeSet;
 
     #[test]
     fn stage_transition_clears_previous_stage_progress() {
-        let completed = BTreeSet::from([OperationStage::Validating]);
         let mut progress = ProfileOperationProgressState::new(OperationKind::Sync, 0);
         apply_operation_progress(
             &mut progress,
-            &completed,
             &OperationProgressEvent {
                 stage: OperationStage::VerifyingInventory,
-                scope: ProgressScope::InventoryVerify,
                 status_text: None,
                 primary: ProgressMetric {
                     label: Some("Bytes".to_string()),
@@ -698,7 +525,7 @@ mod tests {
             1,
         );
 
-        apply_operation_stage(&mut progress, &completed, OperationStage::Sync);
+        apply_operation_stage(&mut progress, OperationStage::Sync);
 
         assert_eq!(progress.active_stage, OperationStage::Sync);
         assert_eq!(progress.stage.percent, None);

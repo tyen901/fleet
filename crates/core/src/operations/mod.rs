@@ -11,6 +11,6 @@ pub(crate) mod validate;
 
 pub use events::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
-    OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
+    OperationStage, ProgressMetric, ProgressUnit,
 };
 pub(crate) use runtime::{OperationPublisher, OperationRuntime};

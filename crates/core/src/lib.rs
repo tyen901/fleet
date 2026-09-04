@@ -29,7 +29,7 @@ pub use fleet_domain::{
 };
 pub use operations::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
-    OperationStage, ProgressMetric, ProgressScope, ProgressUnit,
+    OperationStage, ProgressMetric, ProgressUnit,
 };
 
 pub mod download {
