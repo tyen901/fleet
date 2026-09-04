@@ -7,7 +7,6 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
-use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
 
 #[derive(Props, Clone, PartialEq)]
@@ -68,12 +67,6 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
     }
 }
 
-pub(crate) fn select_profile_in_background(bridge: FleetBridge, profile_id: String) {
-    spawn(async move {
-        let _ = bridge.core().profile_set_selected(Some(profile_id)).await;
-    });
-}
-
 pub(crate) fn profile_not_found_page(nav: Navigator) -> Element {
     let nav_for_profiles = nav;
     rsx! {
@@ -124,8 +117,7 @@ pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static s
     match stage {
         fleet_core::OperationStage::Validating => "Checking",
         fleet_core::OperationStage::LoadingExpectedState => "Planning",
-        fleet_core::OperationStage::ScanningDisk
-        | fleet_core::OperationStage::VerifyingInventory => "Verifying",
+        fleet_core::OperationStage::VerifyingInventory => "Verifying",
         fleet_core::OperationStage::Sync => "Downloading",
         fleet_core::OperationStage::RemovingObsoleteFiles => "Removing obsolete files",
         fleet_core::OperationStage::Finalizing => "Installing",
@@ -158,23 +150,6 @@ pub(crate) fn new_profile_from_draft(
         destination: draft.destination,
         ..Default::default()
     }
-}
-
-pub(crate) async fn save_profile_and_update_state(
-    bridge: FleetBridge,
-    mut store: AppStore,
-    _toasts: ToastStore,
-    profile: fleet_core::Profile,
-    _warning_detail: &'static str,
-) -> Result<fleet_core::Profile, fleet_core::ApiError> {
-    let saved = bridge.core().profile_save(profile).await?;
-
-    let mut next_state = (store.state)();
-    next_state.profiles.insert(saved.id.clone(), saved.clone());
-    next_state.selected_profile_id = Some(saved.id.clone());
-    store.state.set(next_state);
-
-    Ok(saved)
 }
 
 pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
@@ -253,7 +228,13 @@ pub(crate) async fn start_profile_operation_request(
         .start_operation(profile_id.clone(), operation)
         .await
     {
-        Ok(_) => true,
+        Ok(session_id) => {
+            let core = bridge.core();
+            tokio::spawn(async move {
+                let _ = core.await_finished(session_id).await;
+            });
+            true
+        }
         Err(err) => {
             if err.code == "profile_busy" {
                 return false;
