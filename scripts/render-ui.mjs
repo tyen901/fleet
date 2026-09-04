@@ -199,7 +199,6 @@ async function seedDummyConfig() {
       process.platform === 'win32' ? 'arma3_x64.exe $ARGS $MODS' : 'steam $ARGS $MODS',
     onboarding_completed: false,
     show_profile_icons: false,
-    telemetry_consent: false,
     debug_log_to_disk: false,
     auto_check_profiles_on_startup: false,
     auto_check_on_startup: false,
@@ -346,7 +345,6 @@ async function runFlow(client) {
   })()`);
   if (
     settingsTop.sectionTitles[0] !== 'Updates' ||
-    settingsTop.sectionTitles.indexOf('General') < settingsTop.sectionTitles.indexOf('Privacy') ||
     settingsTop.gameDirectoryButtons !== 2 ||
     !settingsTop.hasAutoAction ||
     !settingsTop.resetSlotsConsistent ||

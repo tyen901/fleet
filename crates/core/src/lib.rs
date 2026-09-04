@@ -1,5 +1,4 @@
 pub mod logging;
-pub mod telemetry;
 
 mod core;
 mod features;

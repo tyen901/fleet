@@ -8,7 +8,7 @@ use fleet_domain::health::{CancelResult, OperationKind};
 use fleet_domain::{ApiError, ProfileId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 
 #[derive(Clone)]
 pub struct Core {
@@ -19,6 +19,7 @@ pub(crate) struct CoreInner {
     operations: OperationRuntime,
     next_session_id: AtomicU64,
     config: Arc<ConfigRepo>,
+    pub(crate) settings_save_lock: AsyncMutex<()>,
     state: Mutex<AppState>,
     state_tx: watch::Sender<AppState>,
 }
@@ -86,6 +87,7 @@ impl Core {
                 operations,
                 next_session_id: AtomicU64::new(1),
                 config,
+                settings_save_lock: AsyncMutex::new(()),
                 state,
                 state_tx,
             }),

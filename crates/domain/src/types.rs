@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 pub type ProfileId = String;
-pub const INVENTORY_REBUILD_REQUIRED_CODE: &str = "inventory_rebuild_required";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ApiError {
@@ -19,10 +18,6 @@ impl ApiError {
             code: code.into(),
             message: message.into(),
         }
-    }
-
-    pub fn is_inventory_rebuild_required(&self) -> bool {
-        self.code == INVENTORY_REBUILD_REQUIRED_CODE
     }
 }
 
@@ -244,64 +239,7 @@ fn default_arma3_custom_launch_template() -> String {
 
 pub const DEFAULT_ARMA3_ARGS: &str = "-noPause -noSplash -skipIntro -noLauncher";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
-pub enum TelemetryPreference {
-    #[default]
-    Unset,
-    Allowed,
-    Denied,
-}
-
-impl TelemetryPreference {
-    pub fn is_enabled(self) -> bool {
-        matches!(self, TelemetryPreference::Allowed)
-    }
-}
-
-impl Serialize for TelemetryPreference {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            TelemetryPreference::Unset => serializer.serialize_none(),
-            TelemetryPreference::Allowed => serializer.serialize_bool(true),
-            TelemetryPreference::Denied => serializer.serialize_bool(false),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for TelemetryPreference {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum RawTelemetryPreference {
-            Bool(bool),
-            String(String),
-            Null,
-        }
-
-        let raw = RawTelemetryPreference::deserialize(deserializer)?;
-        let parsed = match raw {
-            RawTelemetryPreference::Bool(true) => TelemetryPreference::Allowed,
-            RawTelemetryPreference::Bool(false) => TelemetryPreference::Denied,
-            RawTelemetryPreference::String(value) => {
-                match value.trim().to_ascii_lowercase().as_str() {
-                    "allowed" | "true" | "yes" | "on" => TelemetryPreference::Allowed,
-                    "denied" | "false" | "no" | "off" => TelemetryPreference::Denied,
-                    _ => TelemetryPreference::Unset,
-                }
-            }
-            RawTelemetryPreference::Null => TelemetryPreference::Unset,
-        };
-        Ok(parsed)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct Arma3Settings {
     #[serde(default)]
     pub arma3_default_args: String,
@@ -324,7 +262,7 @@ impl Default for Arma3Settings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct UiSettings {
     /// If true, the app will skip the first-run onboarding flow.
     ///
@@ -348,28 +286,14 @@ impl Default for UiSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct PrivacySettings {
-    #[serde(default)]
-    pub telemetry_consent: TelemetryPreference,
-}
-
-impl Default for PrivacySettings {
-    fn default() -> Self {
-        Self {
-            telemetry_consent: TelemetryPreference::Unset,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct RuntimeSettings {
     /// If true, enable debug-level logs to disk (trace is always disabled).
     #[serde(default)]
     pub debug_log_to_disk: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct StartupSettings {
     /// If true, automatically check profiles once after app startup.
     #[serde(default = "default_true")]
@@ -384,7 +308,7 @@ impl Default for StartupSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct UpdateSettings {
     /// If true, automatically check for Fleet app updates once after app startup.
     #[serde(default = "default_true")]
@@ -399,14 +323,12 @@ impl Default for UpdateSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type, PartialEq, Eq)]
 pub struct AppSettings {
     #[serde(flatten)]
     pub arma3: Arma3Settings,
     #[serde(flatten)]
     pub ui: UiSettings,
-    #[serde(flatten)]
-    pub privacy: PrivacySettings,
     #[serde(flatten)]
     pub runtime: RuntimeSettings,
     #[serde(flatten)]
