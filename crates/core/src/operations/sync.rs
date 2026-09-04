@@ -41,10 +41,16 @@ pub(crate) async fn sync(
     );
 
     publisher.stage(OperationStage::Sync);
-    let (progress, progress_receiver) =
+    let (progress, hash_progress, progress_receiver) =
         FluxProgressObserver::channel(fleet_domain::OperationKind::Sync);
-    let materialization =
-        fleet_flux::materialize(&dest, inventory, input, cancel.clone(), Some(progress));
+    let materialization = fleet_flux::materialize(
+        &dest,
+        inventory,
+        input,
+        cancel.clone(),
+        Some(progress),
+        Some(hash_progress),
+    );
     progress_receiver
         .observe(publisher.clone(), materialization)
         .await

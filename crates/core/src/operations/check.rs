@@ -13,7 +13,7 @@ pub(crate) async fn check(
 ) -> Result<CheckReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     publisher.stage(OperationStage::LoadingExpectedState);
-    let (progress, progress_receiver) =
+    let (progress, _, progress_receiver) =
         FluxProgressObserver::channel(fleet_domain::OperationKind::Check);
 
     let work = async {
