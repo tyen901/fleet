@@ -8,65 +8,13 @@ pub enum SettingsField {
     Arma3LaunchMethod,
     Arma3CustomLaunchTemplate,
     Arma3DefaultArgs,
-    TelemetryConsent,
     AutoCheckProfilesOnStartup,
     AutoCheckOnStartup,
     ShowProfileIcons,
 }
 
 pub fn effective_settings_defaults() -> AppSettings {
-    normalize_settings(AppSettings::default())
-}
-
-struct SettingsFieldSpec {
-    is_non_default: fn(&AppSettings, &AppSettings) -> bool,
-}
-
-fn settings_field_spec(field: SettingsField) -> SettingsFieldSpec {
-    match field {
-        SettingsField::Arma3GameDir => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.arma3.arma3_game_dir != defaults.arma3.arma3_game_dir
-            },
-        },
-        SettingsField::Arma3LaunchMethod => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.arma3.arma3_launch_method != defaults.arma3.arma3_launch_method
-            },
-        },
-        SettingsField::Arma3CustomLaunchTemplate => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.arma3.arma3_custom_launch_template
-                    != defaults.arma3.arma3_custom_launch_template
-            },
-        },
-        SettingsField::Arma3DefaultArgs => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.arma3.arma3_default_args != defaults.arma3.arma3_default_args
-            },
-        },
-        SettingsField::TelemetryConsent => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.privacy.telemetry_consent != defaults.privacy.telemetry_consent
-            },
-        },
-        SettingsField::AutoCheckProfilesOnStartup => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.startup.auto_check_profiles_on_startup
-                    != defaults.startup.auto_check_profiles_on_startup
-            },
-        },
-        SettingsField::AutoCheckOnStartup => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.updates.auto_check_on_startup != defaults.updates.auto_check_on_startup
-            },
-        },
-        SettingsField::ShowProfileIcons => SettingsFieldSpec {
-            is_non_default: |settings, defaults| {
-                settings.ui.show_profile_icons != defaults.ui.show_profile_icons
-            },
-        },
-    }
+    normalize_app_settings(AppSettings::default())
 }
 
 pub fn settings_field_is_non_default(
@@ -74,39 +22,61 @@ pub fn settings_field_is_non_default(
     settings: &AppSettings,
     defaults: &AppSettings,
 ) -> bool {
-    (settings_field_spec(field).is_non_default)(settings, defaults)
+    match field {
+        SettingsField::Arma3GameDir => {
+            settings.arma3.arma3_game_dir != defaults.arma3.arma3_game_dir
+        }
+        SettingsField::Arma3LaunchMethod => {
+            settings.arma3.arma3_launch_method != defaults.arma3.arma3_launch_method
+        }
+        SettingsField::Arma3CustomLaunchTemplate => {
+            settings.arma3.arma3_custom_launch_template
+                != defaults.arma3.arma3_custom_launch_template
+        }
+        SettingsField::Arma3DefaultArgs => {
+            settings.arma3.arma3_default_args != defaults.arma3.arma3_default_args
+        }
+        SettingsField::AutoCheckProfilesOnStartup => {
+            settings.startup.auto_check_profiles_on_startup
+                != defaults.startup.auto_check_profiles_on_startup
+        }
+        SettingsField::AutoCheckOnStartup => {
+            settings.updates.auto_check_on_startup != defaults.updates.auto_check_on_startup
+        }
+        SettingsField::ShowProfileIcons => {
+            settings.ui.show_profile_icons != defaults.ui.show_profile_icons
+        }
+    }
 }
 
 impl Core {
     pub async fn load_settings(&self) -> anyhow::Result<AppSettings> {
+        let _settings_guard = self.inner.settings_save_lock.lock().await;
         let loaded = run_config_blocking(self.config_repo(), |c| c.load_settings()).await?;
-        let normalized = normalize_settings(loaded.clone());
-        if settings_changed_after_normalize(&loaded, &normalized) {
+        let normalized = normalize_app_settings(loaded.clone());
+        if loaded != normalized {
             let to_save = normalized.clone();
             run_config_blocking(self.config_repo(), move |c| c.save_settings(&to_save)).await?;
         }
         Ok(normalized)
     }
 
-    pub async fn save_settings(&self, settings: AppSettings) -> anyhow::Result<()> {
-        let settings = normalize_settings(settings);
-        run_config_blocking(self.config_repo(), move |c| c.save_settings(&settings)).await
+    pub async fn save_settings(&self, settings: AppSettings) -> Result<(), crate::ApiError> {
+        let _save_guard = self.inner.settings_save_lock.lock().await;
+        let settings = normalize_app_settings(settings);
+        let settings_to_save = settings.clone();
+        run_config_blocking(self.config_repo(), move |c| {
+            c.save_settings(&settings_to_save)
+        })
+        .await
+        .map_err(|error| crate::ApiError::new("settings_error", error.to_string()))?;
+        self.update_state(|state| state.settings = settings);
+        Ok(())
     }
 
     pub async fn reset_settings(&self) -> anyhow::Result<()> {
+        let _settings_guard = self.inner.settings_save_lock.lock().await;
         run_config_blocking(self.config_repo(), |c| c.delete_settings()).await
-    }
-
-    pub async fn settings_save(&self, settings: AppSettings) -> Result<(), crate::ApiError> {
-        let settings = normalize_settings(settings);
-        self.update_state(|state| {
-            state.settings = settings.clone();
-        });
-        run_config_blocking(self.config_repo(), move |c| c.save_settings(&settings))
-            .await
-            .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
-
-        Ok(())
     }
 
     pub async fn factory_reset(&self) -> Result<(), crate::ApiError> {
@@ -143,36 +113,16 @@ impl Core {
     }
 }
 
-fn normalize_settings(mut settings: AppSettings) -> AppSettings {
-    settings = normalize_app_settings(settings);
-    settings
-}
-
-fn settings_changed_after_normalize(before: &AppSettings, after: &AppSettings) -> bool {
-    [
-        SettingsField::Arma3GameDir,
-        SettingsField::Arma3LaunchMethod,
-        SettingsField::Arma3CustomLaunchTemplate,
-        SettingsField::Arma3DefaultArgs,
-        SettingsField::TelemetryConsent,
-        SettingsField::AutoCheckProfilesOnStartup,
-        SettingsField::AutoCheckOnStartup,
-        SettingsField::ShowProfileIcons,
-    ]
-    .into_iter()
-    .any(|field| settings_field_is_non_default(field, after, before))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{effective_settings_defaults, normalize_settings, settings_field_is_non_default};
+    use super::{effective_settings_defaults, settings_field_is_non_default};
     use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
     use crate::{Core, SettingsField};
-    use fleet_domain::{AppSettings, TelemetryPreference};
+    use fleet_domain::{normalize_app_settings, AppSettings};
 
     #[test]
     fn effective_settings_defaults_matches_runtime_normalization() {
-        let expected = normalize_settings(AppSettings::default());
+        let expected = normalize_app_settings(AppSettings::default());
         let actual = effective_settings_defaults();
         assert_eq!(
             actual.arma3.arma3_default_args,
@@ -185,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_settings_save_keeps_valid_state() {
+    fn concurrent_settings_saves_publish_the_final_persisted_settings() {
         let _guard = ENV_VAR_LOCK.lock().expect("env lock");
 
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -198,28 +148,53 @@ mod tests {
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
-            let mut base = core.load_settings().await.expect("load settings");
-            base.arma3.arma3_default_args = String::new();
-            core.settings_save(base).await.expect("seed settings");
-
-            let mut a = core.load_settings().await.expect("load A");
+            let core = Core::new_for_test().expect("core");
+            let base = core.load_settings().await.expect("load settings");
+            let mut a = base.clone();
             a.startup.auto_check_profiles_on_startup = false;
-            let mut b = core.load_settings().await.expect("load B");
-            b.privacy.telemetry_consent = TelemetryPreference::Allowed;
+            let mut b = base;
+            b.ui.show_profile_icons = false;
 
-            let (ra, rb) = tokio::join!(core.settings_save(a), core.settings_save(b));
-            ra.expect("save A");
-            rb.expect("save B");
+            let (first, second) =
+                tokio::join!(core.save_settings(a.clone()), core.save_settings(b.clone()));
+            first.expect("save A");
+            second.expect("save B");
 
-            let final_settings = core.load_settings().await.expect("load final");
-            assert!(!final_settings.arma3.arma3_default_args.trim().is_empty());
-            assert!(matches!(
-                final_settings.privacy.telemetry_consent,
-                TelemetryPreference::Unset
-                    | TelemetryPreference::Allowed
-                    | TelemetryPreference::Denied
-            ));
+            let persisted = core.load_settings().await.expect("load final settings");
+            let published = core.read_state(|state| state.settings.clone());
+            assert_eq!(published, persisted);
+            assert!(persisted == a || persisted == b);
+        });
+    }
+
+    #[test]
+    fn failed_settings_save_preserves_published_state() {
+        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let core = Core::new_for_test().expect("core");
+            let mut persisted = core.load_settings().await.expect("load settings");
+            persisted.ui.show_profile_icons = false;
+            core.save_settings(persisted.clone())
+                .await
+                .expect("save settings");
+
+            std::fs::remove_dir_all(temp_dir.path()).expect("remove config directory");
+            std::fs::write(temp_dir.path(), "blocked").expect("block config path");
+
+            let mut unsaved = persisted.clone();
+            unsaved.startup.auto_check_profiles_on_startup = false;
+            assert!(core.save_settings(unsaved).await.is_err());
+            assert_eq!(core.read_state(|state| state.settings.clone()), persisted);
+
+            std::fs::remove_file(temp_dir.path()).expect("remove config path blocker");
         });
     }
 
