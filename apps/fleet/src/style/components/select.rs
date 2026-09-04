@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use icondata::BsChevronDown;
 
-use super::{AppIcon, IconSize};
+use super::AppIcon;
 
 #[derive(Clone, PartialEq)]
 pub struct SelectOption {
@@ -24,21 +24,13 @@ pub struct SelectFieldProps {
     pub options: Vec<SelectOption>,
     #[props(default = false)]
     pub disabled: bool,
-    #[props(default = true)]
-    pub full_width: bool,
     pub onchange: EventHandler<String>,
 }
 
 #[component]
 pub fn SelectField(props: SelectFieldProps) -> Element {
-    let wrap_class = if props.full_width {
-        "select-wrap select-wrap--full"
-    } else {
-        "select-wrap"
-    };
-
     rsx! {
-        div { class: wrap_class,
+        div { class: "select-wrap",
             select {
                 class: "select",
                 value: props.value,
@@ -53,7 +45,7 @@ pub fn SelectField(props: SelectFieldProps) -> Element {
                 }
             }
             span { class: "select-wrap__chev",
-                AppIcon { icon: BsChevronDown, size: IconSize::Sm }
+                AppIcon { icon: BsChevronDown }
             }
         }
     }
