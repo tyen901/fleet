@@ -76,10 +76,6 @@
 
 .select-wrap {
   position: relative;
-  min-width: 200px;
-}
-
-.select-wrap--full {
   width: 100%;
   min-width: 0;
 }

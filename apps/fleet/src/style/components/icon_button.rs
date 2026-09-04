@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use icondata::Icon;
 
-use super::{AppIcon, ButtonVariant, IconSize};
+use super::{AppIcon, ButtonVariant};
 
 /// The label is required: it becomes the accessible name and the tooltip.
 #[derive(Props, Clone, PartialEq)]
@@ -41,7 +41,7 @@ pub fn IconButton(props: IconButtonProps) -> Element {
                     handler.call(evt);
                 }
             },
-            AppIcon { icon: props.icon, size: IconSize::Sm }
+            AppIcon { icon: props.icon }
         }
     }
 }
