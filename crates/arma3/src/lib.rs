@@ -14,6 +14,6 @@ mod steam;
 
 pub use crate::command::{LaunchCommand, LaunchMethod};
 pub use crate::error::{Error, Result};
-pub use crate::launcher::{steam_available, Arma3Install, LaunchRequest, Launcher};
+pub use crate::launcher::{Arma3Install, LaunchRequest, Launcher};
 pub use crate::mods::{ModList, ModPathStyle};
 pub use crate::steam::discover_steam_arma3;
