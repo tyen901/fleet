@@ -9,7 +9,7 @@ use flux::{
 use futures_util::{stream::BoxStream, StreamExt};
 use rusqlite::params;
 
-use crate::row::{local_file_from_rows, segment_hit_from_row, to_i64};
+use crate::row::{local_file_from_file_row, segment_hit_from_row, to_i64};
 use crate::schema::open_conn;
 use crate::InventoryError;
 
@@ -195,20 +195,9 @@ pub(crate) fn assess_expected_state(
 }
 
 fn apply_changes(db_path: &Path, changes: Vec<Change>, managed: bool) -> FluxResult<()> {
-    let mut seen = std::collections::BTreeSet::new();
     for change in &changes {
-        let path = match change {
-            Change::Upsert(fact) => {
-                fact.validate()?;
-                &fact.path
-            }
-            Change::Remove(path) => path,
-        };
-        if !seen.insert(path.clone()) {
-            return Err(FluxError::new(
-                FluxErrorKind::InventoryUpdateFailed,
-                "inventory batch contains duplicate paths",
-            ));
+        if let Change::Upsert(fact) = change {
+            fact.validate()?;
         }
     }
     if changes.is_empty() {
@@ -256,7 +245,7 @@ fn apply_changes(db_path: &Path, changes: Vec<Change>, managed: bool) -> FluxRes
                 Change::Remove(path) => {
                     file_stmt
                         .execute(params![path.as_str(), 2_i64, None::<i64>, None::<Vec<u8>>])
-                        .map_err(sql_update_error)?;
+                        .map_err(batch_file_insert_error)?;
                 }
                 Change::Upsert(fact) => {
                     file_stmt
@@ -266,7 +255,7 @@ fn apply_changes(db_path: &Path, changes: Vec<Change>, managed: bool) -> FluxRes
                             to_i64(fact.len(), "file length").map_err(inventory_update_error)?,
                             fact.version.token(),
                         ])
-                        .map_err(sql_update_error)?;
+                        .map_err(batch_file_insert_error)?;
                     for (index, segment) in fact.segments.iter().enumerate() {
                         segment_stmt
                             .execute(params![
@@ -359,7 +348,7 @@ pub(crate) fn lookup_files(
         let (position, path, len, token) = row.map_err(sql_read_error)?;
         if let (Some(path), Some(len), Some(token)) = (path, len, token) {
             let position = read_position(position, out.len())?;
-            out[position] = Some(local_file_from_rows(path, len, token, Vec::new())?);
+            out[position] = Some(local_file_from_file_row(path, len, token)?);
         }
     }
     drop(stmt);
@@ -619,4 +608,18 @@ fn sql_read_error(error: rusqlite::Error) -> FluxError {
 
 fn sql_update_error(error: rusqlite::Error) -> FluxError {
     FluxError::new(FluxErrorKind::InventoryUpdateFailed, error.to_string())
+}
+
+fn batch_file_insert_error(error: rusqlite::Error) -> FluxError {
+    if matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if code.code == rusqlite::ErrorCode::ConstraintViolation
+    ) {
+        return FluxError::new(
+            FluxErrorKind::InventoryUpdateFailed,
+            "inventory batch contains duplicate paths",
+        );
+    }
+    sql_update_error(error)
 }
