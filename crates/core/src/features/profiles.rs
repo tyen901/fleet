@@ -2,8 +2,8 @@ use crate::core::run_config_blocking;
 use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
 use crate::storage::{profile_state_root_dir, ProfilesConfig};
 use crate::Core;
-use fleet_domain::{Profile, ProfileId, ProfileSourceKind, RepoServer};
-use std::path::PathBuf;
+use fleet_domain::{validated_repo_url, Profile, ProfileId, RepoServer};
+use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
@@ -132,7 +132,7 @@ impl Core {
         profile.source = profile.source.trim().to_string();
         profile.additional_mod_folders =
             normalize_additional_mod_folders(&profile.additional_mod_folders);
-        if let Err(err) = profile.validated_source_kind() {
+        if let Err(err) = validated_repo_url(&profile.source) {
             error!(
                 op = "save_profile",
                 profile_id = %profile.id,
@@ -156,16 +156,11 @@ impl Core {
                 .load_profiles()
                 .map_err(SaveProfileError::Persistence)?;
 
-            let normalize_path = |path: &str| {
-                let trimmed = path.trim();
-                trimmed.trim_end_matches(['/', '\\']).to_string()
-            };
-
-            let destination = normalize_path(&profile.destination);
+            let destination = normalize_destination_for_compare(&profile.destination);
             if !destination.is_empty() {
                 for existing in cfg.profiles.iter() {
                     if existing.id != profile.id
-                        && normalize_path(&existing.destination) == destination
+                        && normalize_destination_for_compare(&existing.destination) == destination
                     {
                         warn!(
                             op = "save_profile",
@@ -378,9 +373,7 @@ impl Core {
 pub(crate) fn load_cached_repo_servers_blocking(
     profile: &Profile,
 ) -> Result<Option<Vec<RepoServer>>, crate::ApiError> {
-    let Some((cache_root, repo_url)) = swifty_cache_target(profile)? else {
-        return Ok(None);
-    };
+    let (cache_root, repo_url) = swifty_cache_target(profile)?;
 
     let Some(cache) = swifty_repo::load_cached_repo_blocking(&cache_root, &repo_url)
         .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
@@ -421,17 +414,18 @@ pub(crate) fn set_profile_repo_servers_runtime(
     runtime.repo_servers = servers;
 }
 
-fn swifty_cache_target(profile: &Profile) -> Result<Option<(PathBuf, String)>, crate::ApiError> {
+fn swifty_cache_target(profile: &Profile) -> Result<(PathBuf, String), crate::ApiError> {
     profile
         .dest_path()
         .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
-    let ProfileSourceKind::Http(repo_url) = profile.source_kind();
+    let repo_url = validated_repo_url(&profile.source)
+        .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
     let state_root =
         profile_state_root_dir().map_err(|e| crate::ApiError::new("state_root", e.to_string()))?;
-    Ok(Some((
+    Ok((
         fleet_domain::repo_cache_dir(&state_root, &profile.id),
         repo_url.to_string(),
-    )))
+    ))
 }
 
 pub fn validate_profile_name(name: &str) -> bool {
@@ -444,21 +438,11 @@ pub fn validate_profile_name(name: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == ' ')
 }
 
-pub fn validate_repo_url(url: &str) -> bool {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://")) && lower.ends_with("repo.json")
-}
-
 pub fn is_destination_unique(state: &AppState, destination: &str, ignore_id: Option<&str>) -> bool {
-    let trimmed = destination.trim();
-    if trimmed.is_empty() {
+    let destination = normalize_destination_for_compare(destination);
+    if destination.is_empty() {
         return false;
     }
-    let dest = trimmed.to_ascii_lowercase();
 
     !state.profiles.values().any(|profile| {
         if let Some(ignore) = ignore_id {
@@ -466,7 +450,7 @@ pub fn is_destination_unique(state: &AppState, destination: &str, ignore_id: Opt
                 return false;
             }
         }
-        profile.destination.trim().to_ascii_lowercase() == dest
+        normalize_destination_for_compare(&profile.destination) == destination
     })
 }
 
@@ -482,10 +466,32 @@ fn profile_path_context_changed(previous: Option<&Profile>, next: &Profile) -> b
 }
 
 fn normalize_destination_for_compare(value: &str) -> String {
-    value
-        .trim()
-        .trim_end_matches(['/', '\\'])
-        .to_ascii_lowercase()
+    let value = value.trim();
+    #[cfg(windows)]
+    let value = value.replace('\\', "/");
+    #[cfg(not(windows))]
+    let value = value.to_string();
+
+    let root = Path::new(&value).has_root() && Path::new(&value).parent().is_none();
+    let value = value.trim_end_matches('/');
+    let value = if root {
+        if value.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{value}/")
+        }
+    } else {
+        value.to_string()
+    };
+
+    #[cfg(windows)]
+    {
+        value.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
 }
 
 fn normalize_source_for_compare(value: &str) -> String {
@@ -564,11 +570,46 @@ mod tests {
     }
 
     #[test]
-    fn destination_normalization_ignores_case_whitespace_and_trailing_slashes() {
+    fn destination_normalization_ignores_whitespace_and_trailing_separators() {
         assert_eq!(
-            normalize_destination_for_compare("  /Tmp/Fleet/Mods/// "),
+            normalize_destination_for_compare("  /tmp/fleet/mods/// "),
             normalize_destination_for_compare("/tmp/fleet/mods")
         );
+    }
+
+    #[test]
+    fn destination_normalization_preserves_roots() {
+        assert_eq!(
+            normalize_destination_for_compare("////"),
+            normalize_destination_for_compare("/")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn destination_normalization_uses_windows_path_rules() {
+        assert_eq!(
+            normalize_destination_for_compare(" C:\\Fleet\\Mods\\ "),
+            normalize_destination_for_compare("c:/fleet/mods///")
+        );
+        assert_eq!(
+            normalize_destination_for_compare("C:\\\\\\\\"),
+            normalize_destination_for_compare("c:/")
+        );
+        assert_ne!(
+            normalize_destination_for_compare("C:"),
+            normalize_destination_for_compare("C:/")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn destination_normalization_keeps_non_windows_paths_case_sensitive() {
+        assert_ne!(
+            normalize_destination_for_compare("/tmp/Fleet/Mods"),
+            normalize_destination_for_compare("/tmp/fleet/mods")
+        );
+        assert_eq!(normalize_destination_for_compare("mods\\"), "mods\\");
     }
 
     #[test]
@@ -596,7 +637,11 @@ mod tests {
         };
 
         let unchanged = Profile {
-            destination: "/TMP/mods///".to_string(),
+            destination: if cfg!(windows) {
+                "/TMP/mods///".to_string()
+            } else {
+                "/tmp/mods///".to_string()
+            },
             source: "  https://example.com/repo.json ".to_string(),
             ..previous.clone()
         };
@@ -778,12 +823,26 @@ mod tests {
 
         runtime.block_on(async {
             let core = Core::spawn_threaded_default().expect("core");
-            core.profile_save(sample_profile("p1", "/tmp/shared"))
-                .await
-                .expect("save initial profile");
+            core.profile_save(sample_profile(
+                "p1",
+                if cfg!(windows) {
+                    "C:\\Fleet\\Shared\\"
+                } else {
+                    "/tmp/shared/"
+                },
+            ))
+            .await
+            .expect("save initial profile");
 
             let err = core
-                .profile_save(sample_profile("p2", "/tmp/shared"))
+                .profile_save(sample_profile(
+                    "p2",
+                    if cfg!(windows) {
+                        " c:/fleet/shared/// "
+                    } else {
+                        " /tmp/shared/// "
+                    },
+                ))
                 .await
                 .expect_err("destination conflict should fail");
 

@@ -10,7 +10,7 @@ mod test_support;
 
 pub use core::Core;
 pub use features::arma3::{custom_launch_template_preview, server_join_args, ArmaLaunchResult};
-pub use features::profiles::{is_destination_unique, validate_profile_name, validate_repo_url};
+pub use features::profiles::{is_destination_unique, validate_profile_name};
 pub use features::settings::{
     effective_settings_defaults, settings_field_is_non_default, SettingsField,
 };
@@ -25,7 +25,7 @@ pub use fleet_domain::OperationSessionId;
 pub use fleet_domain::RepoServer;
 pub use fleet_domain::{
     ApiError, AppSettings, Arma3LaunchMethod, LocalFileHealth, Profile, ProfileId,
-    ProfileSourceKind, DEFAULT_ARMA3_ARGS,
+    DEFAULT_ARMA3_ARGS,
 };
 pub use operations::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,

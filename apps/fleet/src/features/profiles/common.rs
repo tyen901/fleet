@@ -96,10 +96,7 @@ pub(crate) fn profile_icon_src(
         return None;
     }
 
-    let repo_url = profile.source.trim();
-    if repo_url.is_empty() {
-        return None;
-    }
+    let repo_url = fleet_domain::validated_repo_url(&profile.source).ok()?;
 
     let state_root = fleet_core::profile_state_root_dir().ok()?;
     let repo_cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);

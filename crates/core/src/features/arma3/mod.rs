@@ -10,14 +10,13 @@ use fleet_domain::health::LocalFileReport;
 use fleet_domain::LocalFileHealth;
 use fleet_domain::{
     types::{ProfileServerInfo, RepoServer},
-    AppSettings, Arma3LaunchMethod, Profile, ProfileId, ProfileSourceKind,
+    validated_repo_url, AppSettings, Arma3LaunchMethod, Profile, ProfileId,
 };
 use serde::Serialize;
-use specta::Type;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-#[derive(Clone, Debug, Serialize, Type)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ArmaLaunchResult {
     pub program: String,
     pub args: Vec<String>,
@@ -356,7 +355,9 @@ fn build_mod_list(profile: &Profile) -> Result<ModList, Arma3Error> {
 }
 
 fn discover_mods_from_repo(profile: &Profile, root: &Path) -> Result<Vec<PathBuf>, Arma3Error> {
-    let ProfileSourceKind::Http(repo_url) = profile.source_kind();
+    let repo_url = validated_repo_url(&profile.source).map_err(|error| {
+        Arma3Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+    })?;
 
     let state_root = profile_state_root_dir().map_err(|e| {
         Arma3Error::Io(std::io::Error::other(format!(
