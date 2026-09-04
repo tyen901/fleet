@@ -30,9 +30,6 @@ fn main() -> anyhow::Result<()> {
 
         velopack::VelopackApp::build().run();
 
-        #[cfg(target_arch = "wasm32")]
-        dioxus_logger::initialize_default();
-
         let bridge = FleetBridge::new()?;
         let settings = bridge.get_snapshot().settings.clone();
         fleet_core::logging::init(fleet_core::logging::LoggingConfig {
