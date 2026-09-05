@@ -18,5 +18,7 @@ pub async fn run(core: &Core, profile_id: &str, no_progress: bool) -> anyhow::Re
     println!("---");
     println!("validated");
     println!("local_health: {:?}", report.health);
+    println!("missing_paths: {}", report.missing_paths_count);
+    println!("modified_paths: {}", report.modified_paths_count);
     Ok(())
 }

@@ -24,12 +24,12 @@ jobs:
             os: windows-latest
             app_id: fleet
             exe_name: fleet.exe
-            channel: win-stable
+            channel_prefix: win
           - target: linux
             os: ubuntu-24.04
             app_id: fleet
             exe_name: fleet
-            channel: linux-stable
+            channel_prefix: linux
 
     steps:
       - name: Checkout
@@ -42,7 +42,7 @@ jobs:
           target: ${{ matrix.target }}
           app_id: ${{ matrix.app_id }}
           exe_name: ${{ matrix.exe_name }}
-          channel: ${{ matrix.channel }}
+          channel: ${{ format('{0}-{1}', matrix.channel_prefix, contains(github.ref_name, '-') && 'dev' || 'stable') }}
           private_deps_token: ${{ secrets.FLEET_PRIVATE_DEPS_TOKEN }}
 
       - name: Upload release artifacts
