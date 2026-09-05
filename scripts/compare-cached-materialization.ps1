@@ -19,6 +19,10 @@ $ErrorActionPreference = 'Stop'
 $targetRoot = (Resolve-Path -LiteralPath $Target).Path.TrimEnd('\','/')
 $outputRoot = [IO.Path]::GetFullPath($OutputDir)
 $repairFile = [IO.Path]::GetFullPath((Join-Path $targetRoot $RepairPath))
+$inventories = @{ baseline = (Resolve-Path -LiteralPath $BaselineInventory).Path; candidate = (Resolve-Path -LiteralPath $CandidateInventory).Path }
+if ($inventories.baseline.Equals($inventories.candidate, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Baseline and candidate must use independently seeded inventories.'
+}
 if (!$repairFile.StartsWith($targetRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
     $outputRoot.StartsWith($targetRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
     $outputRoot.Equals($targetRoot, [StringComparison]::OrdinalIgnoreCase)) {
@@ -33,7 +37,6 @@ $backup = Join-Path $outputRoot 'original.bin'
 Copy-Item -LiteralPath $repairFile -Destination $backup
 if ((Get-FileHash -LiteralPath $backup).Hash -ne $ExpectedSha256) { throw 'Backup verification failed.' }
 $binaries = @{ baseline = [IO.Path]::GetFullPath($Baseline); candidate = [IO.Path]::GetFullPath($Candidate) }
-$inventories = @{ baseline = [IO.Path]::GetFullPath($BaselineInventory); candidate = [IO.Path]::GetFullPath($CandidateInventory) }
 $rows = [Collections.Generic.List[object]]::new()
 $pinnedRevision = $null
 $identity = [ordered]@{ source = $Source; repo_cache = [IO.Path]::GetFullPath($RepoCache); target = $targetRoot
@@ -103,8 +106,12 @@ try {
         }
     }
 } finally {
-    if ((Get-FileHash -LiteralPath $repairFile).Hash -ne $ExpectedSha256) {
-        Copy-Item -LiteralPath $backup -Destination $repairFile
+    $restored = $false
+    if (Test-Path -LiteralPath $repairFile -PathType Leaf) {
+        try { $restored = (Get-FileHash -LiteralPath $repairFile).Hash -eq $ExpectedSha256 } catch { $restored = $false }
+    }
+    if (!$restored) {
+        Copy-Item -LiteralPath $backup -Destination $repairFile -Force
         if ((Get-FileHash -LiteralPath $repairFile).Hash -ne $ExpectedSha256) { throw "Restore failed; backup at $backup" }
     }
 }
