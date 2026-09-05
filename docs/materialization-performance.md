@@ -96,3 +96,71 @@ Raw identity, binary hashes, logs and all 12 measurements are ignored under
 `C:/projects/fleet-worktrees/inventory-reuse/target/real-performance/comparison`.
 These measurements establish large-manifest incremental overhead; they do not
 establish large-transfer throughput.
+
+## Compact inventory comparison — 2026-09-05
+
+Baseline `b8b441d` uses Flux `eb63338`; candidate `63058bf` uses Flux `8d381e6`.
+Both clean release adapter binaries use Rust 1.96.0, x86_64-pc-windows-msvc and
+Fleet's unchanged release settings (optimization level z, fat LTO, one codegen
+unit). The explicitly cached release is
+`a6692a65fe2b7902c9774bbe11708d29a03ac107` from the registered PCA source. No
+metadata refresh selects another release. These adapter measurements include
+cached input loading and recipe registration but omit CLI startup/repo refresh;
+they are separate from the earlier CLI comparison.
+
+The baseline uses a consistent SQLite snapshot of the previously byte-validated
+inventory. The candidate starts empty and verifies all 85,732,470,520 target
+bytes: 51.770 seconds process time, comprising 3.529 seconds of input/catalog
+setup and 48.228 seconds of verification. This is separate setup, not a paired
+cold-scan result. Both independently seeded inventories then serve the same
+physical target. All no-op trials precede repairs; executable order alternates.
+No builds, tests or other heavy work overlaps timing.
+
+| Scenario | Baseline min / median / max seconds | Candidate min / median / max seconds | Median CPU seconds, baseline / candidate |
+| --- | --- | --- | --- |
+| No-op | 2.385 / 2.395 / 5.676 | 1.569 / 1.608 / 2.725 | 3.047 / 2.313 |
+| One-piece repair | 2.815 / 2.819 / 2.933 | 1.706 / 1.745 / 1.759 | 3.000 / 2.234 |
+
+All three trials per build are included. The first no-op pair is slower than the
+later pairs; OS caches are uncontrolled. Median operation-only times are 1.703 /
+0.980 seconds for no-op and 2.183 / 1.091 seconds for repair. Highest sampled RSS
+is essentially unchanged: 274,518,016 / 274,391,040 bytes. These runs do not show
+a meaningful whole-process memory reduction despite the smaller database.
+
+Every no-op keeps 3,320 files with no byte or deletion work. Every repair keeps
+3,319 files, reuses 129,117 bytes, fetches exactly 2,387 bytes, writes 131,504 bytes
+and deletes nothing. All six repairs restore
+`C:/pca/@ace/addons/ace_advanced_throwing.pbo` to its original length and SHA-256
+`fd13b93183112da1a11e7abfde76aabcc0eb4845a8852ad833d29456c44d3ffb`.
+
+| Inventory representation | Baseline bytes | Candidate bytes |
+| --- | ---: | ---: |
+| SQLite cell payload, all tables and indexes | 98,124,293 | 33,248,503 |
+| Allocated database | 118,661,120 | 43,630,592 |
+| Segment occurrence table and lookup index payload | 97,597,658 | 11,843,962 |
+| Candidate content table plus uniqueness index | — | 20,599,219 |
+
+The total payload reduction is 66.1%; allocated size falls 63.2%. The content
+table/index is included in that total. Candidate counts are 3,320 observed files,
+3,291 immutable recipes, 463,924 recipe-segment rows and 434,502 content identities.
+Baseline has 463,953 per-file segment rows. File paths and physical evidence are
+stored per file, profile binding per database, and recipe occurrences refer to
+integer IDs. Known recipes and arbitrary observed recipes share the same tables.
+Installed files keep their recipe references across goal registration; successful
+terminal commit prunes unreferenced facts.
+
+The complete candidate inventory was installed as the profile's active
+`observations.sqlite` under Fleet's `fmutex` session exclusion. A subsequent
+pinned sync kept all 3,320 files with zero writes, fetches or deletes. The
+registered profile/settings hashes remain unchanged. No schema migration or
+compatibility store was added; legacy `inventory.db` was not used.
+
+The real repair is still a small-file workload. Bulk local assembly evidence is
+in Flux's `docs/performance.md`: the matched 128 MiB/four-worker median changes
+from 19.522 to 0.446 seconds, with exact shared-fetch and byte assertions. Cold
+per-file observation commits and shared acquisition/publication durability remain
+costs; no WAN saturation or cold-disk throughput claim follows from these runs.
+
+Raw binaries, source/build identities, twelve trials, verified backup, full-scan
+setup report, counts and all-table `dbstat` payload reports are ignored under
+`C:/projects/fleet-worktrees/compact-performance/target/real-performance/compact`.
