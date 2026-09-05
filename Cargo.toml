@@ -29,8 +29,8 @@ fleet-arma3              = { path = "crates/arma3" }
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
 # Flux contract pinned to the exact published revision
-flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", rev = "0c0bd69f6d41b5328df92bc17c5f2a4bcadd3fc3" }
-flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", rev = "0c0bd69f6d41b5328df92bc17c5f2a4bcadd3fc3" }
+flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", rev = "342a8bfd9af625d1800816712a2fa390cbc2120c" }
+flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", rev = "342a8bfd9af625d1800816712a2fa390cbc2120c" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
@@ -39,7 +39,7 @@ reqwest      = { version = "0.13.4", default-features = false, features = ["bloc
 axum         = { version = "0.8.8", default-features = false, features = ["tokio", "http1"] }
 async-trait  = "0.1.89"
 futures-util = "0.3.31"
-object_store = { version = "0.13", features = ["http"] }
+object_store = { version = "0.14.1", features = ["http"] }
 reqwest-middleware = "0.5"
 reqwest-retry = "0.9"
 atomic-write-file = "0.3"

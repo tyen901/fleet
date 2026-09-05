@@ -27,7 +27,13 @@ pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<StoreSo
     let store_url = index.base_url.strip_suffix('/').unwrap_or(&index.base_url);
     let store = HttpBuilder::new()
         .with_url(store_url)
-        .with_client_options(ClientOptions::new().with_allow_http(true))
+        .with_client_options(
+            ClientOptions::new()
+                .with_allow_http(true)
+                .with_connect_timeout(std::time::Duration::from_secs(10))
+                .with_timeout_disabled()
+                .with_read_timeout(std::time::Duration::from_secs(60)),
+        )
         .build()
         .context("build Swifty HTTP object store")?;
     let mut hits_by_key = HashMap::new();
@@ -135,6 +141,90 @@ mod tests {
     use crate::input::{
         swifty_profile_fingerprint, SwiftyStoreIndex, SwiftyStoreObject, SwiftyStorePart,
     };
+
+    #[tokio::test]
+    async fn file_download_can_exceed_thirty_seconds() {
+        download_with_delayed_body(false).await;
+    }
+
+    #[tokio::test]
+    async fn stalled_file_download_resumes_after_read_timeout() {
+        download_with_delayed_body(true).await;
+    }
+
+    async fn download_with_delayed_body(stall: bool) {
+        use axum::http::HeaderMap;
+        use futures_util::{stream, StreamExt};
+        use std::time::Duration;
+
+        let requests = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let app = Router::new().route(
+            "/data",
+            get({
+                let requests = requests.clone();
+                move |headers: HeaderMap| {
+                    let requests = requests.clone();
+                    async move {
+                        let range = headers
+                            .get("range")
+                            .map(|value| value.to_str().unwrap().to_string());
+                        requests.lock().unwrap().push(range.clone());
+                        if range.is_some() {
+                            return Response::builder()
+                                .status(206)
+                                .header("etag", "\"same-object\"")
+                                .header("content-range", "bytes 1-1/2")
+                                .header("content-length", "1")
+                                .body(Body::from("b"))
+                                .unwrap();
+                        }
+                        let body = stream::once(async { Ok::<_, std::io::Error>("a") }).chain(
+                            stream::once(async move {
+                                if stall {
+                                    std::future::pending::<()>().await;
+                                } else {
+                                    tokio::time::sleep(Duration::from_secs(31)).await;
+                                }
+                                Ok::<_, std::io::Error>("b")
+                            }),
+                        );
+                        Response::builder()
+                            .header("etag", "\"same-object\"")
+                            .header("content-length", "2")
+                            .body(Body::from_stream(body))
+                            .unwrap()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let sources = build_store_sources(SwiftyStoreIndex {
+            base_url: format!("http://{address}/"),
+            objects: vec![object("data")],
+        })
+        .unwrap();
+        let downloaded = tokio::time::timeout(Duration::from_secs(80), async {
+            sources[0]
+                .object_store()
+                .get(&ObjectPath::from("data"))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap()
+        })
+        .await;
+        server.abort();
+        assert_eq!(downloaded.expect("download completed"), "ab");
+        let expected = if stall {
+            vec![None, Some("bytes=1-1".to_string())]
+        } else {
+            vec![None]
+        };
+        assert_eq!(*requests.lock().unwrap(), expected);
+    }
 
     #[test]
     fn empty_store_index_creates_no_sources() {
