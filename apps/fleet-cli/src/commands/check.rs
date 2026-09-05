@@ -42,6 +42,8 @@ pub(crate) fn print_check_report(repo: &RepoCheckReport, local: &LocalFileReport
     println!("  verification: {:?}", local.verification);
     println!("  health: {:?}", local.health);
     println!("  checked_at_unix_ms: {}", local.checked_at_unix_ms);
+    println!("  missing_paths: {}", local.missing_paths_count);
+    println!("  modified_paths: {}", local.modified_paths_count);
 
     println!(
         "update_available: {}",
@@ -49,13 +51,18 @@ pub(crate) fn print_check_report(repo: &RepoCheckReport, local: &LocalFileReport
     );
     if matches!(
         local.health,
-        LocalFileHealth::RequiresSync
+        LocalFileHealth::Missing
+            | LocalFileHealth::Dirty
             | LocalFileHealth::MissingDestination
             | LocalFileHealth::ExpectedStateUnavailable
+            | LocalFileHealth::InventoryUnavailable
     ) {
         println!("sync_required: true");
     }
-    if matches!(local.health, LocalFileHealth::RequiresSync) {
+    if matches!(
+        local.health,
+        LocalFileHealth::Missing | LocalFileHealth::Dirty
+    ) {
         println!("local_files_dirty: true");
     }
 }
