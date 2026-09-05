@@ -1,5 +1,7 @@
 //! Fleet's consumer-owned durable observations for one materialization target.
 
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,51 +12,52 @@ use flux::{
     TerminalStream,
 };
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{
+    params, CachedStatement, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
+use sha1::{Digest, Sha1};
+use tempfile::tempfile;
 use thiserror::Error as ThisError;
-use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 CREATE TABLE binding (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     target_root TEXT NOT NULL,
     profile BLOB NOT NULL CHECK (length(profile) = 32)
 );
+CREATE TABLE content (
+    id INTEGER PRIMARY KEY,
+    identity BLOB NOT NULL CHECK (length(identity) > 0),
+    length INTEGER NOT NULL CHECK (length > 0),
+    UNIQUE(identity, length)
+);
+CREATE TABLE recipes (
+    id INTEGER PRIMARY KEY,
+    fingerprint BLOB NOT NULL CHECK (length(fingerprint) > 0) UNIQUE,
+    length INTEGER NOT NULL CHECK (length >= 0)
+);
+CREATE TABLE recipe_segments (
+    recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+    offset INTEGER NOT NULL CHECK (offset >= 0),
+    content_id INTEGER NOT NULL REFERENCES content(id),
+    PRIMARY KEY (recipe_id, offset)
+) WITHOUT ROWID;
+CREATE INDEX recipe_segments_content_lookup
+    ON recipe_segments(content_id, recipe_id, offset);
 CREATE TABLE observed_files (
-    path TEXT PRIMARY KEY NOT NULL,
-    length INTEGER NOT NULL CHECK (length >= 0),
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
     version BLOB NOT NULL CHECK (length(version) = 64),
-    profile BLOB NOT NULL CHECK (length(profile) = 32)
-) WITHOUT ROWID;
-CREATE TABLE segments (
-    path TEXT NOT NULL REFERENCES observed_files(path) ON DELETE CASCADE,
-    segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
-    offset INTEGER NOT NULL CHECK (offset >= 0),
-    length INTEGER NOT NULL CHECK (length > 0),
-    profile BLOB NOT NULL CHECK (length(profile) = 32),
-    identity BLOB NOT NULL CHECK (length(identity) > 0),
-    PRIMARY KEY (path, segment_index)
-) WITHOUT ROWID;
-CREATE INDEX segments_content_lookup
-    ON segments(profile, identity, length, path, offset);
-CREATE TABLE pending_observations (
-    id TEXT PRIMARY KEY NOT NULL,
-    path TEXT NOT NULL
-) WITHOUT ROWID;
-CREATE TABLE provisional_segments (
-    id TEXT NOT NULL REFERENCES pending_observations(id) ON DELETE CASCADE,
-    segment_index INTEGER NOT NULL CHECK (segment_index >= 0),
-    offset INTEGER NOT NULL CHECK (offset >= 0),
-    length INTEGER NOT NULL CHECK (length > 0),
-    profile BLOB NOT NULL CHECK (length(profile) = 32),
-    identity BLOB NOT NULL CHECK (length(identity) > 0),
-    PRIMARY KEY (id, segment_index)
-) WITHOUT ROWID;
+    recipe_id INTEGER NOT NULL REFERENCES recipes(id)
+);
+CREATE INDEX observed_files_recipe_lookup ON observed_files(recipe_id);
 "#;
+
+const SPOOL_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, ThisError)]
 pub enum InventoryError {
@@ -116,12 +119,6 @@ impl FleetInventory {
             validate(&conn)?;
             validate_binding(&conn, target_root, profile)?;
         }
-        let tx = conn.unchecked_transaction().map_err(map_sqlite_error)?;
-        tx.execute("DELETE FROM provisional_segments", [])
-            .map_err(map_sqlite_error)?;
-        tx.execute("DELETE FROM pending_observations", [])
-            .map_err(map_sqlite_error)?;
-        tx.commit().map_err(map_sqlite_error)?;
         drop(conn);
         let manager =
             SqliteConnectionManager::file(db_path).with_init(|conn| configure_connection(conn));
@@ -141,24 +138,48 @@ impl FleetInventory {
             profile,
         })
     }
+
+    /// Registers immutable known recipes before a materialization run.
+    ///
+    /// This transaction only adds missing facts. It never prunes installed recipes,
+    /// so a recipe shared by an older goal remains reusable after a goal change.
+    pub fn register_manifest(&self, manifest: &Manifest) -> Result<()> {
+        if manifest.profile() != self.profile {
+            return Err(Error::new(
+                ErrorKind::State,
+                "manifest profile does not match inventory binding",
+            ));
+        }
+        let mut conn = self.session.connection()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        for file in manifest.files() {
+            ensure_recipe_from_segments(&tx, self.profile, file.length, &file.segments)?;
+        }
+        tx.commit().map_err(sql_error)
+    }
 }
 
 impl Inventory for FleetInventory {
     fn observed(&self, path: &TargetPath) -> Result<Option<ObservedFile>> {
         let conn = self.session.connection()?;
-        let row: Option<(Vec<u8>, i64, Vec<u8>)> = conn
-            .prepare_cached("SELECT version, length, profile FROM observed_files WHERE path = ?1")
+        let row: Option<(Vec<u8>, i64)> = conn
+            .prepare_cached(
+                "SELECT f.version, r.length
+                 FROM observed_files f
+                 JOIN recipes r ON r.id = f.recipe_id
+                 WHERE f.path = ?1",
+            )
             .map_err(sql_error)?
-            .query_row([path.as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_row([path.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
             .map_err(sql_error)?;
-        row.map(|(version, length, profile)| {
+        row.map(|(version, length)| {
             Ok(ObservedFile::new(
                 ObservationToken::from_bytes(version)?,
                 from_sql_u64(length)?,
-                profile_id(&profile)?,
+                self.profile,
             ))
         })
         .transpose()
@@ -172,19 +193,22 @@ impl Inventory for FleetInventory {
         let conn = self.session.connection()?;
         let mut statement = conn
             .prepare_cached(
-                "SELECT offset, length, profile, identity FROM segments
-                 WHERE path = ?1 ORDER BY segment_index",
+                "SELECT rs.offset, c.length, c.identity
+                 FROM observed_files f
+                 JOIN recipe_segments rs ON rs.recipe_id = f.recipe_id
+                 JOIN content c ON c.id = rs.content_id
+                 WHERE f.path = ?1
+                 ORDER BY rs.offset",
             )
             .map_err(sql_error)?;
         let mut rows = statement.query([path.as_str()]).map_err(sql_error)?;
         while let Some(row) = rows.next().map_err(sql_error)? {
             let offset = from_sql_u64(row.get::<_, i64>(0).map_err(sql_error)?)?;
             let length = from_sql_u64(row.get::<_, i64>(1).map_err(sql_error)?)?;
-            let profile = profile_id(&row.get::<_, Vec<u8>>(2).map_err(sql_error)?)?;
-            let identity: Vec<u8> = row.get(3).map_err(sql_error)?;
+            let identity: Vec<u8> = row.get(2).map_err(sql_error)?;
             emit(Segment {
                 offset,
-                key: ContentKey::new(profile, identity, length)?,
+                key: ContentKey::new(self.profile, identity, length)?,
             })?;
         }
         Ok(())
@@ -194,19 +218,24 @@ impl Inventory for FleetInventory {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        if key.profile() != self.profile {
+            return Ok(Vec::new());
+        }
         let conn = self.session.connection()?;
         let mut statement = conn
             .prepare_cached(
-                "SELECT s.path, s.offset, f.version, f.length, f.profile
-                 FROM segments s
-                 JOIN observed_files f ON f.path = s.path
-                 WHERE s.profile = ?1 AND s.identity = ?2 AND s.length = ?3
-                 ORDER BY s.path, s.offset LIMIT ?4",
+                "SELECT f.path, rs.offset, f.version, r.length
+                 FROM content c
+                 JOIN recipe_segments rs ON rs.content_id = c.id
+                 JOIN observed_files f ON f.recipe_id = rs.recipe_id
+                 JOIN recipes r ON r.id = f.recipe_id
+                 WHERE c.identity = ?1 AND c.length = ?2
+                 ORDER BY f.path, rs.offset
+                 LIMIT ?3",
             )
             .map_err(sql_error)?;
         let mut rows = statement
             .query(params![
-                key.profile().0.as_slice(),
                 key.identity(),
                 sql_u64(key.length())?,
                 sql_u64(limit as u64)?
@@ -218,11 +247,10 @@ impl Inventory for FleetInventory {
             let offset = from_sql_u64(row.get::<_, i64>(1).map_err(sql_error)?)?;
             let token = ObservationToken::from_bytes(row.get(2).map_err(sql_error)?)?;
             let length = from_sql_u64(row.get::<_, i64>(3).map_err(sql_error)?)?;
-            let profile = profile_id(&row.get::<_, Vec<u8>>(4).map_err(sql_error)?)?;
             occurrences.push(LocalOccurrence {
                 path,
                 offset,
-                observation: ObservedFile::new(token, length, profile),
+                observation: ObservedFile::new(token, length, self.profile),
             });
         }
         Ok(occurrences)
@@ -230,7 +258,9 @@ impl Inventory for FleetInventory {
 
     fn remove(&self, path: &TargetPath) -> Result<()> {
         let mut conn = self.session.connection()?;
-        let tx = conn.transaction().map_err(sql_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
         tx.execute(
             "DELETE FROM observed_files WHERE path = ?1",
             [path.as_str()],
@@ -240,23 +270,15 @@ impl Inventory for FleetInventory {
     }
 
     fn begin_observation(&self, path: &TargetPath) -> Result<Box<dyn ObservationWriter>> {
-        let mut conn = self.session.connection()?;
-        let id = Uuid::new_v4().to_string();
-        let tx = conn.transaction().map_err(sql_error)?;
-        tx.execute(
-            "INSERT INTO pending_observations(id, path) VALUES (?1, ?2)",
-            params![id, path.as_str()],
-        )
-        .map_err(sql_error)?;
-        tx.commit().map_err(sql_error)?;
+        let spool = BufWriter::with_capacity(SPOOL_BUFFER_BYTES, tempfile().map_err(io_error)?);
         Ok(Box::new(FleetObservation {
             session: self.session.clone(),
-            id,
             path: path.clone(),
+            profile: self.profile,
+            spool,
+            hasher: RecipeHasher::new(self.profile),
             next_offset: 0,
             next_index: 0,
-            profile: self.profile,
-            cleanup: true,
         }))
     }
 
@@ -271,20 +293,27 @@ impl Inventory for FleetInventory {
                 "terminal manifest profile mismatch",
             ));
         }
-        // The terminal producer reenters observation reads; keep its writer outside the pool.
+        // The producer reenters observation reads, so keep terminal writes on a
+        // dedicated connection rather than consuming a pooled reader lease.
         let mut conn = open_connection(&self.session.db_path).map_err(inventory_error)?;
-        let tx = conn.transaction().map_err(sql_error)?;
-        tx.execute(
-            "CREATE TEMP TABLE terminal_paths(path TEXT PRIMARY KEY NOT NULL)",
-            [],
-        )
-        .map_err(sql_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
         {
-            let mut insert = tx
-                .prepare_cached("INSERT INTO terminal_paths(path) VALUES (?1)")
+            tx.execute_batch(
+                "CREATE TEMP TABLE terminal_paths(
+                     path TEXT PRIMARY KEY NOT NULL,
+                     confirmed INTEGER NOT NULL CHECK (confirmed IN (0, 1))
+                 );",
+            )
+            .map_err(sql_error)?;
+            let mut insert_path = tx
+                .prepare_cached("INSERT INTO terminal_paths(path, confirmed) VALUES (?1, 0)")
                 .map_err(sql_error)?;
             for file in manifest.files() {
-                insert.execute([file.path.as_str()]).map_err(sql_error)?;
+                insert_path
+                    .execute([file.path.as_str()])
+                    .map_err(sql_error)?;
             }
         }
         let stream_result = {
@@ -293,6 +322,19 @@ impl Inventory for FleetInventory {
             stream(&mut apply)
         };
         stream_result?;
+        let unconfirmed: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM terminal_paths WHERE confirmed = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if unconfirmed != 0 {
+            return Err(Error::new(
+                ErrorKind::State,
+                "terminal stream omitted manifest files",
+            ));
+        }
         tx.execute(
             "DELETE FROM observed_files
              WHERE NOT EXISTS (
@@ -302,65 +344,64 @@ impl Inventory for FleetInventory {
             [],
         )
         .map_err(sql_error)?;
-        tx.execute("DROP TABLE terminal_paths", [])
-            .map_err(sql_error)?;
+        tx.execute(
+            "DELETE FROM recipes
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM observed_files f
+                 WHERE f.recipe_id = recipes.id
+             )",
+            [],
+        )
+        .map_err(sql_error)?;
+        tx.execute(
+            "DELETE FROM content
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM recipe_segments rs
+                 WHERE rs.content_id = content.id
+             )",
+            [],
+        )
+        .map_err(sql_error)?;
         tx.commit().map_err(sql_error)
     }
 }
 
 struct FleetObservation {
     session: Arc<InventorySession>,
-    id: String,
     path: TargetPath,
+    profile: ProfileId,
+    spool: BufWriter<File>,
+    hasher: RecipeHasher,
     next_offset: u64,
     next_index: u64,
-    profile: ProfileId,
-    cleanup: bool,
 }
 
 impl ObservationWriter for FleetObservation {
     fn append(&mut self, segments: &[Segment]) -> Result<()> {
-        if segments.is_empty() {
-            return Ok(());
-        }
-        let mut conn = self.session.connection()?;
-        let tx = conn.transaction().map_err(sql_error)?;
-        let mut next_offset = self.next_offset;
-        let mut next_index = self.next_index;
-        {
-            let mut insert = tx
-                .prepare_cached(
-                    "INSERT INTO provisional_segments
-                     (id, segment_index, offset, length, profile, identity)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )
-                .map_err(sql_error)?;
-            for segment in segments {
-                if segment.offset != next_offset || segment.key.profile() != self.profile {
-                    return Err(Error::new(
-                        ErrorKind::State,
-                        "invalid observation segment order",
-                    ));
-                }
-                next_offset = next_offset
-                    .checked_add(segment.key.length())
-                    .ok_or_else(|| Error::new(ErrorKind::State, "observation length overflow"))?;
-                insert
-                    .execute(params![
-                        self.id,
-                        sql_u64(next_index)?,
-                        sql_u64(segment.offset)?,
-                        sql_u64(segment.key.length())?,
-                        segment.key.profile().0.as_slice(),
-                        segment.key.identity()
-                    ])
-                    .map_err(sql_error)?;
-                next_index += 1;
+        for segment in segments {
+            if segment.offset != self.next_offset || segment.key.profile() != self.profile {
+                return Err(Error::new(
+                    ErrorKind::State,
+                    "invalid observation segment order",
+                ));
             }
+            let identity_length = u64::try_from(segment.key.identity().len())
+                .map_err(|_| Error::new(ErrorKind::State, "observation identity is too large"))?;
+            write_spool_u64(&mut self.spool, segment.key.length())?;
+            write_spool_u64(&mut self.spool, identity_length)?;
+            self.spool
+                .write_all(segment.key.identity())
+                .map_err(io_error)?;
+            self.hasher
+                .push(segment.key.length(), segment.key.identity());
+            self.next_offset = self
+                .next_offset
+                .checked_add(segment.key.length())
+                .ok_or_else(|| Error::new(ErrorKind::State, "observation length overflow"))?;
+            self.next_index = self.next_index.checked_add(1).ok_or_else(|| {
+                Error::new(ErrorKind::State, "observation segment count overflow")
+            })?;
         }
-        tx.commit().map_err(sql_error)?;
-        self.next_offset = next_offset;
-        self.next_index = next_index;
         Ok(())
     }
 
@@ -371,55 +412,72 @@ impl ObservationWriter for FleetObservation {
                 "observation evidence does not match scanned file",
             ));
         }
+        let fingerprint = self.hasher.finish(observed.length(), self.next_index);
+        self.spool.flush().map_err(io_error)?;
+        let spool = self
+            .spool
+            .into_inner()
+            .map_err(|error| io_error(error.into_error()))?;
+        let mut spool = BufReader::with_capacity(SPOOL_BUFFER_BYTES, spool);
         let mut conn = self.session.connection()?;
-        let tx = conn.transaction().map_err(sql_error)?;
-        tx.execute(
-            "DELETE FROM observed_files WHERE path = ?1",
-            [self.path.as_str()],
-        )
-        .map_err(sql_error)?;
-        tx.execute(
-            "INSERT INTO observed_files(path, length, version, profile)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                self.path.as_str(),
-                sql_u64(observed.length())?,
-                observed.version().as_bytes(),
-                observed.profile().0.as_slice()
-            ],
-        )
-        .map_err(sql_error)?;
-        tx.execute(
-            "INSERT INTO segments(path, segment_index, offset, length, profile, identity)
-             SELECT ?1, segment_index, offset, length, profile, identity
-             FROM provisional_segments WHERE id = ?2 ORDER BY segment_index",
-            params![self.path.as_str(), self.id],
-        )
-        .map_err(sql_error)?;
-        tx.execute("DELETE FROM provisional_segments WHERE id = ?1", [&self.id])
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql_error)?;
-        tx.execute("DELETE FROM pending_observations WHERE id = ?1", [&self.id])
-            .map_err(sql_error)?;
-        tx.commit().map_err(sql_error)?;
-        self.cleanup = false;
-        Ok(())
+        let recipe_id = ensure_recipe_from_spool(
+            &tx,
+            self.profile,
+            observed.length(),
+            self.next_index,
+            &mut spool,
+            &fingerprint,
+        )?;
+        tx.execute(
+            "INSERT INTO observed_files(path, version, recipe_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET
+                 version = excluded.version,
+                 recipe_id = excluded.recipe_id
+             WHERE observed_files.version IS NOT excluded.version
+                OR observed_files.recipe_id IS NOT excluded.recipe_id",
+            params![self.path.as_str(), observed.version().as_bytes(), recipe_id],
+        )
+        .map_err(sql_error)?;
+        tx.commit().map_err(sql_error)
     }
 }
 
-impl Drop for FleetObservation {
-    fn drop(&mut self) {
-        if !self.cleanup {
-            return;
+struct RecipeHasher {
+    hasher: Sha1,
+    segment_count: u64,
+}
+
+impl RecipeHasher {
+    fn new(profile: ProfileId) -> Self {
+        let mut hasher = Sha1::new();
+        hasher.update(b"fleet-inventory-recipe-v1");
+        hasher.update(profile.0);
+        Self {
+            hasher,
+            segment_count: 0,
         }
-        let Ok(conn) = self.session.connection() else {
-            return;
-        };
-        let Ok(tx) = conn.unchecked_transaction() else {
-            return;
-        };
-        let _ = tx.execute("DELETE FROM provisional_segments WHERE id = ?1", [&self.id]);
-        let _ = tx.execute("DELETE FROM pending_observations WHERE id = ?1", [&self.id]);
-        let _ = tx.commit();
+    }
+
+    fn push(&mut self, length: u64, identity: &[u8]) {
+        self.hasher.update(length.to_le_bytes());
+        self.hasher.update(
+            u64::try_from(identity.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        self.hasher.update(identity);
+        self.segment_count = self.segment_count.saturating_add(1);
+    }
+
+    fn finish(mut self, length: u64, segment_count: u64) -> Vec<u8> {
+        debug_assert_eq!(self.segment_count, segment_count);
+        self.hasher.update(length.to_le_bytes());
+        self.hasher.update(segment_count.to_le_bytes());
+        self.hasher.finalize().to_vec()
     }
 }
 
@@ -465,67 +523,62 @@ fn apply_confirmed(
             "terminal confirmation coverage mismatch",
         ));
     }
-    if confirmed_matches(
-        tx,
-        confirmed.path,
-        confirmed.segments,
-        &confirmed.observation,
-    )? {
+    let marked = tx
+        .execute(
+            "UPDATE terminal_paths
+             SET confirmed = 1
+             WHERE path = ?1 AND confirmed = 0",
+            [confirmed.path.as_str()],
+        )
+        .map_err(sql_error)?;
+    if marked != 1 {
+        return Err(Error::new(
+            ErrorKind::State,
+            "terminal stream repeated a manifest path",
+        ));
+    }
+    let recipe_id =
+        ensure_recipe_from_segments(tx, manifest.profile(), file.length, &file.segments)?;
+    if confirmed_matches(tx, confirmed.path, recipe_id, &confirmed.observation)? {
         return Ok(());
     }
 
     tx.execute(
-        "DELETE FROM observed_files WHERE path = ?1",
-        [confirmed.path.as_str()],
-    )
-    .map_err(sql_error)?;
-    tx.execute(
-        "INSERT INTO observed_files(path, length, version, profile)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO observed_files(path, version, recipe_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(path) DO UPDATE SET
+             version = excluded.version,
+             recipe_id = excluded.recipe_id
+         WHERE observed_files.version IS NOT excluded.version
+            OR observed_files.recipe_id IS NOT excluded.recipe_id",
         params![
             confirmed.path.as_str(),
-            sql_u64(confirmed.observation.length())?,
             confirmed.observation.version().as_bytes(),
-            confirmed.observation.profile().0.as_slice()
+            recipe_id
         ],
     )
     .map_err(sql_error)?;
-    let mut insert = tx
-        .prepare_cached(
-            "INSERT INTO segments(path, segment_index, offset, length, profile, identity)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .map_err(sql_error)?;
-    for (index, segment) in confirmed.segments.iter().enumerate() {
-        insert
-            .execute(params![
-                confirmed.path.as_str(),
-                sql_u64(index as u64)?,
-                sql_u64(segment.offset)?,
-                sql_u64(segment.key.length())?,
-                segment.key.profile().0.as_slice(),
-                segment.key.identity()
-            ])
-            .map_err(sql_error)?;
-    }
     Ok(())
 }
 
 fn confirmed_matches(
     tx: &Transaction<'_>,
     path: &TargetPath,
-    segments: &[Segment],
+    recipe_id: i64,
     observed: &ObservedFile,
 ) -> Result<bool> {
-    let Some((version, length, profile)) = tx
+    let Some((version, length, existing_recipe)) = tx
         .query_row(
-            "SELECT version, length, profile FROM observed_files WHERE path = ?1",
+            "SELECT f.version, r.length, f.recipe_id
+             FROM observed_files f
+             JOIN recipes r ON r.id = f.recipe_id
+             WHERE f.path = ?1",
             [path.as_str()],
             |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(2)?,
                 ))
             },
         )
@@ -534,36 +587,193 @@ fn confirmed_matches(
     else {
         return Ok(false);
     };
-    if version.as_slice() != observed.version().as_bytes()
-        || from_sql_u64(length)? != observed.length()
-        || profile.as_slice() != observed.profile().0
-    {
-        return Ok(false);
+    Ok(version.as_slice() == observed.version().as_bytes()
+        && from_sql_u64(length)? == observed.length()
+        && existing_recipe == recipe_id)
+}
+
+fn ensure_recipe_from_segments(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    length: u64,
+    segments: &[Segment],
+) -> Result<i64> {
+    let mut hasher = RecipeHasher::new(profile);
+    let mut coverage = 0u64;
+    for segment in segments {
+        if segment.key.profile() != profile {
+            return Err(Error::new(
+                ErrorKind::State,
+                "recipe segment profile does not match inventory binding",
+            ));
+        }
+        hasher.push(segment.key.length(), segment.key.identity());
+        coverage = coverage
+            .checked_add(segment.key.length())
+            .ok_or_else(|| Error::new(ErrorKind::State, "recipe length overflow"))?;
     }
-    let mut statement = tx
+    if coverage != length {
+        return Err(Error::new(
+            ErrorKind::State,
+            "recipe segments do not cover recipe length",
+        ));
+    }
+    let fingerprint = hasher.finish(length, segments.len() as u64);
+    if let Some(recipe_id) = recipe_id(tx, &fingerprint)? {
+        return Ok(recipe_id);
+    }
+    let mut recipe_insert = tx
+        .prepare_cached("INSERT INTO recipes(fingerprint, length) VALUES (?1, ?2)")
+        .map_err(sql_error)?;
+    recipe_insert
+        .execute(params![fingerprint, sql_u64(length)?])
+        .map_err(sql_error)?;
+    drop(recipe_insert);
+    let recipe_id = tx.last_insert_rowid();
+    let mut content_insert = tx
+        .prepare_cached("INSERT OR IGNORE INTO content(identity, length) VALUES (?1, ?2)")
+        .map_err(sql_error)?;
+    let mut content_select = tx
+        .prepare_cached("SELECT id FROM content WHERE identity = ?1 AND length = ?2")
+        .map_err(sql_error)?;
+    let mut segment_insert = tx
         .prepare_cached(
-            "SELECT offset, length, profile, identity FROM segments
-             WHERE path = ?1 ORDER BY segment_index",
+            "INSERT INTO recipe_segments(recipe_id, offset, content_id)
+             VALUES (?1, ?2, ?3)",
         )
         .map_err(sql_error)?;
-    let mut rows = statement.query([path.as_str()]).map_err(sql_error)?;
-    for expected in segments {
-        let Some(row) = rows.next().map_err(sql_error)? else {
-            return Ok(false);
-        };
-        let offset = from_sql_u64(row.get::<_, i64>(0).map_err(sql_error)?)?;
-        let length = from_sql_u64(row.get::<_, i64>(1).map_err(sql_error)?)?;
-        let profile = profile_id(&row.get::<_, Vec<u8>>(2).map_err(sql_error)?)?;
-        let identity: Vec<u8> = row.get(3).map_err(sql_error)?;
-        if offset != expected.offset
-            || length != expected.key.length()
-            || profile != expected.key.profile()
-            || identity.as_slice() != expected.key.identity()
-        {
-            return Ok(false);
-        }
+    let mut offset = 0u64;
+    for segment in segments {
+        insert_recipe_segment(
+            &mut segment_insert,
+            &mut content_insert,
+            &mut content_select,
+            recipe_id,
+            offset,
+            &segment.key,
+        )?;
+        offset = offset
+            .checked_add(segment.key.length())
+            .ok_or_else(|| Error::new(ErrorKind::State, "recipe length overflow"))?;
     }
-    Ok(rows.next().map_err(sql_error)?.is_none())
+    Ok(recipe_id)
+}
+
+fn ensure_recipe_from_spool(
+    tx: &Transaction<'_>,
+    profile: ProfileId,
+    length: u64,
+    segment_count: u64,
+    spool: &mut BufReader<File>,
+    fingerprint: &[u8],
+) -> Result<i64> {
+    if let Some(recipe_id) = recipe_id(tx, fingerprint)? {
+        return Ok(recipe_id);
+    }
+    let mut recipe_insert = tx
+        .prepare_cached("INSERT INTO recipes(fingerprint, length) VALUES (?1, ?2)")
+        .map_err(sql_error)?;
+    recipe_insert
+        .execute(params![fingerprint, sql_u64(length)?])
+        .map_err(sql_error)?;
+    drop(recipe_insert);
+    let recipe_id = tx.last_insert_rowid();
+    spool.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    let mut offset = 0u64;
+    let mut content_insert = tx
+        .prepare_cached("INSERT OR IGNORE INTO content(identity, length) VALUES (?1, ?2)")
+        .map_err(sql_error)?;
+    let mut content_select = tx
+        .prepare_cached("SELECT id FROM content WHERE identity = ?1 AND length = ?2")
+        .map_err(sql_error)?;
+    let mut segment_insert = tx
+        .prepare_cached(
+            "INSERT INTO recipe_segments(recipe_id, offset, content_id)
+             VALUES (?1, ?2, ?3)",
+        )
+        .map_err(sql_error)?;
+    for _ordinal in 0..segment_count {
+        let segment_length = read_spool_u64_required(spool)?;
+        let identity_length = read_spool_u64_required(spool)?;
+        let identity_size = usize::try_from(identity_length)
+            .map_err(|_| Error::new(ErrorKind::State, "observation identity is too large"))?;
+        let mut identity = vec![0u8; identity_size];
+        spool.read_exact(&mut identity).map_err(io_error)?;
+        let key = ContentKey::new(profile, identity, segment_length)?;
+        insert_recipe_segment(
+            &mut segment_insert,
+            &mut content_insert,
+            &mut content_select,
+            recipe_id,
+            offset,
+            &key,
+        )?;
+        offset = offset
+            .checked_add(segment_length)
+            .ok_or_else(|| Error::new(ErrorKind::State, "recipe length overflow"))?;
+    }
+    let mut trailing = [0u8; 1];
+    if spool.read(&mut trailing).map_err(io_error)? != 0 {
+        return Err(Error::new(
+            ErrorKind::State,
+            "observation spool contains extra segments",
+        ));
+    }
+    if offset != length {
+        return Err(Error::new(
+            ErrorKind::State,
+            "observation segments do not cover file length",
+        ));
+    }
+    Ok(recipe_id)
+}
+
+fn insert_recipe_segment(
+    segment_insert: &mut CachedStatement<'_>,
+    content_insert: &mut CachedStatement<'_>,
+    content_select: &mut CachedStatement<'_>,
+    recipe_id: i64,
+    offset: u64,
+    key: &ContentKey,
+) -> Result<()> {
+    content_insert
+        .execute(params![key.identity(), sql_u64(key.length())?])
+        .map_err(sql_error)?;
+    let content_id: i64 = content_select
+        .query_row(params![key.identity(), sql_u64(key.length())?], |row| {
+            row.get(0)
+        })
+        .map_err(sql_error)?;
+    segment_insert
+        .execute(params![recipe_id, sql_u64(offset)?, content_id])
+        .map_err(sql_error)?;
+    Ok(())
+}
+
+fn recipe_id(tx: &Transaction<'_>, fingerprint: &[u8]) -> Result<Option<i64>> {
+    let mut statement = tx
+        .prepare_cached("SELECT id FROM recipes WHERE fingerprint = ?1")
+        .map_err(sql_error)?;
+    statement
+        .query_row([fingerprint], |row| row.get(0))
+        .optional()
+        .map_err(sql_error)
+}
+
+fn write_spool_u64(spool: &mut impl Write, value: u64) -> Result<()> {
+    spool.write_all(&value.to_le_bytes()).map_err(io_error)
+}
+
+fn read_spool_u64_required(spool: &mut BufReader<File>) -> Result<u64> {
+    let mut bytes = [0u8; 8];
+    match spool.read_exact(&mut bytes) {
+        Ok(()) => Ok(u64::from_le_bytes(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Err(Error::new(
+            ErrorKind::State,
+            "observation spool ended before all segments were read",
+        )),
+        Err(error) => Err(io_error(error)),
+    }
 }
 
 fn binding_root(path: &Path) -> String {
@@ -631,13 +841,6 @@ fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")
 }
 
-fn profile_id(bytes: &[u8]) -> Result<ProfileId> {
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| Error::new(ErrorKind::State, "invalid inventory profile"))?;
-    Ok(ProfileId(bytes))
-}
-
 fn sql_u64(value: u64) -> Result<i64> {
     i64::try_from(value)
         .map_err(|_| Error::new(ErrorKind::State, "inventory integer exceeds SQLite range"))
@@ -650,6 +853,10 @@ fn from_sql_u64(value: i64) -> Result<u64> {
 
 fn inventory_error(error: InventoryError) -> Error {
     Error::with_source(ErrorKind::State, error)
+}
+
+fn io_error(error: io::Error) -> Error {
+    inventory_error(InventoryError::Other(error))
 }
 
 fn sql_error(error: rusqlite::Error) -> Error {

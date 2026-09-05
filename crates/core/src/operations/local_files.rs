@@ -115,16 +115,21 @@ async fn check_or_validate(
         ReadKind::Check => fleet_flux::check_target(&dest, inventory, input, cancel.clone())
             .await
             .map_err(|error| operation_error("local_check", &cancel, error))?,
-        ReadKind::Validate => fleet_flux::verify_manifest(
-            &dest,
-            inventory,
-            input,
-            cancel.clone(),
-            progress,
-            hash_progress,
-        )
-        .await
-        .map_err(|error| operation_error("inventory_validation", &cancel, error))?,
+        ReadKind::Validate => {
+            inventory
+                .register_manifest(input.manifest())
+                .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
+            fleet_flux::verify_manifest(
+                &dest,
+                inventory,
+                input,
+                cancel.clone(),
+                progress,
+                hash_progress,
+            )
+            .await
+            .map_err(|error| operation_error("inventory_validation", &cancel, error))?
+        }
     };
     Ok(report(
         profile,

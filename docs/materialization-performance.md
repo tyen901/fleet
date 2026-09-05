@@ -5,8 +5,10 @@ short observation transactions. Repeated segment and occurrence statements use
 rusqlite's statement cache. A separate terminal writer owns the atomic final
 transaction: its producer can read observations through the pool without holding
 a pool lease across that callback. Observation writers retain the session lock
-until they finish or discard their provisional facts. No full inventory or
-segment cache is added to application memory.
+until they finish or discard their temporary spool. The SQLite inventory binds a
+target/profile once, interns content and immutable recipes by integer ID, and
+references one recipe from each observed file. No full inventory or segment
+cache is added to application memory.
 
 ## Real profile comparison
 
