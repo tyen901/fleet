@@ -9,6 +9,7 @@ use flux::{
     ObservationToken, ObservationWriter, ObservedFile, ProfileId, Result, Segment, TargetPath,
     TerminalStream,
 };
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use thiserror::Error as ThisError;
 use uuid::Uuid;
@@ -70,9 +71,22 @@ pub enum InventoryError {
 }
 
 pub struct FleetInventory {
-    db_path: Arc<PathBuf>,
+    session: Arc<InventorySession>,
     profile: ProfileId,
+}
+
+struct InventorySession {
+    db_path: PathBuf,
+    pool: r2d2::Pool<SqliteConnectionManager>,
     _lock: fmutex::Guard<'static>,
+}
+
+impl InventorySession {
+    fn connection(&self) -> Result<r2d2::PooledConnection<SqliteConnectionManager>> {
+        self.pool
+            .get()
+            .map_err(|error| Error::with_source(ErrorKind::State, error))
+    }
 }
 
 impl FleetInventory {
@@ -109,27 +123,35 @@ impl FleetInventory {
             .map_err(map_sqlite_error)?;
         tx.commit().map_err(map_sqlite_error)?;
         drop(conn);
+        let manager =
+            SqliteConnectionManager::file(db_path).with_init(|conn| configure_connection(conn));
+        let pool = r2d2::Pool::builder()
+            .max_size(4)
+            .min_idle(Some(1))
+            .test_on_check_out(false)
+            .connection_timeout(Duration::from_secs(5))
+            .build(manager)
+            .map_err(|error| InventoryError::Message(error.to_string()))?;
         Ok(Self {
-            db_path: Arc::new(db_path.to_path_buf()),
+            session: Arc::new(InventorySession {
+                db_path: db_path.to_path_buf(),
+                pool,
+                _lock: lock,
+            }),
             profile,
-            _lock: lock,
         })
-    }
-
-    fn connection(&self) -> Result<Connection> {
-        open_connection(&self.db_path).map_err(inventory_error)
     }
 }
 
 impl Inventory for FleetInventory {
     fn observed(&self, path: &TargetPath) -> Result<Option<ObservedFile>> {
-        let conn = self.connection()?;
+        let conn = self.session.connection()?;
         let row: Option<(Vec<u8>, i64, Vec<u8>)> = conn
-            .query_row(
-                "SELECT version, length, profile FROM observed_files WHERE path = ?1",
-                [path.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .prepare_cached("SELECT version, length, profile FROM observed_files WHERE path = ?1")
+            .map_err(sql_error)?
+            .query_row([path.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .optional()
             .map_err(sql_error)?;
         row.map(|(version, length, profile)| {
@@ -147,9 +169,9 @@ impl Inventory for FleetInventory {
         path: &TargetPath,
         emit: &mut dyn FnMut(Segment) -> Result<()>,
     ) -> Result<()> {
-        let conn = self.connection()?;
+        let conn = self.session.connection()?;
         let mut statement = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT offset, length, profile, identity FROM segments
                  WHERE path = ?1 ORDER BY segment_index",
             )
@@ -172,9 +194,9 @@ impl Inventory for FleetInventory {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.connection()?;
+        let conn = self.session.connection()?;
         let mut statement = conn
-            .prepare(
+            .prepare_cached(
                 "SELECT s.path, s.offset, f.version, f.length, f.profile
                  FROM segments s
                  JOIN observed_files f ON f.path = s.path
@@ -207,7 +229,7 @@ impl Inventory for FleetInventory {
     }
 
     fn remove(&self, path: &TargetPath) -> Result<()> {
-        let mut conn = self.connection()?;
+        let mut conn = self.session.connection()?;
         let tx = conn.transaction().map_err(sql_error)?;
         tx.execute(
             "DELETE FROM observed_files WHERE path = ?1",
@@ -218,7 +240,7 @@ impl Inventory for FleetInventory {
     }
 
     fn begin_observation(&self, path: &TargetPath) -> Result<Box<dyn ObservationWriter>> {
-        let mut conn = self.connection()?;
+        let mut conn = self.session.connection()?;
         let id = Uuid::new_v4().to_string();
         let tx = conn.transaction().map_err(sql_error)?;
         tx.execute(
@@ -228,7 +250,7 @@ impl Inventory for FleetInventory {
         .map_err(sql_error)?;
         tx.commit().map_err(sql_error)?;
         Ok(Box::new(FleetObservation {
-            db_path: self.db_path.clone(),
+            session: self.session.clone(),
             id,
             path: path.clone(),
             next_offset: 0,
@@ -249,7 +271,8 @@ impl Inventory for FleetInventory {
                 "terminal manifest profile mismatch",
             ));
         }
-        let mut conn = self.connection()?;
+        // The terminal producer reenters observation reads; keep its writer outside the pool.
+        let mut conn = open_connection(&self.session.db_path).map_err(inventory_error)?;
         let tx = conn.transaction().map_err(sql_error)?;
         tx.execute(
             "CREATE TEMP TABLE terminal_paths(path TEXT PRIMARY KEY NOT NULL)",
@@ -258,7 +281,7 @@ impl Inventory for FleetInventory {
         .map_err(sql_error)?;
         {
             let mut insert = tx
-                .prepare("INSERT INTO terminal_paths(path) VALUES (?1)")
+                .prepare_cached("INSERT INTO terminal_paths(path) VALUES (?1)")
                 .map_err(sql_error)?;
             for file in manifest.files() {
                 insert.execute([file.path.as_str()]).map_err(sql_error)?;
@@ -286,7 +309,7 @@ impl Inventory for FleetInventory {
 }
 
 struct FleetObservation {
-    db_path: Arc<PathBuf>,
+    session: Arc<InventorySession>,
     id: String,
     path: TargetPath,
     next_offset: u64,
@@ -300,13 +323,13 @@ impl ObservationWriter for FleetObservation {
         if segments.is_empty() {
             return Ok(());
         }
-        let mut conn = open_connection(&self.db_path).map_err(inventory_error)?;
+        let mut conn = self.session.connection()?;
         let tx = conn.transaction().map_err(sql_error)?;
         let mut next_offset = self.next_offset;
         let mut next_index = self.next_index;
         {
             let mut insert = tx
-                .prepare(
+                .prepare_cached(
                     "INSERT INTO provisional_segments
                      (id, segment_index, offset, length, profile, identity)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -348,7 +371,7 @@ impl ObservationWriter for FleetObservation {
                 "observation evidence does not match scanned file",
             ));
         }
-        let mut conn = open_connection(&self.db_path).map_err(inventory_error)?;
+        let mut conn = self.session.connection()?;
         let tx = conn.transaction().map_err(sql_error)?;
         tx.execute(
             "DELETE FROM observed_files WHERE path = ?1",
@@ -388,7 +411,7 @@ impl Drop for FleetObservation {
         if !self.cleanup {
             return;
         }
-        let Ok(conn) = open_connection(&self.db_path) else {
+        let Ok(conn) = self.session.connection() else {
             return;
         };
         let Ok(tx) = conn.unchecked_transaction() else {
@@ -468,7 +491,7 @@ fn apply_confirmed(
     )
     .map_err(sql_error)?;
     let mut insert = tx
-        .prepare(
+        .prepare_cached(
             "INSERT INTO segments(path, segment_index, offset, length, profile, identity)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
@@ -518,7 +541,7 @@ fn confirmed_matches(
         return Ok(false);
     }
     let mut statement = tx
-        .prepare(
+        .prepare_cached(
             "SELECT offset, length, profile, identity FROM segments
              WHERE path = ?1 ORDER BY segment_index",
         )
@@ -599,11 +622,13 @@ fn initialize(conn: &Connection) -> rusqlite::Result<()> {
 
 fn open_connection(path: &Path) -> std::result::Result<Connection, InventoryError> {
     let conn = Connection::open(path).map_err(map_sqlite_error)?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(map_sqlite_error)?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(map_sqlite_error)?;
+    configure_connection(&conn).map_err(map_sqlite_error)?;
     Ok(conn)
+}
+
+fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
 }
 
 fn profile_id(bytes: &[u8]) -> Result<ProfileId> {
