@@ -5,8 +5,8 @@ use tracing::{error, info};
 use crate::app::router::Route;
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
-    format_speed, profile_not_found_page, repo_update_available, stage_phase_label,
-    start_profile_operation, ProfileFormField,
+    format_speed, profile_not_found_page, stage_phase_label, start_profile_operation,
+    ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
@@ -25,35 +25,6 @@ fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
         kind,
         fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
     )
-}
-
-fn local_file_description(report: &fleet_core::LocalFileReport) -> String {
-    use fleet_core::{LocalFileHealth, VerificationKind};
-
-    match (&report.verification, &report.health) {
-        (VerificationKind::Fast, LocalFileHealth::Clean) => {
-            "No local metadata changes detected".to_string()
-        }
-        (VerificationKind::Fast, LocalFileHealth::RequiresSync) => {
-            "Local file names or lengths differ from the expected state".to_string()
-        }
-        (VerificationKind::ByteExact, LocalFileHealth::Clean) => {
-            "Byte validation passed".to_string()
-        }
-        (VerificationKind::ByteExact, LocalFileHealth::RequiresSync) => {
-            "Byte validation found files that need repair".to_string()
-        }
-        (VerificationKind::Materialized, LocalFileHealth::Clean) => {
-            "Installed version materialized".to_string()
-        }
-        (_, LocalFileHealth::MissingDestination) => "Local folder is missing".to_string(),
-        (_, LocalFileHealth::ExpectedStateUnavailable) => {
-            "Expected repository state is unavailable; sync will fetch it".to_string()
-        }
-        (_, LocalFileHealth::InvalidProfile) => "Profile paths are invalid".to_string(),
-        (_, LocalFileHealth::Unknown) => "Local state has not been checked".to_string(),
-        _ => "Local files need sync".to_string(),
-    }
 }
 
 #[component]
@@ -127,29 +98,6 @@ pub fn ProfileView(id: String) -> Element {
         .as_ref()
         .map(|status| status.actions.sync_enabled)
         .unwrap_or(false);
-    let update_available = repo_update_available(status.as_ref(), any_active);
-    let sync_action_title = if update_available {
-        "Update profile"
-    } else {
-        "Sync profile"
-    };
-    let sync_action_label = if update_available { "Update" } else { "Sync" };
-    let check_description = runtime
-        .and_then(|runtime| runtime.check.as_ref())
-        .map(local_file_description)
-        .unwrap_or_else(|| {
-            "Compare local file names and lengths with the expected state".to_string()
-        });
-    let validation_description = runtime
-        .and_then(|runtime| runtime.validation.as_ref())
-        .map(local_file_description)
-        .unwrap_or_else(|| "Read every managed file and verify its bytes".to_string());
-    let sync_description = runtime
-        .and_then(|runtime| runtime.materialization.as_ref())
-        .map(local_file_description)
-        .unwrap_or_else(|| {
-            "Install, update, repair, or remove files to match the expected state".to_string()
-        });
     let operation_notice = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
         .filter(|outcome| outcome.status != fleet_core::OperationTerminalStatus::Succeeded)
@@ -433,11 +381,6 @@ pub fn ProfileView(id: String) -> Element {
 
     // Draft signals hold nothing until edit mode seeds them.
     let use_default_args_saved = profile.launch_params.trim().is_empty();
-    let saved_launch_value = if use_default_args_saved {
-        default_args.clone()
-    } else {
-        profile.launch_params.clone()
-    };
     rsx! {
         div { class: "page-frame",
             div { class: "page-frame__body",
@@ -498,11 +441,7 @@ pub fn ProfileView(id: String) -> Element {
                                         class: "check",
                                         checked: use_default_args(),
                                         onchange: move |evt| {
-                                            let next = evt.checked();
-                                            use_default_args.set(next);
-                                            if !next {
-                                                launch_params.set(default_args.clone());
-                                            }
+                                            use_default_args.set(evt.checked());
                                         },
                                     }
                                 } else {
@@ -516,12 +455,13 @@ pub fn ProfileView(id: String) -> Element {
                                 }
                             }
                         }
-                        ProfileFormField {
-                            title: "Launch arguments".to_string(),
-                            value: if editing() { launch_value.clone() } else { saved_launch_value.clone() },
-                            readonly: !editing(),
-                            disabled: editing() && use_default_args(),
-                            on_change: move |v| launch_params.set(v),
+                        if (editing() && !use_default_args()) || (!editing() && !use_default_args_saved) {
+                            ProfileFormField {
+                                title: "Launch arguments".to_string(),
+                                value: if editing() { launch_params() } else { profile.launch_params.clone() },
+                                readonly: !editing(),
+                                on_change: move |v| launch_params.set(v),
+                            }
                         }
                         if display_repo_servers.len() > 1 {
                             div { class: "form-field",
@@ -538,63 +478,63 @@ pub fn ProfileView(id: String) -> Element {
                         }
                     }
 
-                    div { class: "section-divider" }
+                    if editing() || !profile.additional_mod_folders.is_empty() {
+                        div { class: "section-divider" }
 
-                    Section {
-                        SectionHeader {
-                            title: "Additional mods".to_string(),
-                            action: editing().then(|| rsx! {
-                                IconButton {
-                                    icon: BsPlusLg,
-                                    label: "Add mod".to_string(),
-                                    onclick: on_add_mod,
-                                }
-                            }),
-                        }
-                        if editing() {
-                            div { class: "mod-list",
-                                for (idx , mod_dir) in additional_mod_folders().iter().cloned().enumerate() {
-                                    div { class: "mod-list__row", key: "{idx}",
-                                        BrowseField {
-                                            value: mod_dir,
-                                            placeholder: Some("Path to mod directory".to_string()),
-                                            folder_select: true,
-                                            pick_button_text: Some("Browse".to_string()),
-                                            on_change: move |next| {
-                                                additional_mod_folders
-                                                    .with_mut(|folders| {
-                                                        if idx < folders.len() {
-                                                            folders[idx] = next;
-                                                        }
-                                                    });
-                                            },
-                                        }
-                                        Button {
-                                            variant: ButtonVariant::Danger,
-                                            onclick: move |_| {
-                                                additional_mod_folders
-                                                    .with_mut(|folders| {
-                                                        if idx < folders.len() {
-                                                            folders.remove(idx);
-                                                        }
-                                                    });
-                                            },
-                                            "Remove"
+                        Section {
+                            SectionHeader {
+                                title: "Additional mods".to_string(),
+                                action: editing().then(|| rsx! {
+                                    IconButton {
+                                        icon: BsPlusLg,
+                                        label: "Add mod".to_string(),
+                                        onclick: on_add_mod,
+                                    }
+                                }),
+                            }
+                            if editing() {
+                                div { class: "mod-list",
+                                    for (idx , mod_dir) in additional_mod_folders().iter().cloned().enumerate() {
+                                        div { class: "mod-list__row", key: "{idx}",
+                                            BrowseField {
+                                                value: mod_dir,
+                                                placeholder: Some("Path to mod directory".to_string()),
+                                                folder_select: true,
+                                                pick_button_text: Some("Browse".to_string()),
+                                                on_change: move |next| {
+                                                    additional_mod_folders
+                                                        .with_mut(|folders| {
+                                                            if idx < folders.len() {
+                                                                folders[idx] = next;
+                                                            }
+                                                        });
+                                                },
+                                            }
+                                            Button {
+                                                variant: ButtonVariant::Danger,
+                                                onclick: move |_| {
+                                                    additional_mod_folders
+                                                        .with_mut(|folders| {
+                                                            if idx < folders.len() {
+                                                                folders.remove(idx);
+                                                            }
+                                                        });
+                                                },
+                                                "Remove"
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        } else if profile.additional_mod_folders.is_empty() {
-                            p { class: "section-note", "None" }
-                        } else {
-                            div {
-                                class: "mod-list mod-list--plain",
-                                role: "list",
-                                for mod_dir in profile.additional_mod_folders.iter() {
-                                    div {
-                                        class: "mod-list__item mono",
-                                        role: "listitem",
-                                        "{mod_dir}"
+                            } else {
+                                div {
+                                    class: "mod-list mod-list--plain",
+                                    role: "list",
+                                    for mod_dir in profile.additional_mod_folders.iter() {
+                                        div {
+                                            class: "mod-list__item mono",
+                                            role: "listitem",
+                                            "{mod_dir}"
+                                        }
                                     }
                                 }
                             }
@@ -612,13 +552,10 @@ pub fn ProfileView(id: String) -> Element {
                         Section {
                             SectionHeader {
                                 title: "Sync".to_string(),
-                                subtitle: Some(format!(
-                                    "Check: {check_description}. Validate: {validation_description}. Sync: {sync_description}."
-                                )),
                             }
                             FieldRow {
                                 FieldRowMeta {
-                                    title: "Check profile".to_string(),
+                                    title: "Check for updates".to_string(),
                                 }
                                 FieldRowActions {
                                     Button {
@@ -626,18 +563,7 @@ pub fn ProfileView(id: String) -> Element {
                                         disabled: !check_enabled || any_active,
                                         loading: check_running,
                                         onclick: on_check_for_updates,
-                                    "Check now"
-                                    }
-                                }
-                            }
-                            FieldRow {
-                                FieldRowMeta { title: sync_action_title.to_string() }
-                                FieldRowActions {
-                                    Button {
-                                        variant: ButtonVariant::Primary,
-                                        disabled: !sync_enabled || any_active,
-                                        onclick: on_sync_action,
-                                        "{sync_action_label}"
+                                    "Check for updates"
                                     }
                                 }
                             }
@@ -652,6 +578,19 @@ pub fn ProfileView(id: String) -> Element {
                                         loading: validate_running,
                                         onclick: on_validate,
                                         "Validate"
+                                    }
+                                }
+                            }
+                            FieldRow {
+                                FieldRowMeta {
+                                    title: "Force Sync".to_string(),
+                                }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Primary,
+                                        disabled: !sync_enabled || any_active,
+                                        onclick: on_sync_action,
+                                        "Force Sync"
                                     }
                                 }
                             }
