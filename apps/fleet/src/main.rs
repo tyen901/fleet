@@ -39,7 +39,13 @@ fn main() -> anyhow::Result<()> {
         })?;
 
         let args: Vec<String> = std::env::args().collect();
-        info!(?args, "fleet launched");
+        info!(
+            ?args,
+            version = services::updates::build_version_string(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            "fleet launched"
+        );
         let window_icon = load_window_icon()?;
 
         dioxus::LaunchBuilder::desktop()
