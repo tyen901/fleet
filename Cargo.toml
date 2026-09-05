@@ -28,8 +28,7 @@ fleet-arma3              = { path = "crates/arma3" }
 # Pinned external dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-# Flux2 is integrated from the local sibling workspace for this migration.
-flux                    = { path = "C:/projects/flux2/crates/flux" }
+flux                    = { git = "https://github.com/tyen901/flux7.git", rev = "97f35bfcf7991b706561a53a81ca29f0fd9db117" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
