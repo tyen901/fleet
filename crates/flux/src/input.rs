@@ -1,27 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use fleet_download::DownloadService;
-use flux::{
-    ManifestHeader, ManifestRecord, OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey,
-    TargetPath, ValidatedManifest, ValidationSpec,
-};
+use flux::{ContentKey, FileSpec, Manifest, ProfileId, Segment, TargetPath};
 use object_store::path::Path as ObjectPath;
 use tracing::{debug, debug_span, error};
-use uuid::Uuid;
 
 const SWIFTY_PROFILE_BYTES: [u8; 32] = *b"fleet-swifty-md5-profile-v1.0000";
 
-pub fn swifty_profile_fingerprint() -> ProfileFingerprint {
-    ProfileFingerprint::new(SWIFTY_PROFILE_BYTES)
+pub fn swifty_profile_id() -> ProfileId {
+    ProfileId(SWIFTY_PROFILE_BYTES)
 }
 
-#[derive(Clone)]
 pub struct MaterializationInput {
-    pub(crate) manifest: ValidatedManifest,
+    pub(crate) manifest: Manifest,
     pub(crate) store_index: SwiftyStoreIndex,
     pub(crate) revision: Option<String>,
 }
@@ -32,23 +26,19 @@ impl MaterializationInput {
     }
 }
 
-#[derive(Clone)]
-pub struct SwiftyStoreIndex {
-    pub base_url: String,
-    pub objects: Vec<SwiftyStoreObject>,
+pub(crate) struct SwiftyStoreIndex {
+    pub(crate) base_url: String,
+    pub(crate) objects: Vec<SwiftyStoreObject>,
 }
 
-#[derive(Clone)]
-pub struct SwiftyStoreObject {
-    pub object_path: ObjectPath,
-    pub parts: Vec<SwiftyStorePart>,
+pub(crate) struct SwiftyStoreObject {
+    pub(crate) object_path: ObjectPath,
+    pub(crate) parts: Vec<SwiftyStorePart>,
 }
 
-#[derive(Clone)]
-pub struct SwiftyStorePart {
-    pub key: SegmentKey,
-    pub validation: ValidationSpec,
-    pub object_range: Range<u64>,
+pub(crate) struct SwiftyStorePart {
+    pub(crate) key: ContentKey,
+    pub(crate) offset: u64,
 }
 
 pub async fn load_swifty_materialization_input(
@@ -58,8 +48,7 @@ pub async fn load_swifty_materialization_input(
 ) -> Result<MaterializationInput> {
     let span =
         debug_span!("sync.load_materialization_input_from_swifty_repo", repo_url = %repo_url);
-    let _g = span.enter();
-
+    let _guard = span.enter();
     let store = swifty_repo::FsRepoCacheStore::new(repo_cache_dir.to_path_buf());
     let started_at = Instant::now();
     let swifty_repo::RepoSyncResult {
@@ -77,7 +66,6 @@ pub async fn load_swifty_materialization_input(
         optional = repo.optional_mods.len(),
         "synced swifty repo metadata"
     );
-
     let mut input = swifty_repo_to_materialization_input(repo_url, &repo, &mods)
         .context("transform swifty repo -> flux materialization input")?;
     input.revision = revision;
@@ -93,7 +81,6 @@ pub fn load_cached_swifty_materialization_input(
     else {
         return Ok(None);
     };
-
     let revision = swifty_repo::repo_blob_revision(&cache);
     let mods = cache
         .mods
@@ -110,27 +97,24 @@ pub fn swifty_repo_to_materialization_input(
     repo: &swifty_artifacts::RepoSpec,
     mods: &BTreeMap<String, swifty_artifacts::SrfMod>,
 ) -> Result<MaterializationInput> {
-    let base_url = url::Url::parse(repo_url)
-        .context("parse repo url")?
+    let base_url = url::Url::parse(repo_url)?
         .join("./")
         .context("resolve repo base url")?;
-    let profile = swifty_profile_fingerprint();
-    let mut records = vec![ManifestRecord::Header(ManifestHeader {
-        manifest_id: Uuid::new_v4(),
-        profile,
-    })];
+    let profile = swifty_profile_id();
+    let mut files = Vec::new();
     let mut store_index = SwiftyStoreIndex {
         base_url: base_url.to_string(),
         objects: Vec::new(),
     };
     let mut files_seen = BTreeSet::<String>::new();
-
     let ordered_mod_names = repo
         .required_mods
         .iter()
         .chain(repo.optional_mods.iter())
-        .map(|m| m.mod_name.to_ascii_lowercase())
+        .filter(|mod_m| mod_m.enabled)
+        .map(|mod_m| mod_m.mod_name.to_ascii_lowercase())
         .collect::<Vec<_>>();
+
     for name in ordered_mod_names {
         let Some(mod_m) = mods.get(&name) else {
             error!(mod_name = name.as_str(), "missing mod manifest in cache");
@@ -143,41 +127,32 @@ pub fn swifty_repo_to_materialization_input(
             if !files_seen.insert(rel.clone()) {
                 anyhow::bail!("duplicate target path in Swifty metadata: {rel}");
             }
-            let target_path = TargetPath::new(&rel)?;
-            records.push(ManifestRecord::File {
-                path: target_path.clone(),
-                len: file.length,
-            });
-
+            let target_path = TargetPath::new(rel.clone())?;
+            let mut segments = Vec::new();
             let mut parts = Vec::new();
             for part in file.parts.iter().filter(|part| part.length > 0) {
                 let key = swifty_segment_key(part.checksum.as_bytes(), part.length)?;
-                let validation = ValidationSpec {
-                    profile,
+                segments.push(Segment {
+                    offset: part.start,
                     key: key.clone(),
-                    len: part.length,
-                };
-                let target_range = part.start..part.start + part.length;
-                records.push(ManifestRecord::Segment {
-                    path: target_path.clone(),
-                    range: target_range.clone(),
-                    key: key.clone(),
-                    validation: validation.clone(),
                 });
                 parts.push(SwiftyStorePart {
                     key,
-                    validation,
-                    object_range: part.start..part.start + part.length,
+                    offset: part.start,
                 });
             }
+            files.push(FileSpec {
+                path: target_path,
+                length: file.length,
+                segments,
+            });
             store_index.objects.push(SwiftyStoreObject {
                 object_path: ObjectPath::parse(&rel)?,
                 parts,
             });
         }
     }
-
-    let manifest = flux::validate_manifest(records, profile)?;
+    let manifest = Manifest::new(profile, files, Vec::new())?;
     Ok(MaterializationInput {
         manifest,
         store_index,
@@ -207,7 +182,7 @@ fn validate_swifty_file(
                 derived.to_hex_upper()
             );
         }
-    } else if file.parts.iter().any(|p| p.length > 0) {
+    } else if file.parts.iter().any(|part| part.length > 0) {
         anyhow::bail!(
             "invalid swifty parts for empty file: mod={} path={}",
             mod_m.name,
@@ -217,11 +192,11 @@ fn validate_swifty_file(
     Ok(())
 }
 
-fn swifty_segment_key(raw_md5: &[u8; 16], len: u64) -> Result<SegmentKey> {
-    Ok(SegmentKey::new(
-        swifty_profile_fingerprint(),
-        OpaqueSegmentIdentity::new(raw_md5.to_vec())?,
-        len,
+fn swifty_segment_key(raw_md5: &[u8; 16], length: u64) -> Result<ContentKey> {
+    Ok(ContentKey::new(
+        swifty_profile_id(),
+        raw_md5.to_vec(),
+        length,
     )?)
 }
 
@@ -229,7 +204,7 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
     let normalized = raw_path.replace('\\', "/");
     if normalized.starts_with('/') {
         anyhow::bail!(
-            "invalid swifty mod.srf file path (must be relative): mod={} path={}",
+            "invalid swifty mod.srf file path: mod={} path={}",
             mod_name,
             raw_path
         );
@@ -238,7 +213,7 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
         let bytes = normalized.as_bytes();
         if bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
             anyhow::bail!(
-                "invalid swifty mod.srf file path (must be relative): mod={} path={}",
+                "invalid swifty mod.srf file path: mod={} path={}",
                 mod_name,
                 raw_path
             );
@@ -251,7 +226,7 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
         }
         if part == ".." {
             anyhow::bail!(
-                "invalid swifty mod.srf file path (parent traversal not allowed): mod={} path={}",
+                "invalid swifty mod.srf file path traversal: mod={} path={}",
                 mod_name,
                 raw_path
             );
@@ -260,7 +235,7 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
     }
     if parts.is_empty() {
         anyhow::bail!(
-            "invalid swifty mod.srf file path (must not be empty): mod={} path={}",
+            "invalid swifty mod.srf file path is empty: mod={} path={}",
             mod_name,
             raw_path
         );
@@ -270,67 +245,17 @@ fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
+    use super::swifty_repo_to_materialization_input;
     use std::collections::BTreeMap;
 
-    use super::swifty_repo_to_materialization_input;
-
     #[test]
-    fn swifty_conversion_produces_manifest_and_store_sidecar() {
+    fn conversion_materializes_only_enabled_mod_roots() {
         let part = swifty_part("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "addons/a.pbo_5", 0, 5);
         let checksum = swifty_artifacts::file_md5_from_parts(std::slice::from_ref(&part));
-        let repo = repo_spec("@mod");
-        let mods = BTreeMap::from([(
-            "@mod".to_string(),
-            swifty_artifacts::SrfMod {
-                name: "@mod".to_string(),
-                checksum: swifty_artifacts::Md5Digest::default(),
-                files: vec![swifty_artifacts::SrfFile {
-                    path: "addons\\a % #.pbo".to_string(),
-                    length: 5,
-                    checksum,
-                    r#type: None,
-                    parts: vec![part],
-                }],
-            },
-        )]);
-
-        let input = swifty_repo_to_materialization_input(
-            "https://example.com/base%20path/repo.json",
-            &repo,
-            &mods,
-        )
-        .expect("convert");
-
-        assert_eq!(
-            input.manifest.files[0].path.as_str(),
-            "@mod/addons/a % #.pbo"
-        );
-        assert_eq!(input.manifest.files[0].segments.len(), 1);
-        assert_eq!(input.store_index.objects.len(), 1);
-        let object = &input.store_index.objects[0];
-        assert_eq!(object.object_path.as_ref(), "@mod/addons/a % #.pbo");
-        assert_eq!(
-            input.store_index.base_url,
-            "https://example.com/base%20path/"
-        );
-        assert_eq!(object.parts[0].object_range, 0..5);
-        assert_eq!(
-            object.parts[0].key.identity.bytes(),
-            swifty_artifacts::Md5Digest::parse_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .expect("md5")
-                .as_bytes()
-        );
-    }
-
-    fn repo_spec(mod_name: &str) -> swifty_artifacts::RepoSpec {
-        swifty_artifacts::RepoSpec {
+        let repo = swifty_artifacts::RepoSpec {
             repo_name: "test".to_string(),
             checksum: "deadbeef".to_string(),
-            required_mods: vec![swifty_artifacts::RepoMod {
-                mod_name: mod_name.to_string(),
-                checksum: swifty_artifacts::Md5Digest::default(),
-                enabled: true,
-            }],
+            required_mods: vec![repo_mod("@enabled", true), repo_mod("@disabled", false)],
             optional_mods: vec![],
             icon_image_path: None,
             icon_image_checksum: None,
@@ -341,6 +266,45 @@ mod tests {
             repo_basic_authentication: None,
             version: String::new(),
             servers: vec![],
+        };
+        let mods = BTreeMap::from([
+            ("@enabled".to_string(), mod_manifest("@enabled", checksum)),
+            ("@disabled".to_string(), mod_manifest("@disabled", checksum)),
+        ]);
+        let input =
+            swifty_repo_to_materialization_input("https://example.com/repo.json", &repo, &mods)
+                .expect("convert");
+        assert_eq!(input.manifest.files().len(), 1);
+        assert_eq!(
+            input.manifest.files()[0].path.as_str(),
+            "@enabled/addons/a.pbo_5"
+        );
+    }
+
+    fn repo_mod(name: &str, enabled: bool) -> swifty_artifacts::RepoMod {
+        swifty_artifacts::RepoMod {
+            mod_name: name.to_string(),
+            checksum: swifty_artifacts::Md5Digest::default(),
+            enabled,
+        }
+    }
+
+    fn mod_manifest(name: &str, checksum: swifty_artifacts::Md5Digest) -> swifty_artifacts::SrfMod {
+        swifty_artifacts::SrfMod {
+            name: name.to_string(),
+            checksum: swifty_artifacts::Md5Digest::default(),
+            files: vec![swifty_artifacts::SrfFile {
+                path: "addons/a.pbo_5".to_string(),
+                length: 5,
+                checksum,
+                r#type: None,
+                parts: vec![swifty_part(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "addons/a.pbo_5",
+                    0,
+                    5,
+                )],
+            }],
         }
     }
 

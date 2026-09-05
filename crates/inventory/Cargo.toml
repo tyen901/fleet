@@ -4,12 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = { workspace = true }
+fmutex = { workspace = true }
 flux = { workspace = true }
-futures-util = { workspace = true }
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

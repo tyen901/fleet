@@ -31,9 +31,9 @@ impl Core {
         Ok(core)
     }
 
-    pub fn new_in_current_runtime_default() -> anyhow::Result<Self> {
+    pub fn new_in_current_runtime_for_command() -> anyhow::Result<Self> {
         let core = Self::new_default()?;
-        runtime::spawn_in_current(core.clone());
+        runtime::spawn_in_current(core.clone(), runtime::StartupPolicy::ExplicitCommand);
         Ok(core)
     }
 

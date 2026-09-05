@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use indicatif::ProgressBar;
 use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
@@ -14,29 +13,21 @@ use crate::operations::{
 const UI_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) struct FluxProgressObserver {
-    latest: watch::Sender<Option<fleet_flux::ProgressSnapshot>>,
+    latest: watch::Sender<Option<fleet_flux::Snapshot>>,
     hashed_bytes: Arc<AtomicU64>,
 }
 
 pub(crate) struct FluxProgressReceiver {
-    latest: watch::Receiver<Option<fleet_flux::ProgressSnapshot>>,
+    latest: watch::Receiver<Option<fleet_flux::Snapshot>>,
     hashed_bytes: Arc<AtomicU64>,
     last_hashed_bytes: u64,
     hash_rate_estimator: ByteRateEstimator,
-    verification_eta_estimator: EtaEstimator,
-    download_progress: ProgressBar,
-    install_progress: ProgressBar,
     operation: fleet_domain::OperationKind,
 }
 
 #[derive(Default)]
 struct ByteRateEstimator {
     baseline: Option<(u64, Instant)>,
-}
-
-#[derive(Default)]
-struct EtaEstimator {
-    baseline: Option<(u64, u64, Instant)>,
 }
 
 impl ByteRateEstimator {
@@ -49,61 +40,21 @@ impl ByteRateEstimator {
             self.reset();
             return None;
         }
-
         let Some(baseline) = self.baseline else {
             self.baseline = Some((completed, observed_at));
             return None;
         };
-
         if completed < baseline.0 {
             self.baseline = Some((completed, observed_at));
             return None;
         }
-
         let elapsed = observed_at.saturating_duration_since(baseline.1);
         let completed_since_baseline = completed - baseline.0;
         if elapsed.is_zero() || completed_since_baseline == 0 {
             return None;
         }
-
         let rate = completed_since_baseline as f64 / elapsed.as_secs_f64();
         (rate.is_finite() && rate >= 0.5).then(|| rate.round() as u64)
-    }
-}
-
-impl EtaEstimator {
-    fn reset(&mut self) {
-        self.baseline = None;
-    }
-
-    fn update(&mut self, completed: u64, total: Option<u64>, observed_at: Instant) -> Option<u64> {
-        if completed == 0 {
-            self.reset();
-            return None;
-        }
-        let Some(total) = total.filter(|total| *total > completed && *total > 0) else {
-            self.reset();
-            return None;
-        };
-        let Some(baseline) = self.baseline else {
-            self.baseline = Some((completed, total, observed_at));
-            return None;
-        };
-        if baseline.1 != total || completed < baseline.0 {
-            self.baseline = Some((completed, total, observed_at));
-            return None;
-        }
-
-        let elapsed = observed_at.saturating_duration_since(baseline.2);
-        let completed_since_baseline = completed - baseline.0;
-        if elapsed.is_zero() || completed_since_baseline == 0 {
-            return None;
-        }
-
-        let rate = completed_since_baseline as f64 / elapsed.as_secs_f64();
-        (rate.is_finite() && rate > 0.0)
-            .then(|| ((total - completed) as f64 / rate).ceil() as u64)
-            .filter(|seconds| *seconds > 0)
     }
 }
 
@@ -111,7 +62,7 @@ impl FluxProgressObserver {
     pub(crate) fn channel(
         operation: fleet_domain::OperationKind,
     ) -> (
-        fleet_flux::ProgressObserverRef,
+        fleet_flux::SnapshotObserver,
         fleet_flux::HashProgressObserverRef,
         FluxProgressReceiver,
     ) {
@@ -121,26 +72,23 @@ impl FluxProgressObserver {
             latest,
             hashed_bytes: hashed_bytes.clone(),
         });
+        let snapshot_observer: fleet_flux::SnapshotObserver = {
+            let observer = observer.clone();
+            Arc::new(move |snapshot| {
+                observer.latest.send_replace(Some(snapshot));
+            })
+        };
         (
-            observer.clone(),
+            snapshot_observer,
             observer,
             FluxProgressReceiver {
                 latest: receiver,
                 hashed_bytes,
                 last_hashed_bytes: 0,
                 hash_rate_estimator: ByteRateEstimator::default(),
-                verification_eta_estimator: EtaEstimator::default(),
-                download_progress: ProgressBar::hidden(),
-                install_progress: ProgressBar::hidden(),
                 operation,
             },
         )
-    }
-}
-
-impl fleet_flux::ProgressObserver for FluxProgressObserver {
-    fn update(&self, snapshot: fleet_flux::ProgressSnapshot) {
-        self.latest.send_replace(Some(snapshot));
     }
 }
 
@@ -158,7 +106,6 @@ impl FluxProgressReceiver {
         let mut future = std::pin::pin!(future);
         let mut refresh = interval(UI_PROGRESS_INTERVAL);
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
         loop {
             tokio::select! {
                 result = &mut future => {
@@ -177,220 +124,144 @@ impl FluxProgressReceiver {
             return;
         }
         let snapshot = if snapshot_changed {
-            *self.latest.borrow_and_update()
+            self.latest.borrow_and_update().clone()
         } else {
-            *self.latest.borrow()
-        }
-        .or_else(|| {
-            (hashed_bytes > 0).then_some(fleet_flux::ProgressSnapshot {
-                phase: fleet_flux::MaterializationPhase::Verification,
-                completed: 0,
-                total: None,
-                transfer: None,
-            })
-        });
+            self.latest.borrow().clone()
+        };
+        let hash_changed = hashed_bytes != self.last_hashed_bytes;
         if let Some(snapshot) = snapshot {
+            if hash_changed && snapshot.phase == fleet_flux::Phase::Inventory {
+                let throughput = self
+                    .hash_rate_estimator
+                    .update(hashed_bytes, Instant::now());
+                publisher.progress(hash_progress(hashed_bytes, throughput));
+            } else {
+                self.hash_rate_estimator.reset();
+                publisher.progress(operation_progress(self.operation, snapshot));
+            }
             self.last_hashed_bytes = hashed_bytes;
-            publisher.progress(self.operation_progress(snapshot, hashed_bytes));
+        } else if hash_changed {
+            let throughput = self
+                .hash_rate_estimator
+                .update(hashed_bytes, Instant::now());
+            publisher.progress(hash_progress(hashed_bytes, throughput));
+            self.last_hashed_bytes = hashed_bytes;
         }
     }
+}
 
-    fn operation_progress(
-        &mut self,
-        snapshot: fleet_flux::ProgressSnapshot,
-        hashed_bytes: u64,
-    ) -> OperationProgressEvent {
-        if snapshot.phase == fleet_flux::MaterializationPhase::Verification {
-            let now = Instant::now();
-            let throughput = self.hash_rate_estimator.update(hashed_bytes, now);
-            let eta =
-                self.verification_eta_estimator
-                    .update(snapshot.completed, snapshot.total, now);
-            let status_text = match self.operation {
+fn hash_progress(
+    hashed_bytes: u64,
+    throughput_bytes_per_sec: Option<u64>,
+) -> OperationProgressEvent {
+    OperationProgressEvent {
+        stage: OperationStage::VerifyingInventory,
+        status_text: Some("Hashing local files".to_string()),
+        primary: ProgressMetric {
+            label: Some("Hashed".to_string()),
+            done: Some(hashed_bytes),
+            total: None,
+            unit: ProgressUnit::Bytes,
+        },
+        secondary: None,
+        throughput_bytes_per_sec,
+        eta_seconds: None,
+    }
+}
+
+fn operation_progress(
+    operation: fleet_domain::OperationKind,
+    snapshot: fleet_flux::Snapshot,
+) -> OperationProgressEvent {
+    let (stage, status_text) = match snapshot.phase {
+        fleet_flux::Phase::Inventory => (
+            OperationStage::VerifyingInventory,
+            match operation {
                 fleet_domain::OperationKind::Check => "Checking files",
                 fleet_domain::OperationKind::Validate => "Validating files",
-                fleet_domain::OperationKind::Sync if hashed_bytes > 0 => "Hashing local files",
                 fleet_domain::OperationKind::Sync => "Preparing sync",
-            };
-            return OperationProgressEvent {
-                stage: OperationStage::VerifyingInventory,
-                status_text: Some(status_text.to_string()),
-                primary: ProgressMetric {
-                    label: None,
-                    done: Some(snapshot.completed),
-                    total: snapshot.total,
-                    unit: ProgressUnit::Files,
-                },
-                secondary: None,
-                throughput_bytes_per_sec: throughput,
-                eta_seconds: eta,
-            };
-        }
-
-        self.hash_rate_estimator.reset();
-        self.verification_eta_estimator.reset();
-
-        let (stage, status_text) = match snapshot.phase {
-            fleet_flux::MaterializationPhase::Verification
-            | fleet_flux::MaterializationPhase::Planning => {
-                (OperationStage::Sync, "Preparing sync")
-            }
-            fleet_flux::MaterializationPhase::StoreDownload
-            | fleet_flux::MaterializationPhase::ExternalReuse
-            | fleet_flux::MaterializationPhase::LocalReuse
-            | fleet_flux::MaterializationPhase::StageWrites => {
-                (OperationStage::Sync, "Syncing files")
-            }
-            fleet_flux::MaterializationPhase::FinalizeFiles => {
-                (OperationStage::Sync, "Finishing sync")
-            }
-            fleet_flux::MaterializationPhase::DeletePaths => {
-                (OperationStage::RemovingObsoleteFiles, "Finishing sync")
-            }
-            fleet_flux::MaterializationPhase::Inventory
-            | fleet_flux::MaterializationPhase::Complete
-            | fleet_flux::MaterializationPhase::Failed => {
-                (OperationStage::Finalizing, "Finishing sync")
-            }
-        };
-
-        let Some(transfer) = snapshot.transfer else {
-            return OperationProgressEvent {
-                stage,
-                status_text: Some(status_text.to_string()),
-                primary: ProgressMetric {
-                    label: None,
-                    done: Some(snapshot.completed),
-                    total: snapshot.total,
-                    unit: ProgressUnit::Files,
-                },
-                secondary: None,
-                throughput_bytes_per_sec: None,
-                eta_seconds: None,
-            };
-        };
-
-        if transfer.download_bytes_total > 0 {
-            self.download_progress
-                .set_length(transfer.download_bytes_total);
-            self.download_progress
-                .set_position(transfer.downloaded_bytes);
-        }
-        if transfer.install_bytes_total > 0 {
-            self.install_progress
-                .set_length(transfer.install_bytes_total);
-            self.install_progress.set_position(transfer.installed_bytes);
-        }
-        let throughput = (transfer.downloaded_bytes > 0)
-            .then(|| self.download_progress.per_sec())
-            .filter(|rate| rate.is_finite() && *rate > 0.0)
-            .map(|rate| rate.round() as u64);
-        let eta = (transfer.installed_bytes < transfer.install_bytes_total)
-            .then(|| self.install_progress.eta().as_secs())
-            .filter(|seconds| *seconds > 0);
-
-        OperationProgressEvent {
-            stage,
-            status_text: Some(status_text.to_string()),
-            primary: ProgressMetric {
-                label: Some("Installed".to_string()),
-                done: Some(transfer.installed_bytes),
-                total: Some(transfer.install_bytes_total),
-                unit: ProgressUnit::Bytes,
             },
-            secondary: (transfer.download_bytes_total > 0).then_some(ProgressMetric {
-                label: Some("Downloaded".to_string()),
-                done: Some(transfer.downloaded_bytes),
-                total: Some(transfer.download_bytes_total),
-                unit: ProgressUnit::Bytes,
-            }),
-            throughput_bytes_per_sec: throughput,
-            eta_seconds: eta,
+        ),
+        fleet_flux::Phase::Preparing | fleet_flux::Phase::Publishing => {
+            (OperationStage::Sync, "Syncing files")
         }
+        fleet_flux::Phase::Complete => (OperationStage::Finalizing, "Finishing sync"),
+    };
+    let outcome = snapshot.outcome;
+    let primary = if snapshot.phase == fleet_flux::Phase::Inventory {
+        ProgressMetric {
+            label: Some("Kept".to_string()),
+            done: Some(outcome.kept_files),
+            total: None,
+            unit: ProgressUnit::Files,
+        }
+    } else {
+        ProgressMetric {
+            label: Some("Written".to_string()),
+            done: Some(outcome.written_bytes),
+            total: None,
+            unit: ProgressUnit::Bytes,
+        }
+    };
+    let secondary = (outcome.fetched_bytes > 0).then_some(ProgressMetric {
+        label: Some("Fetched".to_string()),
+        done: Some(outcome.fetched_bytes),
+        total: None,
+        unit: ProgressUnit::Bytes,
+    });
+    OperationProgressEvent {
+        stage,
+        status_text: Some(status_text.to_string()),
+        primary,
+        secondary,
+        throughput_bytes_per_sec: None,
+        eta_seconds: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ByteRateEstimator, EtaEstimator, FluxProgressObserver};
-    use crate::operations::ProgressUnit;
+    use super::{hash_progress, operation_progress, ByteRateEstimator};
+    use crate::operations::{OperationStage, ProgressUnit};
     use fleet_domain::OperationKind;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn hash_progress_reports_bytes_per_second() {
+    fn hash_progress_reports_observed_bytes_without_an_invented_total() {
         let mut estimator = ByteRateEstimator::default();
         let started = Instant::now();
-
-        assert_eq!(estimator.update(0, started,), None);
+        assert_eq!(estimator.update(0, started), None);
         assert_eq!(
-            estimator.update(2 * 1024 * 1024, started + Duration::from_secs(1),),
+            estimator.update(2 * 1024 * 1024, started + Duration::from_secs(1)),
             None
         );
         assert_eq!(
-            estimator.update(6 * 1024 * 1024, started + Duration::from_secs(2),),
+            estimator.update(6 * 1024 * 1024, started + Duration::from_secs(2)),
             Some(4 * 1024 * 1024)
         );
+        let event = hash_progress(1234, Some(42));
+        assert_eq!(event.primary.done, Some(1234));
+        assert_eq!(event.primary.total, None);
+        assert_eq!(event.primary.unit, ProgressUnit::Bytes);
+        assert_eq!(event.throughput_bytes_per_sec, Some(42));
     }
 
     #[test]
-    fn file_eta_stays_available_for_slow_progress_and_resets() {
-        let mut estimator = EtaEstimator::default();
-        let started = Instant::now();
-        assert_eq!(estimator.update(0, Some(10), started), None);
-        assert_eq!(
-            estimator.update(1, Some(10), started + Duration::from_secs(4)),
-            None
-        );
-
-        assert_eq!(
-            estimator.update(2, Some(10), started + Duration::from_secs(8)),
-            Some(32)
-        );
-        assert_eq!(
-            estimator.update(1, Some(10), started + Duration::from_secs(12),),
-            None
-        );
-        assert_eq!(
-            estimator.update(0, Some(10), started + Duration::from_secs(16)),
-            None
-        );
-        assert_eq!(
-            estimator.update(3, None, started + Duration::from_secs(20)),
-            None
-        );
-        assert_eq!(
-            estimator.update(10, Some(10), started + Duration::from_secs(24)),
-            None
-        );
-    }
-
-    #[test]
-    fn transfer_progress_keeps_byte_metrics() {
-        let (_, _, mut receiver) = FluxProgressObserver::channel(OperationKind::Sync);
-        let event = receiver.operation_progress(
-            fleet_flux::ProgressSnapshot {
-                phase: fleet_flux::MaterializationPhase::StoreDownload,
-                completed: 4,
-                total: Some(10),
-                transfer: Some(fleet_flux::TransferProgressSnapshot {
-                    downloaded_bytes: 20,
-                    download_bytes_total: 100,
-                    installed_bytes: 10,
-                    install_bytes_total: 100,
-                }),
-            },
-            0,
-        );
-        assert_eq!(
-            (event.primary.done, event.primary.total, event.primary.unit),
-            (Some(10), Some(100), ProgressUnit::Bytes)
-        );
-        assert_eq!(
-            event
-                .secondary
-                .map(|metric| (metric.done, metric.total, metric.unit)),
-            Some((Some(20), Some(100), ProgressUnit::Bytes))
-        );
+    fn preparing_and_publishing_snapshots_remain_active_sync() {
+        for phase in [fleet_flux::Phase::Publishing, fleet_flux::Phase::Preparing] {
+            let event = operation_progress(
+                OperationKind::Sync,
+                fleet_flux::Snapshot {
+                    phase,
+                    outcome: fleet_flux::Outcome {
+                        written_bytes: 2048,
+                        ..Default::default()
+                    },
+                },
+            );
+            assert_eq!(event.stage, OperationStage::Sync);
+            assert_eq!(event.status_text.as_deref(), Some("Syncing files"));
+            assert_eq!(event.primary.done, Some(2048));
+        }
     }
 }
