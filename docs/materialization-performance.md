@@ -10,6 +10,27 @@ segment cache is added to application memory.
 
 ## Real profile comparison
 
+For replacement schemas, use the `fleet-inventory` example
+`cached-materialization` and `scripts/compare-cached-materialization.ps1`.
+The example loads an explicitly supplied cached Swifty release and invokes the
+Fleet adapter; it never refreshes repository metadata or edits registered
+profiles. Give each binary a separately prepared inventory for the same target.
+Its `verify` mode seeds an empty inventory with a full scan; record that setup
+cost separately. Run all warm no-op trials before corruption trials so one
+binary's repair does not invalidate another binary's warm file evidence.
+
+The script alternates clean release executables, records process and operation
+time, CPU time, peak working set, cached revision and actual outcomes, and
+verifies the original file SHA-256 after every trial. A verified external backup
+restores any unsuccessful repair. These adapter measurements omit CLI startup
+and repository refresh; do not combine them with CLI timings below. Build and
+record both source revisions and executable hashes before timing.
+
+`cargo run --release -p fleet-inventory --example inventory-size -- <database>`
+uses SQLite `dbstat` in read-only mode to report cell payload and pages for every
+table and index. Include both index and table payload when reporting compaction;
+allocated file size alone does not measure stored representation.
+
 `scripts/compare-materialization.ps1` compares two release CLI binaries against
 the same registered profile. Full byte validation must establish a clean baseline
 before running it. Choose a payload byte inside a known Swifty piece, supply the
