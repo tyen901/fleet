@@ -81,6 +81,7 @@ pub async fn verify_manifest(
     })
 }
 
+#[tracing::instrument(level = "info", skip_all, fields(target = %dest.display()))]
 pub async fn materialize(
     dest: &Path,
     inventory: Arc<FleetInventoryProvider>,
@@ -94,6 +95,9 @@ pub async fn materialize(
     let mut context = flux::MaterializeContext::new();
     context.cancellation = cancel.clone();
     context.progress = progress;
+    let started = std::time::Instant::now();
+    tracing::info!(target = %dest.display(), files = input.manifest.files.len(),
+        "starting Flux materialization");
 
     flux::materialize(
         flux::MaterializeRequest {
@@ -110,8 +114,16 @@ pub async fn materialize(
         context,
     )
     .await
-    .map(|_| ())
+    .map(|_| {
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "Flux materialization completed"
+        );
+    })
     .map_err(|error| {
+        tracing::error!(kind = ?error.kind, error = %error,
+            caller_cancelled = cancel.is_cancelled(), elapsed_ms = started.elapsed().as_millis(),
+            "Flux materialization ended with error");
         if cancel.is_cancelled() || error.kind == flux::FluxErrorKind::Cancelled {
             anyhow::anyhow!("canceled")
         } else {
