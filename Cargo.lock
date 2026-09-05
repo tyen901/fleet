@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "fleet"
-version = "4.0.0-beta.3"
+version = "4.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-cli"
-version = "4.0.0-beta.3"
+version = "4.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "clap",
