@@ -739,7 +739,7 @@ async function runFlow(client) {
   await client.waitFor(
     `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
       document.querySelector('.sync-panel__count')?.textContent.includes('files') &&
-      document.body.innerText.includes('MiB/s') &&
+      document.body.innerText.includes('MB/s') &&
       document.body.innerText.includes('About')`,
     'inventory rebuild rate and remaining time',
     15_000,
