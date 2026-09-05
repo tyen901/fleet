@@ -653,11 +653,21 @@ async function runFlow(client) {
 
   await client.clickText('Sync');
   await client.waitFor(`document.querySelector('.sync-panel')`, 'sync progress', 15_000);
+  await client.waitFor(
+    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
+      document.querySelector('.sync-panel__count')?.textContent.includes('files') &&
+      document.body.innerText.includes('MiB/s') &&
+      document.body.innerText.includes('About')`,
+    'inventory rebuild rate and remaining time',
+    15_000,
+  );
+  await client.capture('10-inventory-rebuild-progress.png');
   // FLEET_SIMULATE_SYNC drives a scripted sequence that parks at
   // FLEET_SIMULATE_SYNC_HOLD_PERCENT, so this capture is reproducible and no
   // content is actually downloaded.
   await client.waitFor(
-    `document.querySelector('.sync-panel__percent')?.textContent.trim() === '50%'`,
+    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Syncing files' &&
+      document.querySelector('.sync-panel__percent')?.textContent.trim() === '50%'`,
     'simulated sync at 50%',
     15_000,
   );
