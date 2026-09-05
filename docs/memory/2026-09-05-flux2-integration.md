@@ -1,7 +1,7 @@
 # 2026-09-05 — Flux2 materialization integration
 
 Completed:
-- Replaced the Flux6/`flux-content` boundary with Flux2, pinned to Git revision `97f35bfcf7991b706561a53a81ca29f0fd9db117` in `https://github.com/tyen901/flux7.git`. Builds resolve the same source on developer machines and release runners.
+- Replaced the Flux6/`flux-content` boundary with Flux2, pinned to Git revision `97f35bfcf7991b706561a53a81ca29f0fd9db117` on the `flux2` branch in `https://github.com/tyen901/flux6.git`. Builds resolve the same source on developer machines and release runners.
 - Fleet now adapts Swifty manifests, streaming PBO validation, source ranges, and a target-bound native SQLite observation inventory to Flux2's `MaterializeRequest` pipeline.
 - Fast checks report namespace and length evidence; full validation establishes byte equality. Preparing and Publishing snapshots remain active Sync progress, and only terminal completion finalizes an operation.
 - Explicit CLI commands suppress the desktop-only startup auto-check while retaining the persisted desktop setting; the regression test starts a Sync with that setting enabled.
