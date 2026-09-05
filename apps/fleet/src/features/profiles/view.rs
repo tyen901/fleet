@@ -688,22 +688,16 @@ fn render_sync_mode(
         fleet_core::ProgressUnit::Files => metric.rendered.clone(),
         fleet_core::ProgressUnit::Bytes => format!("{} {}", metric.label, metric.rendered),
     });
-    let secondary_amount = secondary_metric.as_ref().and_then(|metric| {
-        metric.done.map(|done| {
-            format!(
-                "{} {}",
-                metric.label,
-                fleet_domain::utils::format_bytes(done)
-            )
-        })
-    });
+    let secondary_amount = secondary_metric
+        .as_ref()
+        .map(|metric| format!("{} {}", metric.label, metric.rendered));
     let rate = progress
         .and_then(|progress| progress.throughput_bytes_per_sec)
         .map(format_speed);
     let remaining = progress
         .and_then(|progress| progress.eta_seconds)
         .map(format_clock);
-    let approximate_remaining = progress.is_some_and(|progress| {
+    let hashing = progress.is_some_and(|progress| {
         progress.active_stage == fleet_core::OperationStage::VerifyingInventory
     });
 
@@ -737,14 +731,12 @@ fn render_sync_mode(
                                     span { class: "mono", "{secondary_amount}" }
                                 }
                                 if let Some(rate) = rate.as_ref() {
-                                    span { class: "mono", "{rate}" }
+                                    span { class: "mono",
+                                        if hashing { "Hashing speed {rate}" } else { "Download speed {rate}" }
+                                    }
                                 }
                                 if let Some(remaining) = remaining.as_ref() {
-                                    if approximate_remaining {
-                                        span { class: "mono", "About {remaining} remaining" }
-                                    } else {
-                                        span { class: "mono", "Remaining {remaining}" }
-                                    }
+                                    span { class: "mono", "About {remaining} remaining" }
                                 }
                             }
                         }

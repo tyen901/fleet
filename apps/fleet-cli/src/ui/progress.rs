@@ -9,7 +9,11 @@ fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
         OperationSessionEventKind::Progress { progress } => {
             if let (Some(done), Some(total)) = (progress.primary.done, progress.primary.total) {
                 Some(match progress.primary.unit {
-                    ProgressUnit::Bytes => format!("Progress: {done}/{total} bytes"),
+                    ProgressUnit::Bytes => format!(
+                        "Progress: {} / {}",
+                        fleet_domain::utils::format_bytes(done),
+                        fleet_domain::utils::format_bytes(total)
+                    ),
                     ProgressUnit::Files => format!("Progress: {done}/{total} files"),
                 })
             } else {
@@ -54,7 +58,7 @@ pub fn spawn_flow_printer(
         let mp = MultiProgress::new();
         let style_spinner = ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_spinner());
-        let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {bytes}/{total_bytes}")
+        let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
         let style_file_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} files")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
@@ -87,7 +91,18 @@ pub fn spawn_flow_printer(
                     if let Some(done) = progress.primary.done {
                         progress_pb.set_position(done);
                     }
-                    if let Some(msg) = progress.status_text {
+                    if progress.primary.unit == ProgressUnit::Bytes {
+                        if let (Some(done), Some(total)) =
+                            (progress.primary.done, progress.primary.total)
+                        {
+                            progress_pb.set_message(format!(
+                                "{} {} / {}",
+                                progress.primary.label.as_deref().unwrap_or("Progress"),
+                                fleet_domain::utils::format_bytes(done),
+                                fleet_domain::utils::format_bytes(total)
+                            ));
+                        }
+                    } else if let Some(msg) = progress.status_text {
                         progress_pb.set_message(msg);
                     }
                 }
