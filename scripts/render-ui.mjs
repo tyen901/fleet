@@ -739,7 +739,7 @@ async function runFlow(client) {
   await client.waitFor(
     `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
       document.querySelector('.sync-panel__count')?.textContent.includes('files') &&
-      document.body.innerText.includes('MiB/s') &&
+      document.body.innerText.includes('MB/s') &&
       document.body.innerText.includes('About')`,
     'inventory rebuild rate and remaining time',
     15_000,
@@ -750,7 +750,9 @@ async function runFlow(client) {
   // content is actually downloaded.
   await client.waitFor(
     `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Syncing files' &&
-      document.querySelector('.sync-panel__percent')?.textContent.trim() === '50%'`,
+      [...document.querySelectorAll('.sync-panel__percent')].map(el => el.textContent.trim()).join(',') === '75%,50%' &&
+      document.body.innerText.includes('Download speed') &&
+      document.body.innerText.includes('Write speed')`,
     'simulated sync at 50%',
     15_000,
   );

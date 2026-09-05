@@ -177,6 +177,7 @@ pub struct ProfileOperationProgressState {
     pub primary_metric: Option<UiProgressMetric>,
     pub secondary_metric: Option<UiProgressMetric>,
     pub throughput_bytes_per_sec: Option<u64>,
+    pub write_bytes_per_sec: Option<u64>,
     pub eta_seconds: Option<u64>,
 }
 
@@ -195,6 +196,7 @@ impl ProfileOperationProgressState {
             primary_metric: None,
             secondary_metric: None,
             throughput_bytes_per_sec: None,
+            write_bytes_per_sec: None,
             eta_seconds: None,
         }
     }
@@ -471,6 +473,7 @@ pub fn apply_operation_progress(
             .map(|fraction| (fraction * 100.0).round().clamp(0.0, 100.0) as u64),
     };
     progress_state.throughput_bytes_per_sec = progress.throughput_bytes_per_sec;
+    progress_state.write_bytes_per_sec = progress.write_bytes_per_sec;
     progress_state.eta_seconds = progress.eta_seconds;
 }
 
@@ -487,6 +490,7 @@ pub(crate) fn apply_operation_stage(
     progress_state.primary_metric = None;
     progress_state.secondary_metric = None;
     progress_state.throughput_bytes_per_sec = None;
+    progress_state.write_bytes_per_sec = None;
     progress_state.eta_seconds = None;
 }
 
@@ -519,6 +523,7 @@ mod tests {
                 },
                 secondary: None,
                 throughput_bytes_per_sec: Some(5),
+                write_bytes_per_sec: Some(3),
                 eta_seconds: Some(1),
             },
             1,
@@ -532,6 +537,7 @@ mod tests {
         assert!(progress.primary_metric.is_none());
         assert!(progress.secondary_metric.is_none());
         assert!(progress.throughput_bytes_per_sec.is_none());
+        assert!(progress.write_bytes_per_sec.is_none());
         assert!(progress.eta_seconds.is_none());
     }
 

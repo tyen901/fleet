@@ -44,6 +44,7 @@ pub struct OperationProgressEvent {
     pub primary: ProgressMetric,
     pub secondary: Option<ProgressMetric>,
     pub throughput_bytes_per_sec: Option<u64>,
+    pub write_bytes_per_sec: Option<u64>,
     pub eta_seconds: Option<u64>,
 }
 
