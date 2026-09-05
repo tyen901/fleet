@@ -1,235 +1,207 @@
-use fleet_inventory::FleetInventoryProvider;
+use fleet_inventory::FleetInventory;
 use flux::{
-    CheckInventory, ExpectedFileFact, FluxErrorKind, InventoryReader, LocalFileFact,
-    LocalFileSegmentFact, ManagedInventoryBatch, ManagedInventoryChange, ManagedInventoryWriter,
-    OpaqueSegmentIdentity, ProfileFingerprint, SegmentKey, TargetFileVersion, TargetPath,
-    ValidationSpec, VerifiedFactBatch, VerifiedFactChange, VerifiedFactWriter,
+    ConfirmedFile, ContentKey, FileSpec, Inventory, Manifest, ObservationToken, ObservedFile,
+    ProfileId, Result, Segment, TargetPath,
 };
-use futures_util::StreamExt;
 
-#[tokio::test]
-async fn verified_facts_persist_without_claiming_managed_path_ownership() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let db_path = temp.path().join("inventory.sqlite");
-    let inventory = FleetInventoryProvider::open_or_recreate(&db_path).expect("open inventory");
-    let fact = fact("observed/addon.pbo", 1);
-
-    inventory
-        .apply_verified_batch(VerifiedFactBatch {
-            changes: vec![VerifiedFactChange::Upsert(fact.clone())],
-        })
-        .await
-        .expect("persist verified fact");
-
-    assert_eq!(
-        lookup_file(&inventory, &fact.path).await,
-        Some(fact.clone())
-    );
-    assert!(managed_paths(&inventory, 2).await.is_empty());
-    let segment_results = inventory
-        .lookup_segments(&[fact.segments[0].key.clone()], 4)
-        .await
-        .expect("lookup segment");
-    assert_eq!(segment_results.len(), 1);
-    assert_eq!(segment_results[0].hits.len(), 1);
-    assert_eq!(segment_results[0].hits[0].path, fact.path);
-
-    drop(inventory);
-    let reopened = FleetInventoryProvider::open_existing(&db_path).expect("reopen inventory");
-    assert_eq!(lookup_file(&reopened, &fact.path).await, Some(fact));
-    assert!(managed_paths(&reopened, 1).await.is_empty());
+fn profile() -> ProfileId {
+    ProfileId([7; 32])
 }
 
-#[tokio::test]
-async fn fact_and_managed_path_mutations_have_distinct_ownership_semantics() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let db_path = temp.path().join("inventory.sqlite");
-    let inventory = FleetInventoryProvider::open_or_recreate(&db_path).expect("open inventory");
-    let managed = fact("managed/addon.pbo", 2);
-
-    inventory
-        .apply_managed_batch(ManagedInventoryBatch {
-            changes: vec![ManagedInventoryChange::Manage(managed.clone())],
-        })
-        .await
-        .expect("manage fact");
-    assert_eq!(
-        managed_paths(&inventory, 1).await,
-        vec![managed.path.clone()]
-    );
-    assert_eq!(
-        lookup_file(&inventory, &managed.path).await,
-        Some(managed.clone())
-    );
-
-    inventory
-        .apply_verified_batch(VerifiedFactBatch {
-            changes: vec![VerifiedFactChange::Remove(managed.path.clone())],
-        })
-        .await
-        .expect("remove reusable fact only");
-    assert_eq!(lookup_file(&inventory, &managed.path).await, None);
-    assert_eq!(
-        managed_paths(&inventory, 1).await,
-        vec![managed.path.clone()]
-    );
-
-    inventory
-        .apply_managed_batch(ManagedInventoryBatch {
-            changes: vec![ManagedInventoryChange::Delete(managed.path.clone())],
-        })
-        .await
-        .expect("delete managed path");
-    assert_eq!(lookup_file(&inventory, &managed.path).await, None);
-    assert!(managed_paths(&inventory, 1).await.is_empty());
+fn token(byte: u8) -> ObservationToken {
+    ObservationToken::from_bytes(vec![byte; 64]).expect("valid token")
 }
 
-#[tokio::test]
-async fn duplicate_batch_paths_fail_without_replacing_existing_fact() {
+fn path(value: &str) -> TargetPath {
+    TargetPath::new(value).expect("valid target path")
+}
+
+fn segment(byte: u8) -> Segment {
+    Segment {
+        offset: 0,
+        key: ContentKey::new(profile(), vec![byte], 1).expect("valid key"),
+    }
+}
+
+#[test]
+fn observations_reopen_and_reverse_lookup_from_sql_index() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let db_path = temp.path().join("inventory.sqlite");
-    let inventory = FleetInventoryProvider::open_or_recreate(&db_path).expect("open inventory");
-    let original = fact("observed/addon.pbo", 1);
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    let db = temp.path().join("observations.sqlite");
+    let file = path("mod/file.pbo");
+    let store = FleetInventory::open(&db, &target, profile()).expect("open");
+    let mut writer = store.begin_observation(&file).expect("begin");
+    writer.append(&[segment(3)]).expect("append");
+    writer
+        .finish(ObservedFile::new(token(1), 1, profile()))
+        .expect("finish");
+    assert_eq!(
+        store.observed(&file).expect("observed").unwrap().version(),
+        &token(1)
+    );
+    drop(store);
 
-    inventory
-        .apply_verified_batch(VerifiedFactBatch {
-            changes: vec![VerifiedFactChange::Upsert(original.clone())],
-        })
-        .await
-        .expect("persist original fact");
+    let reopened = FleetInventory::open(&db, &target, profile()).expect("reopen");
+    let hits = reopened.lookup(&segment(3).key, 4).expect("lookup");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].path, file);
+    assert_eq!(hits[0].offset, 0);
+}
 
-    let error = inventory
-        .apply_verified_batch(VerifiedFactBatch {
-            changes: vec![
-                VerifiedFactChange::Upsert(fact("observed/addon.pbo", 2)),
-                VerifiedFactChange::Remove(original.path.clone()),
+#[test]
+fn failed_finish_keeps_previous_committed_fact() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    let db = temp.path().join("observations.sqlite");
+    let file = path("file");
+    let store = FleetInventory::open(&db, &target, profile()).expect("open");
+    let mut first = store.begin_observation(&file).expect("begin");
+    first.append(&[segment(1)]).expect("append");
+    first
+        .finish(ObservedFile::new(token(1), 1, profile()))
+        .expect("finish");
+    let mut failed = store.begin_observation(&file).expect("begin");
+    failed.append(&[segment(2)]).expect("append");
+    assert!(failed
+        .finish(ObservedFile::new(token(2), 2, profile()))
+        .is_err());
+    assert_eq!(store.lookup(&segment(1).key, 4).expect("lookup").len(), 1);
+    assert!(store.lookup(&segment(2).key, 4).expect("lookup").is_empty());
+}
+
+#[test]
+fn terminal_transaction_rolls_back_and_success_prunes_with_empty_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    let db = temp.path().join("observations.sqlite");
+    let obsolete = path("obsolete");
+    let new_target = path("new");
+    let empty_target = path("empty");
+    let old_segment = segment(1);
+    let new_segment = segment(2);
+    let store = FleetInventory::open(&db, &target, profile()).expect("open");
+    let mut writer = store.begin_observation(&obsolete).expect("begin");
+    writer
+        .append(std::slice::from_ref(&old_segment))
+        .expect("append");
+    writer
+        .finish(ObservedFile::new(token(3), 1, profile()))
+        .expect("finish");
+
+    let manifest: &'static Manifest = Box::leak(Box::new(
+        Manifest::new(
+            profile(),
+            vec![
+                FileSpec {
+                    path: new_target.clone(),
+                    length: 1,
+                    segments: vec![new_segment.clone()],
+                },
+                FileSpec {
+                    path: empty_target.clone(),
+                    length: 0,
+                    segments: Vec::new(),
+                },
             ],
-        })
-        .await
-        .expect_err("reject duplicate paths");
+            Vec::new(),
+        )
+        .expect("manifest"),
+    ));
 
-    assert_eq!(error.kind, FluxErrorKind::InventoryUpdateFailed);
-    assert_eq!(error.message, "inventory batch contains duplicate paths");
+    let mut failing = |sink: &mut dyn FnMut(ConfirmedFile<'static>) -> Result<()>| {
+        let file = manifest
+            .files()
+            .iter()
+            .find(|file| file.path == new_target)
+            .expect("new file");
+        sink(ConfirmedFile {
+            path: &file.path,
+            segments: &file.segments,
+            observation: ObservedFile::new(token(4), 1, profile()),
+        })?;
+        Err(flux::Error::new(
+            flux::ErrorKind::Validation,
+            "terminal producer failed",
+        ))
+    };
+    assert!(store.commit_terminal(manifest, &mut failing).is_err());
+    assert_eq!(store.lookup(&old_segment.key, 4).expect("lookup").len(), 1);
+    assert!(store
+        .lookup(&new_segment.key, 4)
+        .expect("lookup")
+        .is_empty());
+
+    let mut succeeding = |sink: &mut dyn FnMut(ConfirmedFile<'static>) -> Result<()>| {
+        let new_file = manifest
+            .files()
+            .iter()
+            .find(|file| file.path == new_target)
+            .expect("new file");
+        sink(ConfirmedFile {
+            path: &new_file.path,
+            segments: &new_file.segments,
+            observation: ObservedFile::new(token(5), 1, profile()),
+        })?;
+        let empty_file = manifest
+            .files()
+            .iter()
+            .find(|file| file.path == empty_target)
+            .expect("empty file");
+        sink(ConfirmedFile {
+            path: &empty_file.path,
+            segments: &empty_file.segments,
+            observation: ObservedFile::new(token(6), 0, profile()),
+        })
+    };
+    store
+        .commit_terminal(manifest, &mut succeeding)
+        .expect("terminal commit");
+    assert!(store
+        .lookup(&old_segment.key, 4)
+        .expect("lookup")
+        .is_empty());
+    assert_eq!(store.lookup(&new_segment.key, 4).expect("lookup").len(), 1);
     assert_eq!(
-        lookup_file(&inventory, &original.path).await,
-        Some(original)
+        store
+            .observed(&empty_target)
+            .expect("observed")
+            .expect("empty fact")
+            .length(),
+        0
     );
 }
 
-#[tokio::test]
-async fn managed_batches_are_sorted_bounded_and_persisted() {
+#[test]
+fn live_store_excludes_second_session_until_released() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let db_path = temp.path().join("inventory.sqlite");
-    let inventory = FleetInventoryProvider::open_or_recreate(&db_path).expect("open inventory");
-    let facts = [
-        fact("z/last.pbo", 3),
-        fact("a/first.pbo", 4),
-        fact("m/middle.pbo", 5),
-    ];
-
-    inventory
-        .apply_managed_batch(ManagedInventoryBatch {
-            changes: facts
-                .iter()
-                .cloned()
-                .map(ManagedInventoryChange::Manage)
-                .collect(),
-        })
-        .await
-        .expect("persist managed facts");
-
-    assert_eq!(
-        managed_paths(&inventory, 2).await,
-        vec![
-            TargetPath::new("a/first.pbo").expect("path"),
-            TargetPath::new("m/middle.pbo").expect("path"),
-            TargetPath::new("z/last.pbo").expect("path"),
-        ]
-    );
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    let db = temp.path().join("observations.sqlite");
+    let store = FleetInventory::open(&db, &target, profile()).expect("open");
+    let file = path("live");
+    let writer = store.begin_observation(&file).expect("begin");
+    assert!(matches!(
+        FleetInventory::open(&db, &target, profile()),
+        Err(fleet_inventory::InventoryError::Locked)
+    ));
+    drop(writer);
 }
 
-#[tokio::test]
-async fn fast_assessment_compares_expected_facts_and_managed_scope_in_one_query() {
+#[test]
+fn target_binding_rejects_reuse_for_another_destination() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let inventory = FleetInventoryProvider::open_or_recreate(&temp.path().join("inventory.sqlite"))
-        .expect("open inventory");
-    let matching = fact("expected/matching.pbo", 1);
-    let changed_manifest = fact("expected/changed.pbo", 2);
-    let obsolete = fact("obsolete/old.pbo", 3);
-    inventory
-        .apply_managed_batch(ManagedInventoryBatch {
-            changes: vec![
-                ManagedInventoryChange::Manage(matching.clone()),
-                ManagedInventoryChange::Manage(changed_manifest.clone()),
-                ManagedInventoryChange::Manage(obsolete.clone()),
-            ],
-        })
-        .await
-        .expect("seed managed inventory");
-
-    let replacement = fact("expected/changed.pbo", 4);
-    let expected = [expected_fact(&matching), expected_fact(&replacement)];
-    let assessment = inventory
-        .assess_expected_state(&expected)
-        .await
-        .expect("assess expected state");
-
-    assert_eq!(assessment.files.len(), 2);
-    assert!(assessment.files[0].content_matches);
-    assert_eq!(assessment.files[0].stored_version, Some(matching.version));
-    assert!(!assessment.files[1].content_matches);
-    assert_eq!(assessment.obsolete_paths, vec![obsolete.path]);
-}
-
-async fn lookup_file(
-    inventory: &FleetInventoryProvider,
-    path: &TargetPath,
-) -> Option<LocalFileFact> {
-    inventory
-        .lookup_files(std::slice::from_ref(path))
-        .await
-        .expect("lookup file")
-        .into_iter()
-        .next()
-        .expect("one lookup result")
-}
-
-async fn managed_paths(inventory: &FleetInventoryProvider, batch_size: usize) -> Vec<TargetPath> {
-    let mut stream = inventory.managed_path_batches(batch_size);
-    let mut paths = Vec::new();
-    while let Some(batch) = stream.next().await {
-        paths.extend(batch.expect("managed path batch").paths);
-    }
-    paths
-}
-
-fn fact(path: &str, id: u8) -> LocalFileFact {
-    let profile = ProfileFingerprint::new([id; 32]);
-    let key = SegmentKey::new(
-        profile,
-        OpaqueSegmentIdentity::new(vec![id]).expect("identity"),
-        4,
-    )
-    .expect("segment key");
-    LocalFileFact {
-        path: TargetPath::new(path).expect("path"),
-        version: TargetFileVersion::from_storage(4, vec![1, id]).expect("version"),
-        segments: vec![LocalFileSegmentFact {
-            range: 0..4,
-            validation: ValidationSpec {
-                profile,
-                key: key.clone(),
-                len: 4,
-            },
-            key,
-        }],
-    }
-}
-
-fn expected_fact(fact: &LocalFileFact) -> ExpectedFileFact {
-    ExpectedFileFact {
-        path: fact.path.clone(),
-        len: fact.len(),
-        segments: fact.segments.clone(),
-    }
+    let target = temp.path().join("target");
+    let other_target = temp.path().join("other-target");
+    std::fs::create_dir(&target).expect("target");
+    std::fs::create_dir(&other_target).expect("other target");
+    let db = temp.path().join("observations.sqlite");
+    let store = FleetInventory::open(&db, &target, profile()).expect("open");
+    drop(store);
+    assert!(matches!(
+        FleetInventory::open(&db, &other_target, profile()),
+        Err(fleet_inventory::InventoryError::Incompatible)
+    ));
 }
