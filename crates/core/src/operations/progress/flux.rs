@@ -223,6 +223,7 @@ impl FluxProgressReceiver {
                 },
                 secondary: None,
                 throughput_bytes_per_sec: throughput,
+                write_bytes_per_sec: None,
                 eta_seconds: eta,
             };
         }
@@ -266,6 +267,7 @@ impl FluxProgressReceiver {
                 },
                 secondary: None,
                 throughput_bytes_per_sec: None,
+                write_bytes_per_sec: None,
                 eta_seconds: None,
             };
         };
@@ -298,13 +300,17 @@ impl FluxProgressReceiver {
                 total: Some(transfer.install_bytes_total),
                 unit: ProgressUnit::Bytes,
             },
-            secondary: (transfer.download_bytes_total > 0).then_some(ProgressMetric {
+            secondary: Some(ProgressMetric {
                 label: Some("Downloaded".to_string()),
                 done: Some(transfer.downloaded_bytes),
                 total: Some(transfer.download_bytes_total),
                 unit: ProgressUnit::Bytes,
             }),
             throughput_bytes_per_sec: throughput,
+            write_bytes_per_sec: (transfer.installed_bytes > 0)
+                .then(|| self.install_progress.per_sec())
+                .filter(|rate| rate.is_finite() && *rate > 0.0)
+                .map(|rate| rate.round() as u64),
             eta_seconds: eta,
         }
     }
@@ -377,14 +383,14 @@ mod tests {
                     downloaded_bytes: 20,
                     download_bytes_total: 100,
                     installed_bytes: 10,
-                    install_bytes_total: 100,
+                    install_bytes_total: 200,
                 }),
             },
             0,
         );
         assert_eq!(
             (event.primary.done, event.primary.total, event.primary.unit),
-            (Some(10), Some(100), ProgressUnit::Bytes)
+            (Some(10), Some(200), ProgressUnit::Bytes)
         );
         assert_eq!(
             event

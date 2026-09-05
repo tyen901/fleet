@@ -115,7 +115,7 @@ pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static s
         fleet_core::OperationStage::Validating => "Checking",
         fleet_core::OperationStage::LoadingExpectedState => "Planning",
         fleet_core::OperationStage::VerifyingInventory => "Verifying",
-        fleet_core::OperationStage::Sync => "Downloading",
+        fleet_core::OperationStage::Sync => "Syncing files",
         fleet_core::OperationStage::RemovingObsoleteFiles => "Removing obsolete files",
         fleet_core::OperationStage::Finalizing => "Installing",
     }
@@ -124,7 +124,7 @@ pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static s
 pub(crate) fn format_clock(total_seconds: u64) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
-    format!("{minutes:02}:{seconds:02}")
+    format!("{minutes}m {seconds}s")
 }
 
 pub(crate) fn default_arma3_args(settings: &fleet_core::AppSettings) -> String {
