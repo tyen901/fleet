@@ -467,8 +467,6 @@ mod tests {
             verification,
             health,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         }
     }
 

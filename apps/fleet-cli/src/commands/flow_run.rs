@@ -116,7 +116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_session_does_not_wait_for_a_missed_terminal_event() {
+    async fn explicit_command_starts_while_startup_check_is_enabled() {
         let _lock = ENV_LOCK
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
@@ -124,7 +124,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("test config directory");
         let config_dir = EnvVarGuard::set("FLEET_CONFIG_DIR", temp_dir.path());
         let mut settings = AppSettings::default();
-        settings.startup.auto_check_profiles_on_startup = false;
+        settings.startup.auto_check_profiles_on_startup = true;
         let profile = Profile {
             id: "p1".to_string(),
             name: "Profile".to_string(),
@@ -144,7 +144,7 @@ mod tests {
         )
         .expect("write profiles");
         let _simulate_sync = EnvVarGuard::set("FLEET_SIMULATE_SYNC", "1");
-        let core = Core::new_in_current_runtime_default().expect("core");
+        let core = Core::new_in_current_runtime_for_command().expect("core");
         let mut state = core.subscribe_state();
         tokio::time::timeout(Duration::from_secs(1), async {
             while state.borrow().version == 0 || !state.borrow().profiles.contains_key("p1") {

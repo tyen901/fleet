@@ -555,8 +555,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::MissingDestination,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         });
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
@@ -586,8 +584,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
@@ -659,8 +655,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         });
         runtime.active = Some(super::ActiveOperationState::new(
             1,
@@ -694,8 +688,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::ByteExact,
             health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 1,
         });
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
@@ -725,8 +717,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         });
         runtime.active = Some(super::ActiveOperationState::new(1, OperationKind::Check, 1));
 
@@ -775,8 +765,6 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         });
 
         for (operation, expected) in [
