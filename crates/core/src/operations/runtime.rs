@@ -326,6 +326,8 @@ impl OperationRuntime {
             }
             recompute_profile_status(state, &record.profile_id);
         });
+        tracing::info!(session_id, profile_id = %record.profile_id,
+            "operation cancellation requested by caller");
         record.cancel.cancel();
         CancelResult::Requested
     }
