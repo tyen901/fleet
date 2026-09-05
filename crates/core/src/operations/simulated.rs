@@ -59,6 +59,7 @@ pub(crate) async fn sync(
             secondary: None,
             throughput_bytes_per_sec: (step > 0 && step < TOTAL_REBUILD_FILES)
                 .then_some(8 * 1024 * 1024),
+            write_bytes_per_sec: None,
             eta_seconds: (step < TOTAL_REBUILD_FILES).then_some(TOTAL_REBUILD_FILES - step),
         });
         tokio::time::sleep(STEP_DELAY).await;
@@ -82,11 +83,12 @@ pub(crate) async fn sync(
             },
             secondary: Some(ProgressMetric {
                 label: Some("Downloaded".to_string()),
-                done: Some(done_bytes),
-                total: Some(TOTAL_BYTES),
+                done: Some((done_bytes * 3 / 4).min(TOTAL_BYTES / 2)),
+                total: Some(TOTAL_BYTES / 2),
                 unit: ProgressUnit::Bytes,
             }),
             throughput_bytes_per_sec: Some(12 * 1024 * 1024),
+            write_bytes_per_sec: Some(18 * 1024 * 1024),
             eta_seconds: Some(TOTAL_FILES - step),
         });
         if hold_percent() == Some(step * 100 / TOTAL_FILES) {
