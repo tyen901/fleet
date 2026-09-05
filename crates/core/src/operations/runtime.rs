@@ -467,8 +467,6 @@ mod tests {
             verification,
             health,
             checked_at_unix_ms: 1,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         }
     }
 
@@ -539,7 +537,7 @@ mod tests {
         let check = OperationOutput::Check(CheckReport {
             profile_id: "profile".to_string(),
             repo: repo_report(),
-            local: local_report(VerificationKind::Fast, LocalFileHealth::Dirty),
+            local: local_report(VerificationKind::Fast, LocalFileHealth::RequiresSync),
         });
 
         apply_successful_output(&mut runtime, &check);

@@ -2,7 +2,7 @@ use crate::operations::progress::FluxProgressObserver;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
 use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
-use fleet_inventory::FleetInventoryProvider;
+use fleet_inventory::FleetInventory;
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -20,7 +20,8 @@ pub(crate) async fn sync(
     let repo_url = validated_repo_url(&profile.source)
         .map_err(|_| crate::ApiError::new("invalid_profile", "invalid profile source"))?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let inventory_db = fleet_domain::inventory_db_path(state_root, &profile.id);
+    let inventory_db =
+        fleet_domain::profile_state_dir(state_root, &profile.id).join("observations.sqlite");
 
     publisher.stage(OperationStage::LoadingExpectedState);
     let downloads = fleet_download::DownloadService::new_default();
@@ -36,7 +37,7 @@ pub(crate) async fn sync(
     std::fs::create_dir_all(&dest)
         .map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?;
     let inventory = Arc::new(
-        FleetInventoryProvider::open_or_recreate(&inventory_db)
+        FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id())
             .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?,
     );
 
@@ -49,7 +50,7 @@ pub(crate) async fn sync(
         .observe(publisher.clone(), materialization)
         .await
         .map_err(|error| {
-            if cancel.is_cancelled() {
+            if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
                 crate::ApiError::new("canceled", "canceled")
             } else {
                 crate::ApiError::new("sync_failed", error.to_string())

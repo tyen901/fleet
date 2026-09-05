@@ -90,8 +90,6 @@ pub(crate) async fn sync(
             verification: VerificationKind::Materialized,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: checked_at,
-            missing_paths_count: 0,
-            modified_paths_count: 0,
         },
     })
 }

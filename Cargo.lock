@@ -327,26 +327,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bincode"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
-dependencies = [
- "bincode_derive",
- "serde",
- "unty",
-]
-
-[[package]]
-name = "bincode_derive"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
-dependencies = [
- "virtue",
-]
-
-[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -479,10 +459,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "cap-primitives"
-version = "4.0.2"
+name = "cap-fs-ext"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0"
+checksum = "56ff379b70af8e08307a8f65e7040c7301cb4a572538ade16b4984f0da77847f"
+dependencies = [
+ "cap-primitives",
+ "cap-std",
+ "io-lifetimes 3.0.1",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "cap-primitives"
+version = "4.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b5f74729fd2f44701d1a8eb47e906cdb3ccd9ec0f02baad85a744b791940b18"
 dependencies = [
  "ambient-authority",
  "fs-set-times",
@@ -498,9 +490,9 @@ dependencies = [
 
 [[package]]
 name = "cap-std"
-version = "4.0.2"
+version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608"
+checksum = "c1ec78e242cfa2cfe276807ac2ecc00315a6c97786977414bcd1c3963b6c91b8"
 dependencies = [
  "cap-primitives",
  "io-extras",
@@ -1854,7 +1846,7 @@ dependencies = [
  "fleet-download",
  "fleet-flux",
  "fleet-inventory",
- "indicatif",
+ "flux",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -1899,11 +1891,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "bytes",
  "fleet-download",
- "fleet-inventory",
  "flux",
- "flux-content",
  "futures-util",
  "object_store",
  "swifty-repo",
@@ -1912,123 +1901,33 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]
 name = "fleet-inventory"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "flux",
- "futures-util",
+ "fmutex",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "flux"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "flux-content",
- "flux-domain",
- "flux-inventory",
- "flux-manifest",
- "flux-materialize",
- "flux-source",
- "flux-target",
-]
-
-[[package]]
-name = "flux-content"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "bincode",
- "bytes",
- "flux-domain",
-]
-
-[[package]]
-name = "flux-domain"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "bytes",
- "futures-util",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "flux-inventory"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "flux-content",
- "flux-domain",
- "flux-target",
- "futures-util",
-]
-
-[[package]]
-name = "flux-manifest"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "flux-content",
- "flux-domain",
- "rangemap",
  "uuid",
 ]
 
 [[package]]
-name = "flux-materialize"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
+name = "flux"
+version = "2.0.0"
 dependencies = [
- "bytes",
- "flux-content",
- "flux-domain",
- "flux-inventory",
- "flux-manifest",
- "flux-source",
- "flux-target",
+ "blake3",
+ "cap-fs-ext",
+ "cap-std",
+ "fmutex",
  "futures-dag",
  "futures-util",
  "object_store",
  "rangemap",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "flux-source"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "flux-content",
- "flux-domain",
- "futures-util",
- "object_store",
-]
-
-[[package]]
-name = "flux-target"
-version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=aeb946edf05a8ea711fffd6e14f5069b6ef1b03d#aeb946edf05a8ea711fffd6e14f5069b6ef1b03d"
-dependencies = [
- "blake3",
- "bytes",
- "cap-std",
- "flux-domain",
- "flux-manifest",
- "fmutex",
- "futures-util",
- "rangemap",
+ "redb",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2849,7 +2748,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -4678,7 +4577,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls",
- "socket2 0.5.10",
+ "socket2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4716,7 +4615,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -4955,6 +4854,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -5710,16 +5618,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
@@ -6161,7 +6059,7 @@ dependencies = [
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.2",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -6504,12 +6402,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "unty"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
-
-[[package]]
 name = "ureq"
 version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6652,12 +6544,6 @@ checksum = "9e723b9e1c02a3cf9f9d0de6a4ddb8cdc1df859078902fe0ae0589d615711ae6"
 dependencies = [
  "filetime",
 ]
-
-[[package]]
-name = "virtue"
-version = "0.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "walkdir"
