@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Path::new(&args[3]),
         fleet_flux::swifty_profile_id(),
     )?);
+    inventory.register_manifest(input.manifest())?;
     let setup_ns = setup.elapsed().as_nanos();
     let started = Instant::now();
     let cancellation = tokio_util::sync::CancellationToken::new();
