@@ -90,7 +90,7 @@ pub async fn run() -> anyhow::Result<()> {
     })?;
     let args: Vec<String> = std::env::args().collect();
     info!(?args, "fleet-cli launched");
-    let core = Core::new_in_current_runtime_default()?;
+    let core = Core::new_in_current_runtime_for_command()?;
     let result = commands::dispatch(&core, cli.command).await;
     if let Err(ref err) = result {
         error!(error = %err, "fleet-cli failed");

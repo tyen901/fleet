@@ -10,8 +10,8 @@ pub fn profile_state_dir(state_root: &Path, profile_id: &str) -> PathBuf {
     state_root.join(profile_state_key(profile_id))
 }
 
-pub fn inventory_db_path(state_root: &Path, profile_id: &str) -> PathBuf {
-    profile_state_dir(state_root, profile_id).join("inventory.db")
+pub fn observation_db_path(state_root: &Path, profile_id: &str) -> PathBuf {
+    profile_state_dir(state_root, profile_id).join("observations.sqlite")
 }
 
 /// Swifty repo + mod.srf cache (JSON blobs).

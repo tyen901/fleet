@@ -6,10 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 fleet-download = { workspace = true }
-fleet-inventory = { workspace = true }
 flux = { workspace = true }
-flux-content = { workspace = true }
-bytes = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true }
 swifty-repo = { workspace = true }
@@ -18,7 +15,6 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
