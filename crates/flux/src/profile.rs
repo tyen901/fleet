@@ -1,4 +1,5 @@
 use std::io::Read;
+use std::sync::Arc;
 
 use flux::{
     ContentKey, ContentProfile, Error, ErrorKind, ProfileId, Result, Segment, TargetPath, Validator,
@@ -9,7 +10,21 @@ use swifty_artifacts::{
 
 use crate::input::swifty_profile_id;
 
-pub struct SwiftyFluxProfile;
+pub trait HashProgressObserver: Send + Sync {
+    fn bytes_hashed(&self, bytes: u64);
+}
+
+pub type HashProgressObserverRef = Arc<dyn HashProgressObserver>;
+
+pub struct SwiftyFluxProfile {
+    hash_progress: Option<HashProgressObserverRef>,
+}
+
+impl SwiftyFluxProfile {
+    pub fn new(hash_progress: Option<HashProgressObserverRef>) -> Self {
+        Self { hash_progress }
+    }
+}
 
 impl ContentProfile for SwiftyFluxProfile {
     fn id(&self) -> ProfileId {
@@ -34,7 +49,11 @@ impl ContentProfile for SwiftyFluxProfile {
             bytes_read = bytes_read
                 .checked_add(count as u64)
                 .ok_or_else(|| Error::new(ErrorKind::Validation, "profile scan length overflow"))?;
-            for part in scanner.push(&buffer[..count]).map_err(swifty_error)? {
+            let parts = scanner.push(&buffer[..count]).map_err(swifty_error)?;
+            if let Some(progress) = &self.hash_progress {
+                progress.bytes_hashed(count as u64);
+            }
+            for part in parts {
                 if part.length > 0 {
                     emit(part_segment(part)?)?;
                 }
@@ -110,4 +129,38 @@ fn validate_key(key: &ContentKey) -> Result<()> {
 
 fn swifty_error(error: swifty_artifacts::SwiftyError) -> Error {
     Error::with_source(ErrorKind::Validation, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HashProgressObserver, HashProgressObserverRef, SwiftyFluxProfile};
+    use flux::{ContentProfile, Segment, TargetPath};
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    struct HashByteCounter(AtomicU64);
+
+    impl HashProgressObserver for HashByteCounter {
+        fn bytes_hashed(&self, bytes: u64) {
+            self.0.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn scan_reports_hashed_bytes_after_successful_reader_chunks() {
+        let counter = Arc::new(HashByteCounter(AtomicU64::new(0)));
+        let hash_progress: HashProgressObserverRef = counter.clone();
+        let profile = SwiftyFluxProfile::new(Some(hash_progress));
+        let path = TargetPath::new("example.pbo").unwrap();
+        let mut reader = Cursor::new(b"abcdef".as_slice());
+        let mut segments = Vec::<Segment>::new();
+        profile
+            .scan(&path, 6, &mut reader, &mut |segment| {
+                segments.push(segment);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 6);
+    }
 }

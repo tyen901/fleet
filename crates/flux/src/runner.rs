@@ -23,7 +23,7 @@ pub async fn check_target(
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile),
+        profile: Arc::new(SwiftyFluxProfile::new(None)),
         sources: Vec::new(),
         inventory,
     };
@@ -39,6 +39,7 @@ pub async fn verify_manifest(
     input: MaterializationInput,
     cancel: CancellationToken,
     observer: Option<SnapshotObserver>,
+    hash_progress: Option<crate::HashProgressObserverRef>,
 ) -> Result<bool> {
     let options = flux::Options {
         cancellation: cancel.clone(),
@@ -54,7 +55,7 @@ pub async fn verify_manifest(
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile),
+        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
         sources: Vec::new(),
         inventory,
     };
@@ -69,6 +70,7 @@ pub async fn materialize(
     input: MaterializationInput,
     cancel: CancellationToken,
     observer: Option<SnapshotObserver>,
+    hash_progress: Option<crate::HashProgressObserverRef>,
 ) -> Result<flux::Outcome> {
     let sources = build_store_sources(input.store_index)?;
     let options = flux::Options {
@@ -79,7 +81,7 @@ pub async fn materialize(
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile),
+        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
         sources,
         inventory,
     };

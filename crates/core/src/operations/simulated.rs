@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 const ENV_FLAG: &str = "FLEET_SIMULATE_SYNC";
 const ENV_HOLD_PERCENT: &str = "FLEET_SIMULATE_SYNC_HOLD_PERCENT";
 const TOTAL_FILES: u64 = 20;
+const TOTAL_REBUILD_FILES: u64 = 10;
 const TOTAL_BYTES: u64 = 400 * 1024 * 1024;
 const STEP_DELAY: Duration = Duration::from_millis(120);
 const CANCEL_DELAY: Duration = Duration::from_millis(500);
@@ -40,6 +41,29 @@ pub(crate) async fn sync(
 ) -> Result<SyncReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     publisher.stage(OperationStage::LoadingExpectedState);
+    publisher.stage(OperationStage::VerifyingInventory);
+
+    for step in 0..=TOTAL_REBUILD_FILES {
+        if cancel.is_cancelled() {
+            return Err(crate::ApiError::new("canceled", "operation canceled"));
+        }
+        publisher.progress(OperationProgressEvent {
+            stage: OperationStage::VerifyingInventory,
+            status_text: Some("Hashing local files".to_string()),
+            primary: ProgressMetric {
+                label: None,
+                done: Some(step),
+                total: Some(TOTAL_REBUILD_FILES),
+                unit: ProgressUnit::Files,
+            },
+            secondary: None,
+            throughput_bytes_per_sec: (step > 0 && step < TOTAL_REBUILD_FILES)
+                .then_some(8 * 1024 * 1024),
+            eta_seconds: (step < TOTAL_REBUILD_FILES).then_some(TOTAL_REBUILD_FILES - step),
+        });
+        tokio::time::sleep(STEP_DELAY).await;
+    }
+
     publisher.stage(OperationStage::Sync);
 
     for step in 0..=TOTAL_FILES {

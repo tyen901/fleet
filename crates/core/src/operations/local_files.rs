@@ -25,7 +25,7 @@ pub(crate) async fn check(
     state_root: &Path,
     cancel: CancellationToken,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, None, ReadKind::Check).await
+    check_or_validate(profile, state_root, cancel, None, None, ReadKind::Check).await
 }
 
 pub(crate) async fn validate(
@@ -33,8 +33,17 @@ pub(crate) async fn validate(
     state_root: &Path,
     cancel: CancellationToken,
     progress: Option<fleet_flux::SnapshotObserver>,
+    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, progress, ReadKind::Validate).await
+    check_or_validate(
+        profile,
+        state_root,
+        cancel,
+        progress,
+        hash_progress,
+        ReadKind::Validate,
+    )
+    .await
 }
 
 async fn check_or_validate(
@@ -42,6 +51,7 @@ async fn check_or_validate(
     state_root: &Path,
     cancel: CancellationToken,
     progress: Option<fleet_flux::SnapshotObserver>,
+    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
     read_kind: ReadKind,
 ) -> Result<LocalFileReport, crate::ApiError> {
     let verification_kind = read_kind.evidence();
@@ -88,11 +98,16 @@ async fn check_or_validate(
         ReadKind::Check => fleet_flux::check_target(&dest, inventory, input, cancel.clone())
             .await
             .map_err(|error| operation_error("local_check", &cancel, error))?,
-        ReadKind::Validate => {
-            fleet_flux::verify_manifest(&dest, inventory, input, cancel.clone(), progress)
-                .await
-                .map_err(|error| operation_error("inventory_validation", &cancel, error))?
-        }
+        ReadKind::Validate => fleet_flux::verify_manifest(
+            &dest,
+            inventory,
+            input,
+            cancel.clone(),
+            progress,
+            hash_progress,
+        )
+        .await
+        .map_err(|error| operation_error("inventory_validation", &cancel, error))?,
     };
     Ok(report(
         profile,

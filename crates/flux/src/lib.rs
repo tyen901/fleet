@@ -10,6 +10,7 @@ pub use input::{
     load_cached_swifty_materialization_input, load_swifty_materialization_input, swifty_profile_id,
     MaterializationInput,
 };
+pub use profile::{HashProgressObserver, HashProgressObserverRef};
 pub use runner::{check_target, materialize, verify_manifest};
 
 pub type SnapshotObserver = Arc<dyn Fn(flux::Snapshot) + Send + Sync>;
