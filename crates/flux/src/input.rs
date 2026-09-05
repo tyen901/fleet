@@ -21,6 +21,10 @@ pub struct MaterializationInput {
 }
 
 impl MaterializationInput {
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
     pub fn revision(&self) -> Option<&str> {
         self.revision.as_deref()
     }
