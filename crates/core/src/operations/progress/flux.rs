@@ -139,7 +139,7 @@ impl FluxProgressReceiver {
                 let throughput = self
                     .hash_rate_estimator
                     .update(hashed_bytes, Instant::now());
-                publisher.progress(hash_progress(self.operation, hashed_bytes, throughput));
+                publisher.progress(hash_progress(hashed_bytes, throughput));
             } else {
                 self.hash_rate_estimator.reset();
                 publisher.progress(operation_progress(self.operation, snapshot));
@@ -149,14 +149,13 @@ impl FluxProgressReceiver {
             let throughput = self
                 .hash_rate_estimator
                 .update(hashed_bytes, Instant::now());
-            publisher.progress(hash_progress(self.operation, hashed_bytes, throughput));
+            publisher.progress(hash_progress(hashed_bytes, throughput));
             self.last_hashed_bytes = hashed_bytes;
         }
     }
 }
 
 fn hash_progress(
-    _operation: fleet_domain::OperationKind,
     hashed_bytes: u64,
     throughput_bytes_per_sec: Option<u64>,
 ) -> OperationProgressEvent {
@@ -228,7 +227,6 @@ fn operation_progress(
 mod tests {
     use super::{hash_progress, ByteRateEstimator};
     use crate::operations::ProgressUnit;
-    use fleet_domain::OperationKind;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -249,7 +247,7 @@ mod tests {
 
     #[test]
     fn hash_progress_maps_observed_bytes_without_invented_total() {
-        let event = hash_progress(OperationKind::Validate, 1234, Some(42));
+        let event = hash_progress(1234, Some(42));
         assert_eq!(event.status_text.as_deref(), Some("Hashing local files"));
         assert_eq!(event.primary.done, Some(1234));
         assert_eq!(event.primary.total, None);
