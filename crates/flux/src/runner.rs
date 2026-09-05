@@ -1,91 +1,121 @@
-use std::path::Path;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
+use fleet_inventory::FleetInventoryProvider;
 use tokio_util::sync::CancellationToken;
 
 use crate::profile::SwiftyFluxProfile;
 use crate::source::build_store_sources;
-use crate::{MaterializationInput, SnapshotObserver};
+use crate::MaterializationInput;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalAssessment {
+    pub missing_paths_count: u64,
+    pub modified_paths_count: u64,
+}
 
 pub async fn check_target(
     dest: &Path,
-    inventory: Arc<dyn flux::Inventory>,
-    input: MaterializationInput,
+    inventory: Arc<FleetInventoryProvider>,
+    input: &MaterializationInput,
     cancel: CancellationToken,
-) -> Result<bool> {
-    if cancel.is_cancelled() {
-        return Err(anyhow::Error::new(flux::Error::new(
-            flux::ErrorKind::Cancelled,
-            "canceled",
-        )));
-    }
-    let request = flux::MaterializeRequest {
-        target: dest.to_path_buf(),
-        manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile::new(None)),
-        sources: Vec::new(),
+    progress: Option<flux::ProgressObserverRef>,
+) -> Result<LocalAssessment> {
+    let checked = flux::check_target(flux::CheckTargetRequest {
+        target: flux::TargetSpec {
+            root: dest.to_path_buf(),
+        },
+        manifest: input.manifest.clone(),
         inventory,
-    };
-    tokio::task::spawn_blocking(move || flux::check(&request))
-        .await
-        .map_err(anyhow::Error::new)?
-        .map_err(anyhow::Error::new)
+        progress,
+        cancellation: cancel,
+    })
+    .await
+    .map_err(anyhow::Error::new)?;
+    Ok(LocalAssessment {
+        missing_paths_count: checked
+            .files
+            .iter()
+            .filter(|file| file.state == flux::TargetFileState::Missing)
+            .count() as u64,
+        modified_paths_count: checked
+            .files
+            .iter()
+            .filter(|file| file.state == flux::TargetFileState::Dirty)
+            .count() as u64,
+    })
 }
 
 pub async fn verify_manifest(
     dest: &Path,
-    inventory: Arc<dyn flux::Inventory>,
-    input: MaterializationInput,
+    inventory: Arc<FleetInventoryProvider>,
+    input: &MaterializationInput,
     cancel: CancellationToken,
-    observer: Option<SnapshotObserver>,
+    progress: Option<flux::ProgressObserverRef>,
     hash_progress: Option<crate::HashProgressObserverRef>,
-) -> Result<bool> {
-    let options = flux::Options {
-        cancellation: cancel.clone(),
-        limits: flux::Limits::default(),
-        observer,
-    };
-    if cancel.is_cancelled() {
-        return Err(anyhow::Error::new(flux::Error::new(
-            flux::ErrorKind::Cancelled,
-            "canceled",
-        )));
-    }
-    let request = flux::MaterializeRequest {
-        target: dest.to_path_buf(),
-        manifest: input.manifest,
+) -> Result<LocalAssessment> {
+    let verified = flux::verify_manifest(flux::VerifyManifestRequest {
+        target: flux::TargetSpec {
+            root: dest.to_path_buf(),
+        },
+        manifest: input.manifest.clone(),
         profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
-        sources: Vec::new(),
         inventory,
-    };
-    flux::verify(&request, &options)
-        .await
-        .map_err(anyhow::Error::new)
+        scope: flux::VerificationScope::All,
+        progress,
+        cancellation: cancel,
+    })
+    .await
+    .map_err(anyhow::Error::new)?;
+    Ok(LocalAssessment {
+        missing_paths_count: verified
+            .files
+            .iter()
+            .filter(|file| file.state == flux::ManifestFileState::Missing)
+            .count() as u64,
+        modified_paths_count: verified
+            .files
+            .iter()
+            .filter(|file| file.state == flux::ManifestFileState::Different)
+            .count() as u64,
+    })
 }
 
 pub async fn materialize(
     dest: &Path,
-    inventory: Arc<dyn flux::Inventory>,
+    inventory: Arc<FleetInventoryProvider>,
     input: MaterializationInput,
     cancel: CancellationToken,
-    observer: Option<SnapshotObserver>,
+    progress: Option<flux::ProgressObserverRef>,
     hash_progress: Option<crate::HashProgressObserverRef>,
-) -> Result<flux::Outcome> {
-    let sources = build_store_sources(input.store_index)?;
-    let options = flux::Options {
-        cancellation: cancel.clone(),
-        limits: flux::Limits::default(),
-        observer,
-    };
-    let request = flux::MaterializeRequest {
-        target: dest.to_path_buf(),
-        manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
-        sources,
-        inventory,
-    };
-    flux::materialize(request, options)
-        .await
-        .map_err(anyhow::Error::new)
+) -> Result<()> {
+    let profile: flux::ContentProfileRef = Arc::new(SwiftyFluxProfile::new(hash_progress));
+    let stores = build_store_sources(input.store_index)?;
+    let mut context = flux::MaterializeContext::new();
+    context.cancellation = cancel.clone();
+    context.progress = progress;
+
+    flux::materialize(
+        flux::MaterializeRequest {
+            target: flux::TargetSpec {
+                root: dest.to_path_buf(),
+            },
+            manifest: input.manifest,
+            profile,
+            inventory,
+            stores,
+            reuse_sources: Vec::new(),
+            verification_scope: flux::VerificationScope::Changed,
+        },
+        context,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        if cancel.is_cancelled() || error.kind == flux::FluxErrorKind::Cancelled {
+            anyhow::anyhow!("canceled")
+        } else {
+            anyhow::Error::new(error)
+        }
+    })
 }

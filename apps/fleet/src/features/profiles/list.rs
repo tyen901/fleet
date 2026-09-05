@@ -406,9 +406,11 @@ mod tests {
     #[test]
     fn local_files_need_sync_for_local_repair_states() {
         for local_health in [
-            fleet_core::LocalFileHealth::RequiresSync,
+            fleet_core::LocalFileHealth::Missing,
+            fleet_core::LocalFileHealth::Dirty,
             fleet_core::LocalFileHealth::MissingDestination,
             fleet_core::LocalFileHealth::ExpectedStateUnavailable,
+            fleet_core::LocalFileHealth::InventoryUnavailable,
         ] {
             let status = fleet_core::ProfileStatusState {
                 local_health,
@@ -436,7 +438,7 @@ mod tests {
     fn profile_card_exposes_the_required_sync_action() {
         let mut status = fleet_core::ProfileStatusState {
             headline: fleet_core::ProfileStatusHeadline::NeedsSync,
-            local_health: fleet_core::LocalFileHealth::RequiresSync,
+            local_health: fleet_core::LocalFileHealth::Dirty,
             ..fleet_core::ProfileStatusState::unknown(0)
         };
         assert_eq!(

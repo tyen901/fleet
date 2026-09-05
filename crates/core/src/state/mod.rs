@@ -349,9 +349,10 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
     } else {
         match local_health {
             LocalFileHealth::Clean => ProfileStatusHeadline::ReadyToPlay,
-            LocalFileHealth::RequiresSync => ProfileStatusHeadline::NeedsSync,
+            LocalFileHealth::Missing | LocalFileHealth::Dirty => ProfileStatusHeadline::NeedsSync,
             LocalFileHealth::MissingDestination => ProfileStatusHeadline::MissingDestination,
             LocalFileHealth::ExpectedStateUnavailable => ProfileStatusHeadline::NeedsSync,
+            LocalFileHealth::InventoryUnavailable => ProfileStatusHeadline::NeedsSync,
             LocalFileHealth::InvalidProfile => ProfileStatusHeadline::ActionRequired,
             LocalFileHealth::Unknown => match repo_freshness {
                 Some(RepoCheckFreshness::UpToDate) => ProfileStatusHeadline::StatusUnknown,
@@ -424,7 +425,7 @@ pub fn stage_label(stage: OperationStage) -> &'static str {
         OperationStage::LoadingExpectedState => "Loading expected state",
         OperationStage::VerifyingInventory => "Verifying inventory",
         OperationStage::Sync => "Sync",
-        OperationStage::RemovingObsoleteFiles => "Removing obsolete destination files",
+        OperationStage::RemovingObsoleteFiles => "Removing obsolete managed files",
         OperationStage::Finalizing => "Finalizing",
     }
 }
@@ -554,6 +555,8 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::MissingDestination,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         });
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
@@ -581,8 +584,10 @@ mod tests {
         runtime.check = Some(LocalFileReport {
             profile_id: "p1".to_string(),
             verification: fleet_domain::VerificationKind::Fast,
-            health: LocalFileHealth::RequiresSync,
+            health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
@@ -654,6 +659,8 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         });
         runtime.active = Some(super::ActiveOperationState::new(
             1,
@@ -685,8 +692,10 @@ mod tests {
         runtime.validation = Some(LocalFileReport {
             profile_id: "p1".to_string(),
             verification: fleet_domain::VerificationKind::ByteExact,
-            health: LocalFileHealth::RequiresSync,
+            health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 1,
         });
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
@@ -716,6 +725,8 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         });
         runtime.active = Some(super::ActiveOperationState::new(1, OperationKind::Check, 1));
 
@@ -764,6 +775,8 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::Clean,
             checked_at_unix_ms: 1,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         });
 
         for (operation, expected) in [

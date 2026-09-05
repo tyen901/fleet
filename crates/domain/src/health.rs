@@ -8,7 +8,9 @@ pub enum LocalFileHealth {
     Unknown,
     MissingDestination,
     ExpectedStateUnavailable,
-    RequiresSync,
+    InventoryUnavailable,
+    Missing,
+    Dirty,
     Clean,
     InvalidProfile,
 }
@@ -66,6 +68,8 @@ pub struct LocalFileReport {
     pub verification: VerificationKind,
     pub health: LocalFileHealth,
     pub checked_at_unix_ms: u64,
+    pub missing_paths_count: u64,
+    pub modified_paths_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
