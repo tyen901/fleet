@@ -26,18 +26,19 @@ Operation execution is operation-centric and keyed by a single shared type:
   `AppState.profile_runtime_by_id[profile].active.progress`.
 - Runtime state is per-profile in `AppState.profile_runtime_by_id`.
 - `OperationSessionEvent.operation` carries the domain `OperationKind` directly.
-- `Check` concurrently probes repo freshness and compares target file metadata
-  with the installed expected manifest and durable file facts. It never reads
-  file content or mutates inventory.
+- `Check` concurrently probes repo freshness and compares requested target
+  namespace and file lengths with the installed expected manifest. It never
+  establishes byte equality or mutates inventory.
 - `Validate` reads every managed file through Flux, verifies its bytes against
   the installed expected manifest, and refreshes reusable observed facts.
-- `Sync` is the primary self-heal path. Flux owns verification, planning,
-  materialization, and managed-path deletion; core owns the Fleet session's
-  terminal result.
+- `Sync` is the primary materialization path. Flux owns verification, planning,
+  materialization, exact-mirror deletion, and terminal observation evidence;
+  core owns the Fleet session's terminal result.
 - A failed or cancelled `Sync` invalidates prior local-clean runtime evidence.
-- Inventory corruption is surfaced by `Check`/`Validate` and repaired by `Sync`.
-- Arbitrary unmanaged files are outside Fleet's maintenance scope. `Sync` removes
-  only paths previously managed by Fleet and removed from the new manifest.
+- Invalid inventory storage is surfaced as unavailable state. A missing
+  observation database is created fresh and rebuilt by materialization.
+- The destination is an exact mirror of the requested manifest. `Sync` removes
+  destination files outside that manifest.
 
 Removed architectural paths that must stay deleted:
 
@@ -59,8 +60,8 @@ The operation system is split into purpose-built crates with strict dependency r
 - `swifty-repo`: Swifty repo cache, repo metadata sync/probe, and cached repo access.
   - Owns repo freshness checks and cache fallback. Metadata downloads and parsing overlap with bounded concurrency, and cache publication is atomic. Fleet crates should not duplicate this logic.
 - `fleet-inventory`: durable materialization facts database for the managed target scope.
-  - Persists the current managed target-relative path snapshot, reusable local file facts, and reusable segment metadata required for local reuse.
-  - The managed-path snapshot may contain paths that do not have reusable file facts.
+  - Implements Flux's target-bound `Inventory` contract with observed file version/profile evidence and ordered reusable segments.
+  - Uses short provisional observation batch transactions and atomic finish/terminal transactions; provisional rows are incomplete observations, not executable run state.
   - Must not persist run state, staging state, commit state, delete intent, audit history, manifest intent, progress, or recovery journals.
   - SQL-native implementation details remain behind the inventory crate; callers must not use ad hoc SQL access directly.
   - Rust feeds typed facts into SQLite temp tables; SQLite performs set operations, joins, ranking, aggregation, constraints, and mutation.
@@ -68,7 +69,7 @@ The operation system is split into purpose-built crates with strict dependency r
 
 ### Inventory boundary rules
 
-- Inventory answers: the current managed target-relative path snapshot and reusable local file/segment facts.
+- Inventory answers: current observed version/profile evidence and reusable local file/segment facts for one target.
 - Inventory does not answer: what a current sync intends to do, what a manifest expects in the future, what should be deleted later, or how an interrupted operation should resume.
 - There is no initialized baseline state.
 - Core/Flux/runtime layers must recompute transient decisions from manifest + disk + materialization inventory truth instead of storing those decisions in inventory.
@@ -89,13 +90,12 @@ fleet-core
   └─ fleet-flux
 
 fleet-flux        (ONLY Fleet crate with Flux materialization/runtime ownership)
-  ├─ fleet-inventory
   ├─ fleet-download
   ├─ swifty-repo
   ├─ flux
   └─ object_store
 
 fleet-inventory
-  ├─ flux           (capability-specific inventory traits)
+  ├─ flux           (public observation and terminal inventory contracts)
   └─ rusqlite       (private SQL-native implementation)
 ```

@@ -10,7 +10,7 @@ Fleet is a Rust workspace with a native Dioxus desktop UI.
 - `crates/core/`: core runtime, launch planning, settings/profile management.
 - `crates/core/src/operations/`: operation execution, session lifecycle, and progress events.
 - `crates/flux/`: `fleet-flux`, Fleet's Flux integration boundary for Swifty-to-Flux input conversion, store source/profile adapters, and `flux::materialize` execution.
-- `crates/inventory/`: SQL-native durable materialization facts database and Flux inventory bridge.
+- `crates/inventory/`: SQL-native, target-bound implementation of Flux's durable observation contract.
 - `crates/download/`: download service.
 - `crates/swifty-repo/`: Swifty repo cache management.
 - `profile_state/`: per-profile runtime state under Fleet config root (inventory SQLite, repo cache artifacts).
@@ -83,16 +83,15 @@ The runner creates isolated dummy `settings.json`, `profiles.json`, profile file
 
 ## Inventory Enforcement Rules
 
-- Fleet inventory is the durable materialization facts database for the managed target scope.
-- It persists the current managed target-relative path snapshot, reusable local file facts, and reusable segment metadata required for local reuse.
-- The managed-path snapshot may contain paths that do not have reusable file facts.
+- Fleet inventory is the durable, target-bound observation database for local materialization reuse.
+- It persists observed file version/profile evidence and ordered reusable segment facts. Flux supplies the observation and terminal confirmation contract; Fleet owns the SQL storage.
 - There is no initialized baseline state.
 - Do not persist transient run state, sync progress, staging state, commit state, delete plans, audit history, recovery journals, manifest intent, or future desired state in the inventory.
 - Do not add run tables, audit tables, heartbeat metadata, generations, pending-delete markers, staging paths, or similar operational bookkeeping back into the inventory schema.
 - Do not treat the inventory as a general runtime state store, workflow cache, or dumping ground for convenience data.
-- If a value is derived from the current manifest, current disk scan, or current in-memory operation, it does not belong in the inventory unless it is part of the managed path snapshot or reusable local file facts.
+- If a value is derived from the current manifest, current disk scan, or current in-memory operation, it does not belong in the inventory unless it is part of reusable observed file facts.
 - Operational decisions such as cleanup candidates, materialization planning, remote comparisons, and temporary progress belong in core/Flux/runtime layers and must be recomputed, not persisted in inventory.
-- Flux integration must go through a narrow inventory-owned bridge. Do not expose broad public adapter types or public low-level writeback helpers just because another crate might use them.
+- Flux integration uses the narrow public `flux::Inventory` and `flux::ObservationWriter` contracts. Fleet's SQL implementation remains private to the inventory crate.
 - Keep SQL implementation details private to `crates/inventory`. Callers must not use ad hoc SQL access, schema-coupled logic, or inventory-internal helper types.
 - When changing inventory APIs, prefer making the public surface smaller. Do not preserve legacy exports, pass-through re-exports, or compatibility wrappers without explicit instruction.
 - Inventory is SQL-native: feed typed facts into SQLite temp tables and let SQLite perform set operations, joins, ranking, aggregation, constraints, and mutation. Rust should decode final boundary DTOs, not perform inventory row joins or set diffs.
@@ -155,17 +154,17 @@ PRs should pass `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warni
 - Runtime operation state is per-profile in `AppState.profile_runtime_by_id`.
 - Operation events are observational only; terminal completion is read from the core session registry.
 - Supported operation kinds are `Check`, `Validate`, and `Sync`.
-- `Check` concurrently probes remote repo freshness and runs Flux's metadata-only local check against the installed expected manifest and durable facts. It does not read file content or write inventory facts.
+- `Check` concurrently probes remote repo freshness and runs Flux's metadata-only local check for requested namespace and file lengths. It does not establish byte equality or write inventory facts.
 - `Validate` runs Flux's byte-correct verification across every managed file and refreshes reusable observed facts.
 - `Sync` is the primary materialization and self-heal path. It calls `fleet_flux::materialize(...)` directly; Flux owns typed live materialization progress.
-- `Sync` removes obsolete previously managed paths; unrelated unmanaged files are not enumerated or maintained.
+- `Sync` materializes an exact mirror of the requested manifest, including removal of destination files outside that manifest.
 - Failed or cancelled `Sync` invalidates prior runtime local-clean evidence.
-- Inventory corruption is surfaced by `Check`/`Validate` and repaired by `Sync`.
+- Invalid inventory storage is reported as unavailable state; a missing observation database is opened fresh and rebuilt by the next materialization.
 - Check and sync logic may read materialization inventory facts, but must not push operational state back into inventory.
 - Flux entry-point ownership:
   - `crates/flux` is the only Fleet crate that should convert Fleet/Swifty shapes into Flux materialization inputs or call `flux::materialize`.
   - `swifty-repo` owns Swifty repo cache/probe/sync behavior. Do not recreate repo cache logic in `fleet-flux`.
-  - `fleet-inventory` owns the capability-specific Flux inventory bridge.
+  - `fleet-inventory` owns the target-bound SQL implementation of Flux's `Inventory` contract.
 - Removed paths that should not be reintroduced:
   - `crates/pipeline/`
   - `crates/core/src/features/flow_ops.rs`

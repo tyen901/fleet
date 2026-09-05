@@ -156,11 +156,9 @@ pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
 pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> bool {
     matches!(
         status.local_health,
-        fleet_core::LocalFileHealth::Missing
-            | fleet_core::LocalFileHealth::Dirty
+        fleet_core::LocalFileHealth::RequiresSync
             | fleet_core::LocalFileHealth::MissingDestination
             | fleet_core::LocalFileHealth::ExpectedStateUnavailable
-            | fleet_core::LocalFileHealth::InventoryUnavailable
     )
 }
 
