@@ -448,7 +448,6 @@ impl ObservationWriter for FleetObservation {
 
 struct RecipeHasher {
     hasher: Sha1,
-    segment_count: u64,
 }
 
 impl RecipeHasher {
@@ -456,10 +455,7 @@ impl RecipeHasher {
         let mut hasher = Sha1::new();
         hasher.update(b"fleet-inventory-recipe-v1");
         hasher.update(profile.0);
-        Self {
-            hasher,
-            segment_count: 0,
-        }
+        Self { hasher }
     }
 
     fn push(&mut self, length: u64, identity: &[u8]) {
@@ -470,11 +466,9 @@ impl RecipeHasher {
                 .to_le_bytes(),
         );
         self.hasher.update(identity);
-        self.segment_count = self.segment_count.saturating_add(1);
     }
 
     fn finish(mut self, length: u64, segment_count: u64) -> Vec<u8> {
-        debug_assert_eq!(self.segment_count, segment_count);
         self.hasher.update(length.to_le_bytes());
         self.hasher.update(segment_count.to_le_bytes());
         self.hasher.finalize().to_vec()
@@ -539,10 +533,6 @@ fn apply_confirmed(
     }
     let recipe_id =
         ensure_recipe_from_segments(tx, manifest.profile(), file.length, &file.segments)?;
-    if confirmed_matches(tx, confirmed.path, recipe_id, &confirmed.observation)? {
-        return Ok(());
-    }
-
     tx.execute(
         "INSERT INTO observed_files(path, version, recipe_id)
          VALUES (?1, ?2, ?3)
@@ -559,37 +549,6 @@ fn apply_confirmed(
     )
     .map_err(sql_error)?;
     Ok(())
-}
-
-fn confirmed_matches(
-    tx: &Transaction<'_>,
-    path: &TargetPath,
-    recipe_id: i64,
-    observed: &ObservedFile,
-) -> Result<bool> {
-    let Some((version, length, existing_recipe)) = tx
-        .query_row(
-            "SELECT f.version, r.length, f.recipe_id
-             FROM observed_files f
-             JOIN recipes r ON r.id = f.recipe_id
-             WHERE f.path = ?1",
-            [path.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(sql_error)?
-    else {
-        return Ok(false);
-    };
-    Ok(version.as_slice() == observed.version().as_bytes()
-        && from_sql_u64(length)? == observed.length()
-        && existing_recipe == recipe_id)
 }
 
 fn ensure_recipe_from_segments(

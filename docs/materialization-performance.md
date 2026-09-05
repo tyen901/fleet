@@ -27,6 +27,8 @@ verifies the original file SHA-256 after every trial. A verified external backup
 restores any unsuccessful repair. These adapter measurements omit CLI startup
 and repository refresh; do not combine them with CLI timings below. Build and
 record both source revisions and executable hashes before timing.
+Process time includes cached input loading and immutable recipe registration;
+the separately reported operation time starts after that setup.
 
 `cargo run --release -p fleet-inventory --example inventory-size -- <database>`
 uses SQLite `dbstat` in read-only mode to report cell payload and pages for every

@@ -39,8 +39,11 @@ pub(crate) async fn sync(
         FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id())
             .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?,
     );
-    inventory
-        .register_manifest(input.manifest())
+    let catalog = inventory.clone();
+    let manifest = input.manifest().clone();
+    tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
+        .await
+        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?
         .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
 
     publisher.stage(OperationStage::Sync);
