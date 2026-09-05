@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "fleet"
-version = "4.0.0-beta.2"
+version = "4.0.0-beta.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-cli"
-version = "4.0.0-beta.2"
+version = "4.0.0-beta.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1931,7 +1931,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -1945,7 +1945,7 @@ dependencies = [
 [[package]]
 name = "flux-content"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "bincode",
  "bytes",
@@ -1955,7 +1955,7 @@ dependencies = [
 [[package]]
 name = "flux-domain"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1965,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "flux-inventory"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -1976,7 +1976,7 @@ dependencies = [
 [[package]]
 name = "flux-manifest"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -1987,7 +1987,7 @@ dependencies = [
 [[package]]
 name = "flux-materialize"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "bytes",
  "flux-content",
@@ -2008,7 +2008,7 @@ dependencies = [
 [[package]]
 name = "flux-source"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "flux-content",
  "flux-domain",
@@ -2019,7 +2019,7 @@ dependencies = [
 [[package]]
 name = "flux-target"
 version = "0.1.0"
-source = "git+https://github.com/tyen901/flux6.git?rev=51c62765523f06a86e4dfab3464528091f422323#51c62765523f06a86e4dfab3464528091f422323"
+source = "git+https://github.com/tyen901/flux6.git?rev=cd1fa8e837df1986f37562d8c7ca18699e9db5f8#cd1fa8e837df1986f37562d8c7ca18699e9db5f8"
 dependencies = [
  "blake3",
  "bytes",
