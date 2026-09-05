@@ -680,6 +680,12 @@ fn render_sync_mode(
             .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
             .unwrap_or("Preparing sync")
     };
+    let transferring = progress
+        .and_then(|progress| progress.primary_metric.as_ref())
+        .is_some_and(|metric| metric.unit == fleet_core::ProgressUnit::Bytes);
+    let write_rate = progress
+        .and_then(|progress| progress.write_bytes_per_sec)
+        .map(format_speed);
     let percent_label = percent.map(|value| format!("{value}%"));
 
     let primary_metric = progress.and_then(|progress| progress.primary_metric.clone());
@@ -688,22 +694,13 @@ fn render_sync_mode(
         fleet_core::ProgressUnit::Files => metric.rendered.clone(),
         fleet_core::ProgressUnit::Bytes => format!("{} {}", metric.label, metric.rendered),
     });
-    let secondary_amount = secondary_metric.as_ref().and_then(|metric| {
-        metric.done.map(|done| {
-            format!(
-                "{} {}",
-                metric.label,
-                fleet_domain::utils::format_bytes(done)
-            )
-        })
-    });
     let rate = progress
         .and_then(|progress| progress.throughput_bytes_per_sec)
         .map(format_speed);
     let remaining = progress
         .and_then(|progress| progress.eta_seconds)
         .map(format_clock);
-    let approximate_remaining = progress.is_some_and(|progress| {
+    let hashing = progress.is_some_and(|progress| {
         progress.active_stage == fleet_core::OperationStage::VerifyingInventory
     });
 
@@ -721,31 +718,31 @@ fn render_sync_mode(
                     section { class: "sync-panel",
                         div { class: "sync-panel__head",
                             div { class: "sync-panel__phase", "{phase}" }
-                            if let Some(percent_label) = percent_label.as_ref() {
-                                div { class: "sync-panel__percent", "{percent_label}" }
+                            if !transferring {
+                                if let Some(percent_label) = percent_label.as_ref() {
+                                    div { class: "sync-panel__percent", "{percent_label}" }
+                                }
                             }
                         }
-                        ProgressBar { percent, indeterminate }
-                        if !stopping {
-                            if let Some(primary_amount) = primary_amount.as_ref() {
-                                div { class: "sync-panel__count mono", "{primary_amount}" }
-                            }
-                        }
-                        if !stopping {
-                            div { class: "sync-panel__stats",
-                                if let Some(secondary_amount) = secondary_amount.as_ref() {
-                                    span { class: "mono", "{secondary_amount}" }
+                        if transferring {
+                            {render_transfer_bar("Download", secondary_metric.as_ref(), rate.as_deref(), stopping)}
+                            {render_transfer_bar("Write", primary_metric.as_ref(), write_rate.as_deref(), stopping)}
+                        } else {
+                            ProgressBar { percent, indeterminate }
+                            if !stopping {
+                                if let Some(primary_amount) = primary_amount.as_ref() {
+                                    div { class: "sync-panel__count mono", "{primary_amount}" }
                                 }
-                                if let Some(rate) = rate.as_ref() {
-                                    span { class: "mono", "{rate}" }
-                                }
-                                if let Some(remaining) = remaining.as_ref() {
-                                    if approximate_remaining {
-                                        span { class: "mono", "About {remaining} remaining" }
-                                    } else {
-                                        span { class: "mono", "Remaining {remaining}" }
+                                if hashing {
+                                    if let Some(rate) = rate.as_ref() {
+                                        div { class: "sync-panel__stats mono", "Hashing speed {rate}" }
                                     }
                                 }
+                            }
+                        }
+                        if !stopping {
+                            if let Some(remaining) = remaining.as_ref() {
+                                div { class: "sync-panel__stats mono", "About {remaining} remaining" }
                             }
                         }
                     }
@@ -762,6 +759,46 @@ fn render_sync_mode(
                         if stopping { "Stopping" } else { "Cancel" }
                     }
                 }),
+            }
+        }
+    }
+}
+
+fn render_transfer_bar(
+    label: &str,
+    metric: Option<&fleet_core::UiProgressMetric>,
+    rate: Option<&str>,
+    stopping: bool,
+) -> Element {
+    let total = metric.and_then(|metric| metric.total);
+    let done = metric.and_then(|metric| metric.done);
+    let percent = done
+        .zip(total)
+        .filter(|(_, total)| *total > 0)
+        .map(|(done, total)| {
+            ((done as f64 / total as f64) * 100.0)
+                .clamp(0.0, 100.0)
+                .round() as u64
+        });
+    let amount = metric.map(|metric| metric.rendered.as_str());
+    rsx! {
+        div { class: "sync-panel",
+            div { class: "sync-panel__head",
+                div { "{label}" }
+                if total != Some(0) {
+                    if let Some(percent) = percent { div { class: "sync-panel__percent", "{percent}%" } }
+                }
+            }
+            if total == Some(0) {
+                div { class: "sync-panel__stats", "No {label.to_lowercase()} needed" }
+            } else {
+                ProgressBar { percent, indeterminate: percent.is_none() }
+                div { class: "sync-panel__count mono", if let Some(amount) = amount { "{amount}" } }
+                if !stopping {
+                    if let Some(rate) = rate {
+                        div { class: "sync-panel__stats mono", "{label} speed {rate}" }
+                    }
+                }
             }
         }
     }
