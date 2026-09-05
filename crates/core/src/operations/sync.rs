@@ -39,6 +39,9 @@ pub(crate) async fn sync(
         FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id())
             .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?,
     );
+    inventory
+        .register_manifest(input.manifest())
+        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
 
     publisher.stage(OperationStage::Sync);
     let (progress, hash_progress, progress_receiver) =

@@ -1914,11 +1914,11 @@ dependencies = [
  "r2d2_sqlite",
  "rusqlite",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "uuid",
 ]
 
 [[package]]
