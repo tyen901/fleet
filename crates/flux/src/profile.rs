@@ -1,14 +1,14 @@
-use bytes::Bytes;
-use flux::{FluxError, FluxErrorKind, FluxResult, TargetPath};
-use flux_content::{
-    ProfileFileScanner, SegmentObservation, StreamingValidator, ValidationEvidence,
-};
+use std::io::Read;
 use std::sync::Arc;
+
+use flux::{
+    ContentKey, ContentProfile, Error, ErrorKind, ProfileId, Result, Segment, TargetPath, Validator,
+};
 use swifty_artifacts::{
     Md5Digest, SrfPart, SwiftyStreamingPartScanner, SwiftyStreamingPartValidator,
 };
 
-use crate::input::swifty_profile_fingerprint;
+use crate::input::swifty_profile_id;
 
 pub trait HashProgressObserver: Send + Sync {
     fn bytes_hashed(&self, bytes: u64);
@@ -26,152 +26,118 @@ impl SwiftyFluxProfile {
     }
 }
 
-impl flux::ContentProfile for SwiftyFluxProfile {
-    fn fingerprint(&self) -> flux::ProfileFingerprint {
-        swifty_profile_fingerprint()
+impl ContentProfile for SwiftyFluxProfile {
+    fn id(&self) -> ProfileId {
+        swifty_profile_id()
     }
 
-    fn begin_file_scan(
+    fn scan(
         &self,
         path: &TargetPath,
         len: u64,
-    ) -> FluxResult<Box<dyn ProfileFileScanner>> {
-        Ok(Box::new(SwiftyInventoryScanner {
-            scanner: SwiftyStreamingPartScanner::new(path.as_str(), len),
-            hash_progress: self.hash_progress.clone(),
-        }))
-    }
-
-    fn validator(&self, spec: &flux::ValidationSpec) -> FluxResult<Box<dyn StreamingValidator>> {
-        validate_spec(spec)?;
-        let digest = swifty_digest_from_spec(spec)?;
-        Ok(Box::new(SwiftyPartValidator {
-            spec: spec.clone(),
-            validator: SwiftyStreamingPartValidator::new(digest, spec.len),
-        }))
-    }
-}
-
-struct SwiftyInventoryScanner {
-    scanner: SwiftyStreamingPartScanner,
-    hash_progress: Option<HashProgressObserverRef>,
-}
-
-impl ProfileFileScanner for SwiftyInventoryScanner {
-    fn push(&mut self, bytes: Bytes) -> FluxResult<Vec<SegmentObservation>> {
-        let byte_count = bytes.len() as u64;
-        let observations = self
-            .scanner
-            .push(bytes.as_ref())
-            .map_err(swifty_error)?
-            .into_iter()
-            .filter(|part| part.length > 0)
-            .map(part_observation)
-            .collect::<FluxResult<Vec<_>>>()?;
-        if let Some(progress) = &self.hash_progress {
-            progress.bytes_hashed(byte_count);
+        reader: &mut dyn Read,
+        emit: &mut dyn FnMut(Segment) -> Result<()>,
+    ) -> Result<()> {
+        let mut scanner = SwiftyStreamingPartScanner::new(path.as_str(), len);
+        let mut bytes_read = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            bytes_read = bytes_read
+                .checked_add(count as u64)
+                .ok_or_else(|| Error::new(ErrorKind::Validation, "profile scan length overflow"))?;
+            let parts = scanner.push(&buffer[..count]).map_err(swifty_error)?;
+            if let Some(progress) = &self.hash_progress {
+                progress.bytes_hashed(count as u64);
+            }
+            for part in parts {
+                if part.length > 0 {
+                    emit(part_segment(part)?)?;
+                }
+            }
         }
-        Ok(observations)
+        for part in scanner.finish().map_err(swifty_error)? {
+            if part.length > 0 {
+                emit(part_segment(part)?)?;
+            }
+        }
+        if bytes_read != len {
+            return Err(Error::new(
+                ErrorKind::Validation,
+                "profile scanner read length mismatch",
+            ));
+        }
+        Ok(())
     }
 
-    fn finish(self: Box<Self>) -> FluxResult<Vec<SegmentObservation>> {
-        self.scanner
-            .finish()
-            .map_err(swifty_error)?
-            .into_iter()
-            .filter(|part| part.length > 0)
-            .map(part_observation)
-            .collect()
+    fn validator(&self, key: &ContentKey) -> Result<Box<dyn Validator>> {
+        validate_key(key)?;
+        let digest =
+            Md5Digest::from_bytes(key.identity().try_into().map_err(|_| {
+                Error::new(ErrorKind::Validation, "invalid Swifty MD5 digest length")
+            })?);
+        Ok(Box::new(SwiftyValidator {
+            validator: SwiftyStreamingPartValidator::new(digest, key.length()),
+        }))
     }
 }
 
-fn part_observation(part: SrfPart) -> FluxResult<SegmentObservation> {
-    let profile = swifty_profile_fingerprint();
-    let key = flux::SegmentKey::new(
-        profile,
-        flux::OpaqueSegmentIdentity::new(part.checksum.as_bytes().to_vec())?,
-        part.length,
-    )?;
-    Ok(SegmentObservation {
-        range: part.start..part.start + part.length,
-        validation: flux::ValidationSpec {
-            profile,
-            key: key.clone(),
-            len: part.length,
-        },
-        key,
+fn part_segment(part: SrfPart) -> Result<Segment> {
+    Ok(Segment {
+        offset: part.start,
+        key: ContentKey::new(
+            swifty_profile_id(),
+            part.checksum.as_bytes().to_vec(),
+            part.length,
+        )?,
     })
 }
 
-struct SwiftyPartValidator {
-    spec: flux::ValidationSpec,
+struct SwiftyValidator {
     validator: SwiftyStreamingPartValidator,
 }
 
-impl StreamingValidator for SwiftyPartValidator {
-    fn push(&mut self, bytes: Bytes) -> FluxResult<()> {
-        self.validator.push(bytes.as_ref()).map_err(swifty_error)
+impl Validator for SwiftyValidator {
+    fn update(&mut self, bytes: &[u8]) -> Result<()> {
+        self.validator.push(bytes).map_err(swifty_error)
     }
 
-    fn finish(self: Box<Self>) -> FluxResult<ValidationEvidence> {
-        let len = self.validator.finish().map_err(swifty_error)?;
-        Ok(ValidationEvidence {
-            spec: self.spec.clone(),
-            len,
-        })
+    fn finish(self: Box<Self>) -> Result<()> {
+        self.validator.finish().map_err(swifty_error)?;
+        Ok(())
     }
 }
 
-fn validate_spec(spec: &flux::ValidationSpec) -> FluxResult<()> {
-    if spec.profile != swifty_profile_fingerprint() {
-        return Err(FluxError::new(
-            FluxErrorKind::ValidationFailed,
-            "validation spec profile fingerprint mismatch",
+fn validate_key(key: &ContentKey) -> Result<()> {
+    if key.profile() != swifty_profile_id() {
+        return Err(Error::new(
+            ErrorKind::Validation,
+            "validation profile mismatch",
         ));
     }
-    if spec.key.profile != spec.profile {
-        return Err(FluxError::new(
-            FluxErrorKind::ValidationFailed,
-            "validation spec key profile mismatch",
-        ));
-    }
-    if spec.key.identity.bytes().len() != 16 {
-        return Err(FluxError::new(
-            FluxErrorKind::ValidationFailed,
+    if key.identity().len() != 16 {
+        return Err(Error::new(
+            ErrorKind::Validation,
             "invalid Swifty MD5 digest length",
-        ));
-    }
-    if spec.key.len != spec.len {
-        return Err(FluxError::new(
-            FluxErrorKind::ValidationFailed,
-            "validation spec key length mismatch",
         ));
     }
     Ok(())
 }
 
-fn swifty_digest_from_spec(spec: &flux::ValidationSpec) -> FluxResult<Md5Digest> {
-    let bytes: [u8; 16] = spec.key.identity.bytes().try_into().map_err(|_| {
-        FluxError::new(
-            FluxErrorKind::ValidationFailed,
-            "invalid Swifty MD5 digest length",
-        )
-    })?;
-    Ok(Md5Digest::from_bytes(bytes))
-}
-
-fn swifty_error(error: swifty_artifacts::SwiftyError) -> FluxError {
-    FluxError::new(FluxErrorKind::ValidationFailed, error.to_string())
+fn swifty_error(error: swifty_artifacts::SwiftyError) -> Error {
+    Error::with_source(ErrorKind::Validation, error)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HashProgressObserver, HashProgressObserverRef, SwiftyInventoryScanner};
-    use bytes::Bytes;
-    use flux_content::ProfileFileScanner;
+    use super::{HashProgressObserver, HashProgressObserverRef, SwiftyFluxProfile};
+    use flux::{ContentProfile, Segment, TargetPath};
+    use std::io::Cursor;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use swifty_artifacts::SwiftyStreamingPartScanner;
 
     struct HashByteCounter(AtomicU64);
 
@@ -182,18 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn scanner_reports_hashed_bytes_after_a_successful_push() {
+    fn scan_reports_hashed_bytes_after_successful_reader_chunks() {
         let counter = Arc::new(HashByteCounter(AtomicU64::new(0)));
         let hash_progress: HashProgressObserverRef = counter.clone();
-        let mut scanner = SwiftyInventoryScanner {
-            scanner: SwiftyStreamingPartScanner::new("example.pbo", 6),
-            hash_progress: Some(hash_progress),
-        };
-
-        scanner.push(Bytes::from_static(b"abc")).unwrap();
-        assert_eq!(counter.0.load(Ordering::Relaxed), 3);
-        scanner.push(Bytes::from_static(b"def")).unwrap();
-
+        let profile = SwiftyFluxProfile::new(Some(hash_progress));
+        let path = TargetPath::new("example.pbo").unwrap();
+        let mut reader = Cursor::new(b"abcdef".as_slice());
+        let mut segments = Vec::<Segment>::new();
+        profile
+            .scan(&path, 6, &mut reader, &mut |segment| {
+                segments.push(segment);
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(counter.0.load(Ordering::Relaxed), 6);
     }
 }

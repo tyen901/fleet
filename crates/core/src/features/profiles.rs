@@ -695,10 +695,8 @@ mod tests {
                 check: Some(LocalFileReport {
                     profile_id: profile_id.clone(),
                     verification: fleet_domain::VerificationKind::Fast,
-                    health: LocalFileHealth::Dirty,
+                    health: LocalFileHealth::RequiresSync,
                     checked_at_unix_ms: 10,
-                    missing_paths_count: 0,
-                    modified_paths_count: 0,
                 }),
                 validation: None,
                 materialization: None,
