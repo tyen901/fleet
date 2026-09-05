@@ -503,6 +503,13 @@ async function runFlow(client) {
         .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
       syncActions: [...syncSection.querySelectorAll('.field-row__title')]
         .map((heading) => heading.textContent.trim()),
+      hasLaunchArguments: [...document.querySelectorAll('.form-field__label')]
+        .some((label) => label.textContent.trim() === 'Launch arguments'),
+      hasRemovedOperationProse: [
+        'No local metadata changes detected',
+        'Read every managed file and verify its bytes',
+        'Install, update, repair, or remove files to match the expected state',
+      ].some((text) => document.body.innerText.includes(text)),
       // Read mode uses the real controls, locked rather than replaced.
       readonlyInputs: [...document.querySelectorAll('.form-field .field__input')]
         .every((input) => input.readOnly),
@@ -535,9 +542,11 @@ async function runFlow(client) {
     profileOverviewLayout.hasReadyState ||
     profileOverviewLayout.hasLaunchOrJoin ||
     profileOverviewLayout.syncActions.join(',') !==
-      'Check profile,Sync profile,Validate local files' ||
+      'Check for updates,Validate local files,Force Sync' ||
+    profileOverviewLayout.hasLaunchArguments ||
+    profileOverviewLayout.hasRemovedOperationProse ||
     !profileOverviewLayout.readonlyInputs ||
-    profileOverviewLayout.readonlyInputCount !== 4 ||
+    profileOverviewLayout.readonlyInputCount !== 3 ||
     profileOverviewLayout.inlineRowHeights.join(',') !== '34' ||
     !profileOverviewLayout.inputBordersConsistent ||
     !profileOverviewLayout.buttonsBorderless ||
@@ -565,6 +574,52 @@ async function runFlow(client) {
     'edit profile cancel action',
   );
   await client.capture('07-edit-profile-top.png');
+  const customLaunchArguments = '-world=empty -showScriptErrors';
+  const defaultsInitiallyEnabled = await client.evaluate(
+    `document.querySelector('.field-row .check')?.checked`,
+  );
+  if (!defaultsInitiallyEnabled) throw new Error('Default launch arguments should start enabled');
+  await client.click('.field-row .check');
+  await client.waitFor(
+    `[...document.querySelectorAll('.form-field__label')]
+      .some((label) => label.textContent.trim() === 'Launch arguments')`,
+    'custom launch arguments field',
+  );
+  const savedCustomLaunchArguments = await client.evaluate(`(() => {
+    const field = [...document.querySelectorAll('.form-field')]
+      .find((candidate) => candidate.querySelector('.form-field__label')?.textContent.trim() === 'Launch arguments');
+    const input = field?.querySelector('.field__input');
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, ${JSON.stringify(customLaunchArguments)});
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+    return input.value;
+  })()`);
+  if (savedCustomLaunchArguments !== customLaunchArguments) {
+    throw new Error('Custom launch arguments could not be entered');
+  }
+  await client.capture('07-edit-profile-custom-args.png');
+  await client.click('.field-row .check');
+  await client.waitFor(
+    `![...document.querySelectorAll('.form-field__label')]
+      .some((label) => label.textContent.trim() === 'Launch arguments')`,
+    'hidden default launch arguments field',
+  );
+  await client.click('.field-row .check');
+  await client.waitFor(
+    `(() => {
+      const field = [...document.querySelectorAll('.form-field')]
+        .find((candidate) => candidate.querySelector('.form-field__label')?.textContent.trim() === 'Launch arguments');
+      return field?.querySelector('.field__input')?.value === ${JSON.stringify(customLaunchArguments)};
+    })()`,
+    'restored custom launch arguments',
+  );
+  await client.click('.field-row .check');
+  await client.waitFor(
+    `![...document.querySelectorAll('.form-field__label')]
+      .some((label) => label.textContent.trim() === 'Launch arguments')`,
+    'restored default launch arguments visibility',
+  );
   await client.evaluate(`(() => {
     document.querySelector('.mod-list').closest('.section').scrollIntoView({ block: 'start' });
   })()`);
@@ -648,10 +703,38 @@ async function runFlow(client) {
       .find((button) => button.textContent.trim() === 'Cancel').click();
   })()`);
 
-  await client.clickText('Cancel');
-  await client.waitFor(`document.body.innerText.includes('Validate')`, 'profile read mode');
+  while ((await client.evaluate(`document.querySelectorAll('.mod-list__row').length`)) > 0) {
+    await client.clickText('Remove');
+  }
+  const emptyModEditor = await client.evaluate(`(() => {
+    const additionalMods = [...document.querySelectorAll('.section')]
+      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Additional mods');
+    return Boolean(additionalMods?.querySelector('[aria-label="Add mod"]')) &&
+      additionalMods.querySelectorAll('.mod-list__row').length === 0;
+  })()`);
+  if (!emptyModEditor) throw new Error('Empty additional-mod editor lost its Add control');
+  await client.click('[aria-label="Add mod"]');
+  await client.waitFor(
+    `document.querySelectorAll('.mod-list__row').length === 1`,
+    'first additional-mod row',
+  );
+  await client.clickText('Remove');
+  await client.waitFor(
+    `document.querySelectorAll('.mod-list__row').length === 0`,
+    'removed first additional-mod row',
+  );
+  await client.clickText('Save');
+  await client.waitFor(`document.body.innerText.includes('Force Sync')`, 'profile read mode');
+  const emptyModSectionHidden = await client.evaluate(
+    `![...document.querySelectorAll('.section__title')]
+      .some((title) => title.textContent.trim() === 'Additional mods')`,
+  );
+  if (!emptyModSectionHidden) {
+    throw new Error('Empty additional-mod section remains visible in profile read mode');
+  }
+  await client.capture('09-profile-overview-empty-mods.png');
 
-  await client.clickText('Sync');
+  await client.clickText('Force Sync');
   await client.waitFor(`document.querySelector('.sync-panel')`, 'sync progress', 15_000);
   await client.waitFor(
     `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
