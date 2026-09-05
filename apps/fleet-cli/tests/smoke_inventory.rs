@@ -163,7 +163,9 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("verification: Fast") && out.contains("health: Clean"),
+        out.contains("verification: Fast")
+            && out.contains("health: Clean")
+            && out.contains("missing_paths: 0"),
         "expected ready profile check output, got: {out}"
     );
 
@@ -171,13 +173,8 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     fs::write(&unmanaged_file, b"not part of the managed manifest").expect("write unmanaged file");
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("verification: Fast") && out.contains("health: RequiresSync"),
-        "an exact mirror check must report an extra destination file, got: {out}"
-    );
-    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
-    assert!(
-        !unmanaged_file.exists(),
-        "sync must remove exact-mirror extras"
+        out.contains("verification: Fast") && out.contains("health: Clean"),
+        "a rapid check must inspect managed paths without walking unrelated files, got: {out}"
     );
 
     let profile_state_root = config_root.join("profile_state");
@@ -187,7 +184,9 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     server.set_repo_available(false);
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("freshness: Error") && out.contains("health: Clean"),
+        out.contains("freshness: Error")
+            && out.contains("health: Clean")
+            && out.contains("modified_paths: 0"),
         "a failed remote update check must not invalidate clean installed files, got: {out}"
     );
     let failure = run_cmd_expect_failure(&bin, &["sync", profile_id, "--no-progress"], &envs);
@@ -218,13 +217,10 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("health: Clean"),
-        "metadata-only check should not claim byte equality, got: {out}"
-    );
-    let validation = run_cmd(&bin, &["validate", profile_id], &envs);
-    assert!(
-        validation.contains("local_health: RequiresSync"),
-        "byte validation must detect same-size local drift, got: {validation}"
+        out.contains("health: Dirty")
+            && out.contains("modified_paths: 1")
+            && out.contains("sync_required: true"),
+        "expected same-size local drift to require repair, got: {out}"
     );
 
     run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
@@ -236,7 +232,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
 
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("health: Clean"),
+        out.contains("health: Clean") && out.contains("modified_paths: 0"),
         "expected repaired profile check output, got: {out}"
     );
 
@@ -245,7 +241,8 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     assert!(
         out.contains("freshness: UpdateAvailable")
             && out.contains("update_available: true")
-            && out.contains("health: Clean"),
+            && out.contains("health: Clean")
+            && out.contains("modified_paths: 0"),
         "expected published repository update to be detected, got: {out}"
     );
 
@@ -263,27 +260,32 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
             && out.contains("health: Clean"),
         "expected updated profile to be fully healthy, got: {out}"
     );
-    let inventory_db = profile_state_dir.join("observations.sqlite");
+    assert!(
+        unmanaged_file.exists(),
+        "sync must not treat unrelated user files as managed content"
+    );
+
+    let inventory_db = profile_state_dir.join("inventory.db");
     assert!(inventory_db.exists(), "inventory db missing");
 
-    fs::remove_file(&inventory_db).expect("remove inventory database");
+    fs::write(&inventory_db, b"corrupt inventory").expect("corrupt inventory database");
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("health: Clean"),
-        "a namespace/length check should remain truthful when durable facts are missing, got: {out}"
+        out.contains("health: InventoryUnavailable") && out.contains("sync_required: true"),
+        "a rapid check must request sync when durable facts are unavailable, got: {out}"
     );
     run_cmd(&bin, &["sync", profile_id, "--no-progress"], &envs);
     let out = run_cmd(&bin, &["check", profile_id], &envs);
     assert!(
-        out.contains("health: Clean"),
-        "sync must rebuild missing local knowledge and return to a clean state, got: {out}"
+        out.contains("health: Clean") && out.contains("modified_paths: 0"),
+        "sync must recreate corrupt local knowledge and return to a clean state, got: {out}"
     );
 
     let _ = fs::remove_dir_all(run_root);
 }
 
 #[test]
-fn user_story_sync_installs_repairs_and_matches_exact_mirror() {
+fn user_story_sync_installs_repairs_and_updates_only_managed_files() {
     run_local_swifty_repo_sync_flow("smoke-test-remote");
 }
 
@@ -332,7 +334,7 @@ fn user_story_validate_finds_byte_corruption_and_sync_repairs_content() {
         &envs,
     );
     assert!(
-        validation.contains("local_health: RequiresSync"),
+        validation.contains("local_health: Dirty") && validation.contains("modified_paths: 1"),
         "byte validation must report corruption before repair, got: {validation}"
     );
     run_cmd(&bin, &["sync", "validate-story", "--no-progress"], &envs);

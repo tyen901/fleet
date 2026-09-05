@@ -84,6 +84,7 @@ impl Core {
             profile,
             &state_root,
             tokio_util::sync::CancellationToken::new(),
+            None,
         )
         .await
     }
@@ -767,6 +768,8 @@ mod tests {
             verification: fleet_domain::VerificationKind::Fast,
             health: LocalFileHealth::MissingDestination,
             checked_at_unix_ms: 0,
+            missing_paths_count: 0,
+            modified_paths_count: 0,
         })
         .expect_err("must reject incompatible");
         assert_eq!(err.code, "launch_incompatible");
