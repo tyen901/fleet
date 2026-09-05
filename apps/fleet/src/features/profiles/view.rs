@@ -34,13 +34,13 @@ fn local_file_description(report: &fleet_core::LocalFileReport) -> String {
         (VerificationKind::Fast, LocalFileHealth::Clean) => {
             "No local metadata changes detected".to_string()
         }
-        (VerificationKind::Fast, LocalFileHealth::Missing | LocalFileHealth::Dirty) => {
-            "Local files changed since the last known state".to_string()
+        (VerificationKind::Fast, LocalFileHealth::RequiresSync) => {
+            "Local file names or lengths differ from the expected state".to_string()
         }
         (VerificationKind::ByteExact, LocalFileHealth::Clean) => {
             "Byte validation passed".to_string()
         }
-        (VerificationKind::ByteExact, LocalFileHealth::Missing | LocalFileHealth::Dirty) => {
+        (VerificationKind::ByteExact, LocalFileHealth::RequiresSync) => {
             "Byte validation found files that need repair".to_string()
         }
         (VerificationKind::Materialized, LocalFileHealth::Clean) => {
@@ -49,9 +49,6 @@ fn local_file_description(report: &fleet_core::LocalFileReport) -> String {
         (_, LocalFileHealth::MissingDestination) => "Local folder is missing".to_string(),
         (_, LocalFileHealth::ExpectedStateUnavailable) => {
             "Expected repository state is unavailable; sync will fetch it".to_string()
-        }
-        (_, LocalFileHealth::InventoryUnavailable) => {
-            "Local inventory is unavailable; sync will rebuild it".to_string()
         }
         (_, LocalFileHealth::InvalidProfile) => "Profile paths are invalid".to_string(),
         (_, LocalFileHealth::Unknown) => "Local state has not been checked".to_string(),
@@ -140,7 +137,9 @@ pub fn ProfileView(id: String) -> Element {
     let check_description = runtime
         .and_then(|runtime| runtime.check.as_ref())
         .map(local_file_description)
-        .unwrap_or_else(|| "Compare local file metadata with the last known state".to_string());
+        .unwrap_or_else(|| {
+            "Compare local file names and lengths with the expected state".to_string()
+        });
     let validation_description = runtime
         .and_then(|runtime| runtime.validation.as_ref())
         .map(local_file_description)
@@ -148,7 +147,9 @@ pub fn ProfileView(id: String) -> Element {
     let sync_description = runtime
         .and_then(|runtime| runtime.materialization.as_ref())
         .map(local_file_description)
-        .unwrap_or_else(|| "Install, update, or repair managed files".to_string());
+        .unwrap_or_else(|| {
+            "Install, update, repair, or remove files to match the expected state".to_string()
+        });
     let operation_notice = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
         .filter(|outcome| outcome.status != fleet_core::OperationTerminalStatus::Succeeded)
