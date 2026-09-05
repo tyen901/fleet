@@ -79,6 +79,8 @@ tempfile     = "3.24.0"
 # Database
 fmutex = "0.3.0"
 rusqlite = { version = "0.38.0", features = ["bundled-windows", "cache"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.32"
 
 # Time
 chrono = "0.4.43"
