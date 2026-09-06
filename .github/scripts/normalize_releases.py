@@ -20,7 +20,7 @@ What it does:
 
 Environment variables:
 - VERSION (required): e.g. "0.9.1"
-- CHANNEL (optional): e.g. "win-dev", "linux-stable" (inferred when omitted)
+- CHANNEL (optional): e.g. "win-stable", "linux-stable" (inferred when omitted)
 - TARGET (optional): "windows" or "linux" (if omitted, script infers from files)
 """
 import json

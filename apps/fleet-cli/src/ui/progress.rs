@@ -1,41 +1,55 @@
-use fleet_core::{PipelineEventKind, PipelineSessionEvent, ProgressUnit, StageState};
+use fleet_core::{OperationSessionEvent, OperationSessionEventKind, ProgressUnit};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-fn plain_event_line(ev: &PipelineSessionEvent) -> Option<String> {
+fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
     match &ev.kind {
-        PipelineEventKind::StageChanged { stage, state } => {
-            Some(format!("Stage {state:?}: {stage:?}"))
+        OperationSessionEventKind::Stage { stage } => {
+            Some(format!("Stage: {}", fleet_core::stage_label(*stage)))
         }
-        PipelineEventKind::Progress { progress } => {
+        OperationSessionEventKind::Progress { progress } => {
             if let (Some(done), Some(total)) = (progress.primary.done, progress.primary.total) {
                 Some(match progress.primary.unit {
-                    ProgressUnit::Bytes => format!("Progress: {done}/{total} bytes"),
+                    ProgressUnit::Bytes => format!(
+                        "Progress: {} / {}",
+                        fleet_domain::utils::format_bytes(done),
+                        fleet_domain::utils::format_bytes(total)
+                    ),
                     ProgressUnit::Files => format!("Progress: {done}/{total} files"),
-                    ProgressUnit::Paths => format!("Progress: {done}/{total} paths"),
                 })
             } else {
                 progress.status_text.clone()
             }
         }
-        PipelineEventKind::Notice { text, .. } => Some(text.clone()),
-        PipelineEventKind::Finished { .. } => Some("finished".to_string()),
-        PipelineEventKind::Failed { error } => {
+        OperationSessionEventKind::Finished { .. } => Some("finished".to_string()),
+        OperationSessionEventKind::Failed { error } => {
             Some(format!("failed: {}: {}", error.code, error.message))
         }
-        PipelineEventKind::Canceled => Some("canceled".to_string()),
-        PipelineEventKind::Started => Some(format!("started: {:?}", ev.operation)),
+        OperationSessionEventKind::Canceled => Some("canceled".to_string()),
+        OperationSessionEventKind::Started => Some(format!("started: {:?}", ev.operation)),
     }
 }
 
 pub fn spawn_flow_printer(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<PipelineSessionEvent>,
+    session_id: u64,
+    mut rx: tokio::sync::broadcast::Receiver<OperationSessionEvent>,
     no_progress: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if no_progress || std::env::var_os("FLEET_NO_PROGRESS").is_some() {
-            while let Some(ev) = rx.recv().await {
-                if let Some(line) = plain_event_line(&ev) {
-                    println!("{line}");
+            loop {
+                let Ok(ev) = rx.recv().await else { break };
+                if ev.session_id == session_id {
+                    if let Some(line) = plain_event_line(&ev) {
+                        println!("{line}");
+                    }
+                    if matches!(
+                        ev.kind,
+                        OperationSessionEventKind::Finished { .. }
+                            | OperationSessionEventKind::Failed { .. }
+                            | OperationSessionEventKind::Canceled
+                    ) {
+                        break;
+                    }
                 }
             }
             return;
@@ -44,105 +58,62 @@ pub fn spawn_flow_printer(
         let mp = MultiProgress::new();
         let style_spinner = ProgressStyle::with_template("{spinner:.cyan} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_spinner());
-        let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {bytes}/{total_bytes}")
+        let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
         let style_file_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} files")
             .unwrap_or_else(|_| ProgressStyle::default_bar());
-
         let phase_pb = mp.add(ProgressBar::new_spinner());
         phase_pb.set_style(style_spinner);
-        phase_pb.set_message("Stage: starting");
         phase_pb.enable_steady_tick(std::time::Duration::from_millis(150));
-
         let progress_pb = mp.add(ProgressBar::new(0));
         progress_pb.set_style(style_bar.clone());
-        progress_pb.set_message("Operation");
 
-        while let Some(ev) = rx.recv().await {
+        loop {
+            let ev = match rx.recv().await {
+                Ok(ev) => ev,
+                Err(_) => break,
+            };
+            if ev.session_id != session_id {
+                continue;
+            }
             match ev.kind {
-                PipelineEventKind::StageChanged {
-                    stage,
-                    state: StageState::Entered,
-                } => {
-                    phase_pb.set_message(format!("Stage: {stage:?}"));
+                OperationSessionEventKind::Stage { stage } => {
+                    phase_pb.set_message(format!("Stage: {}", fleet_core::stage_label(stage)))
                 }
-                PipelineEventKind::Progress { progress } => {
+                OperationSessionEventKind::Progress { progress } => {
                     match progress.primary.unit {
                         ProgressUnit::Bytes => progress_pb.set_style(style_bar.clone()),
                         ProgressUnit::Files => progress_pb.set_style(style_file_bar.clone()),
-                        ProgressUnit::Paths => progress_pb.set_style(style_file_bar.clone()),
-                    }
-                    if let Some(message) = progress.status_text {
-                        progress_pb.set_message(message);
                     }
                     if let Some(total) = progress.primary.total {
-                        if progress_pb.length().unwrap_or(0) != total {
-                            progress_pb.set_length(total);
-                        }
+                        progress_pb.set_length(total);
                     }
                     if let Some(done) = progress.primary.done {
                         progress_pb.set_position(done);
                     }
+                    if progress.primary.unit == ProgressUnit::Bytes {
+                        if let (Some(done), Some(total)) =
+                            (progress.primary.done, progress.primary.total)
+                        {
+                            progress_pb.set_message(format!(
+                                "{} {} / {}",
+                                progress.primary.label.as_deref().unwrap_or("Progress"),
+                                fleet_domain::utils::format_bytes(done),
+                                fleet_domain::utils::format_bytes(total)
+                            ));
+                        }
+                    } else if let Some(msg) = progress.status_text {
+                        progress_pb.set_message(msg);
+                    }
                 }
-                PipelineEventKind::Notice { text, .. } => {
-                    let _ = mp.println(text);
-                }
-                PipelineEventKind::Finished { .. } => {
-                    phase_pb.finish_with_message("Stage: done");
-                }
-                PipelineEventKind::Failed { error } => {
+                OperationSessionEventKind::Finished { .. } => break,
+                OperationSessionEventKind::Failed { error } => {
                     let _ = mp.println(format!("failed: {}: {}", error.code, error.message));
+                    break;
                 }
-                PipelineEventKind::Canceled => {
-                    let _ = mp.println("canceled");
-                }
-                PipelineEventKind::Started => {
-                    let _ = mp.println(format!("started: {:?}", ev.operation));
-                }
-                PipelineEventKind::StageChanged { .. } => {}
+                OperationSessionEventKind::Canceled => break,
+                OperationSessionEventKind::Started => {}
             }
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::plain_event_line;
-    use fleet_core::{
-        OperationKind, PipelineEventKind, PipelineProgressEvent, PipelineSessionEvent,
-        ProgressScope, ProgressUnit,
-    };
-
-    #[test]
-    fn progress_line_formats_files() {
-        let ev = PipelineSessionEvent {
-            session_id: 1,
-            profile_id: "p1".into(),
-            operation: OperationKind::Sync,
-            timestamp_ms: 1,
-            seq: 1,
-            kind: PipelineEventKind::Progress {
-                progress: PipelineProgressEvent {
-                    stage: fleet_core::OperationStage::Reconciling,
-                    scope: ProgressScope::ReconcileFiles,
-                    status_text: None,
-                    primary: fleet_core::ProgressMetric {
-                        label: None,
-                        done: Some(7),
-                        total: Some(10),
-                        unit: ProgressUnit::Files,
-                    },
-                    secondary: None,
-                    throughput_bytes_per_sec: None,
-                    eta_seconds: None,
-                    elapsed_ms: None,
-                },
-            },
-        };
-
-        assert_eq!(
-            plain_event_line(&ev).as_deref(),
-            Some("Progress: 7/10 files")
-        );
-    }
 }

@@ -1,7 +1,6 @@
 target/
 packdir/
 Releases/
-apps/fleet/assets/icon.ico
 .DS_Store
 node_modules/
 dist/

@@ -1,82 +1,30 @@
-use crate::style::{Button, ButtonSize, ButtonVariant, ProgressBar, SelectField, SelectOption};
 use dioxus::prelude::*;
+use dioxus_router::use_navigator;
+use tracing::{error, info};
 
 use crate::app::router::Route;
-use crate::app::shell::{ShellNavActionStore, ShellNavEvent, ShellNavEventStore, ShellSaveAction};
 use crate::features::profiles::common::{
-    cancel_operation, format_eta, format_progress_metric, format_repo_server_label, format_speed,
-    modpack_size_text, preview_unexpected_paths, profile_folder_row_class, profile_not_found_page,
-    profile_row_class, select_profile_in_background, show_unexpected_paths_panel,
-    start_profile_operation, ProfileTextFieldRow, UNEXPECTED_PATH_PREVIEW_LIMIT,
+    build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
+    format_speed, profile_not_found_page, stage_phase_label, start_profile_operation,
+    ProfileFormField,
 };
-use crate::features::profiles::{
-    PROFILE_NAME_PLACEHOLDER, PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER,
-};
+use crate::features::profiles::draft::ProfileDraft;
+use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
+use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
+use crate::style::{
+    Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, IconButton, InlineConfirm,
+    PageFooter, ProgressBar, Section, SectionHeader, SelectField, SelectOption,
+};
+use icondata::BsPlusLg;
 
-const ACTION_CHECK_REPO: &str = "check_repo";
-const ACTION_CHECK_INVENTORY: &str = "check_inventory";
-const ACTION_DELETE: &str = "delete";
-const ACTION_SYNC: &str = "sync";
-
-#[derive(Clone, Copy, PartialEq)]
-struct MainActionUi {
-    label: &'static str,
-    operation: fleet_core::OperationKind,
-    action: &'static str,
-    error_reason: &'static str,
-    fail_title: &'static str,
-    enabled: bool,
-    running: bool,
-}
-
-fn select_current_step(
-    progress: &fleet_core::ProfileOperationProgressState,
-) -> Option<&fleet_core::UiOperationStepState> {
-    progress
-        .steps
-        .iter()
-        .find(|step| step.status == fleet_core::UiOperationStepStatus::Active)
-}
-
-fn build_main_actions(
-    profile_status: Option<&fleet_core::ProfileStatusState>,
-) -> Vec<MainActionUi> {
-    let Some(status) = profile_status else {
-        return Vec::new();
-    };
-
-    vec![
-        MainActionUi {
-            label: "Check for Updates",
-            operation: fleet_core::OperationKind::CheckRepo,
-            action: ACTION_CHECK_REPO,
-            error_reason: "start_check_repo_failed",
-            fail_title: "Check for updates failed",
-            enabled: status.actions.check_repo_enabled,
-            running: status.actions.check_repo_running,
-        },
-        MainActionUi {
-            label: "Check Inventory",
-            operation: fleet_core::OperationKind::CheckInventory,
-            action: ACTION_CHECK_INVENTORY,
-            error_reason: "start_check_inventory_failed",
-            fail_title: "Check inventory failed",
-            enabled: status.actions.check_inventory_enabled,
-            running: status.actions.check_inventory_running,
-        },
-        MainActionUi {
-            label: "Sync",
-            operation: fleet_core::OperationKind::Sync,
-            action: ACTION_SYNC,
-            error_reason: "start_sync_failed",
-            fail_title: "Sync failed",
-            enabled: status.actions.sync_enabled,
-            running: status.actions.sync_running,
-        },
-    ]
+fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
+    matches!(
+        kind,
+        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
+    )
 }
 
 #[component]
@@ -84,98 +32,188 @@ pub fn ProfileView(id: String) -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
     let toasts = use_context::<ToastStore>();
-    let shell_nav_actions = use_context::<ShellNavActionStore>();
-    let nav_events = use_context::<ShellNavEventStore>();
-    let nav = dioxus_router::use_navigator();
+    let nav = use_navigator();
+
+    let mut editing = use_signal(|| false);
+    let mut name = use_signal(String::new);
+    let mut repo = use_signal(String::new);
+    let mut folder = use_signal(String::new);
+    let mut launch_params = use_signal(String::new);
+    let mut use_default_args = use_signal(|| true);
+    let mut additional_mod_folders = use_signal(Vec::<String>::new);
+    let mut selected_repo_server = use_signal(|| Option::<usize>::None);
+    let mut save_loading = use_signal(|| false);
+    let mut discard_confirm_open = use_signal(|| false);
+    let mut delete_confirm_open = use_signal(|| false);
+    let mut delete_loading = use_signal(|| false);
 
     let snapshot = (store.state)();
     let Some(profile) = snapshot.profiles.get(&id).cloned() else {
         return profile_not_found_page(nav);
     };
 
-    {
-        let bridge = bridge.clone();
-        let profile_id = profile.id.clone();
-        use_effect(move || {
-            select_profile_in_background(bridge.clone(), profile_id.clone());
-        });
+    let runtime = snapshot.profile_runtime_by_id.get(&profile.id);
+    let status = runtime.map(|entry| entry.status.clone());
+    let active = runtime.and_then(|entry| entry.active.as_ref());
+    let active_operation = active.map(|active| active.operation);
+    let exclusive_active = active_operation.is_some_and(exclusive_operation);
+    let any_active = active_operation.is_some();
+    let session_id = active.map(|active| active.session_id);
+    let stopping = active.is_some_and(|active| active.cancel_requested);
+    let progress = status.as_ref().and_then(|status| status.progress.clone());
+
+    let nav_for_back = nav;
+
+    // Validation and sync own the page while they access the managed target.
+    if exclusive_active {
+        return render_sync_mode(
+            &bridge,
+            progress.as_ref(),
+            session_id,
+            stopping,
+            status
+                .as_ref()
+                .map(|status| status.actions.cancel_enabled)
+                .unwrap_or(false),
+        );
     }
 
-    let profile_id = profile.id.clone();
-    let profile_runtime = snapshot.profile_runtime_by_id.get(&profile.id);
-    let inventory_metrics = profile_runtime.and_then(|runtime| runtime.inventory_metrics.as_ref());
-    let inventory_metrics_loading = profile_runtime
-        .map(|runtime| runtime.inventory_metrics_loading)
+    let check_enabled = status
+        .as_ref()
+        .map(|status| status.actions.check_enabled)
         .unwrap_or(false);
-    let inventory_check = profile_runtime.and_then(|runtime| runtime.inventory_check.as_ref());
-    let profile_status = profile_runtime.map(|runtime| &runtime.status);
-    let repo_servers = profile_runtime
+    let check_running = status
+        .as_ref()
+        .map(|status| status.actions.check_running)
+        .unwrap_or(false);
+    let validate_enabled = status
+        .as_ref()
+        .map(|status| status.actions.validate_enabled)
+        .unwrap_or(false);
+    let validate_running = status
+        .as_ref()
+        .map(|status| status.actions.validate_running)
+        .unwrap_or(false);
+    let sync_enabled = status
+        .as_ref()
+        .map(|status| status.actions.sync_enabled)
+        .unwrap_or(false);
+    let operation_notice = runtime
+        .and_then(|runtime| runtime.last_operation.as_ref())
+        .filter(|outcome| outcome.status != fleet_core::OperationTerminalStatus::Succeeded)
+        .map(|outcome| {
+            let title = status
+                .as_ref()
+                .map(|status| status.headline.label())
+                .unwrap_or("Operation stopped");
+            let message = outcome
+                .error
+                .as_ref()
+                .map(|error| error.message.clone())
+                .or_else(|| outcome.message.clone())
+                .unwrap_or_else(|| "The operation did not complete.".to_string());
+            (title, message)
+        });
+
+    let bridge_for_check = bridge.clone();
+    let toasts_for_check = toasts.clone();
+    let profile_id_for_check = profile.id.clone();
+    let on_check_for_updates = move |_: MouseEvent| {
+        start_profile_operation(
+            bridge_for_check.clone(),
+            toasts_for_check.clone(),
+            profile_id_for_check.clone(),
+            fleet_core::OperationKind::Check,
+            "check",
+            "start_check_failed",
+            "Check failed",
+        );
+    };
+
+    let bridge_for_start_sync = bridge.clone();
+    let toasts_for_start_sync = toasts.clone();
+    let profile_id_for_start_sync = profile.id.clone();
+    let start_sync = std::rc::Rc::new(move || {
+        start_profile_operation(
+            bridge_for_start_sync.clone(),
+            toasts_for_start_sync.clone(),
+            profile_id_for_start_sync.clone(),
+            fleet_core::OperationKind::Sync,
+            "sync",
+            "start_sync_failed",
+            "Sync failed",
+        );
+    });
+
+    let start_sync_for_action = start_sync.clone();
+    let on_sync_action = move |_: MouseEvent| {
+        start_sync_for_action();
+    };
+
+    let on_validate = {
+        let bridge = bridge.clone();
+        let toasts = toasts.clone();
+        let profile_id = profile.id.clone();
+        move |_: MouseEvent| {
+            start_profile_operation(
+                bridge.clone(),
+                toasts.clone(),
+                profile_id.clone(),
+                fleet_core::OperationKind::Validate,
+                "validate",
+                "start_validate_failed",
+                "Validation failed",
+            );
+        }
+    };
+
+    // ---- Edit mode -------------------------------------------------------
+    let repo_servers = runtime
         .map(|runtime| runtime.repo_servers.clone())
         .unwrap_or_default();
-    let active_operation = profile_runtime
-        .and_then(|runtime| runtime.active.as_ref())
-        .map(|active| active.operation);
-    let operation_active = active_operation.is_some();
-    let navigation_locked = matches!(
-        active_operation,
-        Some(fleet_core::OperationKind::Sync)
-            | Some(fleet_core::OperationKind::Delete)
-            | Some(fleet_core::OperationKind::CheckRepo)
-    );
-    let show_progress_view = matches!(
-        active_operation,
-        Some(fleet_core::OperationKind::Sync) | Some(fleet_core::OperationKind::Delete)
-    );
-    let cancel_session_id = profile_runtime
-        .and_then(|runtime| runtime.active.as_ref())
-        .map(|active| active.session_id);
+    let default_args = default_arma3_args(&snapshot.settings);
+    let operation_active = any_active;
 
-    let unexpected_paths = inventory_check
-        .map(|report| report.unexpected_delete_paths.clone())
-        .unwrap_or_default();
-    let unexpected_path_count = unexpected_paths.len();
-    let (unexpected_path_preview, hidden_path_count) =
-        preview_unexpected_paths(&unexpected_paths, UNEXPECTED_PATH_PREVIEW_LIMIT);
+    let seed_draft = {
+        let profile = profile.clone();
+        let default_args = default_args.clone();
+        let repo_servers = repo_servers.clone();
+        move || {
+            name.set(profile.name.clone());
+            repo.set(profile.source.clone());
+            folder.set(profile.destination.clone());
+            additional_mod_folders.set(profile.additional_mod_folders.clone());
+            let uses_default = profile.launch_params.trim().is_empty();
+            use_default_args.set(uses_default);
+            launch_params.set(if uses_default {
+                default_args.clone()
+            } else {
+                profile.launch_params.clone()
+            });
+            selected_repo_server.set(profile.arma3_server.as_ref().and_then(|saved| {
+                repo_servers.iter().position(|server| {
+                    server.address.trim() == saved.address.trim() && server.port == saved.port
+                })
+            }));
+        }
+    };
 
-    let progress_ui = profile_status.and_then(|status| status.progress.clone());
-    let show_unexpected_panel = show_unexpected_paths_panel(
-        unexpected_path_count > 0,
-        profile_status
-            .map(|status| status.actions.delete_running)
-            .unwrap_or(false),
-    );
-    let inventory_missing = profile_status
-        .map(|status| {
-            matches!(
-                status.local_health,
-                fleet_core::LocalStateHealth::LocalStateMissing
-            )
-        })
-        .unwrap_or(false);
-    let inventory_corrupt = profile_status
-        .map(|status| {
-            matches!(
-                status.local_health,
-                fleet_core::LocalStateHealth::InventoryCorrupt
-            )
-        })
-        .unwrap_or(false);
-    let modpack_size = modpack_size_text(
-        inventory_metrics,
-        inventory_metrics_loading,
-        profile_status
-            .map(|status| {
-                matches!(
-                    status.local_health,
-                    fleet_core::LocalStateHealth::MissingDestination
-                )
-            })
-            .unwrap_or(false),
-    );
-    let progress_display = progress_ui.clone();
-    let state_label = profile_status
-        .map(|status| status.headline.label())
-        .unwrap_or("Status unknown");
+    let mut seed_draft_for_enter = seed_draft;
+    let on_edit = move |_: MouseEvent| {
+        seed_draft_for_enter();
+        editing.set(true);
+    };
+
+    let draft = ProfileDraft::from_fields(name(), repo(), folder());
+    let validation = draft.validate(&snapshot, Some(profile.id.as_str()));
+    let launch_value = if use_default_args() {
+        default_args.clone()
+    } else {
+        launch_params()
+    };
+    let selected_idx =
+        selected_repo_server().and_then(|idx| (idx < repo_servers.len()).then_some(idx));
+
     let display_repo_servers = if repo_servers.is_empty() {
         profile
             .arma3_server
@@ -191,11 +229,11 @@ pub fn ProfileView(id: String) -> Element {
     } else {
         repo_servers.clone()
     };
-    let display_selected_idx = profile.arma3_server.as_ref().and_then(|saved| {
-        display_repo_servers.iter().position(|server| {
-            server.address.trim() == saved.address.trim() && server.port == saved.port
-        })
-    });
+    let display_selected_idx = if repo_servers.is_empty() {
+        (!display_repo_servers.is_empty()).then_some(0)
+    } else {
+        selected_idx
+    };
     let join_server_value = if display_repo_servers.len() == 1 {
         "0".to_string()
     } else if let Some(idx) = display_selected_idx {
@@ -222,356 +260,543 @@ pub fn ProfileView(id: String) -> Element {
         options
     };
 
-    let main_actions = build_main_actions(profile_status);
-    let check_repo_action = main_actions
-        .iter()
-        .copied()
-        .find(|action| action.action == ACTION_CHECK_REPO);
-    let check_inventory_action = main_actions
-        .iter()
-        .copied()
-        .find(|action| action.action == ACTION_CHECK_INVENTORY);
-    let sync_action = main_actions
-        .iter()
-        .copied()
-        .find(|action| action.action == ACTION_SYNC);
+    let next_profile = build_profile_edit_candidate(
+        &profile,
+        &draft,
+        use_default_args(),
+        &launch_value,
+        &additional_mod_folders(),
+        &repo_servers,
+        selected_idx,
+    );
+    let profile_dirty = editing() && next_profile != profile;
+    let can_save = validation.is_valid() && profile_dirty;
+    let edit_message =
+        (editing() && operation_active).then_some("Finish the active operation before saving.");
 
-    let recovery_message = if inventory_missing {
-        Some(
-            "Local inventory is missing. Run Sync to rebuild inventory and reconcile files."
-                .to_string(),
-        )
-    } else if inventory_corrupt {
-        Some("Local inventory is corrupted. Run Sync to repair local inventory.".to_string())
-    } else {
-        None
-    };
-
-    let on_delete_unexpected = {
+    let on_save = {
         let bridge = bridge.clone();
         let toasts = toasts.clone();
-        let profile_id = profile_id.clone();
-        move |_| {
-            start_profile_operation(
-                bridge.clone(),
-                toasts.clone(),
-                profile_id.clone(),
-                fleet_core::OperationKind::Delete,
-                ACTION_DELETE,
-                "start_delete_failed",
-                "Delete failed",
-            );
-        }
-    };
-
-    let on_cancel_operation = {
-        let bridge = bridge.clone();
-        let toasts = toasts.clone();
-        move |_| {
-            let Some(session_id) = cancel_session_id else {
+        let profile = profile.clone();
+        let next = next_profile.clone();
+        move |_: MouseEvent| {
+            if operation_active || save_loading() || next == profile {
                 return;
-            };
-            cancel_operation(bridge.clone(), toasts.clone(), session_id);
+            }
+            save_loading.set(true);
+            let bridge = bridge.clone();
+            let toasts = toasts.clone();
+            let next = next.clone();
+            spawn(async move {
+                info!(op = "profile_edit_save", profile_id = %next.id, "profile edit save requested");
+                match bridge.core().profile_save(next).await {
+                    Ok(_) => {
+                        save_loading.set(false);
+                        editing.set(false);
+                    }
+                    Err(err) => {
+                        save_loading.set(false);
+                        toasts.push_api_error("Save profile failed", &err);
+                        error!(
+                            op = "profile_edit_save",
+                            outcome = "failed",
+                            code = %err.code,
+                            reason = "profile_save_failed",
+                            "profile edit save failed"
+                        );
+                    }
+                }
+            });
         }
     };
 
-    {
-        let mut profile_action = shell_nav_actions.profile_action;
-        let mut profile_secondary_action = shell_nav_actions.profile_secondary_action;
-        let mut save_action = shell_nav_actions.save_action;
-        let mut back_disabled = shell_nav_actions.back_disabled;
-        use_effect(use_reactive(
-            (&navigation_locked, &check_repo_action, &sync_action),
-            move |(navigation_locked, _check_repo_action, _sync_action)| {
-                profile_action.set(Some(ShellSaveAction::new("Edit", navigation_locked)));
-                profile_secondary_action.set(None);
-                save_action.set(None);
-                back_disabled.set(false);
-            },
-        ));
-    }
+    let on_cancel_edit = EventHandler::new(move |_: MouseEvent| {
+        if profile_dirty {
+            discard_confirm_open.set(true);
+        } else {
+            editing.set(false);
+        }
+    });
+    let leave_page = EventHandler::new(move |_: MouseEvent| {
+        let _ = nav_for_back.push(Route::Profiles {});
+    });
+    let on_confirm_discard = move |_: MouseEvent| {
+        discard_confirm_open.set(false);
+        editing.set(false);
+    };
+    let on_cancel_discard = move |_: MouseEvent| {
+        discard_confirm_open.set(false);
+    };
 
-    {
-        let mut handler = nav_events.handler;
+    let on_add_mod = move |_: MouseEvent| {
+        additional_mod_folders.with_mut(|folders| folders.push(String::new()));
+    };
+
+    let on_request_delete = move |_: MouseEvent| {
+        if operation_active || delete_loading() {
+            return;
+        }
+        delete_confirm_open.set(true);
+    };
+    let on_cancel_delete = move |_: MouseEvent| {
+        if !delete_loading() {
+            delete_confirm_open.set(false);
+        }
+    };
+    let on_confirm_delete = {
         let bridge = bridge.clone();
         let toasts = toasts.clone();
         let profile_id = profile.id.clone();
-        use_effect(move || {
+        move |_: MouseEvent| {
+            if operation_active || delete_loading() {
+                return;
+            }
+            delete_confirm_open.set(false);
+            delete_loading.set(true);
             let bridge = bridge.clone();
             let toasts = toasts.clone();
             let profile_id = profile_id.clone();
-            handler.set(Some(std::rc::Rc::new(move |event| match event {
-                ShellNavEvent::ProfileAction => {
-                    if navigation_locked {
-                        return;
+            spawn(async move {
+                info!(op = "profile_delete", profile_id = %profile_id, "profile delete requested");
+                match bridge.core().profile_delete(profile_id.clone()).await {
+                    Ok(()) => {
+                        let _ = nav.push(Route::Profiles {});
                     }
-                    let _ = nav.push(Route::ProfileEdit {
-                        id: profile_id.clone(),
-                    });
+                    Err(err) => {
+                        error!(
+                            op = "profile_delete",
+                            profile_id = %profile_id,
+                            outcome = "failed",
+                            code = %err.code,
+                            reason = "profile_delete_failed",
+                            "profile delete failed"
+                        );
+                        delete_loading.set(false);
+                        toasts.push_api_error("Delete failed", &err);
+                    }
                 }
-                ShellNavEvent::ProfileSecondaryAction => {
-                    start_profile_operation(
-                        bridge.clone(),
-                        toasts.clone(),
-                        profile_id.clone(),
-                        fleet_core::OperationKind::CheckRepo,
-                        ACTION_CHECK_REPO,
-                        "start_check_repo_failed",
-                        "Check for updates failed",
-                    );
-                }
-                ShellNavEvent::Save => {
-                    start_profile_operation(
-                        bridge.clone(),
-                        toasts.clone(),
-                        profile_id.clone(),
-                        fleet_core::OperationKind::Sync,
-                        ACTION_SYNC,
-                        "start_sync_failed",
-                        "Sync failed",
-                    );
-                }
-            })));
-        });
-    }
+            });
+        }
+    };
 
+    // Draft signals hold nothing until edit mode seeds them.
+    let use_default_args_saved = profile.launch_params.trim().is_empty();
     rsx! {
-        div { class: "page page--scroll profile-form-page",
-            div { class: "page__inner dash-page__inner",
-                div { class: "dash-layout",
-                    div { class: "dash-layout__content",
-                        section { class: "profile-page__layout",
-                            div { class: "panel-group dash-readonly profile-page__group",
-                                ProfileTextFieldRow {
-                                    title: "Name".to_string(),
-                                    class: Some(profile_row_class().to_string()),
-                                    value: profile.name.clone(),
-                                    placeholder: Some(PROFILE_NAME_PLACEHOLDER.to_string()),
-                                    disabled: true,
-                                    on_change: |_| {},
-                                }
-                                ProfileTextFieldRow {
-                                    title: "URL".to_string(),
-                                    class: Some(profile_row_class().to_string()),
-                                    value: profile.source.clone(),
-                                    placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
-                                    disabled: true,
-                                    on_change: |_| {},
-                                }
-                                ProfileTextFieldRow {
-                                    title: "Folder".to_string(),
-                                    class: Some(profile_folder_row_class().to_string()),
-                                    value: profile.destination.clone(),
-                                    placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
-                                    folder_select: true,
-                                    disabled: true,
-                                    open_folder_when_disabled: true,
-                                    on_change: |_| {},
-                                }
-                                if display_repo_servers.len() > 1 {
-                                    div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit",
-                                        div { class: "panel-row__meta",
-                                            div { class: "panel-row__title", "Join Server" }
-                                        }
-                                        div { class: "panel-row__control panel-row__control--stack",
-                                            SelectField {
-                                                disabled: true,
-                                                value: join_server_value.clone(),
-                                                options: join_server_options.clone(),
-                                                onchange: |_| {},
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+        div { class: "page-frame",
+            div { class: "page-frame__body",
+                div { class: "page__inner section-list",
+                    InlineConfirm {
+                        open: discard_confirm_open(),
+                        message: "Discard unsaved changes?".to_string(),
+                        confirm_label: "Discard".to_string(),
+                        cancel_label: "Keep editing".to_string(),
+                        confirm_variant: ButtonVariant::Danger,
+                        on_confirm: on_confirm_discard,
+                        on_cancel: on_cancel_discard,
+                    }
+                    if let Some(edit_message) = edit_message {
+                        p { class: "section-note", "{edit_message}" }
+                    }
 
-                            div { class: "profile-page__state-list",
-                                div { class: "profile-page__state-row",
-                                    div { class: "profile-page__state-key", "State" }
-                                    div { class: "profile-page__state-value", "{state_label}" }
-                                }
-                                div { class: "profile-page__state-row",
-                                    div { class: "profile-page__state-key", "Size" }
-                                    div { class: "profile-page__state-value", "{modpack_size}" }
-                                }
-                            }
-
-                            div { class: "profile-page__section profile-page__action-row",
-                                if let Some(action) = check_repo_action {
-                                    Button {
-                                        key: "profile-action-row-{action.label}",
-                                        variant: ButtonVariant::Secondary,
-                                        size: ButtonSize::Sm,
-                                        loading: action.running,
-                                        disabled: !action.enabled || operation_active,
-                                        onclick: {
-                                            let bridge = bridge.clone();
-                                            let toasts = toasts.clone();
-                                            let profile_id = profile_id.clone();
-                                            move |_| {
-                                                start_profile_operation(
-                                                    bridge.clone(),
-                                                    toasts.clone(),
-                                                    profile_id.clone(),
-                                                    action.operation,
-                                                    action.action,
-                                                    action.error_reason,
-                                                    action.fail_title,
-                                                );
-                                            }
+                    Section {
+                        // Editing is a mode on this page. Read mode keeps the
+                        // same controls in place and marks them readonly.
+                        ProfileFormField {
+                            title: "Name".to_string(),
+                            value: if editing() { name() } else { profile.name.clone() },
+                            readonly: !editing(),
+                            placeholder: Some(crate::features::profiles::PROFILE_NAME_PLACEHOLDER.to_string()),
+                            error: if editing() && !validation.name_ok && !name().trim().is_empty() { Some("Name must be alphanumeric (spaces allowed).".to_string()) } else { None },
+                            on_change: move |v| name.set(v),
+                        }
+                        ProfileFormField {
+                            title: "Sync source URL".to_string(),
+                            value: if editing() { repo() } else { profile.source.clone() },
+                            readonly: !editing(),
+                            placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
+                            error: if editing() && !validation.repo_ok && !repo().trim().is_empty() { Some(
+                                "Sync source URL must use HTTP or HTTPS and point to a valid profile source."
+                                    .to_string(),
+                            ) } else { None },
+                            on_change: move |v| repo.set(v),
+                        }
+                        ProfileFormField {
+                            title: "Folder".to_string(),
+                            value: if editing() { folder() } else { profile.destination.clone() },
+                            readonly: !editing(),
+                            placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
+                            folder_select: true,
+                            pick_button_text: Some("Select".to_string()),
+                            show_open_button: true,
+                            open_button_text: Some("Open".to_string()),
+                            error: if editing() && !validation.folder_ok && !folder().trim().is_empty() { Some("Folder is required and must be unique.".to_string()) } else { None },
+                            on_change: move |v| folder.set(v),
+                        }
+                        FieldRow {
+                            FieldRowMeta { title: "Use default launch arguments".to_string() }
+                            FieldRowActions {
+                                if editing() {
+                                    input {
+                                        r#type: "checkbox",
+                                        class: "check",
+                                        checked: use_default_args(),
+                                        onchange: move |evt| {
+                                            use_default_args.set(evt.checked());
                                         },
-                                        "{action.label}"
                                     }
-                                }
-                                if let Some(action) = check_inventory_action {
-                                    Button {
-                                        key: "profile-action-row-{action.label}",
-                                        variant: ButtonVariant::Secondary,
-                                        size: ButtonSize::Sm,
-                                        loading: action.running,
-                                        disabled: !action.enabled || operation_active,
-                                        onclick: {
-                                            let bridge = bridge.clone();
-                                            let toasts = toasts.clone();
-                                            let profile_id = profile_id.clone();
-                                            move |_| {
-                                                start_profile_operation(
-                                                    bridge.clone(),
-                                                    toasts.clone(),
-                                                    profile_id.clone(),
-                                                    action.operation,
-                                                    action.action,
-                                                    action.error_reason,
-                                                    action.fail_title,
-                                                );
-                                            }
-                                        },
-                                        "{action.label}"
-                                    }
-                                }
-                                if let Some(action) = sync_action {
-                                    Button {
-                                        key: "profile-action-row-{action.label}",
-                                        variant: ButtonVariant::Secondary,
-                                        size: ButtonSize::Sm,
-                                        loading: action.running,
-                                        disabled: !action.enabled || operation_active,
-                                        onclick: {
-                                            let bridge = bridge.clone();
-                                            let toasts = toasts.clone();
-                                            let profile_id = profile_id.clone();
-                                            move |_| {
-                                                start_profile_operation(
-                                                    bridge.clone(),
-                                                    toasts.clone(),
-                                                    profile_id.clone(),
-                                                    action.operation,
-                                                    action.action,
-                                                    action.error_reason,
-                                                    action.fail_title,
-                                                );
-                                            }
-                                        },
-                                        "{action.label}"
-                                    }
-                                }
-                            }
-
-                            if let Some(recovery_message) = recovery_message.clone() {
-                                p { class: "profile-page__note profile-page__note--warn",
-                                    "{recovery_message}"
-                                }
-                            }
-
-                            if show_progress_view {
-                                section { class: "profile-page__section profile-page__section--active profile-page__section--flush",
-                                    if let Some(progress) = progress_display.clone() {
-                                        if let Some(step) = select_current_step(&progress) {
-                                            div { class: "profile-progress", aria_live: "polite",
-                                                header { class: "profile-progress__header",
-                                                    span { class: "profile-progress__title", "{step.label}" }
-                                                    Button {
-                                                        variant: ButtonVariant::Secondary,
-                                                        size: ButtonSize::Sm,
-                                                        disabled: cancel_session_id.is_none(),
-                                                        onclick: on_cancel_operation,
-                                                        "Cancel"
-                                                    }
-                                                }
-                                                ProgressBar {
-                                                    percent: progress.stage.percent,
-                                                    indeterminate: !progress.stage.determinate,
-                                                }
-                                                div { class: "profile-progress__footer",
-                                                    div { class: "profile-progress__metrics",
-                                                        if let Some(metric) = progress.primary_metric.as_ref() {
-                                                            div { class: "profile-progress__metric-line",
-                                                                "{format_progress_metric(metric)}"
-                                                            }
-                                                        }
-                                                        if let Some(metric) = progress.secondary_metric.as_ref() {
-                                                            div { class: "profile-progress__metric-line",
-                                                                "{format_progress_metric(metric)}"
-                                                            }
-                                                        }
-                                                        if let (Some(speed), Some(eta)) = (progress.throughput_bytes_per_sec, progress.eta_seconds) {
-                                                            div { class: "profile-progress__metric-line",
-                                                                "{format_speed(speed)} · ETA {format_eta(eta)}"
-                                                            }
-                                                        }
-                                                    }
-                                                    strong { class: "profile-progress__status",
-                                                        if let Some(percent) = progress.stage.percent {
-                                                            "{percent}%"
-                                                        } else {
-                                                            "Working"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if show_unexpected_panel {
-                                section { class: "profile-page__section profile-page__section--danger",
-                                    div { class: "panel-group dash-readonly profile-page__group",
-                                        div { class: "panel-row panel-row--split dash-profile-row dash-profile-row--edit",
-                                            div { class: "panel-row__meta",
-                                                div { class: "panel-row__title", "Unexpected Paths" }
-                                            }
-                                            div { class: "panel-row__control profile-page__issue-panel",
-                                                p { class: "profile-page__summary",
-                                                    "{unexpected_path_count} item(s) ready to delete from the managed folder."
-                                                }
-                                                Button {
-                                                    variant: ButtonVariant::Danger,
-                                                    size: ButtonSize::Md,
-                                                    loading: profile_status
-                                                        .map(|status| status.actions.delete_running)
-                                                        .unwrap_or(false),
-                                                    disabled: !profile_status
-                                                        .map(|status| status.actions.delete_enabled)
-                                                        .unwrap_or(false)
-                                                        || operation_active,
-                                                    onclick: on_delete_unexpected,
-                                                    "Delete Unexpected Paths"
-                                                }
-                                                ul { class: "profile-page__list",
-                                                    for path in unexpected_path_preview {
-                                                        li { class: "profile-page__list-item", "{path}" }
-                                                    }
-                                                }
-                                                if hidden_path_count > 0 {
-                                                    div { class: "profile-page__summary", "+{hidden_path_count} more" }
-                                                }
-                                            }
+                                } else {
+                                    span { class: "field-row__value",
+                                        if use_default_args_saved {
+                                            "Yes"
+                                        } else {
+                                            "No"
                                         }
                                     }
                                 }
                             }
                         }
+                        if (editing() && !use_default_args()) || (!editing() && !use_default_args_saved) {
+                            ProfileFormField {
+                                title: "Launch arguments".to_string(),
+                                value: if editing() { launch_params() } else { profile.launch_params.clone() },
+                                readonly: !editing(),
+                                on_change: move |v| launch_params.set(v),
+                            }
+                        }
+                        if display_repo_servers.len() > 1 {
+                            div { class: "form-field",
+                                span { class: "form-field__label", "Join server" }
+                                SelectField {
+                                    disabled: !editing(),
+                                    value: join_server_value.clone(),
+                                    options: join_server_options.clone(),
+                                    onchange: move |value: String| {
+                                        selected_repo_server.set(value.parse::<usize>().ok());
+                                    },
+                                }
+                            }
+                        }
+                    }
+
+                    if editing() || !profile.additional_mod_folders.is_empty() {
+                        div { class: "section-divider" }
+
+                        Section {
+                            SectionHeader {
+                                title: "Additional mods".to_string(),
+                                action: editing().then(|| rsx! {
+                                    IconButton {
+                                        icon: BsPlusLg,
+                                        label: "Add mod".to_string(),
+                                        onclick: on_add_mod,
+                                    }
+                                }),
+                            }
+                            if editing() {
+                                div { class: "mod-list",
+                                    for (idx , mod_dir) in additional_mod_folders().iter().cloned().enumerate() {
+                                        div { class: "mod-list__row", key: "{idx}",
+                                            BrowseField {
+                                                value: mod_dir,
+                                                placeholder: Some("Path to mod directory".to_string()),
+                                                folder_select: true,
+                                                pick_button_text: Some("Browse".to_string()),
+                                                on_change: move |next| {
+                                                    additional_mod_folders
+                                                        .with_mut(|folders| {
+                                                            if idx < folders.len() {
+                                                                folders[idx] = next;
+                                                            }
+                                                        });
+                                                },
+                                            }
+                                            Button {
+                                                variant: ButtonVariant::Danger,
+                                                onclick: move |_| {
+                                                    additional_mod_folders
+                                                        .with_mut(|folders| {
+                                                            if idx < folders.len() {
+                                                                folders.remove(idx);
+                                                            }
+                                                        });
+                                                },
+                                                "Remove"
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                div {
+                                    class: "mod-list mod-list--plain",
+                                    role: "list",
+                                    for mod_dir in profile.additional_mod_folders.iter() {
+                                        div {
+                                            class: "mod-list__item mono",
+                                            role: "listitem",
+                                            "{mod_dir}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !editing() {
+                        if let Some((title, message)) = operation_notice.clone() {
+                            section { class: "profile-view__result",
+                                h3 { class: "profile-view__result-title", "{title}" }
+                                p { class: "profile-view__result-message", "{message}" }
+                            }
+                        }
+
+                        Section {
+                            SectionHeader {
+                                title: "Sync".to_string(),
+                            }
+                            FieldRow {
+                                FieldRowMeta {
+                                    title: "Check for updates".to_string(),
+                                }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        disabled: !check_enabled || any_active,
+                                        loading: check_running,
+                                        onclick: on_check_for_updates,
+                                    "Check for updates"
+                                    }
+                                }
+                            }
+                            FieldRow {
+                                FieldRowMeta {
+                                    title: "Validate local files".to_string(),
+                                }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
+                                        disabled: !validate_enabled || any_active,
+                                        loading: validate_running,
+                                        onclick: on_validate,
+                                        "Validate"
+                                    }
+                                }
+                            }
+                            FieldRow {
+                                FieldRowMeta {
+                                    title: "Force Sync".to_string(),
+                                }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Primary,
+                                        disabled: !sync_enabled || any_active,
+                                        onclick: on_sync_action,
+                                        "Force Sync"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if editing() {
+                        Section {
+                            SectionHeader { title: "Profile removal".to_string() }
+                            FieldRow {
+                                FieldRowMeta { title: "Delete profile".to_string() }
+                                FieldRowActions {
+                                    Button {
+                                        variant: ButtonVariant::Danger,
+                                        disabled: operation_active || delete_confirm_open(),
+                                        onclick: on_request_delete,
+                                        "Delete"
+                                    }
+                                }
+                            }
+                            InlineConfirm {
+                                open: delete_confirm_open(),
+                                message: format!("Delete \"{}\"? Local files are kept.", profile.name),
+                                confirm_label: "Delete".to_string(),
+                                cancel_label: "Cancel".to_string(),
+                                confirm_variant: ButtonVariant::Danger,
+                                loading: delete_loading(),
+                                disabled: operation_active,
+                                on_confirm: on_confirm_delete,
+                                on_cancel: on_cancel_delete,
+                            }
+                        }
+                    }
+                }
+            }
+
+            if editing() {
+                PageFooter {
+                    actions: Some(rsx! {
+                        Button { variant: ButtonVariant::Ghost, onclick: on_cancel_edit, "Cancel" }
+                        Button {
+                            variant: ButtonVariant::Primary,
+                            loading: save_loading(),
+                            disabled: !can_save || operation_active,
+                            onclick: on_save,
+                            "Save"
+                        }
+                    }),
+                }
+            } else {
+                PageFooter {
+                    actions: Some(rsx! {
+                        Button { variant: ButtonVariant::Ghost, onclick: move |evt| leave_page.call(evt), "Cancel" }
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            disabled: any_active,
+                            onclick: on_edit,
+                            "Edit"
+                        }
+                    }),
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sync_mode(
+    bridge: &FleetBridge,
+    progress: Option<&fleet_core::ProfileOperationProgressState>,
+    session_id: Option<u64>,
+    stopping: bool,
+    cancel_enabled: bool,
+) -> Element {
+    let percent = (!stopping)
+        .then(|| progress.and_then(|progress| progress.stage.percent))
+        .flatten();
+    let indeterminate = stopping
+        || progress
+            .map(|progress| !progress.stage.determinate)
+            .unwrap_or(true);
+    let phase = if stopping {
+        "Stopping sync"
+    } else {
+        progress
+            .and_then(|progress| progress.status_text.as_deref())
+            .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
+            .unwrap_or("Preparing sync")
+    };
+    let transferring = progress
+        .and_then(|progress| progress.primary_metric.as_ref())
+        .is_some_and(|metric| metric.unit == fleet_core::ProgressUnit::Bytes);
+    let write_rate = progress
+        .and_then(|progress| progress.write_bytes_per_sec)
+        .map(format_speed);
+    let percent_label = percent.map(|value| format!("{value}%"));
+
+    let primary_metric = progress.and_then(|progress| progress.primary_metric.clone());
+    let secondary_metric = progress.and_then(|progress| progress.secondary_metric.clone());
+    let primary_amount = primary_metric.as_ref().map(|metric| match metric.unit {
+        fleet_core::ProgressUnit::Files => metric.rendered.clone(),
+        fleet_core::ProgressUnit::Bytes => format!("{} {}", metric.label, metric.rendered),
+    });
+    let rate = progress
+        .and_then(|progress| progress.throughput_bytes_per_sec)
+        .map(format_speed);
+    let remaining = progress
+        .and_then(|progress| progress.eta_seconds)
+        .map(format_clock);
+    let hashing = progress.is_some_and(|progress| {
+        progress.active_stage == fleet_core::OperationStage::VerifyingInventory
+    });
+
+    let bridge_for_cancel = bridge.clone();
+    let on_cancel_sync = move |_: MouseEvent| {
+        if let Some(session_id) = session_id {
+            let _ = bridge_for_cancel.core().cancel_session(session_id);
+        }
+    };
+
+    rsx! {
+        div { class: "page-frame",
+            div { class: "page-frame__body",
+                div { class: "page__inner section-list",
+                    section { class: "sync-panel",
+                        div { class: "sync-panel__head",
+                            div { class: "sync-panel__phase", "{phase}" }
+                            if !transferring {
+                                if let Some(percent_label) = percent_label.as_ref() {
+                                    div { class: "sync-panel__percent", "{percent_label}" }
+                                }
+                            }
+                        }
+                        if transferring {
+                            {render_transfer_bar("Download", secondary_metric.as_ref(), rate.as_deref(), stopping)}
+                            {render_transfer_bar("Write", primary_metric.as_ref(), write_rate.as_deref(), stopping)}
+                        } else {
+                            ProgressBar { percent, indeterminate }
+                            if !stopping {
+                                if let Some(primary_amount) = primary_amount.as_ref() {
+                                    div { class: "sync-panel__count mono", "{primary_amount}" }
+                                }
+                                if hashing {
+                                    if let Some(rate) = rate.as_ref() {
+                                        div { class: "sync-panel__stats mono", "Hashing speed {rate}" }
+                                    }
+                                }
+                            }
+                        }
+                        if !stopping {
+                            if let Some(remaining) = remaining.as_ref() {
+                                div { class: "sync-panel__stats mono", "About {remaining} remaining" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            PageFooter {
+                actions: Some(rsx! {
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        disabled: !cancel_enabled || session_id.is_none(),
+                        loading: stopping,
+                        onclick: on_cancel_sync,
+                        if stopping { "Stopping" } else { "Cancel" }
+                    }
+                }),
+            }
+        }
+    }
+}
+
+fn render_transfer_bar(
+    label: &str,
+    metric: Option<&fleet_core::UiProgressMetric>,
+    rate: Option<&str>,
+    stopping: bool,
+) -> Element {
+    let total = metric.and_then(|metric| metric.total);
+    let done = metric.and_then(|metric| metric.done);
+    let percent = done
+        .zip(total)
+        .filter(|(_, total)| *total > 0)
+        .map(|(done, total)| {
+            ((done as f64 / total as f64) * 100.0)
+                .clamp(0.0, 100.0)
+                .round() as u64
+        });
+    let amount = metric.map(|metric| metric.rendered.as_str());
+    rsx! {
+        div { class: "sync-panel",
+            div { class: "sync-panel__head",
+                div { "{label}" }
+                if total != Some(0) {
+                    if let Some(percent) = percent { div { class: "sync-panel__percent", "{percent}%" } }
+                }
+            }
+            if total == Some(0) {
+                div { class: "sync-panel__stats", "No {label.to_lowercase()} needed" }
+            } else {
+                ProgressBar { percent, indeterminate: percent.is_none() }
+                div { class: "sync-panel__count mono", if let Some(amount) = amount { "{amount}" } }
+                if !stopping {
+                    if let Some(rate) = rate {
+                        div { class: "sync-panel__stats mono", "{label} speed {rate}" }
                     }
                 }
             }

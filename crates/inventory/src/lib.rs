@@ -1,9 +1,10 @@
-//! Inventory is the authoritative finalized local file index used for trust and segment lookup.
-//! It persists only finalized on-disk file facts and their segments.
+//! Fleet-owned SQLite persistence for Flux materialization facts.
 
-mod flux_view;
-mod inventory;
-mod store;
+mod provider;
+mod row;
+mod schema;
+mod sqlite;
+mod types;
 
-pub use flux_view::open_flux_inventory;
-pub use inventory::{FinalizedFileRow, Inventory, InventoryError};
+pub use provider::FleetInventoryProvider;
+pub use types::InventoryError;

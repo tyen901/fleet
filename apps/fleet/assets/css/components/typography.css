@@ -1,0 +1,9 @@
+/* The only uppercase text in the app. Declared once so it cannot drift. */
+.section__title,
+.settings-preview__label {
+  color: var(--clr-text-secondary);
+  font-size: var(--text-label);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}

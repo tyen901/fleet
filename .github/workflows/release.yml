@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]*.[0-9]*.[0-9]*"
+      - 'v[0-9]*.[0-9]*.[0-9]*'
 
 concurrency:
   group: release
@@ -24,16 +24,16 @@ jobs:
             os: windows-latest
             app_id: fleet
             exe_name: fleet.exe
-            channel: win-stable
+            channel_prefix: win
           - target: linux
             os: ubuntu-24.04
             app_id: fleet
             exe_name: fleet
-            channel: linux-stable
+            channel_prefix: linux
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build and Package
         id: build
@@ -42,11 +42,11 @@ jobs:
           target: ${{ matrix.target }}
           app_id: ${{ matrix.app_id }}
           exe_name: ${{ matrix.exe_name }}
-          channel: ${{ matrix.channel }}
+          channel: ${{ format('{0}-{1}', matrix.channel_prefix, contains(github.ref_name, '-') && 'dev' || 'stable') }}
           private_deps_token: ${{ secrets.FLEET_PRIVATE_DEPS_TOKEN }}
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: releases-${{ matrix.target }}
           path: Releases
@@ -58,16 +58,17 @@ jobs:
     needs: build
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: releases-*
           path: Releases
           merge-multiple: true
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           overwrite_files: true
           files: |
             Releases/fleet-*.nupkg
