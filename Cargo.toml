@@ -8,9 +8,7 @@ members = [
     "crates/domain",
     "crates/download",
     "crates/inventory",
-    "crates/manifest",
-    "crates/pipeline",
-    "crates/reconcile",
+    "crates/flux",
     "crates/swifty-repo",
 ]
 
@@ -19,54 +17,44 @@ license = "GPL-3.0-only"
 
 [workspace.dependencies]
 # Workspace crates (path deps)
-fleet-cli                = { path = "apps/fleet-cli" }
 fleet-core               = { path = "crates/core" }
 fleet-download           = { path = "crates/download" }
 fleet-domain             = { path = "crates/domain" }
 fleet-inventory          = { path = "crates/inventory" }
-fleet-manifest           = { path = "crates/manifest" }
-fleet-pipeline           = { path = "crates/pipeline" }
-fleet-reconcile          = { path = "crates/reconcile" }
-fleet                    = { path = "apps/fleet" }
+fleet-flux               = { path = "crates/flux" }
 swifty-repo              = { path = "crates/swifty-repo" }
 fleet-arma3              = { path = "crates/arma3" }
 
-# Local dependencies
-swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", tag = "v1.1.0" }
+# Pinned external dependencies
+swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-
-
-# Local dependencies (Flux)
-flux-api                    = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-api" }
-flux-inventory-contract     = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-inventory-contract" }
-flux-manifest               = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-manifest" }
-flux-segment-cache          = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-segment-cache" }
-flux-types                  = { git = "https://github.com/tyen901/flux4.git", rev = "9e69c5ebaae63bc058bd5949d2c1cc944fd0555b", package = "flux-types" }
+# Flux contract pinned to the exact published revision
+flux                    = { git = "https://github.com/tyen901/flux6.git", package = "flux", rev = "403778ba803057ba5bd102b4f0f14c2a49c339d6" }
+flux-content            = { git = "https://github.com/tyen901/flux6.git", package = "flux-content", rev = "403778ba803057ba5bd102b4f0f14c2a49c339d6" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
-tokio-util   = { version = "0.7.18", features = ["io-util"] }
-hyper        = "1.8.1"
-reqwest      = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls", "stream"] }
+tokio-util   = { version = "0.7.18", features = ["io-util", "rt"] }
+reqwest      = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls", "stream"] }
 axum         = { version = "0.8.8", default-features = false, features = ["tokio", "http1"] }
 async-trait  = "0.1.89"
-futures      = "0.3.31"
 futures-util = "0.3.31"
-tower        = { version = "0.5.2", features = ["util"] }
+object_store = { version = "0.14.1", features = ["http"] }
+reqwest-middleware = "0.5"
+reqwest-retry = "0.9"
+atomic-write-file = "0.3"
 
 # Serialization
 serde      = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-specta     = { version = "=2.0.0-rc.22", features = ["derive"] }
 
 # Logging / diagnostics
 tracing            = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "time"] }
-tracing-appender   = "0.2.4"
-sentry             = "0.46.1"
 
 # CLI
 clap = { version = "4.5.55", features = ["derive"] }
+indicatif = "0.17.11"
 
 # Error handling
 anyhow      = "1.0.100"
@@ -75,51 +63,29 @@ rand        = "0.8"
 
 # Identifiers / parsing / encoding
 uuid              = { version = "1.20.0", features = ["v4"] }
-hex               = "0.4.3"
-percent-encoding  = "2.3.2"
 shell-words       = "1.1.1"
-shlex             = "1.3.0"
-regex             = "1.12.2"
 url               = "2.5.8"
 velopack          = "0.0.1369-g1d5c984"
 
 # Bytes / paths
 bytes     = "1.11.1"
-byteorder = "1.5.0"
-camino    = "1.2.2"
 
 # Hashing
-blake3 = "1.8.2"
-md5  = "0.8.0"   # repo checksum compatibility
 sha1 = "0.10.6"  # Swifty repo checksum
-sha2 = "0.10.9"  # SHA-256 for InstallationId
-
-# Concurrency
-rayon             = "1.11.0"
-crossbeam-channel = "0.5.15"
 
 # Filesystem / OS
-walkdir      = "2.5.0"
 directories  = "6.0.0"
-filetime     = "0.2.27"
 tempfile     = "3.24.0"
-winreg       = "0.55.0"
-fs2          = "0.4.3"
 
 # Database
-rusqlite = { version = "0.38.0", features = ["bundled-windows"] }
+rusqlite = { version = "0.38.0", features = ["bundled-windows", "cache"] }
 
 # Time
 chrono = "0.4.43"
-
-# Rate limiting / numeric helpers
-governor   = "0.10.4"
-nonzero_ext = "0.3.0"
 
 [profile.release]
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-#strip = "symbols"
 debug = 0

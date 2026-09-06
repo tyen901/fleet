@@ -1,19 +1,22 @@
 [package]
 name = "fleet-cli"
-version = "1.0.0"
+version = "4.0.0"
 edition = "2021"
 build = "build.rs"
 
 [dependencies]
 fleet-core = { workspace = true }
+fleet-domain = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
-indicatif = "0.17.11"
+indicatif = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-fleet-domain = { workspace = true }
+serde_json = { workspace = true }
+swifty_artifacts = { workspace = true }
+tempfile = { workspace = true }
 
 [[bin]]
 name = "fleet-cli"

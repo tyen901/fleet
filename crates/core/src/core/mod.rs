@@ -1,26 +1,25 @@
 mod await_session;
-pub(crate) mod flow_logging;
-pub(crate) mod operation_scheduler;
 mod runtime;
-pub(crate) mod state_projection;
 
-use crate::state::AppState;
-use crate::storage::{profile_state_root_dir, ConfigRepo};
-use fleet_domain::AppSettings;
-use fleet_pipeline::{PipelineConfig, PipelineRuntime, PipelineSessionEvent};
+use crate::operations::{OperationRuntime, OperationSessionEvent};
+use crate::state::{ensure_profile_runtime_mut, AppState};
+use crate::storage::ConfigRepo;
+use fleet_domain::health::{CancelResult, OperationKind};
+use fleet_domain::{ApiError, ProfileId};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex as AsyncMutex};
 
 #[derive(Clone)]
 pub struct Core {
-    inner: Arc<CoreInner>,
+    pub(crate) inner: Arc<CoreInner>,
 }
 
-struct CoreInner {
-    pipeline: PipelineRuntime,
+pub(crate) struct CoreInner {
+    operations: OperationRuntime,
     next_session_id: AtomicU64,
     config: Arc<ConfigRepo>,
+    pub(crate) settings_save_lock: AsyncMutex<()>,
     state: Mutex<AppState>,
     state_tx: watch::Sender<AppState>,
 }
@@ -42,12 +41,12 @@ impl Core {
         self.inner.state_tx.subscribe()
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<PipelineSessionEvent> {
-        self.inner.pipeline.subscribe()
+    pub fn subscribe_events(&self) -> broadcast::Receiver<OperationSessionEvent> {
+        self.inner.operations.subscribe()
     }
 
-    pub(crate) fn pipeline(&self) -> PipelineRuntime {
-        self.inner.pipeline.clone()
+    pub(crate) fn operation_runtime(&self) -> OperationRuntime {
+        self.inner.operations.clone()
     }
 
     pub(crate) fn config_repo(&self) -> Arc<ConfigRepo> {
@@ -77,46 +76,71 @@ impl Core {
         publish_state(&mut guard, &self.inner.state_tx);
     }
 
-    pub(crate) fn update_state_result<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut AppState) -> (R, bool),
-    {
-        let mut guard = self.inner.state.lock().unwrap();
-        let (result, should_publish) = f(&mut guard);
-        if should_publish {
-            publish_state(&mut guard, &self.inner.state_tx);
-        }
-        result
-    }
-
     fn new_default() -> anyhow::Result<Self> {
         let config = Arc::new(ConfigRepo::new_default()?);
-        let pipeline = PipelineRuntime::new(PipelineConfig::new_default());
+        let operations = OperationRuntime::new();
         let (state_tx, _state_rx) = watch::channel(AppState::default());
         let state = Mutex::new(AppState::default());
 
         Ok(Self {
             inner: Arc::new(CoreInner {
-                pipeline,
+                operations,
                 next_session_id: AtomicU64::new(1),
                 config,
+                settings_save_lock: AsyncMutex::new(()),
                 state,
                 state_tx,
             }),
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> anyhow::Result<Self> {
+        Self::new_default()
+    }
+
     pub(crate) fn allocate_session_id(&self) -> u64 {
         self.inner.next_session_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub(crate) fn pipeline_config_from_settings(settings: &AppSettings) -> PipelineConfig {
-        let mut cfg = PipelineConfig::new_default();
-        if let Ok(root) = profile_state_root_dir() {
-            cfg.profile_state_root_dir = root;
+    pub async fn start_operation(
+        &self,
+        profile_id: ProfileId,
+        operation: OperationKind,
+    ) -> Result<u64, ApiError> {
+        self.ensure_profile_loaded_for_start(&profile_id).await?;
+        self.operation_runtime()
+            .start(self.clone(), profile_id, operation)
+    }
+
+    pub fn cancel_session(&self, session_id: u64) -> Result<CancelResult, ApiError> {
+        Ok(self.operation_runtime().cancel(self, session_id))
+    }
+
+    async fn ensure_profile_loaded_for_start(&self, profile_id: &str) -> Result<(), ApiError> {
+        if self.read_state(|state| state.profiles.contains_key(profile_id)) {
+            return Ok(());
         }
-        cfg.inventory_ignore_rules_text = settings.sync.local_state_ignore_rules.clone();
-        cfg
+
+        let profile_id_owned = profile_id.to_string();
+        let profile = self
+            .load_profile(&profile_id_owned)
+            .await
+            .map_err(|e| ApiError::new("not_found", e.to_string()))?;
+
+        let profile_id_owned = profile.id.clone();
+        let profile_for_state = profile.clone();
+        self.update_state(|state| {
+            state
+                .profiles
+                .insert(profile_id_owned.clone(), profile_for_state);
+            let now = fleet_domain::time::now_unix_ms();
+            let _ = ensure_profile_runtime_mut(state, &profile_id_owned, now);
+            if let Some(runtime) = state.profile_runtime_by_id.get_mut(&profile_id_owned) {
+                runtime.recompute_status();
+            }
+        });
+        Ok(())
     }
 }
 

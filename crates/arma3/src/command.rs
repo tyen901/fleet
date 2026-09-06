@@ -1,7 +1,4 @@
-use std::collections::BTreeMap;
-use std::process::{Command, Stdio};
-
-use crate::Result;
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchMethod {
@@ -13,25 +10,14 @@ pub enum LaunchMethod {
 
 #[derive(Debug, Clone)]
 pub struct LaunchCommand {
-    pub method: LaunchMethod,
-    pub executable: String,
+    pub program: String,
     pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
 }
 
 impl LaunchCommand {
-    pub fn to_std_command(&self) -> Result<Command> {
-        let mut cmd = Command::new(&self.executable);
+    pub fn spawn(&self) -> std::io::Result<std::process::Child> {
+        let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
-
-        for (k, v) in &self.env {
-            cmd.env(k, v);
-        }
-
-        // Match HEMTT's behavior of not inheriting steam output.
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-
-        Ok(cmd)
+        cmd.spawn()
     }
 }
