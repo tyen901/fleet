@@ -26,6 +26,14 @@ pub enum Commands {
     /// Check profile health and list dirty/update status
     Check { profile_id: String },
 
+    /// Validate every managed file byte-for-byte
+    Validate {
+        profile_id: String,
+        /// Disable progress bars/spinners (useful for clean debug logs).
+        #[arg(long)]
+        no_progress: bool,
+    },
+
     /// Run a sync oneshot and print live progress
     Sync {
         profile_id: String,
@@ -60,10 +68,6 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum ProfileCommands {
     List,
-    /// Check profile health (local + remote)
-    Check {
-        profile_id: String,
-    },
     Add {
         id: String,
         name: String,

@@ -16,25 +16,9 @@ body {
   background: var(--clr-canvas);
   color: var(--clr-text-primary);
   font-family: var(--sans);
-  font-size: var(--text-size-body);
+  font-size: var(--text-body);
   line-height: 1.35;
   -webkit-font-smoothing: antialiased;
-}
-
-.text-caption {
-  font-size: var(--text-size-caption);
-}
-
-.text-label {
-  font-size: var(--text-size-label);
-}
-
-.text-body {
-  font-size: var(--text-size-body);
-}
-
-.text-emphasis {
-  font-size: var(--text-size-emphasis);
 }
 
 button {
@@ -50,23 +34,6 @@ button {
 button::-moz-focus-inner {
   border: 0;
   padding: 0;
-}
-
-.app-root::before {
-  content: '';
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 260vmax;
-  height: 260vmax;
-  transform: translate(-44%, -53%);
-  pointer-events: none;
-  z-index: -1;
-  background: radial-gradient(
-    circle at 38% 28%,
-    var(--clr-gradient-start) 0%,
-    var(--clr-gradient-end) 100%
-  );
 }
 
 ::selection {

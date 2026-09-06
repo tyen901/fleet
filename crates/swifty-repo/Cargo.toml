@@ -6,13 +6,14 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+atomic-write-file = { workspace = true }
 fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
+futures-util = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 swifty_artifacts = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }

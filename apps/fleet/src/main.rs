@@ -14,13 +14,8 @@ use services::bridge::FleetBridge;
 use style::StyleAssets;
 use tracing::{error, info};
 
-const APP_MIN_WIDTH: f64 = 700.0;
-const APP_MIN_HEIGHT: f64 = 500.0;
-
-static HOME_CSS: Asset = asset!(
-    "/assets/css/pages/home.css",
-    CssAssetOptions::new().with_minify(false)
-);
+const APP_WIDTH: f64 = 420.0;
+const APP_HEIGHT: f64 = 560.0;
 
 fn load_window_icon() -> anyhow::Result<Icon> {
     let image = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
@@ -35,9 +30,6 @@ fn main() -> anyhow::Result<()> {
 
         velopack::VelopackApp::build().run();
 
-        #[cfg(target_arch = "wasm32")]
-        dioxus_logger::initialize_default();
-
         let bridge = FleetBridge::new()?;
         let settings = bridge.get_snapshot().settings.clone();
         fleet_core::logging::init(fleet_core::logging::LoggingConfig {
@@ -47,22 +39,27 @@ fn main() -> anyhow::Result<()> {
         })?;
 
         let args: Vec<String> = std::env::args().collect();
-        info!(?args, "fleet launched");
+        info!(
+            ?args,
+            version = services::updates::build_version_string(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            "fleet launched"
+        );
         let window_icon = load_window_icon()?;
 
         dioxus::LaunchBuilder::desktop()
             .with_context(bridge)
             .with_cfg(
-                Config::new()
-                    .with_icon(window_icon)
-                    .with_menu(None)
-                    .with_window(
-                        WindowBuilder::new()
-                            .with_title("Fleet")
-                            .with_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
-                            .with_min_inner_size(LogicalSize::new(APP_MIN_WIDTH, APP_MIN_HEIGHT))
-                            .with_resizable(true),
-                    ),
+                Config::new().with_menu(None).with_window(
+                    WindowBuilder::new()
+                        .with_title("Fleet")
+                        .with_window_icon(Some(window_icon))
+                        .with_inner_size(LogicalSize::new(APP_WIDTH, APP_HEIGHT))
+                        .with_min_inner_size(LogicalSize::new(APP_WIDTH, APP_HEIGHT))
+                        .with_max_inner_size(LogicalSize::new(APP_WIDTH, APP_HEIGHT))
+                        .with_resizable(false),
+                ),
             )
             .launch(App);
 
@@ -79,7 +76,6 @@ fn main() -> anyhow::Result<()> {
 fn App() -> Element {
     rsx! {
         StyleAssets {}
-        document::Stylesheet { href: HOME_CSS }
         AppRoot {}
     }
 }

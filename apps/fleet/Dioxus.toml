@@ -15,3 +15,6 @@ watch_path = ["src", "assets", "Dioxus.toml"]
 identifier = "com.fleet.app"
 publisher = "Fleet"
 icon = ["assets/icon.png"]
+
+[bundle.windows]
+icon_path = "assets/icon.ico"

@@ -1,8 +1,6 @@
 use crate::ProfileCommands;
 use fleet_core::Core;
 
-use super::check::{print_check_report, run_inventory_check_report, run_repo_check_report};
-
 pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
     match command {
         ProfileCommands::List => {
@@ -11,16 +9,6 @@ pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
             for p in cfg.profiles {
                 println!("{:<20} {:<20} {:<30}", p.id, p.name, p.source);
             }
-        }
-        ProfileCommands::Check { profile_id } => {
-            let profile = core.load_profile(&profile_id).await?;
-            let repo_report = run_repo_check_report(core, &profile_id).await?;
-            let inventory_report = run_inventory_check_report(core, &profile_id).await?;
-            print_check_report(
-                &repo_report,
-                &inventory_report,
-                !profile.source.trim().is_empty(),
-            );
         }
         ProfileCommands::Add {
             id,
@@ -35,11 +23,16 @@ pub async fn run(core: &Core, command: ProfileCommands) -> anyhow::Result<()> {
                 destination: dest,
                 ..Default::default()
             };
-            let saved = core.save_profile(profile).await?;
+            let saved = core
+                .profile_save(profile)
+                .await
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
             println!("Profile '{}' created.", saved.id);
         }
         ProfileCommands::Remove { name } => {
-            core.delete_profile(&name).await?;
+            core.profile_delete(name.clone())
+                .await
+                .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
             println!("Profile '{}' removed.", name);
         }
     }

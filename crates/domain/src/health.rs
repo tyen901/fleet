@@ -1,9 +1,21 @@
 use crate::types::ProfileId;
-pub use crate::LocalStateHealth;
 use serde::{Deserialize, Serialize};
-use specta::Type;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub type OperationSessionId = u64;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LocalFileHealth {
+    Unknown,
+    MissingDestination,
+    ExpectedStateUnavailable,
+    InventoryUnavailable,
+    Missing,
+    Dirty,
+    Clean,
+    InvalidProfile,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RepoCheckFreshness {
     Unknown,
     UpToDate,
@@ -11,22 +23,35 @@ pub enum RepoCheckFreshness {
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OperationKind {
-    CheckRepo,
-    CheckInventory,
-    Delete,
+    Check,
+    Validate,
     Sync,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckReport {
+    pub profile_id: ProfileId,
+    pub repo: RepoCheckReport,
+    pub local: LocalFileReport,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VerificationKind {
+    Fast,
+    ByteExact,
+    Materialized,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CancelResult {
     Requested,
     AlreadyTerminal,
     NotFound,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepoCheckReport {
     pub profile_id: ProfileId,
     #[serde(default)]
@@ -37,22 +62,19 @@ pub struct RepoCheckReport {
     pub checked_at_unix_ms: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
-pub struct InventoryCheckReport {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LocalFileReport {
     pub profile_id: ProfileId,
-    pub local_health: LocalStateHealth,
+    pub verification: VerificationKind,
+    pub health: LocalFileHealth,
     pub checked_at_unix_ms: u64,
-    #[serde(default)]
-    pub expected_missing_in_inventory_count: u64,
-    #[serde(default)]
-    pub inventory_unexpected_paths_count: u64,
-    #[serde(default)]
-    pub unexpected_delete_paths: Vec<String>,
+    pub missing_paths_count: u64,
+    pub modified_paths_count: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncReport {
     pub profile_id: ProfileId,
     pub repo: RepoCheckReport,
-    pub inventory: InventoryCheckReport,
+    pub local: LocalFileReport,
 }
