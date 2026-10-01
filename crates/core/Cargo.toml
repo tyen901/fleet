@@ -3,12 +3,16 @@ name = "fleet-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+flux = ["dep:fleet-flux", "dep:fleet-inventory"]
+
 [dependencies]
 anyhow = { workspace = true }
 fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
-fleet-inventory = { workspace = true }
-fleet-flux = { workspace = true }
+fleet-inventory = { workspace = true, optional = true }
+fleet-flux = { workspace = true, optional = true }
 swifty-repo = { workspace = true }
 directories = { workspace = true }
 fleet-arma3 = { workspace = true }

@@ -4,6 +4,10 @@ version = "4.1.0-alpha.2"
 edition = "2021"
 build = "build.rs"
 
+[features]
+default = ["flux"]
+flux = ["fleet-core/flux"]
+
 [dependencies]
 fleet-core = { workspace = true }
 anyhow = { workspace = true }

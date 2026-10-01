@@ -5,40 +5,19 @@ use tracing::info;
 
 use crate::app::router::Route;
 use crate::features::profiles::common::{
-    local_files_need_sync, profile_icon_src, repo_update_available, start_profile_operation_request,
+    format_clock, format_speed, profile_icon_src, stage_phase_label, start_profile_operation,
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
-use crate::style::{Button, ButtonVariant, IconButton, PageFooter};
+use crate::style::{Button, ButtonVariant, IconButton, PageFooter, ProgressBar};
+use fleet_core::ProfilePrimaryAction;
 use icondata::{BsGear, BsPlusLg, BsThreeDots};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GameStartKind {
     Launch,
     Join,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CardSyncAction {
-    Update,
-    Sync,
-}
-
-impl CardSyncAction {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Update => "Update",
-            Self::Sync => "Sync",
-        }
-    }
-
-    fn request_labels(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Update => ("update", "start_update_failed", "Update failed"),
-            Self::Sync => ("sync", "start_sync_failed", "Sync failed"),
-        }
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -51,15 +30,11 @@ struct ProfileRowViewState {
     launch_loading: bool,
     join_loading: bool,
     check_running: bool,
-    sync_action: Option<CardSyncAction>,
-    sync_enabled: bool,
-}
-
-fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
-    matches!(
-        kind,
-        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
-    )
+    primary_action: ProfilePrimaryAction,
+    progress: Option<fleet_core::ProfileOperationProgressState>,
+    session_id: Option<fleet_core::OperationSessionId>,
+    cancel_enabled: bool,
+    stopping: bool,
 }
 
 fn profile_row_view_state(
@@ -75,7 +50,6 @@ fn profile_row_view_state(
     let active_operation = runtime
         .and_then(|entry| entry.active.as_ref())
         .map(|active| active.operation);
-    let exclusive_active = active_operation.is_some_and(exclusive_operation);
 
     // A profile with nothing wrong shows no status at all.
     let status_label = status
@@ -85,11 +59,8 @@ fn profile_row_view_state(
     let launch_loading = launching_profile_id == Some(profile_id);
     let join_loading = joining_profile_id == Some(profile_id);
     let check_running = active_operation == Some(fleet_core::OperationKind::Check);
-    let sync_action = card_sync_action(status, active_operation.is_some());
-    let start_disabled = status.map(|status| !status.can_launch).unwrap_or(true)
-        || exclusive_active
-        || launch_loading
-        || join_loading;
+    let start_disabled =
+        status.map(|status| !status.can_launch).unwrap_or(true) || launch_loading || join_loading;
 
     ProfileRowViewState {
         id: profile_id.to_string(),
@@ -100,21 +71,17 @@ fn profile_row_view_state(
         launch_loading,
         join_loading,
         check_running,
-        sync_action,
-        sync_enabled: status.is_some_and(|status| status.actions.sync_enabled),
-    }
-}
-
-fn card_sync_action(
-    status: Option<&fleet_core::ProfileStatusState>,
-    operation_active: bool,
-) -> Option<CardSyncAction> {
-    if repo_update_available(status, operation_active) {
-        Some(CardSyncAction::Update)
-    } else if !operation_active && status.is_some_and(local_files_need_sync) {
-        Some(CardSyncAction::Sync)
-    } else {
-        None
+        primary_action: status
+            .map(|status| status.primary_action)
+            .unwrap_or(ProfilePrimaryAction::RefreshStatus),
+        progress: status.and_then(|status| status.progress.clone()),
+        session_id: runtime
+            .and_then(|runtime| runtime.active.as_ref())
+            .map(|active| active.session_id),
+        cancel_enabled: status.is_some_and(|status| status.actions.cancel_enabled),
+        stopping: runtime
+            .and_then(|runtime| runtime.active.as_ref())
+            .is_some_and(|active| active.cancel_requested),
     }
 }
 
@@ -278,8 +245,46 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
 
     let profile_id_for_launch = row.id.clone();
     let profile_id_for_join = row.id.clone();
-    let profile_id_for_sync = row.id.clone();
-    let nav_for_sync = nav;
+    let profile_id_for_action = row.id.clone();
+    let action_label = match row.primary_action {
+        ProfilePrimaryAction::None => None,
+        ProfilePrimaryAction::RefreshStatus => Some("Refresh"),
+        ProfilePrimaryAction::Sync => Some("Sync"),
+        ProfilePrimaryAction::RetrySync => Some("Retry Sync"),
+        ProfilePrimaryAction::FixProfile => Some("Fix"),
+    };
+    let on_primary_action = {
+        let bridge = bridge.clone();
+        let toasts = toasts.clone();
+        move |_| match row.primary_action {
+            ProfilePrimaryAction::None => {}
+            ProfilePrimaryAction::FixProfile => {
+                let _ = nav.push(Route::ProfileView {
+                    id: profile_id_for_action.clone(),
+                });
+            }
+            ProfilePrimaryAction::RefreshStatus => start_profile_operation(
+                bridge.clone(),
+                toasts.clone(),
+                profile_id_for_action.clone(),
+                fleet_core::OperationKind::Check,
+                "check",
+                "start_check_failed",
+                "Status refresh failed",
+            ),
+            ProfilePrimaryAction::Sync | ProfilePrimaryAction::RetrySync => {
+                start_profile_operation(
+                    bridge.clone(),
+                    toasts.clone(),
+                    profile_id_for_action.clone(),
+                    fleet_core::OperationKind::Sync,
+                    "sync",
+                    "start_sync_failed",
+                    "Sync failed",
+                )
+            }
+        }
+    };
     let on_start = props.on_start;
 
     let launch_label = if row.launch_loading {
@@ -313,7 +318,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                 div { class: "profile-row__summary",
                     div { class: "profile-row__name", "{row.name}" }
                 }
-                div { class: "profile-row__status",
+                div { class: "profile-row__status", role: "status",
                     if let Some(status_label) = row.status_label.clone() {
                         div { class: "profile-row__state",
                             if row.check_running {
@@ -324,49 +329,33 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                     }
                 }
             }
+            if let Some(progress) = row.progress.as_ref() {
+                {render_operation_progress(progress, row.stopping)}
+            }
             div { class: "profile-row__actions",
-                div {
-                    class: if row.sync_action.is_some() {
-                        "profile-row__buttons profile-row__buttons--with-sync"
-                    } else {
-                        "profile-row__buttons"
-                    },
-                    if let Some(sync_action) = row.sync_action {
+                div { class: "profile-row__buttons",
+                    if let Some(action_label) = action_label {
                         Button {
                             variant: ButtonVariant::Primary,
-                            disabled: !row.sync_enabled,
-                            onclick: {
-                                let bridge = bridge.clone();
-                                let toasts = toasts.clone();
-                                move |_| {
-                                    let profile_id = profile_id_for_sync.clone();
-                                    let bridge = bridge.clone();
-                                    let toasts = toasts.clone();
-                                    let (action, error_reason, fail_title) =
-                                        sync_action.request_labels();
-                                    spawn(async move {
-                                        if start_profile_operation_request(
-                                            bridge,
-                                            toasts,
-                                            profile_id.clone(),
-                                            fleet_core::OperationKind::Sync,
-                                            action,
-                                            error_reason,
-                                            fail_title,
-                                        )
-                                        .await
-                                        {
-                                            let _ = nav_for_sync
-                                                .push(Route::ProfileView { id: profile_id });
-                                        }
-                                    });
+                            onclick: on_primary_action,
+                            "{action_label}"
+                        }
+                    }
+                    if row.session_id.is_some() {
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            disabled: !row.cancel_enabled,
+                            loading: row.stopping,
+                            onclick: move |_| {
+                                if let Some(session_id) = row.session_id {
+                                    let _ = bridge.core().cancel_session(session_id);
                                 }
                             },
-                            {sync_action.label()}
+                            if row.stopping { "Stopping" } else { "Cancel" }
                         }
                     }
                     Button {
-                        variant: if row.sync_action.is_some() {
+                        variant: if action_label.is_some() || row.session_id.is_some() {
                             ButtonVariant::Secondary
                         } else {
                             ButtonVariant::Primary
@@ -398,59 +387,50 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{card_sync_action, CardSyncAction};
-    use crate::features::profiles::common::local_files_need_sync;
-
-    #[test]
-    fn local_files_need_sync_for_local_repair_states() {
-        for local_health in [
-            fleet_core::LocalFileHealth::Missing,
-            fleet_core::LocalFileHealth::Dirty,
-            fleet_core::LocalFileHealth::MissingDestination,
-            fleet_core::LocalFileHealth::ExpectedStateUnavailable,
-            fleet_core::LocalFileHealth::InventoryUnavailable,
-        ] {
-            let status = fleet_core::ProfileStatusState {
-                local_health,
-                ..fleet_core::ProfileStatusState::unknown(0)
-            };
-            assert!(local_files_need_sync(&status));
+/// The list owns operation progress, including operations started from details.
+fn render_operation_progress(
+    progress: &fleet_core::ProfileOperationProgressState,
+    stopping: bool,
+) -> Element {
+    let phase = if stopping {
+        "Stopping"
+    } else {
+        progress
+            .status_text
+            .as_deref()
+            .unwrap_or_else(|| stage_phase_label(progress.active_stage))
+    };
+    let percent = (!stopping).then_some(progress.stage.percent).flatten();
+    let rate = progress.throughput_bytes_per_sec.map(format_speed);
+    let remaining = progress.eta_seconds.map(format_clock);
+    let rate_label = if progress.active_stage == fleet_core::OperationStage::VerifyingInventory {
+        "Hashing speed"
+    } else {
+        "Download speed"
+    };
+    rsx! {
+        section { class: "profile-row__progress", aria_label: "Profile operation progress",
+            div { class: "profile-row__progress-head",
+                span { class: "profile-row__phase", "{phase}" }
+                if let Some(percent) = percent {
+                    span { class: "profile-row__percent mono", "{percent}%" }
+                }
+            }
+            ProgressBar { percent, indeterminate: stopping || !progress.stage.determinate }
+            if !stopping {
+                div { class: "profile-row__metrics mono",
+                    if let Some(metric) = progress.primary_metric.as_ref() {
+                        span { "{metric.label}: {metric.rendered}" }
+                    }
+                    if let Some(metric) = progress.secondary_metric.as_ref() {
+                        span { "{metric.label}: {metric.rendered}" }
+                    }
+                }
+                div { class: "profile-row__rates mono",
+                    if let Some(rate) = rate { span { "{rate_label} {rate}" } }
+                    if let Some(remaining) = remaining { span { "About {remaining} remaining" } }
+                }
+            }
         }
-    }
-
-    #[test]
-    fn local_files_need_sync_excludes_ready_and_unknown_states() {
-        for local_health in [
-            fleet_core::LocalFileHealth::Clean,
-            fleet_core::LocalFileHealth::Unknown,
-        ] {
-            let status = fleet_core::ProfileStatusState {
-                local_health,
-                ..fleet_core::ProfileStatusState::unknown(0)
-            };
-            assert!(!local_files_need_sync(&status));
-        }
-    }
-
-    #[test]
-    fn profile_card_exposes_the_required_sync_action() {
-        let mut status = fleet_core::ProfileStatusState {
-            headline: fleet_core::ProfileStatusHeadline::NeedsSync,
-            local_health: fleet_core::LocalFileHealth::Dirty,
-            ..fleet_core::ProfileStatusState::unknown(0)
-        };
-        assert_eq!(
-            card_sync_action(Some(&status), false),
-            Some(CardSyncAction::Sync)
-        );
-
-        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpdateAvailable);
-        assert_eq!(
-            card_sync_action(Some(&status), false),
-            Some(CardSyncAction::Update)
-        );
-        assert_eq!(card_sync_action(Some(&status), true), None);
     }
 }
