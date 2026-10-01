@@ -1,7 +1,9 @@
 use crate::operations::events::{
     OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind, OperationStage,
 };
-use crate::operations::{check, simulated, sync, validate, OperationOutput};
+#[cfg(feature = "flux")]
+use crate::operations::{check, sync, validate};
+use crate::operations::{simulated, OperationOutput};
 use crate::state::{
     apply_operation_progress, apply_operation_stage, ensure_profile_runtime_mut,
     recompute_profile_status, ActiveOperationState, OperationOutcomeState, OperationTerminalStatus,
@@ -112,6 +114,7 @@ impl OperationRuntime {
             }
         }
 
+        #[cfg(feature = "flux")]
         let state_root = crate::profile_state_root_dir()
             .map_err(|err| ApiError::new("state_root", err.to_string()))?;
         let session_id = core.allocate_session_id();
@@ -151,11 +154,42 @@ impl OperationRuntime {
         let rt = self.clone();
         tokio::spawn(async move {
             let out = match operation {
+                OperationKind::Check if simulated::is_enabled() => {
+                    let materialized = core.read_state(|state| {
+                        state
+                            .profile_runtime_by_id
+                            .get(&profile.id)
+                            .and_then(|runtime| runtime.materialization.as_ref())
+                            .is_some_and(|report| {
+                                report.health == fleet_domain::LocalFileHealth::Clean
+                            })
+                    });
+                    Ok(OperationOutput::Check(simulated::check(
+                        &profile,
+                        materialized,
+                    )))
+                }
+                OperationKind::Validate if simulated::is_enabled() => {
+                    let materialized = core.read_state(|state| {
+                        state
+                            .profile_runtime_by_id
+                            .get(&profile.id)
+                            .and_then(|runtime| runtime.materialization.as_ref())
+                            .is_some_and(|report| {
+                                report.health == fleet_domain::LocalFileHealth::Clean
+                            })
+                    });
+                    let mut report = simulated::check(&profile, materialized).local;
+                    report.verification = fleet_domain::VerificationKind::ByteExact;
+                    Ok(OperationOutput::Validate(report))
+                }
+                #[cfg(feature = "flux")]
                 OperationKind::Check => {
                     check::check(&profile, &state_root, publisher.clone(), cancel.clone())
                         .await
                         .map(OperationOutput::Check)
                 }
+                #[cfg(feature = "flux")]
                 OperationKind::Validate => {
                     validate::validate(&profile, &state_root, publisher.clone(), cancel.clone())
                         .await
@@ -166,11 +200,14 @@ impl OperationRuntime {
                         .await
                         .map(OperationOutput::Sync)
                 }
+                #[cfg(feature = "flux")]
                 OperationKind::Sync => {
                     sync::sync(&profile, &state_root, publisher.clone(), cancel.clone())
                         .await
                         .map(OperationOutput::Sync)
                 }
+                #[cfg(not(feature = "flux"))]
+                _ => Err(crate::operations::backend_unavailable()),
             };
             rt.finish(&core, session_id, out);
         });

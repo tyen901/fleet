@@ -1,4 +1,4 @@
-//! Scripted sync progress for the automated UI render flow.
+//! Scripted maintenance state and sync progress for the automated UI render flow.
 //!
 //! Enabled by `FLEET_SIMULATE_SYNC=1`. Emits a deterministic progress sequence
 //! and returns an up-to-date report without touching the network, the repo
@@ -8,7 +8,7 @@ use crate::operations::{
     OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressUnit,
 };
 use fleet_domain::health::{
-    LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport, SyncReport,
+    CheckReport, LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport, SyncReport,
     VerificationKind,
 };
 use fleet_domain::Profile;
@@ -27,7 +27,7 @@ pub(crate) fn is_enabled() -> bool {
     std::env::var(ENV_FLAG).is_ok_and(|value| value == "1")
 }
 
-/// Percentage at which the sequence parks until cancelled.
+/// Percentage at which the sequence pauses long enough to capture or cancel.
 fn hold_percent() -> Option<u64> {
     std::env::var(ENV_HOLD_PERCENT)
         .ok()
@@ -90,9 +90,13 @@ pub(crate) async fn sync(
             eta_seconds: Some(TOTAL_FILES - step),
         });
         if hold_percent() == Some(step * 100 / TOTAL_FILES) {
-            cancel.cancelled().await;
-            tokio::time::sleep(CANCEL_DELAY).await;
-            return Err(crate::ApiError::new("canceled", "operation canceled"));
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tokio::time::sleep(CANCEL_DELAY).await;
+                    return Err(crate::ApiError::new("canceled", "operation canceled"));
+                }
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            }
         }
         tokio::time::sleep(STEP_DELAY).await;
     }
@@ -116,4 +120,29 @@ pub(crate) async fn sync(
             checked_at_unix_ms: checked_at,
         },
     })
+}
+
+/// Seed the render flow with missing files; later refreshes preserve a completed sync.
+pub(crate) fn check(profile: &Profile, materialized: bool) -> CheckReport {
+    let now = fleet_domain::time::now_unix_ms();
+    CheckReport {
+        profile_id: profile.id.clone(),
+        repo: RepoCheckReport {
+            profile_id: profile.id.clone(),
+            local_revision: None,
+            remote_revision: None,
+            freshness: RepoCheckFreshness::UpToDate,
+            checked_at_unix_ms: now,
+        },
+        local: LocalFileReport {
+            profile_id: profile.id.clone(),
+            verification: VerificationKind::Fast,
+            health: if materialized {
+                LocalFileHealth::Clean
+            } else {
+                LocalFileHealth::Missing
+            },
+            checked_at_unix_ms: now,
+        },
+    }
 }

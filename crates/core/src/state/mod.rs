@@ -121,19 +121,19 @@ impl ProfileStatusHeadline {
         match self {
             Self::Syncing => "Syncing",
             Self::Checking => "Checking",
-            Self::Validating => "Validating",
+            Self::Validating => "Verifying files",
             Self::Stopping => "Stopping",
-            Self::UpdateAvailable => "Update Required",
-            Self::ReadyToPlay => "Ready to play",
+            Self::UpdateAvailable => "Update available",
+            Self::ReadyToPlay => "Ready",
             Self::NeedsSync => "Needs sync",
             Self::MissingDestination => "Local folder missing",
             Self::ActionRequired => "Action required",
-            Self::UpdateCheckFailed => "Update check failed",
-            Self::CheckFailed => "Check failed",
-            Self::ValidationFailed => "Validation failed",
+            Self::UpdateCheckFailed => "Status refresh failed",
+            Self::CheckFailed => "Status refresh failed",
+            Self::ValidationFailed => "Verification failed",
             Self::SyncFailed => "Sync failed",
-            Self::CheckCanceled => "Check canceled",
-            Self::ValidationCanceled => "Validation canceled",
+            Self::CheckCanceled => "Status refresh canceled",
+            Self::ValidationCanceled => "Verification canceled",
             Self::SyncCanceled => "Sync canceled",
             Self::StatusUnknown => "Status unknown",
         }
@@ -167,7 +167,7 @@ pub struct UiProgressMetric {
     pub rendered: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
     pub last_updated_at_unix_ms: u64,
@@ -200,9 +200,21 @@ impl ProfileOperationProgressState {
     }
 }
 
+/// Recovery intent derived by core; Launch/Join use `can_launch` independently.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProfilePrimaryAction {
+    #[default]
+    None,
+    RefreshStatus,
+    Sync,
+    RetrySync,
+    FixProfile,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProfileStatusState {
     pub headline: ProfileStatusHeadline,
+    pub primary_action: ProfilePrimaryAction,
     pub actions: ProfileActionAvailability,
     pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalFileHealth,
@@ -216,6 +228,7 @@ impl ProfileStatusState {
     pub fn unknown(now_ms: u64) -> Self {
         Self {
             headline: ProfileStatusHeadline::StatusUnknown,
+            primary_action: ProfilePrimaryAction::RefreshStatus,
             actions: ProfileActionAvailability {
                 check_enabled: true,
                 validate_enabled: true,
@@ -306,9 +319,13 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         .as_ref()
         .is_some_and(|active| active.cancel_requested);
     let can_run_actions = !operation_active;
-    let hard_blocked = local_health == LocalFileHealth::InvalidProfile;
-    let sync_blocked = local_health == LocalFileHealth::InvalidProfile;
-    let invalid_profile = local_health == LocalFileHealth::InvalidProfile;
+    let invalid_profile = local_health == LocalFileHealth::InvalidProfile
+        || runtime.last_operation.as_ref().is_some_and(|outcome| {
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "invalid_profile")
+        });
     let repo_check_failed = matches!(repo_freshness, Some(RepoCheckFreshness::Error));
     let failed_operation = runtime.last_operation.as_ref().and_then(|outcome| {
         (outcome.status == OperationTerminalStatus::Failed).then_some(outcome.operation)
@@ -363,10 +380,30 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         }
     };
 
+    let primary_action = match headline {
+        ProfileStatusHeadline::Syncing
+        | ProfileStatusHeadline::Checking
+        | ProfileStatusHeadline::Validating
+        | ProfileStatusHeadline::Stopping
+        | ProfileStatusHeadline::ReadyToPlay => ProfilePrimaryAction::None,
+        ProfileStatusHeadline::ActionRequired => ProfilePrimaryAction::FixProfile,
+        ProfileStatusHeadline::SyncFailed => ProfilePrimaryAction::RetrySync,
+        ProfileStatusHeadline::NeedsSync
+        | ProfileStatusHeadline::UpdateAvailable
+        | ProfileStatusHeadline::MissingDestination
+        | ProfileStatusHeadline::SyncCanceled => ProfilePrimaryAction::Sync,
+        ProfileStatusHeadline::StatusUnknown
+        | ProfileStatusHeadline::UpdateCheckFailed
+        | ProfileStatusHeadline::CheckFailed
+        | ProfileStatusHeadline::CheckCanceled
+        | ProfileStatusHeadline::ValidationFailed
+        | ProfileStatusHeadline::ValidationCanceled => ProfilePrimaryAction::RefreshStatus,
+    };
+
     let actions = ProfileActionAvailability {
-        sync_enabled: can_run_actions && !sync_blocked,
-        check_enabled: can_run_actions && !hard_blocked,
-        validate_enabled: can_run_actions && !hard_blocked,
+        sync_enabled: can_run_actions && !invalid_profile,
+        check_enabled: can_run_actions && !invalid_profile,
+        validate_enabled: can_run_actions && !invalid_profile,
         cancel_enabled: operation_active && !cancel_requested,
         sync_running,
         check_running,
@@ -383,6 +420,7 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
 
     ProfileStatusState {
         headline,
+        primary_action,
         actions,
         progress: runtime
             .active
@@ -495,7 +533,7 @@ mod tests {
     use super::{
         apply_operation_progress, apply_operation_stage, derive_profile_status,
         ensure_profile_runtime_mut, AppState, OperationOutcomeState, OperationTerminalStatus,
-        ProfileOperationProgressState, ProfileStatusHeadline,
+        ProfileOperationProgressState, ProfilePrimaryAction, ProfileStatusHeadline,
     };
     use crate::operations::{OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit};
     use fleet_domain::health::{
@@ -560,6 +598,7 @@ mod tests {
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::MissingDestination);
         assert!(status.actions.sync_enabled);
+        assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
         assert!(!status.can_launch);
         assert!(!status.has_error);
     }
@@ -595,6 +634,7 @@ mod tests {
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::UpdateAvailable);
+        assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
     }
 
     #[test]
@@ -694,6 +734,7 @@ mod tests {
 
         assert_eq!(status.headline, ProfileStatusHeadline::NeedsSync);
         assert!(status.actions.sync_enabled);
+        assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
         assert!(!status.can_launch);
     }
 
@@ -786,6 +827,14 @@ mod tests {
 
             let status = derive_profile_status(runtime);
             assert_eq!(status.headline, expected);
+            assert_eq!(
+                status.primary_action,
+                if operation == OperationKind::Sync {
+                    ProfilePrimaryAction::RetrySync
+                } else {
+                    ProfilePrimaryAction::RefreshStatus
+                }
+            );
             assert!(status.has_error);
             assert!(!status.can_launch);
         }

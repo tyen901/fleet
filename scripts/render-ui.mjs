@@ -18,6 +18,7 @@ const previewHeight = 560;
 const executable = path.join(
   repoRoot,
   'target',
+  'no-flux',
   'debug',
   process.platform === 'win32' ? 'fleet.exe' : 'fleet',
 );
@@ -224,7 +225,7 @@ async function seedDummyConfig() {
     onboarding_completed: false,
     show_profile_icons: false,
     debug_log_to_disk: false,
-    auto_check_profiles_on_startup: false,
+    auto_check_profiles_on_startup: true,
     auto_check_on_startup: false,
   };
   const profiles = {
@@ -238,6 +239,16 @@ async function seedDummyConfig() {
         swifty_repo_revision: '',
         launch_params: '',
         additional_mod_folders: ['@ace', '@cba_a3'],
+      },
+      {
+        id: 'ui-test-second-profile',
+        name: 'Triton Unit',
+        source: 'http://127.0.0.1:9/repo.json',
+        destination: path.join(testRoot, 'second-profile'),
+        arma3_server: null,
+        swifty_repo_revision: '',
+        launch_params: '',
+        additional_mod_folders: [],
       },
     ],
   };
@@ -298,6 +309,10 @@ async function runFlow(client) {
   await client.clickText('Continue');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
 
+  await client.waitFor(
+    `document.querySelector('.profile-row')?.innerText.includes('Needs sync')`,
+    'initial profile state',
+  );
   const cardState = await client.evaluate(`(() => {
     const card = document.querySelector('.profile-row');
     const footer = document.querySelector('.page-footer');
@@ -326,7 +341,7 @@ async function runFlow(client) {
     throw new Error('Profile card exposes local path, last-checked, or a non-actionable status');
   }
   if (
-    cardState.buttons.join(',') !== 'Launch,Join' ||
+    cardState.buttons.join(',') !== 'Sync,Launch,Join' ||
     cardState.direction !== 'row' ||
     cardState.mainTag !== 'DIV' ||
     !cardState.hasSettingsAction ||
@@ -336,7 +351,63 @@ async function runFlow(client) {
   ) {
     throw new Error('Profile card controls do not match the expected explicit-action layout');
   }
-  await client.capture('02-profiles.png');
+  await client.waitFor(
+    `document.querySelector('.profile-row')?.innerText.includes('Needs sync')`,
+    'profile needing sync',
+  );
+  await client.capture('02-profiles-needs-sync.png');
+  const profilesUrl = await client.evaluate('location.href');
+  await client.clickText('Sync');
+  await client.waitFor(
+    `document.querySelector('.profiles-page .profile-row__progress')`,
+    'inline sync progress',
+  );
+  if ((await client.evaluate('location.href')) !== profilesUrl) {
+    throw new Error('List Sync navigated away from Profiles');
+  }
+  await client.waitFor(
+    `document.querySelector('.profile-row__phase')?.textContent.trim() === 'Hashing local files' &&
+      document.querySelector('.profile-row__metrics')?.textContent.includes('files') &&
+      document.body.innerText.includes('MiB/s') && document.body.innerText.includes('About')`,
+    'inline file verification progress',
+  );
+  await client.capture('02-profiles-verifying.png');
+  await client.waitFor(
+    `document.querySelector('.profile-row__phase')?.textContent.trim() === 'Syncing files' &&
+      document.querySelector('.profile-row__percent')?.textContent.trim() === '50%' &&
+      document.body.innerText.includes('Download speed')`,
+    'inline transfer progress',
+  );
+  const otherRowUsable = await client.evaluate(`(() => {
+    const other = document.querySelectorAll('.profile-row')[1];
+    return other && !other.querySelector('.profile-row__progress') &&
+      [...other.querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync' && !button.disabled) &&
+      !other.querySelector('[aria-label="Profile details"]').disabled;
+  })()`);
+  if (!otherRowUsable) throw new Error('Sync disabled an unrelated profile row');
+  await client.capture('02-profiles-syncing.png');
+  await client.clickText('Cancel');
+  await client.waitFor(
+    `document.querySelector('.profile-row__phase')?.textContent.trim() === 'Stopping'`,
+    'stopping sync',
+  );
+  await client.capture('02-profiles-stopping.png');
+  await client.waitFor(
+    `document.querySelector('.profile-row')?.innerText.includes('Sync canceled')`,
+    'canceled sync',
+  );
+  await client.capture('02-profiles-canceled.png');
+  await client.clickText('Sync');
+  await client.waitFor(
+    `document.querySelector('.profiles-page') && !document.querySelector('.profile-row__progress') &&
+      [...document.querySelectorAll('.profile-row button')].some(button => button.textContent.trim() === 'Launch' && !button.disabled)`,
+    'Ready with Launch enabled',
+    15_000,
+  );
+  if ((await client.evaluate('location.href')) !== profilesUrl) {
+    throw new Error('Completed sync navigated away from Profiles');
+  }
+  await client.capture('02-profiles-ready.png');
 
   await client.click('[aria-label="Settings"]');
   await client.waitFor(
@@ -487,29 +558,27 @@ async function runFlow(client) {
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
 
   await client.click('[aria-label="Profile details"]');
-  await client.waitFor(`document.body.innerText.includes('Validate')`, 'profile overview');
+  await client.waitFor(`document.body.innerText.includes('Verify files')`, 'profile overview');
   await client.waitFor(
     `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Cancel')`,
-    'profile overview cancel action',
+      .some((button) => button.textContent.trim() === 'Back')`,
+    'profile overview back action',
   );
   const profileOverviewLayout = await client.evaluate(`(() => {
-    const syncSection = [...document.querySelectorAll('.section')]
-      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Sync');
+    const maintenanceSection = [...document.querySelectorAll('.section')]
+      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Maintenance');
     return {
       hasNoHeader: document.querySelectorAll('.page-header').length === 0,
-      hasReadyState: document.body.innerText.includes('Ready to play'),
+      hasReadyState: [...document.querySelectorAll('.profile-row__state')].some(state => state.textContent.trim() === 'Ready'),
       hasLaunchOrJoin: [...document.querySelectorAll('button')]
         .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
-      syncActions: [...syncSection.querySelectorAll('.field-row__title')]
+      maintenanceActions: [...maintenanceSection.querySelectorAll('.field-row__title')]
         .map((heading) => heading.textContent.trim()),
       hasLaunchArguments: [...document.querySelectorAll('.form-field__label')]
         .some((label) => label.textContent.trim() === 'Launch arguments'),
-      hasRemovedOperationProse: [
-        'No local metadata changes detected',
-        'Read every managed file and verify its bytes',
-        'Install, update, repair, or remove files to match the expected state',
-      ].some((text) => document.body.innerText.includes(text)),
+      maintenanceButtons: [...maintenanceSection.querySelectorAll('button')].map(button => button.textContent.trim()),
+      hasVerificationDescription: document.body.innerText.includes('Byte-level verification of managed files.'),
+      hasReadCancel: [...document.querySelectorAll('.page-footer button')].some(button => button.textContent.trim() === 'Cancel'),
       // Read mode uses the real controls, locked rather than replaced.
       readonlyInputs: [...document.querySelectorAll('.form-field .field__input')]
         .every((input) => input.readOnly),
@@ -541,26 +610,30 @@ async function runFlow(client) {
     !profileOverviewLayout.hasNoHeader ||
     profileOverviewLayout.hasReadyState ||
     profileOverviewLayout.hasLaunchOrJoin ||
-    profileOverviewLayout.syncActions.join(',') !==
-      'Check for updates,Validate local files,Force Sync' ||
+    profileOverviewLayout.maintenanceActions.join(',') !==
+      'Refresh status,Verify files,Sync files' ||
+    profileOverviewLayout.maintenanceButtons.join(',') !== 'Refresh,Verify,Sync files' ||
+    !profileOverviewLayout.hasVerificationDescription ||
+    profileOverviewLayout.hasReadCancel ||
     profileOverviewLayout.hasLaunchArguments ||
-    profileOverviewLayout.hasRemovedOperationProse ||
     !profileOverviewLayout.readonlyInputs ||
     profileOverviewLayout.readonlyInputCount !== 3 ||
-    profileOverviewLayout.inlineRowHeights.join(',') !== '34' ||
+    profileOverviewLayout.inlineRowHeights.some((height) => height < 34) ||
     !profileOverviewLayout.inputBordersConsistent ||
     !profileOverviewLayout.buttonsBorderless ||
     profileOverviewLayout.mods.join(',') !== '@ace,@cba_a3'
   ) {
-    throw new Error('Profile overview header, Sync section, or additional-mod list is incorrect');
+    throw new Error(
+      'Profile overview header, Maintenance section, or additional-mod list is incorrect',
+    );
   }
   await client.capture('06-profile-overview.png');
   await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
   await delay(100);
   await client.waitFor(
     `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Cancel')`,
-    'scrolled profile overview cancel action',
+      .some((button) => button.textContent.trim() === 'Back')`,
+    'scrolled profile overview back action',
   );
   await client.capture('06-profile-overview-mods.png');
 
@@ -653,9 +726,10 @@ async function runFlow(client) {
           addButton.getBoundingClientRect().right -
             additionalMods.getBoundingClientRect().right,
         ) < 1,
-      // There is no back affordance anywhere; Cancel is the only way out.
+      // Edit mode discards changes with Cancel and persists them with Save.
       hasBack: footerLabels.includes('Back'),
       hasCancel: footerLabels.includes('Cancel'),
+      hasSave: footerLabels.includes('Save'),
     };
   })()`);
   if (
@@ -665,7 +739,8 @@ async function runFlow(client) {
     !editButtons.addBeforeList ||
     !editButtons.addRightAligned ||
     editButtons.hasBack ||
-    !editButtons.hasCancel
+    !editButtons.hasCancel ||
+    !editButtons.hasSave
   ) {
     throw new Error('Browse controls or shared button typography are incorrect');
   }
@@ -724,7 +799,7 @@ async function runFlow(client) {
     'removed first additional-mod row',
   );
   await client.clickText('Save');
-  await client.waitFor(`document.body.innerText.includes('Force Sync')`, 'profile read mode');
+  await client.waitFor(`document.body.innerText.includes('Sync files')`, 'profile read mode');
   const emptyModSectionHidden = await client.evaluate(
     `![...document.querySelectorAll('.section__title')]
       .some((title) => title.textContent.trim() === 'Additional mods')`,
@@ -734,35 +809,30 @@ async function runFlow(client) {
   }
   await client.capture('09-profile-overview-empty-mods.png');
 
-  await client.clickText('Force Sync');
-  await client.waitFor(`document.querySelector('.sync-panel')`, 'sync progress', 15_000);
+  await client.clickText('Verify');
   await client.waitFor(
-    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
-      document.querySelector('.sync-panel__count')?.textContent.includes('files') &&
-      document.body.innerText.includes('MiB/s') &&
-      document.body.innerText.includes('About')`,
-    'inventory rebuild rate and remaining time',
+    `document.body.innerText.includes('Verification complete')`,
+    'verification completion feedback',
+  );
+  await client.evaluate(
+    `document.querySelector('.profile-view__result').scrollIntoView({ block: 'center' })`,
+  );
+  await client.capture('10-verification-complete.png');
+  await client.clickText('Sync files');
+  await client.waitFor(
+    `document.querySelector('.profiles-page .profile-row__progress')`,
+    'details sync returning to Profiles',
+  );
+  await client.capture('11-details-sync-inline.png');
+  await client.waitFor(
+    `!document.querySelector('.profile-row__progress') &&
+      [...document.querySelectorAll('.profile-row button')].some(button => button.textContent.trim() === 'Launch' && !button.disabled)`,
+    'details sync completed on Profiles',
     15_000,
   );
-  await client.capture('10-inventory-rebuild-progress.png');
-  // FLEET_SIMULATE_SYNC drives a scripted sequence that parks at
-  // FLEET_SIMULATE_SYNC_HOLD_PERCENT, so this capture is reproducible and no
-  // content is actually downloaded.
-  await client.waitFor(
-    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Syncing files' &&
-      document.querySelector('.sync-panel__percent')?.textContent.trim() === '50%'`,
-    'simulated sync at 50%',
-    15_000,
-  );
-  await client.capture('10-sync-progress.png');
-  await client.clickText('Cancel');
-  await client.waitFor(
-    `document.body.innerText.includes('Stopping sync') &&
-      [...document.querySelectorAll('button')]
-        .some((button) => button.textContent.trim() === 'Stopping')`,
-    'immediate stopping state',
-  );
-  await client.capture('11-sync-stopping.png');
+  await client.click('[aria-label="Profile details"]');
+  await client.clickText('Back');
+  await client.waitFor(`document.querySelector('.profiles-page')`, 'Back returning to Profiles');
 }
 
 await ensureCdpPortAvailable();

@@ -1,3 +1,4 @@
+#[cfg(feature = "flux")]
 use crate::operations::local_files;
 use crate::storage::profile_state_root_dir;
 use crate::ApiError;
@@ -76,6 +77,7 @@ impl Core {
         arma3_execute(&profile, &settings, action, extra_args, dry_run)
     }
 
+    #[cfg(feature = "flux")]
     async fn launch_local_check(&self, profile: &Profile) -> Result<LocalFileReport, ApiError> {
         let state_root =
             profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
@@ -86,6 +88,11 @@ impl Core {
             tokio_util::sync::CancellationToken::new(),
         )
         .await
+    }
+
+    #[cfg(not(feature = "flux"))]
+    async fn launch_local_check(&self, _profile: &Profile) -> Result<LocalFileReport, ApiError> {
+        Err(crate::operations::backend_unavailable())
     }
 
     async fn ensure_arma3_settings(&self, settings: &mut AppSettings) -> Result<(), ApiError> {

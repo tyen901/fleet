@@ -4,8 +4,8 @@ use tracing::{error, info};
 
 use crate::app::router::Route;
 use crate::features::profiles::common::{
-    build_profile_edit_candidate, default_arma3_args, format_clock, format_repo_server_label,
-    format_speed, profile_not_found_page, stage_phase_label, start_profile_operation,
+    build_profile_edit_candidate, default_arma3_args, format_repo_server_label,
+    profile_not_found_page, start_profile_operation, start_profile_operation_request,
     ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
@@ -16,16 +16,9 @@ use crate::stores::app_store::AppStore;
 use crate::stores::toast_store::ToastStore;
 use crate::style::{
     Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, IconButton, InlineConfirm,
-    PageFooter, ProgressBar, Section, SectionHeader, SelectField, SelectOption,
+    PageFooter, Section, SectionHeader, SelectField, SelectOption,
 };
 use icondata::BsPlusLg;
-
-fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
-    matches!(
-        kind,
-        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
-    )
-}
 
 #[component]
 pub fn ProfileView(id: String) -> Element {
@@ -56,27 +49,8 @@ pub fn ProfileView(id: String) -> Element {
     let status = runtime.map(|entry| entry.status.clone());
     let active = runtime.and_then(|entry| entry.active.as_ref());
     let active_operation = active.map(|active| active.operation);
-    let exclusive_active = active_operation.is_some_and(exclusive_operation);
     let any_active = active_operation.is_some();
-    let session_id = active.map(|active| active.session_id);
-    let stopping = active.is_some_and(|active| active.cancel_requested);
-    let progress = status.as_ref().and_then(|status| status.progress.clone());
-
     let nav_for_back = nav;
-
-    // Validation and sync own the page while they access the managed target.
-    if exclusive_active {
-        return render_sync_mode(
-            &bridge,
-            progress.as_ref(),
-            session_id,
-            stopping,
-            status
-                .as_ref()
-                .map(|status| status.actions.cancel_enabled)
-                .unwrap_or(false),
-        );
-    }
 
     let check_enabled = status
         .as_ref()
@@ -100,8 +74,34 @@ pub fn ProfileView(id: String) -> Element {
         .unwrap_or(false);
     let operation_notice = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
-        .filter(|outcome| outcome.status != fleet_core::OperationTerminalStatus::Succeeded)
+        .filter(|_| !any_active)
+        .filter(|outcome| outcome.operation != fleet_core::OperationKind::Sync)
+        .filter(|outcome| {
+            outcome.status != fleet_core::OperationTerminalStatus::Succeeded
+                || outcome.operation == fleet_core::OperationKind::Validate
+        })
         .map(|outcome| {
+            if outcome.status == fleet_core::OperationTerminalStatus::Succeeded {
+                let message = runtime
+                    .and_then(|runtime| runtime.validation.as_ref())
+                    .map(|report| match report.health {
+                        fleet_core::LocalFileHealth::Clean => {
+                            "Managed files match the expected bytes.".to_string()
+                        }
+                        fleet_core::LocalFileHealth::Dirty
+                        | fleet_core::LocalFileHealth::Missing => {
+                            "Managed files need repair. Sync to restore the expected bytes."
+                                .to_string()
+                        }
+                        fleet_core::LocalFileHealth::InvalidProfile => {
+                            "Fix the profile configuration to verify files.".to_string()
+                        }
+                        _ => "Files could not be verified. Sync to restore the managed files."
+                            .to_string(),
+                    })
+                    .unwrap_or_else(|| "File verification finished.".to_string());
+                return ("Verification complete", message);
+            }
             let title = status
                 .as_ref()
                 .map(|status| status.headline.label())
@@ -118,7 +118,7 @@ pub fn ProfileView(id: String) -> Element {
     let bridge_for_check = bridge.clone();
     let toasts_for_check = toasts.clone();
     let profile_id_for_check = profile.id.clone();
-    let on_check_for_updates = move |_: MouseEvent| {
+    let on_refresh_status = move |_: MouseEvent| {
         start_profile_operation(
             bridge_for_check.clone(),
             toasts_for_check.clone(),
@@ -126,28 +126,34 @@ pub fn ProfileView(id: String) -> Element {
             fleet_core::OperationKind::Check,
             "check",
             "start_check_failed",
-            "Check failed",
+            "Status refresh failed",
         );
     };
 
-    let bridge_for_start_sync = bridge.clone();
-    let toasts_for_start_sync = toasts.clone();
-    let profile_id_for_start_sync = profile.id.clone();
-    let start_sync = std::rc::Rc::new(move || {
-        start_profile_operation(
-            bridge_for_start_sync.clone(),
-            toasts_for_start_sync.clone(),
-            profile_id_for_start_sync.clone(),
-            fleet_core::OperationKind::Sync,
-            "sync",
-            "start_sync_failed",
-            "Sync failed",
-        );
-    });
-
-    let start_sync_for_action = start_sync.clone();
-    let on_sync_action = move |_: MouseEvent| {
-        start_sync_for_action();
+    let on_sync_action = {
+        let bridge = bridge.clone();
+        let toasts = toasts.clone();
+        let profile_id = profile.id.clone();
+        move |_: MouseEvent| {
+            let bridge = bridge.clone();
+            let toasts = toasts.clone();
+            let profile_id = profile_id.clone();
+            spawn(async move {
+                if start_profile_operation_request(
+                    bridge,
+                    toasts,
+                    profile_id,
+                    fleet_core::OperationKind::Sync,
+                    "sync",
+                    "start_sync_failed",
+                    "Sync failed",
+                )
+                .await
+                {
+                    let _ = nav.push(Route::Profiles {});
+                }
+            });
+        }
     };
 
     let on_validate = {
@@ -162,7 +168,7 @@ pub fn ProfileView(id: String) -> Element {
                 fleet_core::OperationKind::Validate,
                 "validate",
                 "start_validate_failed",
-                "Validation failed",
+                "Verification failed",
             );
         }
     };
@@ -543,7 +549,7 @@ pub fn ProfileView(id: String) -> Element {
 
                     if !editing() {
                         if let Some((title, message)) = operation_notice.clone() {
-                            section { class: "profile-view__result",
+                            section { class: "profile-view__result", role: "status",
                                 h3 { class: "profile-view__result-title", "{title}" }
                                 p { class: "profile-view__result-message", "{message}" }
                             }
@@ -551,46 +557,47 @@ pub fn ProfileView(id: String) -> Element {
 
                         Section {
                             SectionHeader {
-                                title: "Sync".to_string(),
+                                title: "Maintenance".to_string(),
                             }
                             FieldRow {
                                 FieldRowMeta {
-                                    title: "Check for updates".to_string(),
+                                    title: "Refresh status".to_string(),
                                 }
                                 FieldRowActions {
                                     Button {
-                                        variant: ButtonVariant::Secondary,
+                                        variant: ButtonVariant::Ghost,
                                         disabled: !check_enabled || any_active,
                                         loading: check_running,
-                                        onclick: on_check_for_updates,
-                                    "Check for updates"
+                                        onclick: on_refresh_status,
+                                    "Refresh"
                                     }
                                 }
                             }
                             FieldRow {
                                 FieldRowMeta {
-                                    title: "Validate local files".to_string(),
+                                    title: "Verify files".to_string(),
+                                    description: "Byte-level verification of managed files.".to_string(),
                                 }
                                 FieldRowActions {
                                     Button {
-                                        variant: ButtonVariant::Secondary,
+                                        variant: ButtonVariant::Ghost,
                                         disabled: !validate_enabled || any_active,
                                         loading: validate_running,
                                         onclick: on_validate,
-                                        "Validate"
+                                        "Verify"
                                     }
                                 }
                             }
                             FieldRow {
                                 FieldRowMeta {
-                                    title: "Force Sync".to_string(),
+                                    title: "Sync files".to_string(),
                                 }
                                 FieldRowActions {
                                     Button {
-                                        variant: ButtonVariant::Primary,
+                                        variant: ButtonVariant::Ghost,
                                         disabled: !sync_enabled || any_active,
                                         onclick: on_sync_action,
-                                        "Force Sync"
+                                        "Sync files"
                                     }
                                 }
                             }
@@ -643,125 +650,15 @@ pub fn ProfileView(id: String) -> Element {
             } else {
                 PageFooter {
                     actions: Some(rsx! {
-                        Button { variant: ButtonVariant::Ghost, onclick: move |evt| leave_page.call(evt), "Cancel" }
+                        Button { variant: ButtonVariant::Ghost, onclick: move |evt| leave_page.call(evt), "Back" }
                         Button {
-                            variant: ButtonVariant::Secondary,
+                            variant: ButtonVariant::Primary,
                             disabled: any_active,
                             onclick: on_edit,
                             "Edit"
                         }
                     }),
                 }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_sync_mode(
-    bridge: &FleetBridge,
-    progress: Option<&fleet_core::ProfileOperationProgressState>,
-    session_id: Option<u64>,
-    stopping: bool,
-    cancel_enabled: bool,
-) -> Element {
-    let percent = (!stopping)
-        .then(|| progress.and_then(|progress| progress.stage.percent))
-        .flatten();
-    let indeterminate = stopping
-        || progress
-            .map(|progress| !progress.stage.determinate)
-            .unwrap_or(true);
-    let phase = if stopping {
-        "Stopping sync"
-    } else {
-        progress
-            .and_then(|progress| progress.status_text.as_deref())
-            .or_else(|| progress.map(|progress| stage_phase_label(progress.active_stage)))
-            .unwrap_or("Preparing sync")
-    };
-    let percent_label = percent.map(|value| format!("{value}%"));
-
-    let primary_metric = progress.and_then(|progress| progress.primary_metric.clone());
-    let secondary_metric = progress.and_then(|progress| progress.secondary_metric.clone());
-    let primary_amount = primary_metric.as_ref().map(|metric| match metric.unit {
-        fleet_core::ProgressUnit::Files => metric.rendered.clone(),
-        fleet_core::ProgressUnit::Bytes => format!("{} {}", metric.label, metric.rendered),
-    });
-    let secondary_amount = secondary_metric.as_ref().and_then(|metric| {
-        metric.done.map(|done| {
-            format!(
-                "{} {}",
-                metric.label,
-                fleet_domain::utils::format_bytes(done)
-            )
-        })
-    });
-    let rate = progress
-        .and_then(|progress| progress.throughput_bytes_per_sec)
-        .map(format_speed);
-    let remaining = progress
-        .and_then(|progress| progress.eta_seconds)
-        .map(format_clock);
-    let approximate_remaining = progress.is_some_and(|progress| {
-        progress.active_stage == fleet_core::OperationStage::VerifyingInventory
-    });
-
-    let bridge_for_cancel = bridge.clone();
-    let on_cancel_sync = move |_: MouseEvent| {
-        if let Some(session_id) = session_id {
-            let _ = bridge_for_cancel.core().cancel_session(session_id);
-        }
-    };
-
-    rsx! {
-        div { class: "page-frame",
-            div { class: "page-frame__body",
-                div { class: "page__inner section-list",
-                    section { class: "sync-panel",
-                        div { class: "sync-panel__head",
-                            div { class: "sync-panel__phase", "{phase}" }
-                            if let Some(percent_label) = percent_label.as_ref() {
-                                div { class: "sync-panel__percent", "{percent_label}" }
-                            }
-                        }
-                        ProgressBar { percent, indeterminate }
-                        if !stopping {
-                            if let Some(primary_amount) = primary_amount.as_ref() {
-                                div { class: "sync-panel__count mono", "{primary_amount}" }
-                            }
-                        }
-                        if !stopping {
-                            div { class: "sync-panel__stats",
-                                if let Some(secondary_amount) = secondary_amount.as_ref() {
-                                    span { class: "mono", "{secondary_amount}" }
-                                }
-                                if let Some(rate) = rate.as_ref() {
-                                    span { class: "mono", "{rate}" }
-                                }
-                                if let Some(remaining) = remaining.as_ref() {
-                                    if approximate_remaining {
-                                        span { class: "mono", "About {remaining} remaining" }
-                                    } else {
-                                        span { class: "mono", "Remaining {remaining}" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            PageFooter {
-                actions: Some(rsx! {
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        disabled: !cancel_enabled || session_id.is_none(),
-                        loading: stopping,
-                        onclick: on_cancel_sync,
-                        if stopping { "Stopping" } else { "Cancel" }
-                    }
-                }),
             }
         }
     }
