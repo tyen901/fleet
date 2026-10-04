@@ -473,6 +473,12 @@ async function runFlow(client) {
       hasNoHeader: document.querySelectorAll('.page-header').length === 0,
       hasLaunchOrJoin: [...document.querySelectorAll('button')]
         .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
+      folderActionsCorrect: (() => {
+        const openFolder = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Open folder');
+        const folder = [...document.querySelectorAll('.form-field')].find(field => field.querySelector('.form-field__label')?.textContent.trim() === 'Folder');
+        return openFolder && !openFolder.disabled && !folder.querySelector('button') &&
+          openFolder.getBoundingClientRect().bottom <= maintenanceSection.getBoundingClientRect().top;
+      })(),
       maintenanceActions: [...maintenanceSection.querySelectorAll('.field-row__title')]
         .map((heading) => heading.textContent.trim()),
       hasLaunchArguments: [...document.querySelectorAll('.form-field__label')]
@@ -510,6 +516,7 @@ async function runFlow(client) {
   if (
     !profileOverviewLayout.hasNoHeader ||
     profileOverviewLayout.hasLaunchOrJoin ||
+    !profileOverviewLayout.folderActionsCorrect ||
     profileOverviewLayout.maintenanceActions.length !== 0 ||
     profileOverviewLayout.maintenanceButtons.join(',') !== 'Verify' ||
     profileOverviewLayout.hasVerificationDescription ||
@@ -602,7 +609,7 @@ async function runFlow(client) {
     const modRows = [...document.querySelectorAll('.mod-list__row')];
     const labels = modRows.flatMap((row) => [...row.querySelectorAll('button')]
       .map((button) => button.textContent.trim()));
-    const compared = ['Select', 'Open', 'Browse', 'Remove']
+    const compared = ['Select', 'Browse', 'Remove']
       .map((label) => [...document.querySelectorAll('button')]
         .find((button) => button.textContent.trim() === label))
       .filter(Boolean)
@@ -617,7 +624,7 @@ async function runFlow(client) {
       .map((button) => button.getAttribute('aria-label') ?? button.textContent.trim());
     return {
       labels,
-      sharedTypography: compared.length === 4 && new Set(compared).size === 1,
+      sharedTypography: compared.length === 3 && new Set(compared).size === 1,
       addBeforeList: addButton.getBoundingClientRect().bottom <= list.getBoundingClientRect().top,
       // Right aligned above the list.
       addRightAligned:

@@ -19,10 +19,6 @@ pub(crate) struct ProfileFormFieldProps {
     pub folder_select: bool,
     #[props(default)]
     pub pick_button_text: Option<String>,
-    #[props(default = false)]
-    pub show_open_button: bool,
-    #[props(default)]
-    pub open_button_text: Option<String>,
     #[props(default)]
     pub error: Option<String>,
     #[props(default = false)]
@@ -46,8 +42,6 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
                     disabled: props.disabled,
                     folder_select: true,
                     pick_button_text: props.pick_button_text,
-                    show_open_button: props.show_open_button,
-                    open_button_text: props.open_button_text,
                     invalid: props.error.is_some(),
                     on_change: move |v| props.on_change.call(v),
                 }
