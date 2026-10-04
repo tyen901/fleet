@@ -1,12 +1,14 @@
-use crate::operations::events::{
-    OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind, OperationStage,
-};
+#[cfg(any(feature = "flux", test))]
+use crate::operations::events::OperationProgressEvent;
+use crate::operations::events::{OperationSessionEvent, OperationSessionEventKind, OperationStage};
+use crate::operations::OperationOutput;
 #[cfg(feature = "flux")]
 use crate::operations::{check, sync, validate};
-use crate::operations::{simulated, OperationOutput};
+#[cfg(any(feature = "flux", test))]
+use crate::state::{apply_operation_progress, apply_operation_stage};
 use crate::state::{
-    apply_operation_progress, apply_operation_stage, ensure_profile_runtime_mut,
-    recompute_profile_status, ActiveOperationState, OperationOutcomeState, OperationTerminalStatus,
+    ensure_profile_runtime_mut, recompute_profile_status, ActiveOperationState,
+    OperationOutcomeState, OperationTerminalStatus,
 };
 use crate::Core;
 use fleet_domain::health::{CancelResult, OperationKind};
@@ -57,6 +59,7 @@ struct OperationTerminal {
 
 #[derive(Clone)]
 pub(crate) struct OperationPublisher {
+    #[cfg(any(feature = "flux", test))]
     core: Core,
     events_tx: broadcast::Sender<OperationSessionEvent>,
     session_id: u64,
@@ -104,7 +107,8 @@ impl OperationRuntime {
         operation: OperationKind,
     ) -> Result<u64, ApiError> {
         #[cfg(feature = "flux")]
-        let state_root = crate::profile_state_root_dir()
+        let state_root = core
+            .profile_state_root_dir()
             .map_err(|err| ApiError::new("state_root", err.to_string()))?;
         let reservation = self.reserve_profile_mutation(profile_id.clone())?;
         let profile = self.load_profile(&core, &profile_id)?;
@@ -133,6 +137,7 @@ impl OperationRuntime {
         });
 
         let publisher = OperationPublisher {
+            #[cfg(any(feature = "flux", test))]
             core: core.clone(),
             events_tx: self.events_tx.clone(),
             session_id,
@@ -145,43 +150,6 @@ impl OperationRuntime {
         let rt = self.clone();
         tokio::spawn(async move {
             let mut out = match operation {
-                OperationKind::Check if simulated::is_enabled() => {
-                    let materialized = core.read_state(|state| {
-                        state
-                            .profile_runtime_by_id
-                            .get(&profile.id)
-                            .and_then(|runtime| runtime.materialization.as_ref())
-                            .is_some_and(|report| {
-                                report.health == fleet_domain::LocalFileHealth::Clean
-                            })
-                    });
-                    if let Err(error) = simulated::scan(&publisher, &cancel).await {
-                        rt.finish(&core, session_id, Err(error), reservation);
-                        return;
-                    }
-                    Ok(OperationOutput::Check(simulated::check(
-                        &profile,
-                        materialized,
-                    )))
-                }
-                OperationKind::Validate if simulated::is_enabled() => {
-                    let materialized = core.read_state(|state| {
-                        state
-                            .profile_runtime_by_id
-                            .get(&profile.id)
-                            .and_then(|runtime| runtime.materialization.as_ref())
-                            .is_some_and(|report| {
-                                report.health == fleet_domain::LocalFileHealth::Clean
-                            })
-                    });
-                    if let Err(error) = simulated::scan(&publisher, &cancel).await {
-                        rt.finish(&core, session_id, Err(error), reservation);
-                        return;
-                    }
-                    let mut report = simulated::check(&profile, materialized).local;
-                    report.verification = fleet_domain::VerificationKind::ByteExact;
-                    Ok(OperationOutput::Validate(report))
-                }
                 #[cfg(feature = "flux")]
                 OperationKind::Check => {
                     check::check(&profile, &state_root, publisher.clone(), cancel.clone())
@@ -193,11 +161,6 @@ impl OperationRuntime {
                     validate::validate(&profile, &state_root, publisher.clone(), cancel.clone())
                         .await
                         .map(OperationOutput::Validate)
-                }
-                OperationKind::Sync if simulated::is_enabled() => {
-                    simulated::sync(&profile, publisher.clone(), cancel.clone())
-                        .await
-                        .map(OperationOutput::Sync)
                 }
                 #[cfg(feature = "flux")]
                 OperationKind::Sync => {
@@ -247,22 +210,17 @@ impl OperationRuntime {
                     operation: OperationKind::Sync,
                     ..publisher
                 };
-                out = if simulated::is_enabled() {
-                    simulated::sync(&profile, publisher, cancel.clone())
+                #[cfg(feature = "flux")]
+                {
+                    out = sync::sync(&profile, &state_root, publisher, cancel.clone())
                         .await
-                        .map(OperationOutput::Sync)
-                } else {
-                    #[cfg(feature = "flux")]
-                    {
-                        sync::sync(&profile, &state_root, publisher, cancel.clone())
-                            .await
-                            .map(OperationOutput::Sync)
-                    }
-                    #[cfg(not(feature = "flux"))]
-                    {
-                        Err(crate::operations::backend_unavailable())
-                    }
-                };
+                        .map(OperationOutput::Sync);
+                }
+                #[cfg(not(feature = "flux"))]
+                {
+                    let _ = publisher;
+                    out = Err(crate::operations::backend_unavailable());
+                }
             }
             rt.finish(&core, session_id, out, reservation);
         });
@@ -512,6 +470,7 @@ fn invalidate_local_state_after_incomplete_operation(
 }
 
 impl OperationPublisher {
+    #[cfg(any(feature = "flux", test))]
     pub(crate) fn stage(&self, stage: OperationStage) {
         self.emit_raw(OperationSessionEventKind::Stage { stage });
         let profile_id = self.profile_id.clone();
@@ -531,6 +490,7 @@ impl OperationPublisher {
         });
     }
 
+    #[cfg(any(feature = "flux", test))]
     pub(crate) fn progress(&self, progress: OperationProgressEvent) {
         self.emit_raw(OperationSessionEventKind::Progress {
             progress: progress.clone(),
@@ -576,11 +536,9 @@ mod tests {
     #[cfg(feature = "flux")]
     #[test]
     fn finalizing_event_rejects_cancel_before_the_next_progress_refresh() {
-        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-        let _lock = ENV_VAR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
-        let core = crate::Core::new_for_test().unwrap();
+
+        let core = crate::Core::new_for_test(temp.path()).unwrap();
         let runtime = core.operation_runtime();
         let cancel = tokio_util::sync::CancellationToken::new();
         let (terminal_tx, terminal_rx) = tokio::sync::watch::channel(None);
@@ -631,11 +589,9 @@ mod tests {
 
     #[test]
     fn game_start_cancels_check_and_waits_for_workers_even_if_ui_removes_session() {
-        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-        let _lock = ENV_VAR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
-        let core = crate::Core::new_for_test().unwrap();
+
+        let core = crate::Core::new_for_test(temp.path()).unwrap();
         let runtime = core.operation_runtime();
         let reservation = runtime.reserve_profile_mutation("p1".to_string()).unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -675,11 +631,9 @@ mod tests {
 
     #[test]
     fn cancellation_wins_over_a_completed_validation_before_terminal_publish() {
-        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-        let _lock = ENV_VAR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
-        let core = crate::Core::new_for_test().unwrap();
+
+        let core = crate::Core::new_for_test(temp.path()).unwrap();
         let runtime = core.operation_runtime();
         let reservation = runtime.reserve_profile_mutation("p1".to_string()).unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -727,11 +681,9 @@ mod tests {
 
     #[test]
     fn stopping_and_obsolete_sessions_cannot_change_progress() {
-        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
-        let _lock = ENV_VAR_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
-        let core = crate::Core::new_for_test().unwrap();
+
+        let core = crate::Core::new_for_test(temp.path()).unwrap();
         core.update_state(|state| {
             let runtime = crate::state::ensure_profile_runtime_mut(state, "p1", 0);
             runtime.active = Some(crate::ActiveOperationState::new(

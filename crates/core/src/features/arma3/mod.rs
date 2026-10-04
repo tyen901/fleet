@@ -1,6 +1,5 @@
 #[cfg(feature = "flux")]
 use crate::operations::local_files;
-use crate::storage::profile_state_root_dir;
 use crate::ApiError;
 use crate::Core;
 use fleet_arma3::{
@@ -77,13 +76,23 @@ impl Core {
             .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
         self.ensure_arma3_settings(&mut settings).await?;
 
-        arma3_execute(&profile, &settings, action, extra_args, dry_run)
+        arma3_execute(
+            &profile,
+            &settings,
+            action,
+            extra_args,
+            dry_run,
+            &self
+                .profile_state_root_dir()
+                .map_err(|e| ApiError::new("state_root", e.to_string()))?,
+        )
     }
 
     #[cfg(feature = "flux")]
     async fn launch_local_check(&self, profile: &Profile) -> Result<LocalFileReport, ApiError> {
-        let state_root =
-            profile_state_root_dir().map_err(|err| ApiError::new("state_root", err.to_string()))?;
+        let state_root = self
+            .profile_state_root_dir()
+            .map_err(|err| ApiError::new("state_root", err.to_string()))?;
 
         local_files::check(
             profile,
@@ -121,9 +130,16 @@ fn arma3_execute(
     kind: ActionKind,
     extra_args: Option<Vec<String>>,
     dry_run: bool,
+    state_root: &Path,
 ) -> Result<ArmaLaunchResult, ApiError> {
-    let command = build_launch(profile, settings, kind, extra_args.unwrap_or_default())
-        .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
+    let command = build_launch(
+        profile,
+        settings,
+        kind,
+        extra_args.unwrap_or_default(),
+        state_root,
+    )
+    .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
 
     let pid = if dry_run {
         None
@@ -157,6 +173,7 @@ fn build_launch(
     settings: &AppSettings,
     kind: ActionKind,
     extra_args: Vec<String>,
+    state_root: &Path,
 ) -> Result<LaunchCommand, Arma3Error> {
     let game_dir = resolve_game_dir(settings)?;
     let resolved_mode = resolve_launch_mode(settings)?;
@@ -164,9 +181,9 @@ fn build_launch(
     let install = Arma3Install { dir: game_dir };
     install.validate()?;
 
-    let mod_list = build_mod_list(profile)?;
+    let mod_list = build_mod_list(profile, state_root)?;
 
-    let args = build_args(profile, settings, kind, extra_args)?;
+    let args = build_args(profile, settings, kind, extra_args, state_root)?;
 
     let mut req = LaunchRequest::new(resolved_mode.wrapper_method, mod_list);
     req.args = args;
@@ -277,6 +294,7 @@ fn build_args(
     settings: &AppSettings,
     kind: ActionKind,
     extra_args: Vec<String>,
+    state_root: &Path,
 ) -> Result<Vec<String>, Arma3Error> {
     let mut args = if !profile.launch_params.trim().is_empty() {
         parse_args(&profile.launch_params)?
@@ -289,7 +307,7 @@ fn build_args(
         .any(|argument| argument.starts_with("-connect=") || argument == "-connect");
 
     if kind == ActionKind::Join && !has_connect_override {
-        if let Some(server) = resolve_join_server(profile)? {
+        if let Some(server) = resolve_join_server(profile, state_root)? {
             args.extend(server_join_args(
                 &server.address,
                 server.port,
@@ -303,9 +321,15 @@ fn build_args(
     Ok(args)
 }
 
-fn resolve_join_server(profile: &Profile) -> Result<Option<ProfileServerInfo>, Arma3Error> {
-    let cached = crate::features::profiles::load_cached_repo_servers_blocking(profile)
-        .map_err(|e| Arma3Error::Io(std::io::Error::other(e.message)))?;
+fn resolve_join_server(
+    profile: &Profile,
+    state_root: &Path,
+) -> Result<Option<ProfileServerInfo>, Arma3Error> {
+    let cached = crate::features::profiles::load_cached_repo_servers_blocking(
+        profile,
+        state_root.to_path_buf(),
+    )
+    .map_err(|e| Arma3Error::Io(std::io::Error::other(e.message)))?;
 
     Ok(select_join_server(
         profile.arma3_server.as_ref(),
@@ -350,31 +374,30 @@ pub fn server_join_args(address: &str, port: u16, password: &str) -> Vec<String>
     args
 }
 
-fn build_mod_list(profile: &Profile) -> Result<ModList, Arma3Error> {
+fn build_mod_list(profile: &Profile, state_root: &Path) -> Result<ModList, Arma3Error> {
     let root = profile.dest_path().map_err(|e| {
         Arma3Error::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             e.to_string(),
         ))
     })?;
-    let repo_mods = discover_mods_from_repo(profile, &root)?;
+    let repo_mods = discover_mods_from_repo(profile, &root, state_root)?;
     let repo_mod_list = ModList::validate_and_normalize(repo_mods)?;
     let mut mod_paths = repo_mod_list.paths().to_vec();
     append_unique_paths(&mut mod_paths, additional_mod_folders(profile));
     Ok(ModList::new(mod_paths))
 }
 
-fn discover_mods_from_repo(profile: &Profile, root: &Path) -> Result<Vec<PathBuf>, Arma3Error> {
+fn discover_mods_from_repo(
+    profile: &Profile,
+    root: &Path,
+    state_root: &Path,
+) -> Result<Vec<PathBuf>, Arma3Error> {
     let repo_url = validated_repo_url(&profile.source).map_err(|error| {
         Arma3Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     })?;
 
-    let state_root = profile_state_root_dir().map_err(|e| {
-        Arma3Error::Io(std::io::Error::other(format!(
-            "resolve profile state root: {e}"
-        )))
-    })?;
-    let cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
+    let cache_root = fleet_domain::repo_cache_dir(state_root, &profile.id);
     let mod_names = match swifty_repo::enabled_mod_names(&cache_root, repo_url) {
         Ok(Some(names)) => names,
         Ok(None) => {
@@ -584,7 +607,14 @@ mod tests {
         let mut settings = default_settings();
         settings.arma3.arma3_default_args = "-baz".into();
 
-        let args = build_args(&profile, &settings, ActionKind::Launch, Vec::new()).unwrap();
+        let args = build_args(
+            &profile,
+            &settings,
+            ActionKind::Launch,
+            Vec::new(),
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap();
         assert!(args.contains(&"-foo".to_string()));
         assert!(args.contains(&"-bar".to_string()));
         assert!(!args.contains(&"-baz".to_string()));
@@ -600,7 +630,14 @@ mod tests {
         });
 
         let settings = default_settings();
-        let args = build_args(&profile, &settings, ActionKind::Join, Vec::new()).unwrap();
+        let args = build_args(
+            &profile,
+            &settings,
+            ActionKind::Join,
+            Vec::new(),
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap();
         assert!(args.contains(&"-connect=127.0.0.1".to_string()));
         assert!(args.contains(&"-port=2302".to_string()));
         assert!(args.contains(&"-password=pw".to_string()));
@@ -617,7 +654,14 @@ mod tests {
 
         let settings = default_settings();
         let extra = vec!["-connect=1.2.3.4".to_string()];
-        let args = build_args(&profile, &settings, ActionKind::Join, extra).unwrap();
+        let args = build_args(
+            &profile,
+            &settings,
+            ActionKind::Join,
+            extra,
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap();
         assert!(args.contains(&"-connect=1.2.3.4".to_string()));
         assert!(!args.contains(&"-connect=127.0.0.1".to_string()));
         assert!(!args.contains(&"-port=2302".to_string()));

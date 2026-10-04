@@ -3,33 +3,8 @@ use std::sync::OnceLock;
 use semver::Version;
 use velopack::{sources, UpdateCheck, UpdateManager, UpdateOptions};
 
-const UPDATE_URL: &str = "https://github.com/tyen901/fleet/releases/latest/download";
+pub const UPDATE_URL: &str = "https://github.com/tyen901/fleet/releases/latest/download";
 static INSTALLED_VERSION: OnceLock<String> = OnceLock::new();
-
-pub fn resolve_feed_url() -> Result<String, String> {
-    if std::env::var("FLEET_DISABLE_UPDATES")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-    {
-        return Err("Updates are disabled.".to_string());
-    }
-
-    if let Some(url) = std::env::var("FLEET_UPDATE_FEED")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        return Ok(url);
-    }
-
-    if let Some(url) = std::env::var("FLEET_UPDATE_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        return Ok(url);
-    }
-
-    Ok(UPDATE_URL.to_string())
-}
 
 pub fn build_version_string() -> &'static str {
     option_env!("FLEET_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))

@@ -90,6 +90,7 @@ pub(crate) fn profile_not_found_page(nav: Navigator) -> Element {
 }
 
 pub(crate) fn profile_icon_src(
+    core: &fleet_core::Core,
     settings: &fleet_core::AppSettings,
     profile: &fleet_core::Profile,
 ) -> Option<String> {
@@ -99,7 +100,7 @@ pub(crate) fn profile_icon_src(
 
     let repo_url = fleet_domain::validated_repo_url(&profile.source).ok()?;
 
-    let state_root = fleet_core::profile_state_root_dir().ok()?;
+    let state_root = core.profile_state_root_dir().ok()?;
     let repo_cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
     let icon_path = swifty_repo::repo_icon_cache_path(&repo_cache_root, repo_url);
     if !icon_path.is_file() {

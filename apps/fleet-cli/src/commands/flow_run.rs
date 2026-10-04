@@ -87,49 +87,17 @@ mod tests {
     use super::{run_sync_session, FlowOutput, FlowRunOptions};
     use fleet_core::{Core, OperationKind, OperationSessionEventKind, Profile};
     use fleet_domain::AppSettings;
-    use std::ffi::OsString;
-    use std::sync::OnceLock;
     use std::time::Duration;
-
-    static ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(value) = self.previous.as_ref() {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 
     #[tokio::test]
     async fn explicit_command_starts_while_startup_check_is_enabled() {
-        let _lock = ENV_LOCK
-            .get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await;
         let temp_dir = tempfile::tempdir().expect("test config directory");
-        let config_dir = EnvVarGuard::set("FLEET_CONFIG_DIR", temp_dir.path());
         let mut settings = AppSettings::default();
         settings.startup.auto_check_profiles_on_startup = true;
         let profile = Profile {
             id: "p1".to_string(),
             name: "Profile".to_string(),
-            source: "https://example.com/repo.json".to_string(),
+            source: "file:///invalid/repo.json".to_string(),
             destination: temp_dir.path().join("profile").display().to_string(),
             ..Default::default()
         };
@@ -144,8 +112,8 @@ mod tests {
                 .expect("serialize profiles"),
         )
         .expect("write profiles");
-        let _simulate_sync = EnvVarGuard::set("FLEET_SIMULATE_SYNC", "1");
-        let core = Core::new_in_current_runtime_for_command().expect("core");
+        let core = Core::new_in_current_runtime_for_command(Some(temp_dir.path().to_path_buf()))
+            .expect("core");
         let mut state = core.subscribe_state();
         tokio::time::timeout(Duration::from_secs(1), async {
             while state.borrow().version == 0 || !state.borrow().profiles.contains_key("p1") {
@@ -192,7 +160,6 @@ mod tests {
         )
         .await
         .expect("completed session must not wait for the printer");
-        assert_eq!(report.expect("sync output").profile_id, "p1");
-        drop(config_dir);
+        assert!(report.is_err());
     }
 }

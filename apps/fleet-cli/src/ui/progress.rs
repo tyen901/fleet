@@ -29,7 +29,7 @@ pub fn spawn_flow_printer(
     no_progress: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let plain = no_progress || std::env::var_os("FLEET_NO_PROGRESS").is_some();
+        let plain = no_progress;
         let mp = MultiProgress::new();
         let spinner =
             ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template");

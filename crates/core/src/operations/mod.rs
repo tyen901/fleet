@@ -9,7 +9,6 @@ pub(crate) mod local_files;
 #[cfg(feature = "flux")]
 pub(crate) mod progress;
 pub(crate) mod runtime;
-pub(crate) mod simulated;
 #[cfg(feature = "flux")]
 pub(crate) mod sync;
 #[cfg(feature = "flux")]
@@ -19,7 +18,9 @@ pub use events::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
     OperationStage, ProgressTrack, ProgressTrackKind, TaskUsage,
 };
-pub(crate) use runtime::{OperationPublisher, OperationRuntime};
+#[cfg(feature = "flux")]
+pub(crate) use runtime::OperationPublisher;
+pub(crate) use runtime::OperationRuntime;
 
 #[cfg(not(feature = "flux"))]
 pub(crate) fn backend_unavailable() -> crate::ApiError {
