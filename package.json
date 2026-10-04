@@ -8,7 +8,8 @@
     "fmt:css": "prettier --write \"apps/fleet/assets/css/**/*.css\"",
     "lint:css": "prettier --check \"apps/fleet/assets/css/**/*.css\"",
     "lint:design": "node scripts/lint-design.mjs",
-    "render:ui": "npm run build:no-flux && node scripts/render-ui.mjs",
-    "build:no-flux": "node scripts/cargo-no-flux.mjs build -p fleet --locked"
+    "render:ui": "cargo build -p fleet --locked && node scripts/render-ui.mjs",
+    "build:no-flux": "cargo build -p fleet --no-default-features --locked",
+    "build": "node scripts/cargo.mjs build --workspace --locked"
   }
 }

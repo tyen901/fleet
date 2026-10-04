@@ -103,20 +103,11 @@ impl OperationRuntime {
         profile_id: ProfileId,
         operation: OperationKind,
     ) -> Result<u64, ApiError> {
-        let profile = self.load_profile(&core, &profile_id)?;
-        {
-            let mut active_profiles = self.active_profiles.lock().unwrap();
-            if !active_profiles.insert(profile_id.clone()) {
-                return Err(ApiError::new(
-                    "profile_busy",
-                    "profile already has an active operation",
-                ));
-            }
-        }
-
         #[cfg(feature = "flux")]
         let state_root = crate::profile_state_root_dir()
             .map_err(|err| ApiError::new("state_root", err.to_string()))?;
+        let reservation = self.reserve_profile_mutation(profile_id.clone())?;
+        let profile = self.load_profile(&core, &profile_id)?;
         let session_id = core.allocate_session_id();
         let cancel = CancellationToken::new();
         let (terminal_tx, terminal_rx) = watch::channel(None);
@@ -153,7 +144,7 @@ impl OperationRuntime {
 
         let rt = self.clone();
         tokio::spawn(async move {
-            let out = match operation {
+            let mut out = match operation {
                 OperationKind::Check if simulated::is_enabled() => {
                     let materialized = core.read_state(|state| {
                         state
@@ -164,6 +155,10 @@ impl OperationRuntime {
                                 report.health == fleet_domain::LocalFileHealth::Clean
                             })
                     });
+                    if let Err(error) = simulated::scan(&publisher, &cancel).await {
+                        rt.finish(&core, session_id, Err(error), reservation);
+                        return;
+                    }
                     Ok(OperationOutput::Check(simulated::check(
                         &profile,
                         materialized,
@@ -179,6 +174,10 @@ impl OperationRuntime {
                                 report.health == fleet_domain::LocalFileHealth::Clean
                             })
                     });
+                    if let Err(error) = simulated::scan(&publisher, &cancel).await {
+                        rt.finish(&core, session_id, Err(error), reservation);
+                        return;
+                    }
                     let mut report = simulated::check(&profile, materialized).local;
                     report.verification = fleet_domain::VerificationKind::ByteExact;
                     Ok(OperationOutput::Validate(report))
@@ -209,7 +208,63 @@ impl OperationRuntime {
                 #[cfg(not(feature = "flux"))]
                 _ => Err(crate::operations::backend_unavailable()),
             };
-            rt.finish(&core, session_id, out);
+            // Validation repairs mismatched content in the same session and reservation.
+            // Cancellation and backend errors remain terminal, never trigger a repair.
+            if matches!(&out,Ok(OperationOutput::Validate(report)) if matches!(report.health,fleet_domain::LocalFileHealth::Dirty|fleet_domain::LocalFileHealth::Missing|fleet_domain::LocalFileHealth::MissingDestination))
+                && !cancel.is_cancelled()
+            {
+                let mut transitioned = false;
+                core.update_state(|state| {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    transitioned = true;
+                    let runtime = ensure_profile_runtime_mut(
+                        state,
+                        &profile.id,
+                        fleet_domain::time::now_unix_ms(),
+                    );
+                    runtime.active = Some(ActiveOperationState::new(
+                        session_id,
+                        OperationKind::Sync,
+                        fleet_domain::time::now_unix_ms(),
+                    ));
+                    recompute_profile_status(state, &profile.id);
+                });
+                if !transitioned {
+                    rt.finish(
+                        &core,
+                        session_id,
+                        Err(ApiError::new("canceled", "canceled")),
+                        reservation,
+                    );
+                    return;
+                }
+                if let Some(record) = rt.sessions.lock().unwrap().get_mut(&session_id) {
+                    record.operation = OperationKind::Sync;
+                }
+                let publisher = OperationPublisher {
+                    operation: OperationKind::Sync,
+                    ..publisher
+                };
+                out = if simulated::is_enabled() {
+                    simulated::sync(&profile, publisher, cancel.clone())
+                        .await
+                        .map(OperationOutput::Sync)
+                } else {
+                    #[cfg(feature = "flux")]
+                    {
+                        sync::sync(&profile, &state_root, publisher, cancel.clone())
+                            .await
+                            .map(OperationOutput::Sync)
+                    }
+                    #[cfg(not(feature = "flux"))]
+                    {
+                        Err(crate::operations::backend_unavailable())
+                    }
+                };
+            }
+            rt.finish(&core, session_id, out, reservation);
         });
         Ok(session_id)
     }
@@ -235,95 +290,80 @@ impl OperationRuntime {
         Ok(profile)
     }
 
-    fn finish(&self, core: &Core, session_id: u64, out: Result<OperationOutput, ApiError>) {
+    fn finish(
+        &self,
+        core: &Core,
+        session_id: u64,
+        out: Result<OperationOutput, ApiError>,
+        reservation: ProfileMutationGuard,
+    ) {
+        let mut reservation = Some(reservation);
         let Some(record) = self.sessions.lock().unwrap().get(&session_id).cloned() else {
             return;
         };
-        self.active_profiles
-            .lock()
-            .unwrap()
-            .remove(&record.profile_id);
-
         let now = fleet_domain::time::now_unix_ms();
-        match out {
-            Ok(output) => {
-                core.update_state(|state| {
-                    if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                        apply_successful_output(runtime, &output);
-                        runtime.active = None;
-                        runtime.last_operation = Some(OperationOutcomeState {
-                            session_id,
-                            operation: record.operation,
-                            status: OperationTerminalStatus::Succeeded,
-                            updated_at_unix_ms: now,
-                            message: None,
-                            error: None,
-                        });
+        let mut out = out;
+        core.update_state(|state| {
+            // Serialize the terminal decision with cancellation, including the
+            // validation-to-repair boundary. The reservation outlives all workers.
+            if record.cancel.is_cancelled() {
+                out = Err(ApiError::new("canceled", "canceled"));
+            }
+            if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
+                let (status, error) = match &out {
+                    Ok(output) => {
+                        apply_successful_output(runtime, output);
+                        (OperationTerminalStatus::Succeeded, None)
                     }
-                    recompute_profile_status(state, &record.profile_id);
+                    Err(error) => {
+                        invalidate_local_state_after_incomplete_operation(runtime);
+                        if error.code == "canceled" {
+                            (OperationTerminalStatus::Canceled, None)
+                        } else {
+                            (OperationTerminalStatus::Failed, Some(error.clone()))
+                        }
+                    }
+                };
+                runtime.active = None;
+                runtime.last_operation = Some(OperationOutcomeState {
+                    session_id,
+                    operation: record.operation,
+                    status,
+                    updated_at_unix_ms: now,
+                    error,
                 });
-                let _ = record.terminal_tx.send(Some(OperationTerminal {
+            }
+            recompute_profile_status(state, &record.profile_id);
+            drop(reservation.take());
+        });
+        let (terminal, event) = match out {
+            Ok(output) => (
+                OperationTerminal {
                     output: Some(output.clone()),
                     error: None,
                     canceled: false,
-                }));
-                self.emit_terminal_event(
-                    &record,
-                    session_id,
-                    OperationSessionEventKind::Finished { output },
-                );
-            }
-            Err(error) if error.code == "canceled" => {
-                core.update_state(|state| {
-                    if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                        invalidate_local_state_after_incomplete_operation(runtime);
-                        runtime.active = None;
-                        runtime.last_operation = Some(OperationOutcomeState {
-                            session_id,
-                            operation: record.operation,
-                            status: OperationTerminalStatus::Canceled,
-                            updated_at_unix_ms: now,
-                            message: Some(canceled_message(record.operation).to_string()),
-                            error: None,
-                        });
-                    }
-                    recompute_profile_status(state, &record.profile_id);
-                });
-                let _ = record.terminal_tx.send(Some(OperationTerminal {
+                },
+                OperationSessionEventKind::Finished { output },
+            ),
+            Err(error) if error.code == "canceled" => (
+                OperationTerminal {
                     output: None,
                     error: None,
                     canceled: true,
-                }));
-                self.emit_terminal_event(&record, session_id, OperationSessionEventKind::Canceled);
-            }
-            Err(error) => {
-                core.update_state(|state| {
-                    if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
-                        invalidate_local_state_after_incomplete_operation(runtime);
-                        runtime.active = None;
-                        runtime.last_operation = Some(OperationOutcomeState {
-                            session_id,
-                            operation: record.operation,
-                            status: OperationTerminalStatus::Failed,
-                            updated_at_unix_ms: now,
-                            message: Some(error.message.clone()),
-                            error: Some(error.clone()),
-                        });
-                    }
-                    recompute_profile_status(state, &record.profile_id);
-                });
-                let _ = record.terminal_tx.send(Some(OperationTerminal {
+                },
+                OperationSessionEventKind::Canceled,
+            ),
+            Err(error) => (
+                OperationTerminal {
                     output: None,
                     error: Some(error.clone()),
                     canceled: false,
-                }));
-                self.emit_terminal_event(
-                    &record,
-                    session_id,
-                    OperationSessionEventKind::Failed { error },
-                );
-            }
-        }
+                },
+                OperationSessionEventKind::Failed { error },
+            ),
+        };
+        let _ = record.terminal_tx.send(Some(terminal));
+        self.emit_terminal_event(&record, session_id, event);
     }
 
     fn emit_terminal_event(
@@ -349,8 +389,8 @@ impl OperationRuntime {
         if record.terminal_rx.borrow().is_some() || record.cancel.is_cancelled() {
             return CancelResult::AlreadyTerminal;
         }
-
         let now = fleet_domain::time::now_unix_ms();
+        let mut result = CancelResult::NotFound;
         core.update_state(|state| {
             if let Some(active) = state
                 .profile_runtime_by_id
@@ -358,13 +398,48 @@ impl OperationRuntime {
                 .and_then(|runtime| runtime.active.as_mut())
                 .filter(|active| active.session_id == session_id)
             {
+                if active.progress.active_stage == OperationStage::Finalizing {
+                    result = CancelResult::Finalizing;
+                    return;
+                }
                 active.cancel_requested = true;
                 active.updated_at_unix_ms = now;
+                record.cancel.cancel();
+                result = CancelResult::Requested;
             }
             recompute_profile_status(state, &record.profile_id);
         });
-        record.cancel.cancel();
-        CancelResult::Requested
+        result
+    }
+
+    pub(crate) async fn cancel_update_check(
+        &self,
+        core: &Core,
+        profile_id: &str,
+    ) -> Result<(), ApiError> {
+        let check = self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(id, record)| {
+                (record.profile_id == profile_id
+                    && record.operation == OperationKind::Check
+                    && record.terminal_rx.borrow().is_none())
+                .then(|| (*id, record.terminal_rx.clone()))
+            });
+        let Some((session_id, mut terminal_rx)) = check else {
+            return Ok(());
+        };
+        self.cancel(core, session_id);
+        // Keep our own receiver: the UI may consume and remove this session.
+        while terminal_rx.borrow().is_none() {
+            terminal_rx
+                .changed()
+                .await
+                .map_err(|_| ApiError::new("internal", "session terminal channel closed"))?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn await_finished(
@@ -436,14 +511,6 @@ fn invalidate_local_state_after_incomplete_operation(
     runtime.materialization = None;
 }
 
-fn canceled_message(operation: OperationKind) -> &'static str {
-    match operation {
-        OperationKind::Check => "Check stopped before recording a new local state.",
-        OperationKind::Validate => "Validation stopped before recording a byte-correct state.",
-        OperationKind::Sync => "Sync stopped before completion; run Sync again.",
-    }
-}
-
 impl OperationPublisher {
     pub(crate) fn stage(&self, stage: OperationStage) {
         self.emit_raw(OperationSessionEventKind::Stage { stage });
@@ -451,7 +518,11 @@ impl OperationPublisher {
         self.core.update_state(|state| {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
-            if let Some(active) = runtime.active.as_mut() {
+            if let Some(active) = runtime
+                .active
+                .as_mut()
+                .filter(|active| active.session_id == self.session_id && !active.cancel_requested)
+            {
                 apply_operation_stage(&mut active.progress, stage);
                 active.updated_at_unix_ms = now;
                 active.progress.last_updated_at_unix_ms = now;
@@ -468,7 +539,11 @@ impl OperationPublisher {
         self.core.update_state(|state| {
             let now = fleet_domain::time::now_unix_ms();
             let runtime = ensure_profile_runtime_mut(state, &profile_id, now);
-            if let Some(active) = runtime.active.as_mut() {
+            if let Some(active) = runtime
+                .active
+                .as_mut()
+                .filter(|active| active.session_id == self.session_id && !active.cancel_requested)
+            {
                 apply_operation_progress(&mut active.progress, &progress, now);
                 active.updated_at_unix_ms = now;
             }
@@ -497,6 +572,227 @@ mod tests {
         CheckReport, LocalFileReport, RepoCheckFreshness, RepoCheckReport, VerificationKind,
     };
     use fleet_domain::LocalFileHealth;
+
+    #[cfg(feature = "flux")]
+    #[test]
+    fn finalizing_event_rejects_cancel_before_the_next_progress_refresh() {
+        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+        let _lock = ENV_VAR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
+        let core = crate::Core::new_for_test().unwrap();
+        let runtime = core.operation_runtime();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (terminal_tx, terminal_rx) = tokio::sync::watch::channel(None);
+        let seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        runtime.sessions.lock().unwrap().insert(
+            9,
+            super::SessionRecord {
+                profile_id: "p1".to_string(),
+                operation: fleet_domain::OperationKind::Sync,
+                cancel: cancel.clone(),
+                terminal_tx,
+                terminal_rx,
+                seq: seq.clone(),
+            },
+        );
+        core.update_state(|state| {
+            crate::state::ensure_profile_runtime_mut(state, "p1", 0).active = Some(
+                crate::ActiveOperationState::new(9, fleet_domain::OperationKind::Sync, 0),
+            );
+        });
+        let publisher = super::OperationPublisher {
+            core: core.clone(),
+            events_tx: runtime.events_tx.clone(),
+            session_id: 9,
+            profile_id: "p1".to_string(),
+            operation: fleet_domain::OperationKind::Sync,
+            seq,
+        };
+        let (observer, _) = crate::operations::progress::progress_channel(publisher.clone());
+        observer(fleet_flux::ProgressEvent::Finalizing);
+        // A snapshot already captured by the refresh timer must not undo finalization.
+        publisher.progress(crate::OperationProgressEvent {
+            stage: crate::OperationStage::Sync,
+            tracks: vec![],
+            usage: Default::default(),
+        });
+        assert_eq!(
+            runtime.cancel(&core, 9),
+            fleet_domain::health::CancelResult::Finalizing
+        );
+        assert!(!cancel.is_cancelled());
+        assert!(!core.read_state(|state| state.profile_runtime_by_id["p1"]
+            .active
+            .as_ref()
+            .unwrap()
+            .cancel_requested));
+    }
+
+    #[test]
+    fn game_start_cancels_check_and_waits_for_workers_even_if_ui_removes_session() {
+        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+        let _lock = ENV_VAR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
+        let core = crate::Core::new_for_test().unwrap();
+        let runtime = core.operation_runtime();
+        let reservation = runtime.reserve_profile_mutation("p1".to_string()).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (terminal_tx, terminal_rx) = tokio::sync::watch::channel(None);
+        runtime.sessions.lock().unwrap().insert(
+            9,
+            super::SessionRecord {
+                profile_id: "p1".to_string(),
+                operation: fleet_domain::OperationKind::Check,
+                cancel: cancel.clone(),
+                terminal_tx,
+                terminal_rx,
+                seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+        core.update_state(|state| {
+            crate::state::ensure_profile_runtime_mut(state, "p1", 0).active = Some(
+                crate::ActiveOperationState::new(9, fleet_domain::OperationKind::Check, 0),
+            );
+        });
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let worker_core = core.clone();
+            let worker_runtime = runtime.clone();
+            let worker = tokio::spawn(async move {
+                cancel.cancelled().await;
+                assert!(worker_runtime.reserve_profile_mutation("p1".to_string()).is_err());
+                worker_runtime.finish(&worker_core, 9,
+                    Err(crate::ApiError::new("canceled", "canceled")), reservation);
+                worker_runtime.sessions.lock().unwrap().remove(&9);
+            });
+            runtime.cancel_update_check(&core, "p1").await.unwrap();
+            worker.await.unwrap();
+            assert!(runtime.reserve_profile_mutation("p1".to_string()).is_ok());
+            assert!(core.read_state(|state| state.profile_runtime_by_id["p1"].active.is_none()));
+        });
+    }
+
+    #[test]
+    fn cancellation_wins_over_a_completed_validation_before_terminal_publish() {
+        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+        let _lock = ENV_VAR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
+        let core = crate::Core::new_for_test().unwrap();
+        let runtime = core.operation_runtime();
+        let reservation = runtime.reserve_profile_mutation("p1".to_string()).unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (terminal_tx, terminal_rx) = tokio::sync::watch::channel(None);
+        runtime.sessions.lock().unwrap().insert(
+            9,
+            super::SessionRecord {
+                profile_id: "p1".to_string(),
+                operation: fleet_domain::OperationKind::Validate,
+                cancel,
+                terminal_tx,
+                terminal_rx: terminal_rx.clone(),
+                seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+        );
+        core.update_state(|state| {
+            crate::state::ensure_profile_runtime_mut(state, "p1", 0).active = Some(
+                crate::ActiveOperationState::new(9, fleet_domain::OperationKind::Validate, 0),
+            );
+        });
+        assert_eq!(
+            runtime.cancel(&core, 9),
+            fleet_domain::health::CancelResult::Requested
+        );
+        assert!(runtime.reserve_profile_mutation("p1".to_string()).is_err());
+        let report = LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: VerificationKind::ByteExact,
+            health: LocalFileHealth::Dirty,
+            checked_at_unix_ms: 1,
+        };
+        runtime.finish(&core, 9, Ok(OperationOutput::Validate(report)), reservation);
+        assert!(terminal_rx.borrow().as_ref().unwrap().canceled);
+        core.read_state(|state| {
+            let runtime = &state.profile_runtime_by_id["p1"];
+            assert!(runtime.active.is_none());
+            assert!(runtime.validation.is_none());
+            assert_eq!(
+                runtime.last_operation.as_ref().unwrap().status,
+                crate::OperationTerminalStatus::Canceled
+            );
+        });
+        assert!(runtime.reserve_profile_mutation("p1".to_string()).is_ok());
+    }
+
+    #[test]
+    fn stopping_and_obsolete_sessions_cannot_change_progress() {
+        use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+        let _lock = ENV_VAR_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp.path());
+        let core = crate::Core::new_for_test().unwrap();
+        core.update_state(|state| {
+            let runtime = crate::state::ensure_profile_runtime_mut(state, "p1", 0);
+            runtime.active = Some(crate::ActiveOperationState::new(
+                9,
+                fleet_domain::OperationKind::Sync,
+                0,
+            ));
+        });
+        let publisher = super::OperationPublisher {
+            core: core.clone(),
+            events_tx: core.operation_runtime().events_tx,
+            session_id: 9,
+            profile_id: "p1".to_string(),
+            operation: fleet_domain::OperationKind::Sync,
+            seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        let progress = crate::OperationProgressEvent {
+            stage: crate::OperationStage::Sync,
+            tracks: vec![crate::ProgressTrack {
+                kind: crate::ProgressTrackKind::LocalCheck,
+                done: 50,
+                total: Some(100),
+            }],
+            usage: Default::default(),
+        };
+        publisher.progress(progress.clone());
+        core.update_state(|state| {
+            state
+                .profile_runtime_by_id
+                .get_mut("p1")
+                .unwrap()
+                .active
+                .as_mut()
+                .unwrap()
+                .cancel_requested = true
+        });
+        let late = progress;
+        publisher.progress(late.clone());
+        publisher.stage(crate::OperationStage::Finalizing);
+        core.read_state(|state| {
+            let runtime = &state.profile_runtime_by_id["p1"];
+            assert_eq!(
+                runtime.active.as_ref().unwrap().progress.active_stage,
+                crate::OperationStage::Sync
+            );
+        });
+        core.update_state(|state| {
+            state.profile_runtime_by_id.get_mut("p1").unwrap().active = Some(
+                crate::ActiveOperationState::new(10, fleet_domain::OperationKind::Sync, 0),
+            )
+        });
+        publisher.progress(late);
+        core.read_state(|state| {
+            let runtime = &state.profile_runtime_by_id["p1"];
+            assert_eq!(runtime.active.as_ref().unwrap().session_id, 10);
+            assert_eq!(
+                runtime.active.as_ref().unwrap().progress.active_stage,
+                crate::OperationStage::Validating
+            );
+        });
+    }
 
     fn local_report(verification: VerificationKind, health: LocalFileHealth) -> LocalFileReport {
         LocalFileReport {

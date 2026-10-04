@@ -1924,7 +1924,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "2.0.0"
-source = "git+https://github.com/tyen901/flux.git?rev=9214baf61ece9db2b9ba1bc47e8681aaaaefc771#9214baf61ece9db2b9ba1bc47e8681aaaaefc771"
+source = "git+https://github.com/tyen901/flux.git?rev=cfa59d105b0eda64de7959aea591faafc7e22a41#cfa59d105b0eda64de7959aea591faafc7e22a41"
 dependencies = [
  "blake3",
  "cap-fs-ext",

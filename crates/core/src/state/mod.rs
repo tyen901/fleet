@@ -1,4 +1,4 @@
-use crate::operations::{OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit};
+use crate::operations::{OperationProgressEvent, OperationStage};
 use fleet_domain::health::{
     LocalFileHealth, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
 };
@@ -49,7 +49,7 @@ impl ProfileRuntimeState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveOperationState {
     pub session_id: OperationSessionId,
     pub operation: OperationKind,
@@ -85,7 +85,7 @@ pub struct OperationOutcomeState {
     pub operation: OperationKind,
     pub status: OperationTerminalStatus,
     pub updated_at_unix_ms: u64,
-    pub message: Option<String>,
+
     pub error: Option<ApiError>,
 }
 
@@ -111,41 +111,11 @@ pub enum ProfileStatusHeadline {
     StatusUnknown,
 }
 
-impl ProfileStatusHeadline {
-    /// Whether this state is worth showing at all.
-    pub fn is_noteworthy(self) -> bool {
-        !matches!(self, Self::ReadyToPlay | Self::StatusUnknown)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Syncing => "Syncing",
-            Self::Checking => "Checking",
-            Self::Validating => "Verifying files",
-            Self::Stopping => "Stopping",
-            Self::UpdateAvailable => "Update available",
-            Self::ReadyToPlay => "Ready",
-            Self::NeedsSync => "Needs sync",
-            Self::MissingDestination => "Local folder missing",
-            Self::ActionRequired => "Action required",
-            Self::UpdateCheckFailed => "Status refresh failed",
-            Self::CheckFailed => "Status refresh failed",
-            Self::ValidationFailed => "Verification failed",
-            Self::SyncFailed => "Sync failed",
-            Self::CheckCanceled => "Status refresh canceled",
-            Self::ValidationCanceled => "Verification canceled",
-            Self::SyncCanceled => "Sync canceled",
-            Self::StatusUnknown => "Status unknown",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct ProfileActionAvailability {
     pub sync_enabled: bool,
     pub check_enabled: bool,
     pub validate_enabled: bool,
-    pub cancel_enabled: bool,
 
     pub sync_running: bool,
     pub check_running: bool,
@@ -153,31 +123,12 @@ pub struct ProfileActionAvailability {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UiProgressBarState {
-    pub determinate: bool,
-    pub percent: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UiProgressMetric {
-    pub label: String,
-    pub done: Option<u64>,
-    pub total: Option<u64>,
-    pub unit: ProgressUnit,
-    pub rendered: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileOperationProgressState {
     pub operation: OperationKind,
     pub last_updated_at_unix_ms: u64,
     pub active_stage: OperationStage,
-    pub status_text: Option<String>,
-    pub stage: UiProgressBarState,
-    pub primary_metric: Option<UiProgressMetric>,
-    pub secondary_metric: Option<UiProgressMetric>,
-    pub throughput_bytes_per_sec: Option<u64>,
-    pub eta_seconds: Option<u64>,
+    pub tracks: Vec<crate::operations::ProgressTrack>,
+    pub usage: crate::TaskUsage,
 }
 
 impl ProfileOperationProgressState {
@@ -187,15 +138,8 @@ impl ProfileOperationProgressState {
             operation,
             last_updated_at_unix_ms: now_ms,
             active_stage,
-            status_text: None,
-            stage: UiProgressBarState {
-                determinate: false,
-                percent: None,
-            },
-            primary_metric: None,
-            secondary_metric: None,
-            throughput_bytes_per_sec: None,
-            eta_seconds: None,
+            tracks: Vec::new(),
+            usage: Default::default(),
         }
     }
 }
@@ -205,9 +149,9 @@ impl ProfileOperationProgressState {
 pub enum ProfilePrimaryAction {
     #[default]
     None,
-    RefreshStatus,
+    CheckForUpdates,
     Sync,
-    RetrySync,
+    Update,
     FixProfile,
 }
 
@@ -216,7 +160,6 @@ pub struct ProfileStatusState {
     pub headline: ProfileStatusHeadline,
     pub primary_action: ProfilePrimaryAction,
     pub actions: ProfileActionAvailability,
-    pub progress: Option<ProfileOperationProgressState>,
     pub local_health: LocalFileHealth,
     pub repo_freshness: Option<RepoCheckFreshness>,
     pub has_error: bool,
@@ -228,14 +171,13 @@ impl ProfileStatusState {
     pub fn unknown(now_ms: u64) -> Self {
         Self {
             headline: ProfileStatusHeadline::StatusUnknown,
-            primary_action: ProfilePrimaryAction::RefreshStatus,
+            primary_action: ProfilePrimaryAction::CheckForUpdates,
             actions: ProfileActionAvailability {
                 check_enabled: true,
                 validate_enabled: true,
                 sync_enabled: true,
                 ..ProfileActionAvailability::default()
             },
-            progress: None,
             local_health: LocalFileHealth::Unknown,
             repo_freshness: None,
             has_error: false,
@@ -380,31 +322,34 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         }
     };
 
-    let primary_action = match headline {
-        ProfileStatusHeadline::Syncing
-        | ProfileStatusHeadline::Checking
-        | ProfileStatusHeadline::Validating
-        | ProfileStatusHeadline::Stopping
-        | ProfileStatusHeadline::ReadyToPlay => ProfilePrimaryAction::None,
-        ProfileStatusHeadline::ActionRequired => ProfilePrimaryAction::FixProfile,
-        ProfileStatusHeadline::SyncFailed => ProfilePrimaryAction::RetrySync,
-        ProfileStatusHeadline::NeedsSync
-        | ProfileStatusHeadline::UpdateAvailable
-        | ProfileStatusHeadline::MissingDestination
-        | ProfileStatusHeadline::SyncCanceled => ProfilePrimaryAction::Sync,
-        ProfileStatusHeadline::StatusUnknown
-        | ProfileStatusHeadline::UpdateCheckFailed
-        | ProfileStatusHeadline::CheckFailed
-        | ProfileStatusHeadline::CheckCanceled
-        | ProfileStatusHeadline::ValidationFailed
-        | ProfileStatusHeadline::ValidationCanceled => ProfilePrimaryAction::RefreshStatus,
+    let primary_action = if operation_active {
+        ProfilePrimaryAction::None
+    } else if invalid_profile {
+        ProfilePrimaryAction::FixProfile
+    } else if repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
+        && local_health == LocalFileHealth::Clean
+    {
+        ProfilePrimaryAction::Update
+    } else if matches!(
+        local_health,
+        LocalFileHealth::Dirty
+            | LocalFileHealth::Missing
+            | LocalFileHealth::MissingDestination
+            | LocalFileHealth::ExpectedStateUnavailable
+            | LocalFileHealth::InventoryUnavailable
+    ) || repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
+        || sync_failed
+        || canceled_operation == Some(OperationKind::Sync)
+    {
+        ProfilePrimaryAction::Sync
+    } else {
+        ProfilePrimaryAction::CheckForUpdates
     };
 
     let actions = ProfileActionAvailability {
         sync_enabled: can_run_actions && !invalid_profile,
         check_enabled: can_run_actions && !invalid_profile,
         validate_enabled: can_run_actions && !invalid_profile,
-        cancel_enabled: operation_active && !cancel_requested,
         sync_running,
         check_running,
         validate_running,
@@ -422,10 +367,6 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         headline,
         primary_action,
         actions,
-        progress: runtime
-            .active
-            .as_ref()
-            .map(|active| active.progress.clone()),
         local_health,
         repo_freshness,
         has_error: invalid_profile
@@ -438,94 +379,26 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
     }
 }
 
-fn format_metric(metric: &ProgressMetric) -> String {
-    match (metric.done, metric.total, metric.unit) {
-        (Some(done), Some(total), ProgressUnit::Bytes) => {
-            format!("{} / {}", format_bytes(done), format_bytes(total))
-        }
-        (Some(done), Some(total), ProgressUnit::Files) => format!("{done} / {total} files"),
-        (Some(done), None, ProgressUnit::Bytes) => format!("{} processed", format_bytes(done)),
-        (Some(done), None, ProgressUnit::Files) => format!("{done} files"),
-        _ => metric
-            .label
-            .clone()
-            .unwrap_or_else(|| "Working".to_string()),
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    fleet_domain::utils::format_bytes(bytes)
-}
-
-pub fn stage_label(stage: OperationStage) -> &'static str {
-    match stage {
-        OperationStage::Validating => "Validating",
-        OperationStage::LoadingExpectedState => "Loading expected state",
-        OperationStage::VerifyingInventory => "Verifying inventory",
-        OperationStage::Sync => "Sync",
-        OperationStage::RemovingObsoleteFiles => "Removing obsolete managed files",
-        OperationStage::Finalizing => "Finalizing",
-    }
-}
-
-fn stage_fraction(metric: Option<&UiProgressMetric>) -> Option<f64> {
-    let metric = metric?;
-    let (Some(done), Some(total)) = (metric.done, metric.total) else {
-        return None;
-    };
-    if total == 0 {
-        return Some(0.0);
-    }
-    Some((done as f64 / total as f64).clamp(0.0, 1.0))
-}
-
-pub fn metric_from_progress(metric: &ProgressMetric) -> UiProgressMetric {
-    UiProgressMetric {
-        label: metric.label.clone().unwrap_or_else(|| match metric.unit {
-            ProgressUnit::Bytes => "Bytes".to_string(),
-            ProgressUnit::Files => "Files".to_string(),
-        }),
-        done: metric.done,
-        total: metric.total,
-        unit: metric.unit,
-        rendered: format_metric(metric),
-    }
-}
-
 pub fn apply_operation_progress(
     progress_state: &mut ProfileOperationProgressState,
     progress: &OperationProgressEvent,
     now_ms: u64,
 ) {
     progress_state.last_updated_at_unix_ms = now_ms;
-    progress_state.active_stage = progress.stage;
-    progress_state.status_text = progress.status_text.clone();
-    progress_state.primary_metric = Some(metric_from_progress(&progress.primary));
-    progress_state.secondary_metric = progress.secondary.as_ref().map(metric_from_progress);
-    let active_fraction = stage_fraction(progress_state.primary_metric.as_ref());
-    progress_state.stage = UiProgressBarState {
-        determinate: active_fraction.is_some(),
-        percent: active_fraction
-            .map(|fraction| (fraction * 100.0).round().clamp(0.0, 100.0) as u64),
-    };
-    progress_state.throughput_bytes_per_sec = progress.throughput_bytes_per_sec;
-    progress_state.eta_seconds = progress.eta_seconds;
+    if progress_state.active_stage != OperationStage::Finalizing {
+        progress_state.active_stage = progress.stage;
+    }
+    progress_state.tracks = progress.tracks.clone();
+    progress_state.usage = progress.usage.clone();
 }
 
 pub(crate) fn apply_operation_stage(
     progress_state: &mut ProfileOperationProgressState,
     stage: OperationStage,
 ) {
-    progress_state.active_stage = stage;
-    progress_state.status_text = None;
-    progress_state.stage = UiProgressBarState {
-        determinate: false,
-        percent: None,
-    };
-    progress_state.primary_metric = None;
-    progress_state.secondary_metric = None;
-    progress_state.throughput_bytes_per_sec = None;
-    progress_state.eta_seconds = None;
+    if progress_state.active_stage != OperationStage::Finalizing {
+        progress_state.active_stage = stage;
+    }
 }
 
 #[cfg(test)]
@@ -535,42 +408,31 @@ mod tests {
         ensure_profile_runtime_mut, AppState, OperationOutcomeState, OperationTerminalStatus,
         ProfileOperationProgressState, ProfilePrimaryAction, ProfileStatusHeadline,
     };
-    use crate::operations::{OperationProgressEvent, OperationStage, ProgressMetric, ProgressUnit};
+    use crate::operations::{OperationProgressEvent, OperationStage};
     use fleet_domain::health::{
         LocalFileHealth, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,
     };
     use fleet_domain::Profile;
 
     #[test]
-    fn stage_transition_clears_previous_stage_progress() {
+    fn finalization_keeps_patch_progress_visible() {
         let mut progress = ProfileOperationProgressState::new(OperationKind::Sync, 0);
         apply_operation_progress(
             &mut progress,
             &OperationProgressEvent {
-                stage: OperationStage::VerifyingInventory,
-                status_text: None,
-                primary: ProgressMetric {
-                    label: Some("Bytes".to_string()),
-                    done: Some(5),
-                    total: Some(10),
-                    unit: ProgressUnit::Bytes,
-                },
-                secondary: None,
-                throughput_bytes_per_sec: Some(5),
-                eta_seconds: Some(1),
+                stage: OperationStage::Sync,
+                tracks: vec![crate::ProgressTrack {
+                    kind: crate::ProgressTrackKind::LocalCheck,
+                    done: 100,
+                    total: Some(100),
+                }],
+                usage: Default::default(),
             },
             1,
         );
-
-        apply_operation_stage(&mut progress, OperationStage::Sync);
-
-        assert_eq!(progress.active_stage, OperationStage::Sync);
-        assert_eq!(progress.stage.percent, None);
-        assert!(!progress.stage.determinate);
-        assert!(progress.primary_metric.is_none());
-        assert!(progress.secondary_metric.is_none());
-        assert!(progress.throughput_bytes_per_sec.is_none());
-        assert!(progress.eta_seconds.is_none());
+        apply_operation_stage(&mut progress, OperationStage::Finalizing);
+        assert_eq!(progress.active_stage, OperationStage::Finalizing);
+        assert_eq!(progress.tracks[0].done, 100);
     }
 
     #[test]
@@ -638,6 +500,54 @@ mod tests {
     }
 
     #[test]
+    fn clean_profiles_offer_check_and_new_versions_offer_update() {
+        let mut runtime = super::ProfileRuntimeState::new("p1".to_string(), 0);
+        runtime.check = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::Clean,
+            checked_at_unix_ms: 1,
+        });
+        assert_eq!(
+            derive_profile_status(&runtime).primary_action,
+            ProfilePrimaryAction::CheckForUpdates
+        );
+        runtime.repo_check = Some(RepoCheckReport {
+            profile_id: "p1".to_string(),
+            local_revision: Some("old".to_string()),
+            remote_revision: Some("new".to_string()),
+            freshness: RepoCheckFreshness::UpdateAvailable,
+            checked_at_unix_ms: 1,
+        });
+        assert_eq!(
+            derive_profile_status(&runtime).primary_action,
+            ProfilePrimaryAction::Update
+        );
+    }
+
+    #[test]
+    fn failed_remote_probe_does_not_hide_a_detected_local_repair() {
+        let mut runtime = super::ProfileRuntimeState::new("p1".to_string(), 0);
+        runtime.check = Some(LocalFileReport {
+            profile_id: "p1".to_string(),
+            verification: fleet_domain::VerificationKind::Fast,
+            health: LocalFileHealth::ExpectedStateUnavailable,
+            checked_at_unix_ms: 1,
+        });
+        runtime.repo_check = Some(RepoCheckReport {
+            profile_id: "p1".to_string(),
+            local_revision: None,
+            remote_revision: None,
+            freshness: RepoCheckFreshness::Error,
+            checked_at_unix_ms: 1,
+        });
+        assert_eq!(
+            derive_profile_status(&runtime).primary_action,
+            ProfilePrimaryAction::Sync
+        );
+    }
+
+    #[test]
     fn sync_running_uses_syncing_headline() {
         let mut state = AppState::default();
         state.profiles.insert(
@@ -672,7 +582,7 @@ mod tests {
         let status = derive_profile_status(&runtime);
 
         assert_eq!(status.headline, ProfileStatusHeadline::Stopping);
-        assert!(!status.actions.cancel_enabled);
+
         assert!(!status.can_launch);
     }
 
@@ -821,7 +731,7 @@ mod tests {
                 operation,
                 status: OperationTerminalStatus::Failed,
                 updated_at_unix_ms: 2,
-                message: Some("read failed".to_string()),
+
                 error: Some(crate::ApiError::new("read_failed", "read failed")),
             });
 
@@ -830,9 +740,9 @@ mod tests {
             assert_eq!(
                 status.primary_action,
                 if operation == OperationKind::Sync {
-                    ProfilePrimaryAction::RetrySync
+                    ProfilePrimaryAction::Sync
                 } else {
-                    ProfilePrimaryAction::RefreshStatus
+                    ProfilePrimaryAction::CheckForUpdates
                 }
             );
             assert!(status.has_error);

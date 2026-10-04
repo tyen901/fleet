@@ -1,267 +1,234 @@
+use crate::operations::{
+    OperationProgressEvent, OperationPublisher, OperationStage, ProgressTrack, ProgressTrackKind,
+    TaskUsage,
+};
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressUnit,
-};
-
 const UI_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-
-pub(crate) struct FluxProgressObserver {
-    latest: watch::Sender<Option<fleet_flux::Snapshot>>,
-    hashed_bytes: Arc<AtomicU64>,
+#[derive(Clone, Default)]
+struct WorkProgress {
+    check_total: Option<u64>,
+    checked: u64,
+    download_total: Option<u64>,
+    downloaded: u64,
+    patch_total: Option<u64>,
+    rebuilt: u64,
+    read: u64,
+    written: u64,
+    finalizing: bool,
 }
-
-pub(crate) struct FluxProgressReceiver {
-    latest: watch::Receiver<Option<fleet_flux::Snapshot>>,
-    hashed_bytes: Arc<AtomicU64>,
-    last_hashed_bytes: u64,
-    hash_rate_estimator: ByteRateEstimator,
-    operation: fleet_domain::OperationKind,
-}
-
-#[derive(Default)]
-struct ByteRateEstimator {
-    baseline: Option<(u64, Instant)>,
-}
-
-impl ByteRateEstimator {
-    fn reset(&mut self) {
-        self.baseline = None;
-    }
-
-    fn update(&mut self, completed: u64, observed_at: Instant) -> Option<u64> {
-        if completed == 0 {
-            self.reset();
-            return None;
+impl WorkProgress {
+    fn apply(&mut self, event: fleet_flux::ProgressEvent) {
+        use fleet_flux::ProgressEvent::*;
+        match event {
+            InventoryPlan { bytes } => self.check_total = Some(bytes),
+            Checked { bytes, .. } => self.checked += bytes,
+            DownloadPlan { bytes } => self.download_total = Some(bytes),
+            Downloaded { bytes } => self.downloaded += bytes,
+            PatchPlan { bytes } => self.patch_total = Some(bytes),
+            Patched { bytes, .. } => self.rebuilt += bytes,
+            Read { bytes } => self.read += bytes,
+            Written { bytes } => self.written += bytes,
+            Finalizing => self.finalizing = true,
         }
-        let Some(baseline) = self.baseline else {
-            self.baseline = Some((completed, observed_at));
-            return None;
+    }
+    fn checked_bytes(&self) -> u64 {
+        self.checked
+            .max(self.read)
+            .min(self.check_total.unwrap_or(u64::MAX))
+    }
+    fn tracks(&self) -> Vec<ProgressTrack> {
+        if self.patch_total.is_some() {
+            vec![
+                ProgressTrack {
+                    kind: ProgressTrackKind::Download,
+                    done: self.downloaded,
+                    total: self.download_total,
+                },
+                ProgressTrack {
+                    kind: ProgressTrackKind::Patch,
+                    done: self.rebuilt,
+                    total: self.patch_total,
+                },
+            ]
+        } else {
+            vec![ProgressTrack {
+                kind: ProgressTrackKind::LocalCheck,
+                done: self.checked_bytes(),
+                total: self.check_total,
+            }]
+        }
+    }
+}
+struct RateSample {
+    at: Instant,
+    started: Instant,
+    network: u64,
+    disk: u64,
+    work: u64,
+    network_rate: f64,
+    disk_rate: f64,
+    work_rate: f64,
+    work_last_at: Instant,
+    network_last_at: Instant,
+    disk_last_at: Instant,
+    patching: bool,
+}
+impl RateSample {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            at: now,
+            started: now,
+            network: 0,
+            disk: 0,
+            work: 0,
+            network_rate: 0.,
+            disk_rate: 0.,
+            work_rate: 0.,
+            work_last_at: now,
+            network_last_at: now,
+            disk_last_at: now,
+            patching: false,
+        }
+    }
+    fn sample(&mut self, work: &WorkProgress) -> TaskUsage {
+        let now = Instant::now();
+        if self.patching != work.patch_total.is_some() {
+            self.patching = work.patch_total.is_some();
+            self.started = now;
+            self.work = 0;
+            self.work_rate = 0.;
+            self.work_last_at = now;
+        }
+        let elapsed = now.duration_since(self.at).as_secs_f64();
+        if elapsed > 0. {
+            if work.downloaded > self.network {
+                self.network_last_at = now;
+            }
+            if work.read + work.written > self.disk {
+                self.disk_last_at = now;
+            }
+            let alpha = 1. - (-elapsed / 2.).exp();
+            self.network_rate += (work.downloaded.saturating_sub(self.network) as f64 / elapsed
+                - self.network_rate)
+                * alpha;
+            let disk = work.read + work.written;
+            self.disk_rate +=
+                (disk.saturating_sub(self.disk) as f64 / elapsed - self.disk_rate) * alpha;
+            let current = if work.patch_total.is_some() {
+                work.downloaded + work.rebuilt
+            } else {
+                work.checked_bytes()
+            };
+            let delta = current.saturating_sub(self.work);
+            if delta > 0 {
+                self.work_last_at = now;
+            }
+            self.work_rate +=
+                (delta as f64 / elapsed - self.work_rate) * (1. - (-elapsed / 6.).exp());
+            self.at = now;
+            self.network = work.downloaded;
+            self.disk = disk;
+            self.work = current;
+        }
+        if now.duration_since(self.network_last_at) >= Duration::from_secs(2) {
+            self.network_rate = 0.;
+        }
+        if now.duration_since(self.disk_last_at) >= Duration::from_secs(2) {
+            self.disk_rate = 0.;
+        }
+        let total = match (work.download_total, work.patch_total) {
+            (Some(a), Some(b)) => Some(a + b),
+            _ => work.check_total,
         };
-        if completed < baseline.0 {
-            self.baseline = Some((completed, observed_at));
-            return None;
-        }
-        let elapsed = observed_at.saturating_duration_since(baseline.1);
-        let completed_since_baseline = completed - baseline.0;
-        if elapsed.is_zero() || completed_since_baseline == 0 {
-            return None;
-        }
-        let rate = completed_since_baseline as f64 / elapsed.as_secs_f64();
-        (rate.is_finite() && rate >= 0.5).then(|| rate.round() as u64)
-    }
-}
-
-impl FluxProgressObserver {
-    pub(crate) fn channel(
-        operation: fleet_domain::OperationKind,
-    ) -> (
-        fleet_flux::SnapshotObserver,
-        fleet_flux::HashProgressObserverRef,
-        FluxProgressReceiver,
-    ) {
-        let (latest, receiver) = watch::channel(None);
-        let hashed_bytes = Arc::new(AtomicU64::new(0));
-        let observer = Arc::new(Self {
-            latest,
-            hashed_bytes: hashed_bytes.clone(),
+        let age = now.duration_since(self.started).as_secs_f64();
+        let eta_seconds = total.and_then(|total| {
+            if age < 3.
+                || now.duration_since(self.work_last_at).as_secs() >= 2
+                || self.work_rate <= 0.
+                || work.finalizing
+            {
+                None
+            } else {
+                let rate = self.work_rate / (1. - (-age / 6.).exp());
+                Some((total.saturating_sub(self.work) as f64 / rate).ceil() as u64)
+            }
         });
-        let snapshot_observer: fleet_flux::SnapshotObserver = {
-            let observer = observer.clone();
-            Arc::new(move |snapshot| {
-                observer.latest.send_replace(Some(snapshot));
-            })
-        };
-        (
-            snapshot_observer,
-            observer,
-            FluxProgressReceiver {
-                latest: receiver,
-                hashed_bytes,
-                last_hashed_bytes: 0,
-                hash_rate_estimator: ByteRateEstimator::default(),
-                operation,
-            },
-        )
+        TaskUsage {
+            network_bytes_per_sec: self.network_rate.round() as u64,
+            disk_bytes_per_sec: self.disk_rate.round() as u64,
+            eta_seconds,
+        }
     }
 }
-
-impl fleet_flux::HashProgressObserver for FluxProgressObserver {
-    fn bytes_hashed(&self, bytes: u64) {
-        self.hashed_bytes.fetch_add(bytes, Ordering::Relaxed);
-    }
+pub(crate) struct FluxProgressReceiver {
+    work: Arc<Mutex<WorkProgress>>,
 }
-
+pub(crate) fn progress_channel(
+    publisher: OperationPublisher,
+) -> (fleet_flux::WorkProgressObserver, FluxProgressReceiver) {
+    let work = Arc::new(Mutex::new(WorkProgress::default()));
+    let capture = work.clone();
+    let observer = Arc::new(move |event| {
+        if matches!(event, fleet_flux::ProgressEvent::Finalizing) {
+            publisher.stage(OperationStage::Finalizing);
+        }
+        capture.lock().unwrap().apply(event);
+    });
+    (observer, FluxProgressReceiver { work })
+}
 impl FluxProgressReceiver {
-    pub(crate) async fn observe<F, T>(mut self, publisher: OperationPublisher, future: F) -> T
-    where
-        F: Future<Output = T>,
-    {
+    pub(crate) async fn observe<F: Future>(
+        self,
+        publisher: OperationPublisher,
+        future: F,
+    ) -> F::Output {
         let mut future = std::pin::pin!(future);
         let mut refresh = interval(UI_PROGRESS_INTERVAL);
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut rates = RateSample::new();
         loop {
             tokio::select! {
-                result = &mut future => {
-                    self.publish_latest(&publisher);
-                    return result;
-                }
-                _ = refresh.tick() => self.publish_latest(&publisher),
+                result=&mut future=>{self.publish_latest(&publisher,&mut rates);return result;}
+                _=refresh.tick()=>self.publish_latest(&publisher,&mut rates),
             }
         }
     }
-
-    fn publish_latest(&mut self, publisher: &OperationPublisher) {
-        let snapshot_changed = self.latest.has_changed().unwrap_or(false);
-        let hashed_bytes = self.hashed_bytes.load(Ordering::Relaxed);
-        if !snapshot_changed && hashed_bytes == self.last_hashed_bytes {
+    fn publish_latest(&self, publisher: &OperationPublisher, rates: &mut RateSample) {
+        let work = self.work.lock().unwrap().clone();
+        if work.check_total.is_none() {
             return;
         }
-        let snapshot = if snapshot_changed {
-            self.latest.borrow_and_update().clone()
+        let stage = if work.finalizing {
+            OperationStage::Finalizing
+        } else if work.patch_total.is_some() {
+            OperationStage::Sync
         } else {
-            self.latest.borrow().clone()
+            OperationStage::VerifyingInventory
         };
-        let hash_changed = hashed_bytes != self.last_hashed_bytes;
-        if let Some(snapshot) = snapshot {
-            if hash_changed && snapshot.phase == fleet_flux::Phase::Inventory {
-                let throughput = self
-                    .hash_rate_estimator
-                    .update(hashed_bytes, Instant::now());
-                publisher.progress(hash_progress(hashed_bytes, throughput));
-            } else {
-                self.hash_rate_estimator.reset();
-                publisher.progress(operation_progress(self.operation, snapshot));
-            }
-            self.last_hashed_bytes = hashed_bytes;
-        } else if hash_changed {
-            let throughput = self
-                .hash_rate_estimator
-                .update(hashed_bytes, Instant::now());
-            publisher.progress(hash_progress(hashed_bytes, throughput));
-            self.last_hashed_bytes = hashed_bytes;
-        }
+        publisher.progress(OperationProgressEvent {
+            stage,
+            tracks: work.tracks(),
+            usage: rates.sample(&work),
+        });
     }
 }
-
-fn hash_progress(
-    hashed_bytes: u64,
-    throughput_bytes_per_sec: Option<u64>,
-) -> OperationProgressEvent {
-    OperationProgressEvent {
-        stage: OperationStage::VerifyingInventory,
-        status_text: Some("Hashing local files".to_string()),
-        primary: ProgressMetric {
-            label: Some("Hashed".to_string()),
-            done: Some(hashed_bytes),
-            total: None,
-            unit: ProgressUnit::Bytes,
-        },
-        secondary: None,
-        throughput_bytes_per_sec,
-        eta_seconds: None,
-    }
-}
-
-fn operation_progress(
-    operation: fleet_domain::OperationKind,
-    snapshot: fleet_flux::Snapshot,
-) -> OperationProgressEvent {
-    let (stage, status_text) = match snapshot.phase {
-        fleet_flux::Phase::Inventory => (
-            OperationStage::VerifyingInventory,
-            match operation {
-                fleet_domain::OperationKind::Check => "Checking files",
-                fleet_domain::OperationKind::Validate => "Validating files",
-                fleet_domain::OperationKind::Sync => "Preparing sync",
-            },
-        ),
-        fleet_flux::Phase::Preparing | fleet_flux::Phase::Publishing => {
-            (OperationStage::Sync, "Syncing files")
-        }
-        fleet_flux::Phase::Complete => (OperationStage::Finalizing, "Finishing sync"),
-    };
-    let outcome = snapshot.outcome;
-    let primary = if snapshot.phase == fleet_flux::Phase::Inventory {
-        ProgressMetric {
-            label: Some("Kept".to_string()),
-            done: Some(outcome.kept_files),
-            total: None,
-            unit: ProgressUnit::Files,
-        }
-    } else {
-        ProgressMetric {
-            label: Some("Written".to_string()),
-            done: Some(outcome.written_bytes),
-            total: None,
-            unit: ProgressUnit::Bytes,
-        }
-    };
-    let secondary = (outcome.fetched_bytes > 0).then_some(ProgressMetric {
-        label: Some("Fetched".to_string()),
-        done: Some(outcome.fetched_bytes),
-        total: None,
-        unit: ProgressUnit::Bytes,
-    });
-    OperationProgressEvent {
-        stage,
-        status_text: Some(status_text.to_string()),
-        primary,
-        secondary,
-        throughput_bytes_per_sec: None,
-        eta_seconds: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{hash_progress, operation_progress, ByteRateEstimator};
-    use crate::operations::{OperationStage, ProgressUnit};
-    use fleet_domain::OperationKind;
-    use std::time::{Duration, Instant};
-
+    use super::*;
     #[test]
-    fn hash_progress_reports_observed_bytes_without_an_invented_total() {
-        let mut estimator = ByteRateEstimator::default();
-        let started = Instant::now();
-        assert_eq!(estimator.update(0, started), None);
-        assert_eq!(
-            estimator.update(2 * 1024 * 1024, started + Duration::from_secs(1)),
-            None
-        );
-        assert_eq!(
-            estimator.update(6 * 1024 * 1024, started + Duration::from_secs(2)),
-            Some(4 * 1024 * 1024)
-        );
-        let event = hash_progress(1234, Some(42));
-        assert_eq!(event.primary.done, Some(1234));
-        assert_eq!(event.primary.total, None);
-        assert_eq!(event.primary.unit, ProgressUnit::Bytes);
-        assert_eq!(event.throughput_bytes_per_sec, Some(42));
-    }
-
-    #[test]
-    fn preparing_and_publishing_snapshots_remain_active_sync() {
-        for phase in [fleet_flux::Phase::Publishing, fleet_flux::Phase::Preparing] {
-            let event = operation_progress(
-                OperationKind::Sync,
-                fleet_flux::Snapshot {
-                    phase,
-                    outcome: fleet_flux::Outcome {
-                        written_bytes: 2048,
-                        ..Default::default()
-                    },
-                },
-            );
-            assert_eq!(event.stage, OperationStage::Sync);
-            assert_eq!(event.status_text.as_deref(), Some("Syncing files"));
-            assert_eq!(event.primary.done, Some(2048));
-        }
+    fn patch_and_download_tracks_are_independent() {
+        let mut work = WorkProgress::default();
+        work.apply(fleet_flux::ProgressEvent::DownloadPlan { bytes: 40 });
+        work.apply(fleet_flux::ProgressEvent::PatchPlan { bytes: 100 });
+        work.apply(fleet_flux::ProgressEvent::Downloaded { bytes: 20 });
+        work.apply(fleet_flux::ProgressEvent::Patched { bytes: 30 });
+        let tracks = work.tracks();
+        assert_eq!((tracks[0].done, tracks[0].total), (20, Some(40)));
+        assert_eq!((tracks[1].done, tracks[1].total), (30, Some(100)));
     }
 }

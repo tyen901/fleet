@@ -17,7 +17,7 @@ license = "GPL-3.0-only"
 
 [workspace.dependencies]
 # Workspace crates (path deps)
-fleet-core               = { path = "crates/core" }
+fleet-core               = { path = "crates/core", default-features = false }
 fleet-download           = { path = "crates/download" }
 fleet-domain             = { path = "crates/domain" }
 fleet-inventory          = { path = "crates/inventory" }
@@ -28,7 +28,7 @@ fleet-arma3              = { path = "crates/arma3" }
 # Pinned external dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-flux                    = { git = "https://github.com/tyen901/flux.git", rev = "9214baf61ece9db2b9ba1bc47e8681aaaaefc771" }
+flux                    = { git = "https://github.com/tyen901/flux.git", rev = "cfa59d105b0eda64de7959aea591faafc7e22a41" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }

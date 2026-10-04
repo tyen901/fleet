@@ -291,7 +291,7 @@ fn user_story_sync_installs_repairs_and_updates_only_managed_files() {
 }
 
 #[test]
-fn user_story_validate_finds_byte_corruption_and_sync_repairs_content() {
+fn user_story_validate_automatically_repairs_byte_corruption() {
     let suffix = unique_suffix();
     let run_root = smoke_test_root().join(format!("validate_{suffix}"));
     let dest_root = run_root.join("dest");
@@ -327,7 +327,9 @@ fn user_story_validate_finds_byte_corruption_and_sync_repairs_content() {
     );
     run_cmd(&bin, &["sync", "validate-story", "--no-progress"], &envs);
     let file = dest_root.join(server.example_file_target_path());
-    fs::write(&file, b"content requiring full validation").expect("modify managed file");
+    let mut corrupt = server.example_file_bytes().to_vec();
+    corrupt[0] ^= 0xff;
+    fs::write(&file, corrupt).expect("modify managed bytes without changing file length");
 
     let validation = run_cmd(
         &bin,
@@ -335,10 +337,9 @@ fn user_story_validate_finds_byte_corruption_and_sync_repairs_content() {
         &envs,
     );
     assert!(
-        validation.contains("local_health: Dirty"),
-        "byte validation must report corruption before repair, got: {validation}"
+        validation.contains("local_health: Clean") && validation.contains("Patch:"),
+        "byte validation must automatically repair corruption in the same task, got: {validation}"
     );
-    run_cmd(&bin, &["sync", "validate-story", "--no-progress"], &envs);
 
     assert_eq!(
         fs::read(file).expect("read fully repaired file"),

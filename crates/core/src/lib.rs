@@ -29,5 +29,5 @@ pub use fleet_domain::{
 };
 pub use operations::{
     OperationOutput, OperationProgressEvent, OperationSessionEvent, OperationSessionEventKind,
-    OperationStage, ProgressMetric, ProgressUnit,
+    OperationStage, ProgressTrack, ProgressTrackKind, TaskUsage,
 };

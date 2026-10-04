@@ -1,4 +1,4 @@
-use crate::operations::progress::FluxProgressObserver;
+use crate::operations::progress::progress_channel;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
 use fleet_domain::{observation_db_path, validated_repo_url, LocalFileHealth, Profile};
@@ -29,34 +29,32 @@ pub(crate) async fn sync(
             repo_url,
             &repo_cache,
             &downloads,
-        ) => result.map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?,
+        ) => result.map_err(|error| crate::ApiError::new("sync_failed", format!("Could not download repository data: {}", error.root_cause())))?,
         () = cancel.cancelled() => return Err(crate::ApiError::new("canceled", "canceled")),
     };
     let revision = input.revision().map(ToOwned::to_owned);
     std::fs::create_dir_all(&dest)
-        .map_err(|error| crate::ApiError::new("sync_failed", error.to_string()))?;
+        .map_err(|error| crate::ApiError::new("sync_failed", format!("Sync failed: {error:#}")))?;
     let inventory = Arc::new(
-        FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id())
-            .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?,
+        FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id()).map_err(
+            |error| crate::ApiError::new("inventory", format!("Local inventory failed: {error:#}")),
+        )?,
     );
     let catalog = inventory.clone();
     let manifest = input.manifest().clone();
     tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
         .await
-        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?
-        .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
+        .map_err(|error| {
+            crate::ApiError::new("inventory", format!("Local inventory failed: {error:#}"))
+        })?
+        .map_err(|error| {
+            crate::ApiError::new("inventory", format!("Local inventory failed: {error:#}"))
+        })?;
 
-    publisher.stage(OperationStage::Sync);
-    let (progress, hash_progress, progress_receiver) =
-        FluxProgressObserver::channel(fleet_domain::OperationKind::Sync);
-    let materialization = fleet_flux::materialize(
-        &dest,
-        inventory,
-        input,
-        cancel.clone(),
-        Some(progress),
-        Some(hash_progress),
-    );
+    publisher.stage(OperationStage::VerifyingInventory);
+    let (observers, progress_receiver) = progress_channel(publisher.clone());
+    let materialization =
+        fleet_flux::materialize(&dest, inventory, input, cancel.clone(), observers);
     progress_receiver
         .observe(publisher.clone(), materialization)
         .await
@@ -64,7 +62,7 @@ pub(crate) async fn sync(
             if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
                 crate::ApiError::new("canceled", "canceled")
             } else {
-                crate::ApiError::new("sync_failed", error.to_string())
+                crate::ApiError::new("sync_failed", format!("Sync failed: {error:#}"))
             }
         })?;
     publisher.stage(OperationStage::Finalizing);

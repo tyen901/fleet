@@ -6,13 +6,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::profile::SwiftyFluxProfile;
 use crate::source::build_store_sources;
-use crate::{MaterializationInput, SnapshotObserver};
+use crate::MaterializationInput;
 
 pub async fn check_target(
     dest: &Path,
     inventory: Arc<dyn flux::Inventory>,
     input: MaterializationInput,
     cancel: CancellationToken,
+    work_progress: crate::WorkProgressObserver,
 ) -> Result<bool> {
     if cancel.is_cancelled() {
         return Err(anyhow::Error::new(flux::Error::new(
@@ -23,14 +24,23 @@ pub async fn check_target(
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile::new(None)),
+        profile: Arc::new(SwiftyFluxProfile),
         sources: Vec::new(),
         inventory,
     };
-    tokio::task::spawn_blocking(move || flux::check(&request))
-        .await
-        .map_err(anyhow::Error::new)?
-        .map_err(anyhow::Error::new)
+    tokio::task::spawn_blocking(move || {
+        flux::check(
+            &request,
+            &flux::Options {
+                cancellation: cancel,
+                progress: Some(work_progress),
+                ..flux::Options::default()
+            },
+        )
+    })
+    .await
+    .map_err(anyhow::Error::new)?
+    .map_err(anyhow::Error::new)
 }
 
 pub async fn verify_manifest(
@@ -38,13 +48,13 @@ pub async fn verify_manifest(
     inventory: Arc<dyn flux::Inventory>,
     input: MaterializationInput,
     cancel: CancellationToken,
-    observer: Option<SnapshotObserver>,
-    hash_progress: Option<crate::HashProgressObserverRef>,
+    work_progress: crate::WorkProgressObserver,
 ) -> Result<bool> {
     let options = flux::Options {
         cancellation: cancel.clone(),
         limits: flux::Limits::default(),
-        observer,
+        observer: None,
+        progress: Some(work_progress),
     };
     if cancel.is_cancelled() {
         return Err(anyhow::Error::new(flux::Error::new(
@@ -55,7 +65,7 @@ pub async fn verify_manifest(
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
+        profile: Arc::new(SwiftyFluxProfile),
         sources: Vec::new(),
         inventory,
     };
@@ -69,19 +79,19 @@ pub async fn materialize(
     inventory: Arc<dyn flux::Inventory>,
     input: MaterializationInput,
     cancel: CancellationToken,
-    observer: Option<SnapshotObserver>,
-    hash_progress: Option<crate::HashProgressObserverRef>,
+    work_progress: crate::WorkProgressObserver,
 ) -> Result<flux::Outcome> {
     let sources = build_store_sources(input.store_index)?;
     let options = flux::Options {
         cancellation: cancel,
         limits: flux::Limits::default(),
-        observer,
+        observer: None,
+        progress: Some(work_progress),
     };
     let request = flux::MaterializeRequest {
         target: dest.to_path_buf(),
         manifest: input.manifest,
-        profile: Arc::new(SwiftyFluxProfile::new(hash_progress)),
+        profile: Arc::new(SwiftyFluxProfile),
         sources,
         inventory,
     };
