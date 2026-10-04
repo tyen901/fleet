@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use tokio::time::{interval, MissedTickBehavior};
 
 const UI_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const LIVE_RATE_WINDOW_SECONDS: f64 = 2.;
+const ETA_RATE_WINDOW_SECONDS: f64 = 60.;
+const ETA_WARMUP: Duration = Duration::from_secs(5);
+const ETA_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone, Default)]
 struct WorkProgress {
     check_total: Option<u64>,
@@ -96,7 +100,9 @@ impl RateSample {
         }
     }
     fn sample(&mut self, work: &WorkProgress) -> TaskUsage {
-        let now = Instant::now();
+        self.sample_at(work, Instant::now())
+    }
+    fn sample_at(&mut self, work: &WorkProgress, now: Instant) -> TaskUsage {
         if self.patching != work.patch_total.is_some() {
             self.patching = work.patch_total.is_some();
             self.started = now;
@@ -112,7 +118,7 @@ impl RateSample {
             if work.read + work.written > self.disk {
                 self.disk_last_at = now;
             }
-            let alpha = 1. - (-elapsed / 2.).exp();
+            let alpha = 1. - (-elapsed / LIVE_RATE_WINDOW_SECONDS).exp();
             self.network_rate += (work.downloaded.saturating_sub(self.network) as f64 / elapsed
                 - self.network_rate)
                 * alpha;
@@ -128,8 +134,8 @@ impl RateSample {
             if delta > 0 {
                 self.work_last_at = now;
             }
-            self.work_rate +=
-                (delta as f64 / elapsed - self.work_rate) * (1. - (-elapsed / 6.).exp());
+            self.work_rate += (delta as f64 / elapsed - self.work_rate)
+                * (1. - (-elapsed / ETA_RATE_WINDOW_SECONDS).exp());
             self.at = now;
             self.network = work.downloaded;
             self.disk = disk;
@@ -147,14 +153,14 @@ impl RateSample {
         };
         let age = now.duration_since(self.started).as_secs_f64();
         let eta_seconds = total.and_then(|total| {
-            if age < 3.
-                || now.duration_since(self.work_last_at).as_secs() >= 2
+            if now.duration_since(self.started) < ETA_WARMUP
+                || now.duration_since(self.work_last_at) >= ETA_STALL_TIMEOUT
                 || self.work_rate <= 0.
                 || work.finalizing
             {
                 None
             } else {
-                let rate = self.work_rate / (1. - (-age / 6.).exp());
+                let rate = self.work_rate / (1. - (-age / ETA_RATE_WINDOW_SECONDS).exp());
                 Some((total.saturating_sub(self.work) as f64 / rate).ceil() as u64)
             }
         });
@@ -220,6 +226,98 @@ impl FluxProgressReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn established_eta_resists_short_throughput_fluctuations() {
+        let mut rates = RateSample::new();
+        let start = rates.at;
+        let mut work = WorkProgress {
+            check_total: Some(30_000),
+            ..Default::default()
+        };
+        for second in 1..=60 {
+            work.checked += 100;
+            work.read += 100;
+            rates.sample_at(&work, start + Duration::from_secs(second));
+        }
+        let mut previous = 240;
+        for second in 61..=80 {
+            work.checked += if second % 2 == 0 { 175 } else { 25 };
+            let eta = rates
+                .sample_at(&work, start + Duration::from_secs(second))
+                .eta_seconds
+                .unwrap();
+            assert!(
+                eta.abs_diff(previous) <= 8,
+                "ETA jumped from {previous} to {eta}"
+            );
+            previous = eta;
+        }
+        assert!(previous.abs_diff(220) <= 5);
+    }
+
+    #[test]
+    fn brief_io_pauses_keep_eta_but_sustained_stalls_hide_it() {
+        let mut rates = RateSample::new();
+        let start = rates.at;
+        let mut work = WorkProgress {
+            check_total: Some(30_000),
+            ..Default::default()
+        };
+        for second in 1..=30 {
+            work.checked += 100;
+            work.read += 100;
+            rates.sample_at(&work, start + Duration::from_secs(second));
+        }
+        let paused = rates.sample_at(&work, start + Duration::from_secs(32));
+        assert_eq!(paused.disk_bytes_per_sec, 0);
+        assert!(paused.eta_seconds.is_some());
+        assert!(rates
+            .sample_at(&work, start + Duration::from_secs(45))
+            .eta_seconds
+            .is_none());
+        work.checked += 100;
+        assert!(rates
+            .sample_at(&work, start + Duration::from_secs(46))
+            .eta_seconds
+            .is_some());
+        work.finalizing = true;
+        assert!(rates
+            .sample_at(&work, start + Duration::from_secs(47))
+            .eta_seconds
+            .is_none());
+    }
+
+    #[test]
+    fn patch_plan_discards_the_inventory_eta_baseline() {
+        let mut rates = RateSample::new();
+        let start = rates.at;
+        let mut work = WorkProgress {
+            check_total: Some(30_000),
+            ..Default::default()
+        };
+        for second in 1..=30 {
+            work.checked += 100;
+            work.read += 100;
+            rates.sample_at(&work, start + Duration::from_secs(second));
+        }
+        work.download_total = Some(1_000);
+        work.patch_total = Some(2_000);
+        assert!(rates
+            .sample_at(&work, start + Duration::from_secs(31))
+            .eta_seconds
+            .is_none());
+        for second in 32..=36 {
+            work.downloaded += 50;
+            work.rebuilt += 50;
+            let usage = rates.sample_at(&work, start + Duration::from_secs(second));
+            if second < 36 {
+                assert!(usage.eta_seconds.is_none());
+            } else {
+                assert_eq!(usage.eta_seconds, Some(25));
+            }
+        }
+    }
+
     #[test]
     fn patch_and_download_tracks_are_independent() {
         let mut work = WorkProgress::default();
