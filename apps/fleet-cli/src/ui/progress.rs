@@ -1,28 +1,26 @@
-use fleet_core::{OperationSessionEvent, OperationSessionEventKind, ProgressUnit};
+use fleet_core::{OperationSessionEvent, OperationSessionEventKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::collections::BTreeMap;
 
 fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
-    match &ev.kind {
-        OperationSessionEventKind::Stage { stage } => {
-            Some(format!("Stage: {}", fleet_core::stage_label(*stage)))
-        }
-        OperationSessionEventKind::Progress { progress } => {
-            if let (Some(done), Some(total)) = (progress.primary.done, progress.primary.total) {
-                Some(match progress.primary.unit {
-                    ProgressUnit::Bytes => format!("Progress: {done}/{total} bytes"),
-                    ProgressUnit::Files => format!("Progress: {done}/{total} files"),
-                })
-            } else {
-                progress.status_text.clone()
-            }
-        }
-        OperationSessionEventKind::Finished { .. } => Some("finished".to_string()),
+    Some(match &ev.kind {
+        OperationSessionEventKind::Stage { stage } => format!("Stage: {}", stage.label()),
+        OperationSessionEventKind::Progress { progress } => progress
+            .tracks
+            .iter()
+            .map(|track| match track.total {
+                Some(total) => format!("{}: {}/{total} bytes", track.kind.label(), track.done),
+                None => format!("{}: {} bytes (planning)", track.kind.label(), track.done),
+            })
+            .collect::<Vec<_>>()
+            .join(" | "),
+        OperationSessionEventKind::Finished { .. } => "finished".to_string(),
         OperationSessionEventKind::Failed { error } => {
-            Some(format!("failed: {}: {}", error.code, error.message))
+            format!("failed: {}: {}", error.code, error.message)
         }
-        OperationSessionEventKind::Canceled => Some("canceled".to_string()),
-        OperationSessionEventKind::Started => Some(format!("started: {:?}", ev.operation)),
-    }
+        OperationSessionEventKind::Canceled => "canceled".to_string(),
+        OperationSessionEventKind::Started => format!("started: {:?}", ev.operation),
+    })
 }
 
 pub fn spawn_flow_printer(
@@ -31,74 +29,72 @@ pub fn spawn_flow_printer(
     no_progress: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if no_progress || std::env::var_os("FLEET_NO_PROGRESS").is_some() {
-            loop {
-                let Ok(ev) = rx.recv().await else { break };
-                if ev.session_id == session_id {
-                    if let Some(line) = plain_event_line(&ev) {
-                        println!("{line}");
-                    }
-                    if matches!(
-                        ev.kind,
-                        OperationSessionEventKind::Finished { .. }
-                            | OperationSessionEventKind::Failed { .. }
-                            | OperationSessionEventKind::Canceled
-                    ) {
-                        break;
-                    }
-                }
-            }
-            return;
-        }
-
+        let plain = no_progress || std::env::var_os("FLEET_NO_PROGRESS").is_some();
         let mp = MultiProgress::new();
-        let style_spinner = ProgressStyle::with_template("{spinner:.cyan} {msg}")
-            .unwrap_or_else(|_| ProgressStyle::default_spinner());
-        let style_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {bytes}/{total_bytes}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar());
-        let style_file_bar = ProgressStyle::with_template("{bar:40.cyan/blue} {pos}/{len} files")
-            .unwrap_or_else(|_| ProgressStyle::default_bar());
-        let phase_pb = mp.add(ProgressBar::new_spinner());
-        phase_pb.set_style(style_spinner);
-        phase_pb.enable_steady_tick(std::time::Duration::from_millis(150));
-        let progress_pb = mp.add(ProgressBar::new(0));
-        progress_pb.set_style(style_bar.clone());
-
-        loop {
-            let ev = match rx.recv().await {
-                Ok(ev) => ev,
-                Err(_) => break,
-            };
+        let spinner =
+            ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template");
+        let bar = ProgressStyle::with_template("{msg} {bar:40.cyan/blue} {bytes}/{total_bytes}")
+            .expect("valid byte template");
+        let planning = ProgressStyle::with_template("{msg} {bytes} (planning)")
+            .expect("valid planning template");
+        let phase = mp.add(ProgressBar::new_spinner());
+        if !plain {
+            phase.set_style(spinner);
+            phase.enable_steady_tick(std::time::Duration::from_millis(150));
+        }
+        let mut bars = BTreeMap::new();
+        while let Ok(ev) = rx.recv().await {
             if ev.session_id != session_id {
                 continue;
             }
-            match ev.kind {
-                OperationSessionEventKind::Stage { stage } => {
-                    phase_pb.set_message(format!("Stage: {}", fleet_core::stage_label(stage)))
+            if plain {
+                if let Some(line) = plain_event_line(&ev) {
+                    println!("{line}");
                 }
-                OperationSessionEventKind::Progress { progress } => {
-                    match progress.primary.unit {
-                        ProgressUnit::Bytes => progress_pb.set_style(style_bar.clone()),
-                        ProgressUnit::Files => progress_pb.set_style(style_file_bar.clone()),
+            } else {
+                match &ev.kind {
+                    OperationSessionEventKind::Stage { stage } => phase.set_message(stage.label()),
+                    OperationSessionEventKind::Progress { progress } => {
+                        phase.set_message(progress.stage.label());
+                        bars.retain(|kind, bar: &mut ProgressBar| {
+                            let present = progress.tracks.iter().any(|track| track.kind == *kind);
+                            if !present {
+                                bar.finish_and_clear();
+                            }
+                            present
+                        });
+                        for track in &progress.tracks {
+                            let pb = bars
+                                .entry(track.kind)
+                                .or_insert_with(|| mp.add(ProgressBar::new(0)));
+                            pb.set_message(track.kind.label());
+                            if let Some(total) = track.total {
+                                pb.set_style(bar.clone());
+                                pb.set_length(total);
+                            } else {
+                                pb.set_style(planning.clone());
+                            }
+                            pb.set_position(track.done);
+                        }
                     }
-                    if let Some(total) = progress.primary.total {
-                        progress_pb.set_length(total);
+                    OperationSessionEventKind::Failed { error } => {
+                        let _ = mp.println(format!("failed: {}: {}", error.code, error.message));
                     }
-                    if let Some(done) = progress.primary.done {
-                        progress_pb.set_position(done);
-                    }
-                    if let Some(msg) = progress.status_text {
-                        progress_pb.set_message(msg);
-                    }
+                    _ => {}
                 }
-                OperationSessionEventKind::Finished { .. } => break,
-                OperationSessionEventKind::Failed { error } => {
-                    let _ = mp.println(format!("failed: {}: {}", error.code, error.message));
-                    break;
-                }
-                OperationSessionEventKind::Canceled => break,
-                OperationSessionEventKind::Started => {}
             }
+            if matches!(
+                ev.kind,
+                OperationSessionEventKind::Finished { .. }
+                    | OperationSessionEventKind::Failed { .. }
+                    | OperationSessionEventKind::Canceled
+            ) {
+                break;
+            }
+        }
+        phase.finish_and_clear();
+        for pb in bars.values() {
+            pb.finish_and_clear();
         }
     })
 }

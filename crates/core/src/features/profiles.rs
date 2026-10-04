@@ -222,22 +222,20 @@ impl Core {
         run_config_blocking(self.config_repo(), |c| c.delete_profiles()).await
     }
 
-    pub async fn profile_save(&self, profile: Profile) -> Result<Profile, crate::ApiError> {
-        let previous = if profile.id.trim().is_empty() {
+    pub async fn profile_save(&self, mut profile: Profile) -> Result<Profile, crate::ApiError> {
+        profile.id = profile.id.trim().to_string();
+        let profile_mutation = if profile.id.trim().is_empty() {
             None
         } else {
-            self.load_profile(&profile.id.trim().to_string()).await.ok()
-        };
-        let profile_mutation = if previous
-            .as_ref()
-            .is_some_and(|previous| profile_path_context_changed(Some(previous), &profile))
-        {
             Some(
                 self.operation_runtime()
                     .reserve_profile_mutation(profile.id.clone())?,
             )
-        } else {
+        };
+        let previous = if profile.id.trim().is_empty() {
             None
+        } else {
+            self.load_profile(&profile.id.trim().to_string()).await.ok()
         };
         let requested_profile_id = profile.id.clone();
         let saved = self
@@ -726,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn user_story_profile_path_change_is_rejected_while_an_operation_owns_the_profile() {
+    fn user_story_all_profile_edits_are_rejected_while_an_operation_owns_the_profile() {
         let _guard = ENV_VAR_LOCK.lock().expect("env lock");
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
@@ -745,16 +743,21 @@ mod tests {
                 .operation_runtime()
                 .reserve_profile_mutation(profile.id.clone())
                 .expect("reserve active profile");
-            let changed = Profile {
-                destination: "/tmp/p1-new".to_string(),
-                ..profile
-            };
-
-            let error = core
-                .profile_save(changed)
-                .await
-                .expect_err("active profile edit must fail");
-            assert_eq!(error.code, "profile_busy");
+            let mut renamed = profile.clone();
+            renamed.name = "Renamed while syncing".to_string();
+            let mut moved = profile.clone();
+            moved.destination = "/tmp/p1-new".to_string();
+            let mut redirected = profile.clone();
+            redirected.source = "https://example.com/changed".to_string();
+            let mut padded_id = profile.clone();
+            padded_id.id = " p1 ".to_string();
+            for changed in [renamed, moved, redirected, padded_id, profile] {
+                let error = core
+                    .profile_save(changed)
+                    .await
+                    .expect_err("active profile edit must fail");
+                assert_eq!(error.code, "profile_busy");
+            }
         });
     }
 

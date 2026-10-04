@@ -1,11 +1,7 @@
-//! Scripted maintenance state and sync progress for the automated UI render flow.
-//!
-//! Enabled by `FLEET_SIMULATE_SYNC=1`. Emits a deterministic progress sequence
-//! and returns an up-to-date report without touching the network, the repo
-//! cache, the inventory, or the profile destination.
-
+//! Disposable renderer telemetry. Enabled only by FLEET_SIMULATE_SYNC=1.
 use crate::operations::{
-    OperationProgressEvent, OperationPublisher, OperationStage, ProgressMetric, ProgressUnit,
+    OperationProgressEvent, OperationPublisher, OperationStage, ProgressTrack, ProgressTrackKind,
+    TaskUsage,
 };
 use fleet_domain::health::{
     CheckReport, LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport, SyncReport,
@@ -14,115 +10,86 @@ use fleet_domain::health::{
 use fleet_domain::Profile;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-
-const ENV_FLAG: &str = "FLEET_SIMULATE_SYNC";
-const ENV_HOLD_PERCENT: &str = "FLEET_SIMULATE_SYNC_HOLD_PERCENT";
-const TOTAL_FILES: u64 = 20;
-const TOTAL_REBUILD_FILES: u64 = 10;
 const TOTAL_BYTES: u64 = 400 * 1024 * 1024;
-const STEP_DELAY: Duration = Duration::from_millis(120);
-const CANCEL_DELAY: Duration = Duration::from_millis(500);
-
 pub(crate) fn is_enabled() -> bool {
-    std::env::var(ENV_FLAG).is_ok_and(|value| value == "1")
+    std::env::var("FLEET_SIMULATE_SYNC").is_ok_and(|value| value == "1")
 }
-
-/// Percentage at which the sequence pauses long enough to capture or cancel.
-fn hold_percent() -> Option<u64> {
-    std::env::var(ENV_HOLD_PERCENT)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+pub(crate) async fn scan(
+    publisher: &OperationPublisher,
+    cancel: &CancellationToken,
+) -> Result<(), crate::ApiError> {
+    for step in 0..=10 {
+        if cancel.is_cancelled() {
+            return Err(crate::ApiError::new("canceled", "canceled"));
+        }
+        publisher.progress(OperationProgressEvent {
+            stage: OperationStage::VerifyingInventory,
+            tracks: vec![ProgressTrack {
+                kind: ProgressTrackKind::LocalCheck,
+                done: TOTAL_BYTES * step / 10,
+                total: Some(TOTAL_BYTES),
+            }],
+            usage: TaskUsage {
+                network_bytes_per_sec: 0,
+                disk_bytes_per_sec: TOTAL_BYTES,
+                eta_seconds: Some(1),
+            },
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+    Ok(())
 }
-
 pub(crate) async fn sync(
     profile: &Profile,
     publisher: OperationPublisher,
     cancel: CancellationToken,
 ) -> Result<SyncReport, crate::ApiError> {
-    publisher.stage(OperationStage::Validating);
-    publisher.stage(OperationStage::LoadingExpectedState);
-    publisher.stage(OperationStage::VerifyingInventory);
-
-    for step in 0..=TOTAL_REBUILD_FILES {
+    scan(&publisher, &cancel).await?;
+    let hold = std::env::var("FLEET_SIMULATE_SYNC_HOLD_PERCENT")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    for step in 0..=20 {
         if cancel.is_cancelled() {
-            return Err(crate::ApiError::new("canceled", "operation canceled"));
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return Err(crate::ApiError::new("canceled", "canceled"));
         }
-        publisher.progress(OperationProgressEvent {
-            stage: OperationStage::VerifyingInventory,
-            status_text: Some("Hashing local files".to_string()),
-            primary: ProgressMetric {
-                label: None,
-                done: Some(step),
-                total: Some(TOTAL_REBUILD_FILES),
-                unit: ProgressUnit::Files,
-            },
-            secondary: None,
-            throughput_bytes_per_sec: (step > 0 && step < TOTAL_REBUILD_FILES)
-                .then_some(8 * 1024 * 1024),
-            eta_seconds: (step < TOTAL_REBUILD_FILES).then_some(TOTAL_REBUILD_FILES - step),
-        });
-        tokio::time::sleep(STEP_DELAY).await;
-    }
-
-    publisher.stage(OperationStage::Sync);
-
-    for step in 0..=TOTAL_FILES {
-        if cancel.is_cancelled() {
-            return Err(crate::ApiError::new("canceled", "operation canceled"));
-        }
-        let done_bytes = TOTAL_BYTES * step / TOTAL_FILES;
         publisher.progress(OperationProgressEvent {
             stage: OperationStage::Sync,
-            status_text: Some("Syncing files".to_string()),
-            primary: ProgressMetric {
-                label: Some("Installed".to_string()),
-                done: Some(done_bytes),
-                total: Some(TOTAL_BYTES),
-                unit: ProgressUnit::Bytes,
+            tracks: vec![
+                ProgressTrack {
+                    kind: ProgressTrackKind::Download,
+                    done: TOTAL_BYTES / 2 * step / 20,
+                    total: Some(TOTAL_BYTES / 2),
+                },
+                ProgressTrack {
+                    kind: ProgressTrackKind::Patch,
+                    done: TOTAL_BYTES * step / 20,
+                    total: Some(TOTAL_BYTES),
+                },
+            ],
+            usage: TaskUsage {
+                network_bytes_per_sec: 20 * 1024 * 1024,
+                disk_bytes_per_sec: 50 * 1024 * 1024,
+                eta_seconds: Some((20 - step) / 2),
             },
-            secondary: Some(ProgressMetric {
-                label: Some("Downloaded".to_string()),
-                done: Some(done_bytes),
-                total: Some(TOTAL_BYTES),
-                unit: ProgressUnit::Bytes,
-            }),
-            throughput_bytes_per_sec: Some(12 * 1024 * 1024),
-            eta_seconds: Some(TOTAL_FILES - step),
         });
-        if hold_percent() == Some(step * 100 / TOTAL_FILES) {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tokio::time::sleep(CANCEL_DELAY).await;
-                    return Err(crate::ApiError::new("canceled", "operation canceled"));
-                }
-                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
-            }
+        if hold == Some(step * 100 / 20) {
+            tokio::select! {_=cancel.cancelled()=>{tokio::time::sleep(Duration::from_millis(500)).await;return Err(crate::ApiError::new("canceled","canceled"));},_=tokio::time::sleep(Duration::from_secs(3))=>{}}
         }
-        tokio::time::sleep(STEP_DELAY).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-
     publisher.stage(OperationStage::Finalizing);
-
-    let checked_at = fleet_domain::time::now_unix_ms();
+    let report = check(profile, true);
     Ok(SyncReport {
         profile_id: profile.id.clone(),
-        repo: RepoCheckReport {
-            profile_id: profile.id.clone(),
-            local_revision: Some("simulated".to_string()),
-            remote_revision: Some("simulated".to_string()),
-            freshness: RepoCheckFreshness::UpToDate,
-            checked_at_unix_ms: checked_at,
-        },
+        repo: report.repo,
         local: LocalFileReport {
-            profile_id: profile.id.clone(),
             verification: VerificationKind::Materialized,
-            health: LocalFileHealth::Clean,
-            checked_at_unix_ms: checked_at,
+            ..report.local
         },
     })
 }
-
-/// Seed the render flow with missing files; later refreshes preserve a completed sync.
+/// Deterministic profile health for the disposable UI fixture.
 pub(crate) fn check(profile: &Profile, materialized: bool) -> CheckReport {
     let now = fleet_domain::time::now_unix_ms();
     CheckReport {

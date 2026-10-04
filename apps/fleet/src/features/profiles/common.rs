@@ -5,9 +5,9 @@ use dioxus_router::Navigator;
 use tracing::{error, info};
 
 use crate::app::router::Route;
+use crate::features::action_error::ActionError;
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
-use crate::stores::toast_store::ToastStore;
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ProfileFormFieldProps {
@@ -43,6 +43,7 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
                     value: props.value,
                     placeholder: props.placeholder,
                     readonly: props.readonly,
+                    disabled: props.disabled,
                     folder_select: true,
                     pick_button_text: props.pick_button_text,
                     show_open_button: props.show_open_button,
@@ -110,23 +111,6 @@ pub(crate) fn profile_icon_src(
     Some(format!("data:image/png;base64,{encoded}"))
 }
 
-pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static str {
-    match stage {
-        fleet_core::OperationStage::Validating => "Checking",
-        fleet_core::OperationStage::LoadingExpectedState => "Planning",
-        fleet_core::OperationStage::VerifyingInventory => "Verifying",
-        fleet_core::OperationStage::Sync => "Downloading",
-        fleet_core::OperationStage::RemovingObsoleteFiles => "Removing obsolete files",
-        fleet_core::OperationStage::Finalizing => "Installing",
-    }
-}
-
-pub(crate) fn format_clock(total_seconds: u64) -> String {
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{minutes:02}:{seconds:02}")
-}
-
 pub(crate) fn default_arma3_args(settings: &fleet_core::AppSettings) -> String {
     let v = settings.arma3.arma3_default_args.clone();
     if v.trim().is_empty() {
@@ -149,10 +133,6 @@ pub(crate) fn new_profile_from_draft(
     }
 }
 
-pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", fleet_domain::utils::format_bytes(bytes_per_sec))
-}
-
 pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> String {
     if server.port == 0 {
         server.address.clone()
@@ -163,22 +143,20 @@ pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> Strin
 
 pub(crate) fn start_profile_operation(
     bridge: FleetBridge,
-    toasts: ToastStore,
+    feedback: ActionError,
     profile_id: String,
     operation: fleet_core::OperationKind,
     action: &'static str,
     error_reason: &'static str,
-    fail_title: &'static str,
 ) {
     spawn(async move {
         start_profile_operation_request(
             bridge,
-            toasts,
+            feedback,
             profile_id,
             operation,
             action,
             error_reason,
-            fail_title,
         )
         .await;
     });
@@ -186,13 +164,13 @@ pub(crate) fn start_profile_operation(
 
 pub(crate) async fn start_profile_operation_request(
     bridge: FleetBridge,
-    toasts: ToastStore,
+    feedback: ActionError,
     profile_id: String,
     operation: fleet_core::OperationKind,
     action: &'static str,
     error_reason: &'static str,
-    fail_title: &'static str,
 ) -> bool {
+    feedback.clear();
     info!(
         op = "profile_action",
         profile_id = %profile_id,
@@ -224,7 +202,7 @@ pub(crate) async fn start_profile_operation_request(
                 reason = error_reason,
                 "profile operation failed"
             );
-            toasts.push_api_error(fail_title, &err);
+            feedback.set(&err);
             false
         }
     }

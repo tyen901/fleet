@@ -48,6 +48,7 @@ pub enum VerificationKind {
 pub enum CancelResult {
     Requested,
     AlreadyTerminal,
+    Finalizing,
     NotFound,
 }
 

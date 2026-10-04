@@ -29,6 +29,12 @@ changed surface, and state any check that could not run.
 
 ## UI changes
 
+Review UI text adversarially: do not add, and actively remove, explanatory text
+that repeats behavior already intuitively conveyed by the controls, layout, or
+state. Code functionality never needs an explanatory UI label. Documentation
+belongs in documentation, not the UI. Keep only concise action names, necessary
+values, and actionable errors.
+
 Follow the existing tokens and components. Containers use even padding and
 `gap`; use the spacing scale rather than ad hoc values. Keep the established
 four type roles, two weights, sentence-case strings, and label tracking rules; a

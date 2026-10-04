@@ -62,6 +62,9 @@ impl Core {
         extra_args: Option<Vec<String>>,
         dry_run: bool,
     ) -> Result<ArmaLaunchResult, ApiError> {
+        let operations = self.operation_runtime();
+        operations.cancel_update_check(self, &profile_id).await?;
+        let _reservation = operations.reserve_profile_mutation(profile_id.clone())?;
         let profile = self
             .load_profile(&profile_id)
             .await
@@ -86,6 +89,7 @@ impl Core {
             profile,
             &state_root,
             tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
         )
         .await
     }

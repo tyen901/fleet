@@ -30,8 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             inventory,
             input,
             cancellation,
-            None,
-            None,
+            Arc::new(|_| {}),
         )
         .await?;
         if !equal {
@@ -44,8 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             inventory,
             input,
             cancellation,
-            None,
-            None,
+            Arc::new(|_| {}),
         )
         .await?;
         serde_json::json!({"kept_files": outcome.kept_files,

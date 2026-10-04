@@ -7,12 +7,14 @@ use dioxus::prelude::*;
 pub(crate) fn advanced_section<FOpenLogs, FRestartSetup, FResetSettings, FFactoryReset>(
     on_open_logs: FOpenLogs,
     on_restart_setup: FRestartSetup,
+    setup_error: Element,
     mut on_reset_settings: FResetSettings,
     mut on_request_factory_reset: FFactoryReset,
     reset_settings_confirm_open: bool,
     reset_settings_confirm: Element,
     factory_reset_confirm_open: bool,
     factory_reset_confirm: Element,
+    factory_reset_error: Element,
 ) -> Element
 where
     FOpenLogs: Fn() + Clone + 'static,
@@ -49,6 +51,7 @@ where
                 }
             }
 
+            {setup_error}
             FieldRow {
                 FieldRowMeta {
                     title: "Reset all settings".to_string(),
@@ -79,6 +82,7 @@ where
                 }
             }
             {factory_reset_confirm}
+            {factory_reset_error}
         }
     }
 }

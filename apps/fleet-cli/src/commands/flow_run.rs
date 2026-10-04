@@ -77,6 +77,7 @@ pub(crate) async fn run_validation_session(
 ) -> anyhow::Result<LocalFileReport> {
     match run_flow_session(core, session_id, options).await? {
         OperationOutput::Validate(report) => Ok(report),
+        OperationOutput::Sync(report) => Ok(report.local),
         _ => Err(anyhow::anyhow!("internal: expected validation result")),
     }
 }

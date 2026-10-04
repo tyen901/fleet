@@ -3,17 +3,17 @@ use dioxus_router::use_navigator;
 use tracing::{error, info};
 
 use crate::app::router::Route;
+use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_repo_server_label,
-    profile_not_found_page, start_profile_operation, start_profile_operation_request,
-    ProfileFormField,
+    profile_not_found_page, start_profile_operation_request, ProfileFormField,
 };
 use crate::features::profiles::draft::ProfileDraft;
+
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
-use crate::stores::toast_store::ToastStore;
 use crate::style::{
     Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, IconButton, InlineConfirm,
     PageFooter, Section, SectionHeader, SelectField, SelectOption,
@@ -24,7 +24,9 @@ use icondata::BsPlusLg;
 pub fn ProfileView(id: String) -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
-    let toasts = use_context::<ToastStore>();
+    let feedback = use_action_error();
+    let save_feedback = use_action_error();
+    let delete_feedback = use_action_error();
     let nav = use_navigator();
 
     let mut editing = use_signal(|| false);
@@ -52,14 +54,6 @@ pub fn ProfileView(id: String) -> Element {
     let any_active = active_operation.is_some();
     let nav_for_back = nav;
 
-    let check_enabled = status
-        .as_ref()
-        .map(|status| status.actions.check_enabled)
-        .unwrap_or(false);
-    let check_running = status
-        .as_ref()
-        .map(|status| status.actions.check_running)
-        .unwrap_or(false);
     let validate_enabled = status
         .as_ref()
         .map(|status| status.actions.validate_enabled)
@@ -68,108 +62,34 @@ pub fn ProfileView(id: String) -> Element {
         .as_ref()
         .map(|status| status.actions.validate_running)
         .unwrap_or(false);
-    let sync_enabled = status
-        .as_ref()
-        .map(|status| status.actions.sync_enabled)
-        .unwrap_or(false);
     let operation_notice = runtime
         .and_then(|runtime| runtime.last_operation.as_ref())
         .filter(|_| !any_active)
-        .filter(|outcome| outcome.operation != fleet_core::OperationKind::Sync)
-        .filter(|outcome| {
-            outcome.status != fleet_core::OperationTerminalStatus::Succeeded
-                || outcome.operation == fleet_core::OperationKind::Validate
-        })
-        .map(|outcome| {
-            if outcome.status == fleet_core::OperationTerminalStatus::Succeeded {
-                let message = runtime
-                    .and_then(|runtime| runtime.validation.as_ref())
-                    .map(|report| match report.health {
-                        fleet_core::LocalFileHealth::Clean => {
-                            "Managed files match the expected bytes.".to_string()
-                        }
-                        fleet_core::LocalFileHealth::Dirty
-                        | fleet_core::LocalFileHealth::Missing => {
-                            "Managed files need repair. Sync to restore the expected bytes."
-                                .to_string()
-                        }
-                        fleet_core::LocalFileHealth::InvalidProfile => {
-                            "Fix the profile configuration to verify files.".to_string()
-                        }
-                        _ => "Files could not be verified. Sync to restore the managed files."
-                            .to_string(),
-                    })
-                    .unwrap_or_else(|| "File verification finished.".to_string());
-                return ("Verification complete", message);
-            }
-            let title = status
-                .as_ref()
-                .map(|status| status.headline.label())
-                .unwrap_or("Operation stopped");
-            let message = outcome
-                .error
-                .as_ref()
-                .map(|error| error.message.clone())
-                .or_else(|| outcome.message.clone())
-                .unwrap_or_else(|| "The operation did not complete.".to_string());
-            (title, message)
-        });
+        .filter(|outcome| outcome.status == fleet_core::OperationTerminalStatus::Failed)
+        .and_then(|outcome| outcome.error.as_ref().map(|error| error.message.clone()));
 
-    let bridge_for_check = bridge.clone();
-    let toasts_for_check = toasts.clone();
-    let profile_id_for_check = profile.id.clone();
-    let on_refresh_status = move |_: MouseEvent| {
-        start_profile_operation(
-            bridge_for_check.clone(),
-            toasts_for_check.clone(),
-            profile_id_for_check.clone(),
-            fleet_core::OperationKind::Check,
-            "check",
-            "start_check_failed",
-            "Status refresh failed",
-        );
-    };
-
-    let on_sync_action = {
+    let on_validate = {
         let bridge = bridge.clone();
-        let toasts = toasts.clone();
+        let feedback = feedback.clone();
         let profile_id = profile.id.clone();
         move |_: MouseEvent| {
             let bridge = bridge.clone();
-            let toasts = toasts.clone();
+            let feedback = feedback.clone();
             let profile_id = profile_id.clone();
             spawn(async move {
                 if start_profile_operation_request(
                     bridge,
-                    toasts,
+                    feedback,
                     profile_id,
-                    fleet_core::OperationKind::Sync,
-                    "sync",
-                    "start_sync_failed",
-                    "Sync failed",
+                    fleet_core::OperationKind::Validate,
+                    "validate",
+                    "start_validate_failed",
                 )
                 .await
                 {
                     let _ = nav.push(Route::Profiles {});
                 }
             });
-        }
-    };
-
-    let on_validate = {
-        let bridge = bridge.clone();
-        let toasts = toasts.clone();
-        let profile_id = profile.id.clone();
-        move |_: MouseEvent| {
-            start_profile_operation(
-                bridge.clone(),
-                toasts.clone(),
-                profile_id.clone(),
-                fleet_core::OperationKind::Validate,
-                "validate",
-                "start_validate_failed",
-                "Verification failed",
-            );
         }
     };
 
@@ -206,6 +126,9 @@ pub fn ProfileView(id: String) -> Element {
 
     let mut seed_draft_for_enter = seed_draft;
     let on_edit = move |_: MouseEvent| {
+        if any_active {
+            return;
+        }
         seed_draft_for_enter();
         editing.set(true);
     };
@@ -277,21 +200,20 @@ pub fn ProfileView(id: String) -> Element {
     );
     let profile_dirty = editing() && next_profile != profile;
     let can_save = validation.is_valid() && profile_dirty;
-    let edit_message =
-        (editing() && operation_active).then_some("Finish the active operation before saving.");
 
     let on_save = {
         let bridge = bridge.clone();
-        let toasts = toasts.clone();
+        let feedback = save_feedback.clone();
         let profile = profile.clone();
         let next = next_profile.clone();
         move |_: MouseEvent| {
             if operation_active || save_loading() || next == profile {
                 return;
             }
+            feedback.clear();
             save_loading.set(true);
             let bridge = bridge.clone();
-            let toasts = toasts.clone();
+            let feedback = feedback.clone();
             let next = next.clone();
             spawn(async move {
                 info!(op = "profile_edit_save", profile_id = %next.id, "profile edit save requested");
@@ -302,7 +224,7 @@ pub fn ProfileView(id: String) -> Element {
                     }
                     Err(err) => {
                         save_loading.set(false);
-                        toasts.push_api_error("Save profile failed", &err);
+                        feedback.set(&err);
                         error!(
                             op = "profile_edit_save",
                             outcome = "failed",
@@ -351,16 +273,17 @@ pub fn ProfileView(id: String) -> Element {
     };
     let on_confirm_delete = {
         let bridge = bridge.clone();
-        let toasts = toasts.clone();
+        let feedback = delete_feedback.clone();
         let profile_id = profile.id.clone();
         move |_: MouseEvent| {
             if operation_active || delete_loading() {
                 return;
             }
             delete_confirm_open.set(false);
+            feedback.clear();
             delete_loading.set(true);
             let bridge = bridge.clone();
-            let toasts = toasts.clone();
+            let feedback = feedback.clone();
             let profile_id = profile_id.clone();
             spawn(async move {
                 info!(op = "profile_delete", profile_id = %profile_id, "profile delete requested");
@@ -378,7 +301,7 @@ pub fn ProfileView(id: String) -> Element {
                             "profile delete failed"
                         );
                         delete_loading.set(false);
-                        toasts.push_api_error("Delete failed", &err);
+                        feedback.set(&err);
                     }
                 }
             });
@@ -400,9 +323,6 @@ pub fn ProfileView(id: String) -> Element {
                         on_confirm: on_confirm_discard,
                         on_cancel: on_cancel_discard,
                     }
-                    if let Some(edit_message) = edit_message {
-                        p { class: "section-note", "{edit_message}" }
-                    }
 
                     Section {
                         // Editing is a mode on this page. Read mode keeps the
@@ -410,7 +330,7 @@ pub fn ProfileView(id: String) -> Element {
                         ProfileFormField {
                             title: "Name".to_string(),
                             value: if editing() { name() } else { profile.name.clone() },
-                            readonly: !editing(),
+                            readonly: !editing() || operation_active,
                             placeholder: Some(crate::features::profiles::PROFILE_NAME_PLACEHOLDER.to_string()),
                             error: if editing() && !validation.name_ok && !name().trim().is_empty() { Some("Name must be alphanumeric (spaces allowed).".to_string()) } else { None },
                             on_change: move |v| name.set(v),
@@ -418,7 +338,7 @@ pub fn ProfileView(id: String) -> Element {
                         ProfileFormField {
                             title: "Sync source URL".to_string(),
                             value: if editing() { repo() } else { profile.source.clone() },
-                            readonly: !editing(),
+                            readonly: !editing() || operation_active,
                             placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
                             error: if editing() && !validation.repo_ok && !repo().trim().is_empty() { Some(
                                 "Sync source URL must use HTTP or HTTPS and point to a valid profile source."
@@ -429,7 +349,7 @@ pub fn ProfileView(id: String) -> Element {
                         ProfileFormField {
                             title: "Folder".to_string(),
                             value: if editing() { folder() } else { profile.destination.clone() },
-                            readonly: !editing(),
+                            readonly: !editing() || operation_active,
                             placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
                             folder_select: true,
                             pick_button_text: Some("Select".to_string()),
@@ -446,6 +366,7 @@ pub fn ProfileView(id: String) -> Element {
                                         r#type: "checkbox",
                                         class: "check",
                                         checked: use_default_args(),
+                                        disabled: operation_active,
                                         onchange: move |evt| {
                                             use_default_args.set(evt.checked());
                                         },
@@ -465,7 +386,7 @@ pub fn ProfileView(id: String) -> Element {
                             ProfileFormField {
                                 title: "Launch arguments".to_string(),
                                 value: if editing() { launch_params() } else { profile.launch_params.clone() },
-                                readonly: !editing(),
+                                readonly: !editing() || operation_active,
                                 on_change: move |v| launch_params.set(v),
                             }
                         }
@@ -473,7 +394,7 @@ pub fn ProfileView(id: String) -> Element {
                             div { class: "form-field",
                                 span { class: "form-field__label", "Join server" }
                                 SelectField {
-                                    disabled: !editing(),
+                                    disabled: !editing() || operation_active,
                                     value: join_server_value.clone(),
                                     options: join_server_options.clone(),
                                     onchange: move |value: String| {
@@ -494,6 +415,7 @@ pub fn ProfileView(id: String) -> Element {
                                     IconButton {
                                         icon: BsPlusLg,
                                         label: "Add mod".to_string(),
+                                        disabled: operation_active,
                                         onclick: on_add_mod,
                                     }
                                 }),
@@ -505,6 +427,7 @@ pub fn ProfileView(id: String) -> Element {
                                             BrowseField {
                                                 value: mod_dir,
                                                 placeholder: Some("Path to mod directory".to_string()),
+                                                disabled: operation_active,
                                                 folder_select: true,
                                                 pick_button_text: Some("Browse".to_string()),
                                                 on_change: move |next| {
@@ -518,6 +441,7 @@ pub fn ProfileView(id: String) -> Element {
                                             }
                                             Button {
                                                 variant: ButtonVariant::Danger,
+                                                disabled: operation_active,
                                                 onclick: move |_| {
                                                     additional_mod_folders
                                                         .with_mut(|folders| {
@@ -548,58 +472,21 @@ pub fn ProfileView(id: String) -> Element {
                     }
 
                     if !editing() {
-                        if let Some((title, message)) = operation_notice.clone() {
-                            section { class: "profile-view__result", role: "status",
-                                h3 { class: "profile-view__result-title", "{title}" }
-                                p { class: "profile-view__result-message", "{message}" }
-                            }
+                        if let Some(message) = operation_notice.clone() {
+                            p { class: "field__error", role: "alert", "{message}" }
                         }
 
                         Section {
                             SectionHeader {
                                 title: "Maintenance".to_string(),
                             }
-                            FieldRow {
-                                FieldRowMeta {
-                                    title: "Refresh status".to_string(),
-                                }
-                                FieldRowActions {
-                                    Button {
-                                        variant: ButtonVariant::Ghost,
-                                        disabled: !check_enabled || any_active,
-                                        loading: check_running,
-                                        onclick: on_refresh_status,
-                                    "Refresh"
-                                    }
-                                }
-                            }
-                            FieldRow {
-                                FieldRowMeta {
-                                    title: "Verify files".to_string(),
-                                    description: "Byte-level verification of managed files.".to_string(),
-                                }
-                                FieldRowActions {
-                                    Button {
-                                        variant: ButtonVariant::Ghost,
-                                        disabled: !validate_enabled || any_active,
-                                        loading: validate_running,
-                                        onclick: on_validate,
-                                        "Verify"
-                                    }
-                                }
-                            }
-                            FieldRow {
-                                FieldRowMeta {
-                                    title: "Sync files".to_string(),
-                                }
-                                FieldRowActions {
-                                    Button {
-                                        variant: ButtonVariant::Ghost,
-                                        disabled: !sync_enabled || any_active,
-                                        onclick: on_sync_action,
-                                        "Sync files"
-                                    }
-                                }
+                            ActionErrorView { feedback: feedback.clone() }
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                disabled: !validate_enabled || any_active,
+                                loading: validate_running,
+                                onclick: on_validate,
+                                "Verify"
                             }
                         }
                     }
@@ -629,6 +516,7 @@ pub fn ProfileView(id: String) -> Element {
                                 on_confirm: on_confirm_delete,
                                 on_cancel: on_cancel_delete,
                             }
+                            ActionErrorView { feedback: delete_feedback.clone() }
                         }
                     }
                 }
@@ -636,6 +524,7 @@ pub fn ProfileView(id: String) -> Element {
 
             if editing() {
                 PageFooter {
+                    error: Some(rsx! { ActionErrorView { feedback: save_feedback.clone() } }),
                     actions: Some(rsx! {
                         Button { variant: ButtonVariant::Ghost, onclick: on_cancel_edit, "Cancel" }
                         Button {

@@ -5,17 +5,20 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Copy)]
 enum ReadKind {
-    Check,
-    Validate,
+    Check {
+        work: fleet_flux::WorkProgressObserver,
+    },
+    Validate {
+        work: fleet_flux::WorkProgressObserver,
+    },
 }
 
 impl ReadKind {
-    fn evidence(self) -> VerificationKind {
+    fn evidence(&self) -> VerificationKind {
         match self {
-            Self::Check => VerificationKind::Fast,
-            Self::Validate => VerificationKind::ByteExact,
+            Self::Check { .. } => VerificationKind::Fast,
+            Self::Validate { .. } => VerificationKind::ByteExact,
         }
     }
 }
@@ -24,34 +27,25 @@ pub(crate) async fn check(
     profile: &Profile,
     state_root: &Path,
     cancel: CancellationToken,
+    work: fleet_flux::WorkProgressObserver,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, None, None, ReadKind::Check).await
+    check_or_validate(profile, state_root, cancel, ReadKind::Check { work }).await
 }
 
 pub(crate) async fn validate(
     profile: &Profile,
     state_root: &Path,
     cancel: CancellationToken,
-    progress: Option<fleet_flux::SnapshotObserver>,
-    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
+
+    work: fleet_flux::WorkProgressObserver,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(
-        profile,
-        state_root,
-        cancel,
-        progress,
-        hash_progress,
-        ReadKind::Validate,
-    )
-    .await
+    check_or_validate(profile, state_root, cancel, ReadKind::Validate { work }).await
 }
 
 async fn check_or_validate(
     profile: &Profile,
     state_root: &Path,
     cancel: CancellationToken,
-    progress: Option<fleet_flux::SnapshotObserver>,
-    hash_progress: Option<fleet_flux::HashProgressObserverRef>,
     read_kind: ReadKind,
 ) -> Result<LocalFileReport, crate::ApiError> {
     let verification_kind = read_kind.evidence();
@@ -85,7 +79,7 @@ async fn check_or_validate(
             LocalFileHealth::ExpectedStateUnavailable,
         ));
     };
-    if !inventory_db.is_file() && matches!(read_kind, ReadKind::Check) {
+    if !inventory_db.is_file() && matches!(read_kind, ReadKind::Check { .. }) {
         return Ok(report(
             profile,
             verification_kind,
@@ -112,26 +106,21 @@ async fn check_or_validate(
     }
 
     let matches = match read_kind {
-        ReadKind::Check => fleet_flux::check_target(&dest, inventory, input, cancel.clone())
-            .await
-            .map_err(|error| operation_error("local_check", &cancel, error))?,
-        ReadKind::Validate => {
+        ReadKind::Check { work } => {
+            fleet_flux::check_target(&dest, inventory, input, cancel.clone(), work)
+                .await
+                .map_err(|error| operation_error("local_check", &cancel, error))?
+        }
+        ReadKind::Validate { work } => {
             let catalog = inventory.clone();
             let manifest = input.manifest().clone();
             tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
                 .await
                 .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?
                 .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
-            fleet_flux::verify_manifest(
-                &dest,
-                inventory,
-                input,
-                cancel.clone(),
-                progress,
-                hash_progress,
-            )
-            .await
-            .map_err(|error| operation_error("inventory_validation", &cancel, error))?
+            fleet_flux::verify_manifest(&dest, inventory, input, cancel.clone(), work)
+                .await
+                .map_err(|error| operation_error("inventory_validation", &cancel, error))?
         }
     };
     Ok(report(
@@ -153,7 +142,7 @@ fn operation_error(
     if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
         crate::ApiError::new("canceled", "canceled")
     } else {
-        crate::ApiError::new(code, error.to_string())
+        crate::ApiError::new(code, format!("File check failed: {error:#}"))
     }
 }
 

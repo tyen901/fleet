@@ -27,32 +27,68 @@ pub enum OperationStage {
     LoadingExpectedState,
     VerifyingInventory,
     Sync,
-    RemovingObsoleteFiles,
     Finalizing,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProgressUnit {
-    Bytes,
-    Files,
 }
 
 #[derive(Clone, Debug)]
 pub struct OperationProgressEvent {
     pub stage: OperationStage,
-    pub status_text: Option<String>,
-    pub primary: ProgressMetric,
-    pub secondary: Option<ProgressMetric>,
-    pub throughput_bytes_per_sec: Option<u64>,
-    pub eta_seconds: Option<u64>,
+    pub tracks: Vec<ProgressTrack>,
+    pub usage: TaskUsage,
 }
 
-#[derive(Clone, Debug)]
-pub struct ProgressMetric {
-    pub label: Option<String>,
-    pub done: Option<u64>,
+impl OperationStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Validating => "Checking profile",
+            Self::LoadingExpectedState => "Preparing",
+            Self::VerifyingInventory => "Checking local files",
+            Self::Sync => "Patching",
+            Self::Finalizing => "Finishing up",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProgressTrackKind {
+    LocalCheck,
+    Patch,
+    Download,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgressTrack {
+    pub kind: ProgressTrackKind,
+    pub done: u64,
     pub total: Option<u64>,
-    pub unit: ProgressUnit,
+}
+
+impl ProgressTrack {
+    pub fn percent(&self) -> Option<u64> {
+        self.total.map(|total| {
+            if total == 0 {
+                100
+            } else {
+                ((self.done as u128 * 100) / total as u128).min(100) as u64
+            }
+        })
+    }
+}
+impl ProgressTrackKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LocalCheck => "Local check",
+            Self::Patch => "Patch",
+            Self::Download => "Download",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TaskUsage {
+    pub network_bytes_per_sec: u64,
+    pub disk_bytes_per_sec: u64,
+    pub eta_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
