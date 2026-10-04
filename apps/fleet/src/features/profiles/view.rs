@@ -13,6 +13,7 @@ use crate::features::profiles::draft::ProfileDraft;
 use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
+use crate::services::platform::open::open_path;
 use crate::stores::app_store::AppStore;
 use crate::style::{
     Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, IconButton, InlineConfirm,
@@ -353,8 +354,6 @@ pub fn ProfileView(id: String) -> Element {
                             placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
                             folder_select: true,
                             pick_button_text: Some("Select".to_string()),
-                            show_open_button: true,
-                            open_button_text: Some("Open".to_string()),
                             error: if editing() && !validation.folder_ok && !folder().trim().is_empty() { Some("Folder is required and must be unique.".to_string()) } else { None },
                             on_change: move |v| folder.set(v),
                         }
@@ -474,6 +473,23 @@ pub fn ProfileView(id: String) -> Element {
                     if !editing() {
                         if let Some(message) = operation_notice.clone() {
                             p { class: "field__error", role: "alert", "{message}" }
+                        }
+
+                        Section {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                disabled: !std::path::Path::new(profile.destination.trim()).is_dir(),
+                                onclick: {
+                                    let destination = profile.destination.trim().to_string();
+                                    move |_| {
+                                        let path = std::path::PathBuf::from(&destination);
+                                        if path.is_dir() {
+                                            spawn(async move { open_path(path).await; });
+                                        }
+                                    }
+                                },
+                                "Open folder"
+                            }
                         }
 
                         Section {
