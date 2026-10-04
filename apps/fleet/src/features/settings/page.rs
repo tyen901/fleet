@@ -69,14 +69,10 @@ pub fn Settings() -> Element {
 
     let open_logs = move || {
         spawn(async move {
-            let log_dir = if let Some(dir) = std::env::var_os("FLEET_LOG_DIR") {
-                std::path::PathBuf::from(dir)
-            } else {
-                let Some(proj) = ProjectDirs::from("com", "fleet", "manager") else {
-                    return;
-                };
-                proj.data_dir().join("logs")
+            let Some(proj) = ProjectDirs::from("com", "fleet", "manager") else {
+                return;
             };
+            let log_dir = proj.data_dir().join("logs");
             let _ = std::fs::create_dir_all(&log_dir);
             open_path(log_dir).await;
         });

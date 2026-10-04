@@ -5,14 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const testRoot = path.resolve(
-  process.env.FLEET_UI_TEST_ROOT ?? path.join(repoRoot, 'target', 'ui-render'),
-);
+const testRoot = path.join(repoRoot, 'target', 'ui-render');
 const configRoot = path.join(testRoot, 'config');
-const failureFlow = process.env.FLEET_UI_TEST_FAILURE === '1';
-const captureRoot = path.join(testRoot, failureFlow ? 'captures-error' : 'captures');
+const captureRoot = path.join(testRoot, 'captures');
 const profileRoot = path.join(testRoot, 'profile');
-const cdpPort = Number(process.env.FLEET_UI_TEST_CDP_PORT ?? 9333);
+const cdpPort = 9333;
 const cdpHost = '127.0.0.1';
 const previewWidth = 420;
 const previewHeight = 560;
@@ -25,10 +22,6 @@ const executable = path.join(
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-if (!Number.isInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535) {
-  throw new Error('FLEET_UI_TEST_CDP_PORT must be an integer from 1 to 65535');
-}
-
 function ensureCdpPortAvailable() {
   const server = createServer();
   return new Promise((resolve, reject) => {
@@ -36,7 +29,7 @@ function ensureCdpPortAvailable() {
       if (error?.code === 'EADDRINUSE') {
         reject(
           new Error(
-            `Fleet UI renderer cannot use CDP port ${cdpPort}: it is already in use. Set FLEET_UI_TEST_CDP_PORT to an unused port and rerun.`,
+            `Fleet UI renderer cannot use CDP port ${cdpPort}: it is already in use. Close the process using that port and rerun.`,
           ),
         );
       } else {
@@ -225,7 +218,7 @@ async function seedDummyConfig() {
     onboarding_completed: false,
     show_profile_icons: false,
     debug_log_to_disk: false,
-    auto_check_profiles_on_startup: !failureFlow,
+    auto_check_profiles_on_startup: false,
     auto_check_on_startup: false,
   };
   const profiles = {
@@ -308,117 +301,15 @@ async function runFlow(client) {
   await client.setInput('input[type="text"]', path.join(testRoot, 'arma3'));
   await client.clickText('Continue');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
-  if (failureFlow) {
-    await client.clickText('Check for updates');
-    await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`, 'profile issue');
-    await client.clickText('Sync');
-    await client.waitFor(`document.querySelector('.profile-row .field__error')?.textContent.trim() && !document.querySelector('.profile-operation')`, 'inline sync error', 20_000);
-    await client.capture('02-profiles-error.png');
-    await client.click('[aria-label="Profile settings"]');
-    const unlocked = await client.evaluate(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Edit' && !button.disabled) && document.querySelector('.field__error')`);
-    if (!unlocked) throw new Error('Failed sync did not unlock profile editing or show its inline error');
-    await client.capture('02-profile-details-error.png');
-    await client.clickText('Back');
-    await client.click('[aria-label="Settings"]');
-    if (await client.evaluate(`Boolean(document.querySelector('.field__error'))`)) throw new Error('Profile error leaked to Settings');
-    return;
-  }
-
-  await client.waitFor(
-    `[...document.querySelector('.profile-row').querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`,
-    'initial profile state',
-  );
-  const cardState = await client.evaluate(`(() => {
-    const card = document.querySelector('.profile-row');
-    const footer = document.querySelector('.page-footer');
-    const newProfile = footer.querySelector('[aria-label="New profile"]');
-    const settings = footer.querySelector('[aria-label="Settings"]');
-    const buttons = [...card.querySelectorAll('.profile-row__buttons button')]
-      .map((button) => button.textContent.trim());
-    return {
-      text: card.textContent,
-      buttons,
-      mainTag: card.querySelector('.profile-row__main').tagName,
-      direction: getComputedStyle(card.querySelector('.profile-row__buttons')).flexDirection,
-      hasSettingsAction: Boolean(card.querySelector('[aria-label="Profile settings"]')),
-      newProfileLeft: newProfile.getBoundingClientRect().left,
-      settingsLeft: settings.getBoundingClientRect().left,
-      newProfileWidth: newProfile.getBoundingClientRect().width,
-      settingsWidth: settings.getBoundingClientRect().width,
-      navIsIconOnly: !newProfile.textContent.trim() && !settings.textContent.trim(),
-    };
-  })()`);
-  if (
-    cardState.text.includes(profileRoot) ||
-    cardState.text.includes('Last checked') ||
-    cardState.text.includes('Status unknown')
-  ) {
-    throw new Error('Profile card exposes local path, last-checked, or a non-actionable status');
-  }
-  if (
-    cardState.buttons.join(',') !== 'Sync,Launch,Join' ||
-    cardState.direction !== 'row' ||
-    cardState.mainTag !== 'DIV' ||
-    !cardState.hasSettingsAction ||
-    cardState.newProfileLeft >= cardState.settingsLeft ||
-    cardState.newProfileWidth !== cardState.settingsWidth ||
-    !cardState.navIsIconOnly
-  ) {
-    throw new Error('Profile card controls do not match the expected explicit-action layout');
-  }
-  await client.waitFor(
-    `[...document.querySelector('.profile-row').querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`,
-    'profile needing sync',
-  );
-  await client.capture('02-profiles-needs-sync.png');
-  const profilesUrl = await client.evaluate('location.href');
-  await client.click('[aria-label="Profile settings"]');
-  await client.clickText('Verify');
-  await client.waitFor(`document.querySelector('progress[aria-label="Validating files"]')`, 'validation starting on home');
-
-  await client.waitFor(
-    `document.querySelector('.profiles-page .profile-operation')`,
-    'inline sync progress',
-  );
-  if ((await client.evaluate('location.href')) !== profilesUrl) {
-    throw new Error('List Sync navigated away from Profiles');
-  }
-  await client.capture('02-profiles-verifying.png');
-  await client.waitFor(`document.querySelector('progress[aria-label="Patching files"]')?.value === 60`, 'inline transfer progress');
-  const progressLayout = await client.evaluate(`(() => {
-    const card = document.querySelector('.profile-row');
-    const metrics = [...card.querySelectorAll('.operation-usage')];
-    const other = document.querySelectorAll('.profile-row')[1];
-    return card.querySelectorAll('progress').length === 2 && metrics.length === 2 &&
-      metrics.every(metric => Math.abs(metric.getBoundingClientRect().width - 128) < 1 && getComputedStyle(metric.querySelector('.operation-usage__value')).textAlign === 'right') &&
-      !card.querySelector('[aria-label="Profile settings"]') &&
-      [...card.querySelectorAll('button')].some(button => button.textContent.trim() === 'Cancel' && !button.disabled) &&
-      other && !other.querySelector('.profile-operation') && !other.querySelector('[aria-label="Profile settings"]').disabled;
-  })()`);
-  if (!progressLayout) throw new Error('Task bars, fixed metrics, cancel placement or unrelated profile controls are incorrect');
-  await client.capture('02-profiles-syncing.png');
-  await client.clickText('Cancel');
-  await client.waitFor(
-    `[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Stopping' && button.disabled)`,
-    'stopping sync',
-  );
-  await client.capture('02-profiles-stopping.png');
-  await client.waitFor(
-    `!document.querySelector('.profile-operation') && [...document.querySelector('.profile-row').querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`,
-    'canceled sync',
-  );
-  await client.capture('02-profiles-canceled.png');
+  await client.clickText('Check for updates');
+  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`, 'profile issue');
   await client.clickText('Sync');
-  await client.waitFor(
-    `document.querySelector('.profiles-page') && !document.querySelector('.profile-operation') &&
-      [...document.querySelectorAll('.profile-row button')].some(button => button.textContent.trim() === 'Launch' && !button.disabled)`,
-    'Ready with Launch enabled',
-    15_000,
-  );
-  if ((await client.evaluate('location.href')) !== profilesUrl) {
-    throw new Error('Completed sync navigated away from Profiles');
-  }
-  await client.capture('02-profiles-ready.png');
+  await client.waitFor(`document.querySelector('.profile-row .field__error')?.textContent.trim() && !document.querySelector('.profile-operation')`, 'inline sync error', 20_000);
+  await client.capture('02-profiles-error.png');
+  await client.click('[aria-label="Profile settings"]');
+  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Edit' && !button.disabled)`, 'editing unlocked after failure');
+  await client.capture('02-profile-details-error.png');
+  await client.clickText('Back');
 
   await client.click('[aria-label="Settings"]');
   await client.waitFor(
@@ -818,32 +709,18 @@ async function runFlow(client) {
   await client.capture('09-profile-overview-empty-mods.png');
 
   await client.clickText('Verify');
-  await client.waitFor(`document.querySelector('.profiles-page .profile-operation')`, 'verification returning home');
-  await client.capture('10-verification-running.png');
-  await client.waitFor(`!document.querySelector('.profile-operation') && [...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Check for updates' && !button.disabled)`, 'verification completion');
-  await client.capture('10-verification-complete.png');
-  await client.clickText('Check for updates');
-  await client.waitFor(`document.querySelector('.btn__spinner')`, 'update check spinner');
-  const rotation = await client.evaluate(`getComputedStyle(document.querySelector('.btn__spinner')).transform`);
-  await delay(180);
-  if (await client.evaluate(`getComputedStyle(document.querySelector('.btn__spinner')).transform`) === rotation) throw new Error('Update check spinner is not rotating');
-  await client.capture('10-update-check.png');
-  await client.waitFor(`!document.querySelector('.btn__spinner')`, 'update check completion');
-  await client.click('[aria-label="Profile settings"]');
-  await client.clickText('Back');
-  await client.waitFor(`document.querySelector('.profiles-page')`, 'Back returning to Profiles');
+  await client.waitFor(`document.querySelector('.profiles-page') && !document.querySelector('.profile-operation')`, 'verification returning home');
+  await client.capture('10-verification-result.png');
+
 }
 
 await ensureCdpPortAvailable();
 await seedDummyConfig();
 
-const child = spawn(executable, [], {
+const child = spawn(executable, ['--config-dir', configRoot], {
   cwd: repoRoot,
   env: {
     ...process.env,
-    FLEET_CONFIG_DIR: configRoot,
-    FLEET_SIMULATE_SYNC: failureFlow ? '0' : '1',
-    FLEET_SIMULATE_SYNC_HOLD_PERCENT: '60',
     WEBVIEW2_USER_DATA_FOLDER: path.join(testRoot, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
   },

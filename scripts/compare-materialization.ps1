@@ -72,9 +72,8 @@ function Measure-Sync([string]$Label, [int]$Trial, [string]$Scenario) {
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
     foreach ($arg in @('sync', $ProfileId, '--no-progress')) { $start.ArgumentList.Add($arg) }
-    $start.Environment['FLEET_CONFIG_DIR'] = [IO.Path]::GetFullPath($ConfigDir)
-    $start.Environment.Remove('FLEET_SIMULATE_SYNC') | Out-Null
-    $start.Environment['RUST_LOG'] = 'flux=info'
+    $start.ArgumentList.Add('--config-dir')
+    $start.ArgumentList.Add([IO.Path]::GetFullPath($ConfigDir))
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $process = [Diagnostics.Process]::Start($start)
     $stdout = $process.StandardOutput.ReadToEndAsync()

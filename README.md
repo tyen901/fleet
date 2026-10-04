@@ -24,9 +24,13 @@ UI-only app without the Flux backend.
 `npm run build:no-flux` runs the optional build directly with Cargo. File
 maintenance and launch-time file checks return `backend_unavailable` in this build.
 
-`npm run render:ui` uses the Flux-enabled app and disposable configuration with the
-existing opt-in operation simulator. The renderer requires Windows WebView2's
-CDP endpoint. Simulation never downloads or verifies real profile files.
+`npm run render:ui` uses the Flux-enabled app with disposable configuration and
+real operation failures against an unavailable local repository. The renderer
+requires Windows WebView2's CDP endpoint. It never uses real profile files.
+
+Both binaries accept `--config-dir <path>` to select their settings, profiles and
+sync state explicitly. Runtime environment overrides and simulated operations are
+not supported.
 
 ### Operation progress
 

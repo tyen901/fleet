@@ -5,8 +5,6 @@ mod features;
 mod operations;
 mod state;
 mod storage;
-#[cfg(test)]
-mod test_support;
 
 pub use core::Core;
 pub use features::arma3::{custom_launch_template_preview, server_join_args, ArmaLaunchResult};
@@ -15,7 +13,7 @@ pub use features::settings::{
     effective_settings_defaults, settings_field_is_non_default, SettingsField,
 };
 pub use state::*;
-pub use storage::{profile_state_root_dir, ProfilesConfig};
+pub use storage::ProfilesConfig;
 
 pub use fleet_domain::health::{
     CancelResult, CheckReport, LocalFileReport, OperationKind, RepoCheckFreshness, RepoCheckReport,

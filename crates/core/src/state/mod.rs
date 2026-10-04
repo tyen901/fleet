@@ -392,6 +392,7 @@ pub fn apply_operation_progress(
     progress_state.usage = progress.usage.clone();
 }
 
+#[cfg(any(feature = "flux", test))]
 pub(crate) fn apply_operation_stage(
     progress_state: &mut ProfileOperationProgressState,
     stage: OperationStage,

@@ -33,6 +33,7 @@ struct ProfileRowViewState {
 }
 
 fn profile_row_view_state(
+    core: &fleet_core::Core,
     snapshot: &fleet_core::AppState,
     profile_id: &str,
     profile_name: &str,
@@ -50,7 +51,7 @@ fn profile_row_view_state(
     ProfileRowViewState {
         id: profile_id.to_string(),
         name: profile_name.to_string(),
-        icon_src: profile.and_then(|profile| profile_icon_src(&snapshot.settings, profile)),
+        icon_src: profile.and_then(|profile| profile_icon_src(core, &snapshot.settings, profile)),
         start_disabled,
         launch_loading,
         join_loading,
@@ -129,6 +130,7 @@ pub fn Profiles() -> Element {
         .iter()
         .map(|(id, name)| {
             profile_row_view_state(
+                &bridge.core(),
                 &snapshot,
                 id,
                 name,
