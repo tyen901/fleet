@@ -1839,7 +1839,6 @@ dependencies = [
  "fleet-download",
  "fleet-flux",
  "fleet-inventory",
- "indicatif",
  "rand 0.8.5",
  "serde",
  "serde_json",
