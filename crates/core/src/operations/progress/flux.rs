@@ -2,6 +2,7 @@ use crate::operations::{
     OperationProgressEvent, OperationPublisher, OperationStage, ProgressTrack, ProgressTrackKind,
     TaskUsage,
 };
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,7 +10,10 @@ use tokio::time::{interval, MissedTickBehavior};
 
 const UI_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const LIVE_RATE_WINDOW_SECONDS: f64 = 2.;
-const ETA_RATE_WINDOW_SECONDS: f64 = 60.;
+const ETA_RECENT_WINDOW: Duration = Duration::from_secs(4);
+const ETA_SLOW_RESPONSE_SECONDS: f64 = 20.;
+const ETA_FAST_RESPONSE_SECONDS: f64 = 4.;
+const ETA_TREND_CONFIRM_SECONDS: f64 = 4.;
 const ETA_WARMUP: Duration = Duration::from_secs(5);
 const ETA_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone, Default)]
@@ -67,6 +71,71 @@ impl WorkProgress {
         }
     }
 }
+struct EtaRate {
+    samples: VecDeque<(Instant, u64)>,
+    at: Instant,
+    weighted_rate: f64,
+    weight: f64,
+    trend: i8,
+    trend_seconds: f64,
+}
+impl EtaRate {
+    fn new(now: Instant) -> Self {
+        Self {
+            samples: VecDeque::from([(now, 0)]),
+            at: now,
+            weighted_rate: 0.,
+            weight: 0.,
+            trend: 0,
+            trend_seconds: 0.,
+        }
+    }
+    fn rate(&self) -> f64 {
+        if self.weight > 0. {
+            self.weighted_rate / self.weight
+        } else {
+            0.
+        }
+    }
+    fn sample(&mut self, now: Instant, done: u64) {
+        let elapsed = now.duration_since(self.at).as_secs_f64();
+        if elapsed <= 0. {
+            return;
+        }
+        self.samples.push_back((now, done));
+        while self.samples.len() > 2 && now.duration_since(self.samples[1].0) >= ETA_RECENT_WINDOW {
+            self.samples.pop_front();
+        }
+        let (since, previous) = self.samples[0];
+        let recent = done.saturating_sub(previous) as f64 / now.duration_since(since).as_secs_f64();
+        let established = self.rate();
+        let trend = if established > 0. && (recent - established).abs() > established * 0.15 {
+            if recent > established {
+                1
+            } else {
+                -1
+            }
+        } else {
+            0
+        };
+        self.trend_seconds = if trend != 0 && trend == self.trend {
+            self.trend_seconds + elapsed
+        } else {
+            0.
+        };
+        self.trend = trend;
+        // Short bursts cancel in the recent window. A persistent change gradually
+        // shortens the response, rather than making every fluctuation a new baseline.
+        let confidence = (self.trend_seconds / ETA_TREND_CONFIRM_SECONDS).min(1.);
+        let response = ETA_SLOW_RESPONSE_SECONDS
+            + (ETA_FAST_RESPONSE_SECONDS - ETA_SLOW_RESPONSE_SECONDS) * confidence;
+        let alpha = 1. - (-elapsed / response).exp();
+        self.weighted_rate += (recent - self.weighted_rate) * alpha;
+        self.weight += (1. - self.weight) * alpha;
+        self.at = now;
+    }
+}
+
 struct RateSample {
     at: Instant,
     started: Instant,
@@ -75,7 +144,7 @@ struct RateSample {
     work: u64,
     network_rate: f64,
     disk_rate: f64,
-    work_rate: f64,
+    eta_rate: EtaRate,
     work_last_at: Instant,
     network_last_at: Instant,
     disk_last_at: Instant,
@@ -92,7 +161,7 @@ impl RateSample {
             work: 0,
             network_rate: 0.,
             disk_rate: 0.,
-            work_rate: 0.,
+            eta_rate: EtaRate::new(now),
             work_last_at: now,
             network_last_at: now,
             disk_last_at: now,
@@ -107,7 +176,7 @@ impl RateSample {
             self.patching = work.patch_total.is_some();
             self.started = now;
             self.work = 0;
-            self.work_rate = 0.;
+            self.eta_rate = EtaRate::new(now);
             self.work_last_at = now;
         }
         let elapsed = now.duration_since(self.at).as_secs_f64();
@@ -134,8 +203,7 @@ impl RateSample {
             if delta > 0 {
                 self.work_last_at = now;
             }
-            self.work_rate += (delta as f64 / elapsed - self.work_rate)
-                * (1. - (-elapsed / ETA_RATE_WINDOW_SECONDS).exp());
+            self.eta_rate.sample(now, current);
             self.at = now;
             self.network = work.downloaded;
             self.disk = disk;
@@ -151,16 +219,15 @@ impl RateSample {
             (Some(a), Some(b)) => Some(a + b),
             _ => work.check_total,
         };
-        let age = now.duration_since(self.started).as_secs_f64();
         let eta_seconds = total.and_then(|total| {
             if now.duration_since(self.started) < ETA_WARMUP
                 || now.duration_since(self.work_last_at) >= ETA_STALL_TIMEOUT
-                || self.work_rate <= 0.
+                || self.eta_rate.rate() <= 0.
                 || work.finalizing
             {
                 None
             } else {
-                let rate = self.work_rate / (1. - (-age / ETA_RATE_WINDOW_SECONDS).exp());
+                let rate = self.eta_rate.rate();
                 Some((total.saturating_sub(self.work) as f64 / rate).ceil() as u64)
             }
         });
@@ -253,6 +320,31 @@ mod tests {
             previous = eta;
         }
         assert!(previous.abs_diff(220) <= 5);
+    }
+
+    #[test]
+    fn eta_adapts_to_sustained_speed_changes_in_both_directions() {
+        for changed_rate in [25, 400] {
+            let mut rates = RateSample::new();
+            let start = rates.at;
+            let mut work = WorkProgress {
+                check_total: Some(100_000),
+                ..Default::default()
+            };
+            for second in 1..=30 {
+                work.checked += 100;
+                rates.sample_at(&work, start + Duration::from_secs(second));
+            }
+            for second in 31..=46 {
+                work.checked += changed_rate;
+                rates.sample_at(&work, start + Duration::from_secs(second));
+            }
+            let rate = rates.eta_rate.rate();
+            assert!(
+                (rate - changed_rate as f64).abs() < changed_rate as f64 * 0.2,
+                "ETA baseline {rate} did not adapt to sustained {changed_rate} bytes/s"
+            );
+        }
     }
 
     #[test]
