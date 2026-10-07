@@ -20,7 +20,7 @@ pub(crate) async fn sync(
     let repo_url = validated_repo_url(&profile.source)
         .map_err(|_| crate::ApiError::new("invalid_profile", "invalid profile source"))?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let inventory_db = observation_db_path(state_root, &profile.id);
+    let inventory_db = observation_db_path(&dest);
 
     publisher.stage(OperationStage::LoadingExpectedState);
     let downloads = fleet_download::DownloadService::new_default();

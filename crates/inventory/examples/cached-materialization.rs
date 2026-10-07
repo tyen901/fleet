@@ -4,8 +4,8 @@ use std::{path::Path, sync::Arc, time::Instant};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 5 || !matches!(args[0].as_str(), "sync" | "verify") {
-        return Err("expected sync|verify source-url repo-cache target inventory-db".into());
+    if args.len() != 4 || !matches!(args[0].as_str(), "sync" | "verify") {
+        return Err("expected sync|verify source-url repo-cache target".into());
     }
     let setup = Instant::now();
     let input =
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("cached input has no revision")?
         .to_owned();
     let inventory = Arc::new(fleet_inventory::FleetInventory::open(
-        Path::new(&args[4]),
+        &Path::new(&args[3]).join(".fleet/observations.sqlite"),
         Path::new(&args[3]),
         fleet_flux::swifty_profile_id(),
     )?);

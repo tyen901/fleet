@@ -69,7 +69,7 @@ async fn check_or_validate(
     let repo_url = validated_repo_url(&profile.source)
         .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let inventory_db = observation_db_path(state_root, &profile.id);
+    let inventory_db = observation_db_path(&dest);
     let Some(input) = fleet_flux::load_cached_swifty_materialization_input(repo_url, &repo_cache)
         .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
     else {
