@@ -16,7 +16,7 @@ use rusqlite::{
     params, CachedStatement, Connection, OptionalExtension, Transaction, TransactionBehavior,
 };
 use sha1::{Digest, Sha1};
-use tempfile::tempfile;
+use tempfile::tempfile_in;
 use thiserror::Error as ThisError;
 
 const SCHEMA_VERSION: i64 = 2;
@@ -99,6 +99,23 @@ impl FleetInventory {
         target_root: &Path,
         profile: ProfileId,
     ) -> std::result::Result<Self, InventoryError> {
+        let workspace = flux::workspace_dir(target_root)
+            .map_err(|error| InventoryError::Message(error.to_string()))?;
+        if db_path == target_root.join(".fleet/observations.sqlite") {
+            for name in [
+                "observations.sqlite",
+                "observations.lock",
+                "observations.sqlite-wal",
+                "observations.sqlite-shm",
+            ] {
+                let path = workspace.join(name);
+                if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                    if !metadata.is_file() || metadata.file_type().is_symlink() {
+                        return Err(InventoryError::Message("invalid observation file".into()));
+                    }
+                }
+            }
+        }
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -270,7 +287,14 @@ impl Inventory for FleetInventory {
     }
 
     fn begin_observation(&self, path: &TargetPath) -> Result<Box<dyn ObservationWriter>> {
-        let spool = BufWriter::with_capacity(SPOOL_BUFFER_BYTES, tempfile().map_err(io_error)?);
+        let directory =
+            self.session.db_path.parent().ok_or_else(|| {
+                Error::new(ErrorKind::State, "inventory database has no directory")
+            })?;
+        let spool = BufWriter::with_capacity(
+            SPOOL_BUFFER_BYTES,
+            tempfile_in(directory).map_err(io_error)?,
+        );
         Ok(Box::new(FleetObservation {
             session: self.session.clone(),
             path: path.clone(),
