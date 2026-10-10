@@ -29,13 +29,9 @@ pub fn init(config: LoggingConfig) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let log_dir = if let Some(dir) = std::env::var_os("FLEET_LOG_DIR") {
-        std::path::PathBuf::from(dir)
-    } else {
-        let proj = ProjectDirs::from("com", "fleet", config.project_dir_name)
-            .ok_or_else(|| anyhow::anyhow!("failed to resolve log directory"))?;
-        proj.data_dir().join("logs")
-    };
+    let proj = ProjectDirs::from("com", "fleet", config.project_dir_name)
+        .ok_or_else(|| anyhow::anyhow!("failed to resolve log directory"))?;
+    let log_dir = proj.data_dir().join("logs");
     std::fs::create_dir_all(&log_dir)?;
     prune_old_logs(&log_dir);
 

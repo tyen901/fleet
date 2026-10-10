@@ -42,9 +42,6 @@ pub(crate) fn print_check_report(repo: &RepoCheckReport, local: &LocalFileReport
     println!("  verification: {:?}", local.verification);
     println!("  health: {:?}", local.health);
     println!("  checked_at_unix_ms: {}", local.checked_at_unix_ms);
-    println!("  missing_paths: {}", local.missing_paths_count);
-    println!("  modified_paths: {}", local.modified_paths_count);
-
     println!(
         "update_available: {}",
         matches!(repo.freshness, RepoCheckFreshness::UpdateAvailable)

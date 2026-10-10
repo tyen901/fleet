@@ -1,3 +1,4 @@
+pub(crate) mod action_error;
 pub mod boot;
 pub mod not_found;
 pub mod onboarding;

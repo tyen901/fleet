@@ -1,3 +1,3 @@
 mod flux;
 
-pub(crate) use flux::FluxProgressObserver;
+pub(crate) use flux::progress_channel;

@@ -1,8 +1,6 @@
 use crate::style::{Button, ButtonVariant};
 use dioxus::prelude::*;
 
-use crate::services::platform::open::open_path;
-
 #[derive(Props, Clone, PartialEq)]
 pub struct BrowseFieldProps {
     #[props(default)]
@@ -12,7 +10,7 @@ pub struct BrowseFieldProps {
     pub value: String,
     #[props(default = false)]
     pub disabled: bool,
-    /// Withdraws the picker; any open action stays.
+    /// Withdraws the picker in read mode.
     #[props(default = false)]
     pub readonly: bool,
     #[props(default = false)]
@@ -20,39 +18,17 @@ pub struct BrowseFieldProps {
     #[props(default)]
     pub pick_button_text: Option<String>,
     #[props(default = false)]
-    pub show_open_button: bool,
-    #[props(default)]
-    pub open_button_text: Option<String>,
-    #[props(default = false)]
     pub invalid: bool,
     pub on_change: EventHandler<String>,
 }
 
 #[component]
 pub fn BrowseField(props: BrowseFieldProps) -> Element {
-    let value_for_open = props.value.clone();
     let pick_button_label = props
         .pick_button_text
         .clone()
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_else(|| "Browse".to_string());
-    let open_button_text = props.open_button_text.clone();
-    let open_button_label = open_button_text.unwrap_or_else(|| "Open".to_string());
-    let trimmed_open_path = props.value.trim().to_string();
-    let can_open_folder = props.folder_select
-        && !trimmed_open_path.is_empty()
-        && std::path::Path::new(&trimmed_open_path).is_dir();
-
-    let on_open = move |_| {
-        let path = value_for_open.trim().to_string();
-        if path.is_empty() || !std::path::Path::new(&path).is_dir() {
-            return;
-        }
-        spawn(async move {
-            open_path(path.into()).await;
-        });
-    };
-
     let on_browse = move |_| {
         let folder_select = props.folder_select;
         let on_change = props.on_change;
@@ -98,14 +74,7 @@ pub fn BrowseField(props: BrowseFieldProps) -> Element {
                         "{pick_button_label}"
                     }
                 }
-                if props.show_open_button && props.folder_select {
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        disabled: !can_open_folder,
-                        onclick: on_open,
-                        "{open_button_label}"
-                    }
-                }
+
             }
         }
     }

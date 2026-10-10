@@ -33,10 +33,6 @@
   --clr-selection: oklch(93% 0.003 235 / 16%);
   --clr-scrollbar: oklch(93% 0.003 235 / 18%);
 
-  --clr-toast-bg: oklch(13% 0.005 235 / 94%);
-  --clr-toast-fg: var(--clr-text-primary);
-  --clr-toast-border: var(--clr-border);
-
   --clr-control-bg-hover: var(--clr-control-fill-hover);
   --clr-control-bg-active: var(--clr-control-fill-active);
 
