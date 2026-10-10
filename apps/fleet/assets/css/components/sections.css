@@ -53,12 +53,6 @@
   align-self: flex-start;
 }
 
-.section-note {
-  margin: 0;
-  color: var(--clr-text-secondary);
-  font-size: var(--text-label);
-}
-
 .field-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

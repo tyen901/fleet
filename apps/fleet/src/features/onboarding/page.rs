@@ -2,8 +2,8 @@ use dioxus::prelude::*;
 use dioxus_router::use_navigator;
 
 use crate::app::router::Route;
+use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::services::bridge::FleetBridge;
-use crate::stores::toast_store::ToastStore;
 
 use super::hooks::use_onboarding_defaults;
 use super::sections::onboarding_form_section;
@@ -11,7 +11,7 @@ use super::sections::onboarding_form_section;
 #[component]
 pub fn Onboarding() -> Element {
     let bridge = use_context::<FleetBridge>();
-    let toasts = use_context::<ToastStore>();
+    let feedback = use_action_error();
     let nav = use_navigator();
 
     let mut game_dir = use_signal(String::new);
@@ -26,10 +26,10 @@ pub fn Onboarding() -> Element {
     };
 
     let bridge_for_finish = bridge.clone();
-    let toasts_for_finish = toasts.clone();
+    let feedback_for_finish = feedback.clone();
     let on_finish = move |_| {
         let bridge = bridge_for_finish.clone();
-        let toasts = toasts_for_finish.clone();
+        let feedback = feedback_for_finish.clone();
         let nav = nav;
         let dir = game_dir();
         spawn(async move {
@@ -40,12 +40,15 @@ pub fn Onboarding() -> Element {
                 Ok(()) => {
                     let _ = nav.push(Route::Profiles {});
                 }
-                Err(error) => toasts.push_api_error("Complete setup", &error),
+                Err(error) => feedback.set(&error),
             }
         });
     };
 
     let finish_disabled = game_dir().trim().is_empty();
 
-    onboarding_form_section(game_dir, on_detect, on_finish, finish_disabled)
+    rsx! {
+        ActionErrorView { feedback: feedback.clone() }
+        {onboarding_form_section(game_dir, on_detect, on_finish, finish_disabled)}
+    }
 }

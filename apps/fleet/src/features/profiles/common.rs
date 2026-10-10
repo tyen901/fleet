@@ -5,9 +5,9 @@ use dioxus_router::Navigator;
 use tracing::{error, info};
 
 use crate::app::router::Route;
+use crate::features::action_error::ActionError;
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
-use crate::stores::toast_store::ToastStore;
 
 #[derive(Props, Clone, PartialEq)]
 pub(crate) struct ProfileFormFieldProps {
@@ -19,10 +19,6 @@ pub(crate) struct ProfileFormFieldProps {
     pub folder_select: bool,
     #[props(default)]
     pub pick_button_text: Option<String>,
-    #[props(default = false)]
-    pub show_open_button: bool,
-    #[props(default)]
-    pub open_button_text: Option<String>,
     #[props(default)]
     pub error: Option<String>,
     #[props(default = false)]
@@ -43,10 +39,9 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
                     value: props.value,
                     placeholder: props.placeholder,
                     readonly: props.readonly,
+                    disabled: props.disabled,
                     folder_select: true,
                     pick_button_text: props.pick_button_text,
-                    show_open_button: props.show_open_button,
-                    open_button_text: props.open_button_text,
                     invalid: props.error.is_some(),
                     on_change: move |v| props.on_change.call(v),
                 }
@@ -89,6 +84,7 @@ pub(crate) fn profile_not_found_page(nav: Navigator) -> Element {
 }
 
 pub(crate) fn profile_icon_src(
+    core: &fleet_core::Core,
     settings: &fleet_core::AppSettings,
     profile: &fleet_core::Profile,
 ) -> Option<String> {
@@ -98,7 +94,7 @@ pub(crate) fn profile_icon_src(
 
     let repo_url = fleet_domain::validated_repo_url(&profile.source).ok()?;
 
-    let state_root = fleet_core::profile_state_root_dir().ok()?;
+    let state_root = core.profile_state_root_dir().ok()?;
     let repo_cache_root = fleet_domain::repo_cache_dir(&state_root, &profile.id);
     let icon_path = swifty_repo::repo_icon_cache_path(&repo_cache_root, repo_url);
     if !icon_path.is_file() {
@@ -108,23 +104,6 @@ pub(crate) fn profile_icon_src(
     let icon_bytes = std::fs::read(icon_path).ok()?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(icon_bytes);
     Some(format!("data:image/png;base64,{encoded}"))
-}
-
-pub(crate) fn stage_phase_label(stage: fleet_core::OperationStage) -> &'static str {
-    match stage {
-        fleet_core::OperationStage::Validating => "Checking",
-        fleet_core::OperationStage::LoadingExpectedState => "Planning",
-        fleet_core::OperationStage::VerifyingInventory => "Verifying",
-        fleet_core::OperationStage::Sync => "Syncing files",
-        fleet_core::OperationStage::RemovingObsoleteFiles => "Removing obsolete files",
-        fleet_core::OperationStage::Finalizing => "Installing",
-    }
-}
-
-pub(crate) fn format_clock(total_seconds: u64) -> String {
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{minutes}m {seconds}s")
 }
 
 pub(crate) fn default_arma3_args(settings: &fleet_core::AppSettings) -> String {
@@ -149,31 +128,6 @@ pub(crate) fn new_profile_from_draft(
     }
 }
 
-pub(crate) fn format_speed(bytes_per_sec: u64) -> String {
-    format!("{}/s", fleet_domain::utils::format_bytes(bytes_per_sec))
-}
-
-pub(crate) fn local_files_need_sync(status: &fleet_core::ProfileStatusState) -> bool {
-    matches!(
-        status.local_health,
-        fleet_core::LocalFileHealth::Missing
-            | fleet_core::LocalFileHealth::Dirty
-            | fleet_core::LocalFileHealth::MissingDestination
-            | fleet_core::LocalFileHealth::ExpectedStateUnavailable
-            | fleet_core::LocalFileHealth::InventoryUnavailable
-    )
-}
-
-pub(crate) fn repo_update_available(
-    status: Option<&fleet_core::ProfileStatusState>,
-    operation_active: bool,
-) -> bool {
-    !operation_active
-        && status.is_some_and(|status| {
-            status.repo_freshness == Some(fleet_core::RepoCheckFreshness::UpdateAvailable)
-        })
-}
-
 pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> String {
     if server.port == 0 {
         server.address.clone()
@@ -184,22 +138,20 @@ pub(crate) fn format_repo_server_label(server: &fleet_core::RepoServer) -> Strin
 
 pub(crate) fn start_profile_operation(
     bridge: FleetBridge,
-    toasts: ToastStore,
+    feedback: ActionError,
     profile_id: String,
     operation: fleet_core::OperationKind,
     action: &'static str,
     error_reason: &'static str,
-    fail_title: &'static str,
 ) {
     spawn(async move {
         start_profile_operation_request(
             bridge,
-            toasts,
+            feedback,
             profile_id,
             operation,
             action,
             error_reason,
-            fail_title,
         )
         .await;
     });
@@ -207,13 +159,13 @@ pub(crate) fn start_profile_operation(
 
 pub(crate) async fn start_profile_operation_request(
     bridge: FleetBridge,
-    toasts: ToastStore,
+    feedback: ActionError,
     profile_id: String,
     operation: fleet_core::OperationKind,
     action: &'static str,
     error_reason: &'static str,
-    fail_title: &'static str,
 ) -> bool {
+    feedback.clear();
     info!(
         op = "profile_action",
         profile_id = %profile_id,
@@ -245,7 +197,7 @@ pub(crate) async fn start_profile_operation_request(
                 reason = error_reason,
                 "profile operation failed"
             );
-            toasts.push_api_error(fail_title, &err);
+            feedback.set(&err);
             false
         }
     }
@@ -292,7 +244,7 @@ pub(crate) fn build_profile_edit_candidate(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_profile_edit_candidate, repo_update_available};
+    use super::build_profile_edit_candidate;
 
     #[test]
     fn profile_edit_candidate_differs_when_name_changes() {
@@ -319,18 +271,5 @@ mod tests {
         assert_ne!(candidate.name, profile.name);
         assert_eq!(candidate.source, profile.source);
         assert_eq!(candidate.destination, profile.destination);
-    }
-
-    #[test]
-    fn user_story_update_action_appears_only_after_check_detects_an_update() {
-        let mut status = fleet_core::ProfileStatusState::unknown(0);
-        assert!(!repo_update_available(Some(&status), false));
-
-        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpToDate);
-        assert!(!repo_update_available(Some(&status), false));
-
-        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpdateAvailable);
-        assert!(repo_update_available(Some(&status), false));
-        assert!(!repo_update_available(Some(&status), true));
     }
 }

@@ -35,6 +35,7 @@
   z-index: 1;
   flex: 0 0 auto;
   min-height: calc(var(--control-height) + 2 * var(--content-inline-gap));
+  flex-wrap: wrap;
   padding: var(--content-inline-gap);
   display: flex;
   align-items: center;
@@ -70,4 +71,8 @@
   margin: var(--space-2) 0 0;
   color: var(--clr-text-secondary);
   font-size: var(--text-body);
+}
+
+.page-footer > .field__error {
+  flex: 1 0 100%;
 }

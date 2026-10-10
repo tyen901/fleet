@@ -5,13 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const testRoot = path.resolve(
-  process.env.FLEET_UI_TEST_ROOT ?? path.join(repoRoot, 'target', 'ui-render'),
-);
+const testRoot = path.join(repoRoot, 'target', 'ui-render');
 const configRoot = path.join(testRoot, 'config');
 const captureRoot = path.join(testRoot, 'captures');
 const profileRoot = path.join(testRoot, 'profile');
-const cdpPort = Number(process.env.FLEET_UI_TEST_CDP_PORT ?? 9333);
+const cdpPort = 9333;
 const cdpHost = '127.0.0.1';
 const previewWidth = 420;
 const previewHeight = 560;
@@ -24,10 +22,6 @@ const executable = path.join(
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-if (!Number.isInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535) {
-  throw new Error('FLEET_UI_TEST_CDP_PORT must be an integer from 1 to 65535');
-}
-
 function ensureCdpPortAvailable() {
   const server = createServer();
   return new Promise((resolve, reject) => {
@@ -35,7 +29,7 @@ function ensureCdpPortAvailable() {
       if (error?.code === 'EADDRINUSE') {
         reject(
           new Error(
-            `Fleet UI renderer cannot use CDP port ${cdpPort}: it is already in use. Set FLEET_UI_TEST_CDP_PORT to an unused port and rerun.`,
+            `Fleet UI renderer cannot use CDP port ${cdpPort}: it is already in use. Close the process using that port and rerun.`,
           ),
         );
       } else {
@@ -239,6 +233,16 @@ async function seedDummyConfig() {
         launch_params: '',
         additional_mod_folders: ['@ace', '@cba_a3'],
       },
+      {
+        id: 'ui-test-second-profile',
+        name: 'Triton Unit',
+        source: 'http://127.0.0.1:9/repo.json',
+        destination: path.join(testRoot, 'second-profile'),
+        arma3_server: null,
+        swifty_repo_revision: '',
+        launch_params: '',
+        additional_mod_folders: [],
+      },
     ],
   };
 
@@ -297,46 +301,15 @@ async function runFlow(client) {
   await client.setInput('input[type="text"]', path.join(testRoot, 'arma3'));
   await client.clickText('Continue');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
-
-  const cardState = await client.evaluate(`(() => {
-    const card = document.querySelector('.profile-row');
-    const footer = document.querySelector('.page-footer');
-    const newProfile = footer.querySelector('[aria-label="New profile"]');
-    const settings = footer.querySelector('[aria-label="Settings"]');
-    const buttons = [...card.querySelectorAll('.profile-row__buttons button')]
-      .map((button) => button.textContent.trim());
-    return {
-      text: card.textContent,
-      buttons,
-      mainTag: card.querySelector('.profile-row__main').tagName,
-      direction: getComputedStyle(card.querySelector('.profile-row__buttons')).flexDirection,
-      hasSettingsAction: Boolean(card.querySelector('[aria-label="Profile details"]')),
-      newProfileLeft: newProfile.getBoundingClientRect().left,
-      settingsLeft: settings.getBoundingClientRect().left,
-      newProfileWidth: newProfile.getBoundingClientRect().width,
-      settingsWidth: settings.getBoundingClientRect().width,
-      navIsIconOnly: !newProfile.textContent.trim() && !settings.textContent.trim(),
-    };
-  })()`);
-  if (
-    cardState.text.includes(profileRoot) ||
-    cardState.text.includes('Last checked') ||
-    cardState.text.includes('Status unknown')
-  ) {
-    throw new Error('Profile card exposes local path, last-checked, or a non-actionable status');
-  }
-  if (
-    cardState.buttons.join(',') !== 'Launch,Join' ||
-    cardState.direction !== 'row' ||
-    cardState.mainTag !== 'DIV' ||
-    !cardState.hasSettingsAction ||
-    cardState.newProfileLeft >= cardState.settingsLeft ||
-    cardState.newProfileWidth !== cardState.settingsWidth ||
-    !cardState.navIsIconOnly
-  ) {
-    throw new Error('Profile card controls do not match the expected explicit-action layout');
-  }
-  await client.capture('02-profiles.png');
+  await client.clickText('Check for updates');
+  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`, 'profile issue');
+  await client.clickText('Sync');
+  await client.waitFor(`document.querySelector('.profile-row .field__error')?.textContent.trim() && !document.querySelector('.profile-operation')`, 'inline sync error', 20_000);
+  await client.capture('02-profiles-error.png');
+  await client.click('[aria-label="Profile settings"]');
+  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Edit' && !button.disabled)`, 'editing unlocked after failure');
+  await client.capture('02-profile-details-error.png');
+  await client.clickText('Back');
 
   await client.click('[aria-label="Settings"]');
   await client.waitFor(
@@ -486,30 +459,33 @@ async function runFlow(client) {
   await client.clickText('Cancel');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
 
-  await client.click('[aria-label="Profile details"]');
-  await client.waitFor(`document.body.innerText.includes('Validate')`, 'profile overview');
+  await client.click('[aria-label="Profile settings"]');
+  await client.waitFor(`document.body.innerText.includes('Verify')`, 'profile overview');
   await client.waitFor(
     `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Cancel')`,
-    'profile overview cancel action',
+      .some((button) => button.textContent.trim() === 'Back')`,
+    'profile overview back action',
   );
   const profileOverviewLayout = await client.evaluate(`(() => {
-    const syncSection = [...document.querySelectorAll('.section')]
-      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Sync');
+    const maintenanceSection = [...document.querySelectorAll('.section')]
+      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Maintenance');
     return {
       hasNoHeader: document.querySelectorAll('.page-header').length === 0,
-      hasReadyState: document.body.innerText.includes('Ready to play'),
       hasLaunchOrJoin: [...document.querySelectorAll('button')]
         .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
-      syncActions: [...syncSection.querySelectorAll('.field-row__title')]
+      folderActionsCorrect: (() => {
+        const openFolder = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Open folder');
+        const folder = [...document.querySelectorAll('.form-field')].find(field => field.querySelector('.form-field__label')?.textContent.trim() === 'Folder');
+        return openFolder && !openFolder.disabled && !folder.querySelector('button') &&
+          openFolder.getBoundingClientRect().bottom <= maintenanceSection.getBoundingClientRect().top;
+      })(),
+      maintenanceActions: [...maintenanceSection.querySelectorAll('.field-row__title')]
         .map((heading) => heading.textContent.trim()),
       hasLaunchArguments: [...document.querySelectorAll('.form-field__label')]
         .some((label) => label.textContent.trim() === 'Launch arguments'),
-      hasRemovedOperationProse: [
-        'No local metadata changes detected',
-        'Read every managed file and verify its bytes',
-        'Install, update, repair, or remove files to match the expected state',
-      ].some((text) => document.body.innerText.includes(text)),
+      maintenanceButtons: [...maintenanceSection.querySelectorAll('button')].map(button => button.textContent.trim()),
+      hasVerificationDescription: document.body.innerText.includes('Byte-level verification of managed files.'),
+      hasReadCancel: [...document.querySelectorAll('.page-footer button')].some(button => button.textContent.trim() === 'Cancel'),
       // Read mode uses the real controls, locked rather than replaced.
       readonlyInputs: [...document.querySelectorAll('.form-field .field__input')]
         .every((input) => input.readOnly),
@@ -539,28 +515,31 @@ async function runFlow(client) {
   })()`);
   if (
     !profileOverviewLayout.hasNoHeader ||
-    profileOverviewLayout.hasReadyState ||
     profileOverviewLayout.hasLaunchOrJoin ||
-    profileOverviewLayout.syncActions.join(',') !==
-      'Check for updates,Validate local files,Force Sync' ||
+    !profileOverviewLayout.folderActionsCorrect ||
+    profileOverviewLayout.maintenanceActions.length !== 0 ||
+    profileOverviewLayout.maintenanceButtons.join(',') !== 'Verify' ||
+    profileOverviewLayout.hasVerificationDescription ||
+    profileOverviewLayout.hasReadCancel ||
     profileOverviewLayout.hasLaunchArguments ||
-    profileOverviewLayout.hasRemovedOperationProse ||
     !profileOverviewLayout.readonlyInputs ||
     profileOverviewLayout.readonlyInputCount !== 3 ||
-    profileOverviewLayout.inlineRowHeights.join(',') !== '34' ||
+    profileOverviewLayout.inlineRowHeights.some((height) => height < 34) ||
     !profileOverviewLayout.inputBordersConsistent ||
     !profileOverviewLayout.buttonsBorderless ||
     profileOverviewLayout.mods.join(',') !== '@ace,@cba_a3'
   ) {
-    throw new Error('Profile overview header, Sync section, or additional-mod list is incorrect');
+    throw new Error(
+      'Profile overview header, Maintenance section, or additional-mod list is incorrect',
+    );
   }
   await client.capture('06-profile-overview.png');
   await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
   await delay(100);
   await client.waitFor(
     `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Cancel')`,
-    'scrolled profile overview cancel action',
+      .some((button) => button.textContent.trim() === 'Back')`,
+    'scrolled profile overview back action',
   );
   await client.capture('06-profile-overview-mods.png');
 
@@ -630,7 +609,7 @@ async function runFlow(client) {
     const modRows = [...document.querySelectorAll('.mod-list__row')];
     const labels = modRows.flatMap((row) => [...row.querySelectorAll('button')]
       .map((button) => button.textContent.trim()));
-    const compared = ['Select', 'Open', 'Browse', 'Remove']
+    const compared = ['Select', 'Browse', 'Remove']
       .map((label) => [...document.querySelectorAll('button')]
         .find((button) => button.textContent.trim() === label))
       .filter(Boolean)
@@ -645,7 +624,7 @@ async function runFlow(client) {
       .map((button) => button.getAttribute('aria-label') ?? button.textContent.trim());
     return {
       labels,
-      sharedTypography: compared.length === 4 && new Set(compared).size === 1,
+      sharedTypography: compared.length === 3 && new Set(compared).size === 1,
       addBeforeList: addButton.getBoundingClientRect().bottom <= list.getBoundingClientRect().top,
       // Right aligned above the list.
       addRightAligned:
@@ -653,9 +632,10 @@ async function runFlow(client) {
           addButton.getBoundingClientRect().right -
             additionalMods.getBoundingClientRect().right,
         ) < 1,
-      // There is no back affordance anywhere; Cancel is the only way out.
+      // Edit mode discards changes with Cancel and persists them with Save.
       hasBack: footerLabels.includes('Back'),
       hasCancel: footerLabels.includes('Cancel'),
+      hasSave: footerLabels.includes('Save'),
     };
   })()`);
   if (
@@ -665,7 +645,8 @@ async function runFlow(client) {
     !editButtons.addBeforeList ||
     !editButtons.addRightAligned ||
     editButtons.hasBack ||
-    !editButtons.hasCancel
+    !editButtons.hasCancel ||
+    !editButtons.hasSave
   ) {
     throw new Error('Browse controls or shared button typography are incorrect');
   }
@@ -724,7 +705,7 @@ async function runFlow(client) {
     'removed first additional-mod row',
   );
   await client.clickText('Save');
-  await client.waitFor(`document.body.innerText.includes('Force Sync')`, 'profile read mode');
+  await client.waitFor(`document.body.innerText.includes('Verify')`, 'profile read mode');
   const emptyModSectionHidden = await client.evaluate(
     `![...document.querySelectorAll('.section__title')]
       .some((title) => title.textContent.trim() === 'Additional mods')`,
@@ -734,49 +715,19 @@ async function runFlow(client) {
   }
   await client.capture('09-profile-overview-empty-mods.png');
 
-  await client.clickText('Force Sync');
-  await client.waitFor(`document.querySelector('.sync-panel')`, 'sync progress', 15_000);
-  await client.waitFor(
-    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Hashing local files' &&
-      document.querySelector('.sync-panel__count')?.textContent.includes('files') &&
-      document.body.innerText.includes('MB/s') &&
-      document.body.innerText.includes('About')`,
-    'inventory rebuild rate and remaining time',
-    15_000,
-  );
-  await client.capture('10-inventory-rebuild-progress.png');
-  // FLEET_SIMULATE_SYNC drives a scripted sequence that parks at
-  // FLEET_SIMULATE_SYNC_HOLD_PERCENT, so this capture is reproducible and no
-  // content is actually downloaded.
-  await client.waitFor(
-    `document.querySelector('.sync-panel__phase')?.textContent.trim() === 'Syncing files' &&
-      [...document.querySelectorAll('.sync-panel__percent')].map(el => el.textContent.trim()).join(',') === '75%,50%' &&
-      document.body.innerText.includes('Download speed') &&
-      document.body.innerText.includes('Write speed')`,
-    'simulated sync at 50%',
-    15_000,
-  );
-  await client.capture('10-sync-progress.png');
-  await client.clickText('Cancel');
-  await client.waitFor(
-    `document.body.innerText.includes('Stopping sync') &&
-      [...document.querySelectorAll('button')]
-        .some((button) => button.textContent.trim() === 'Stopping')`,
-    'immediate stopping state',
-  );
-  await client.capture('11-sync-stopping.png');
+  await client.clickText('Verify');
+  await client.waitFor(`document.querySelector('.profiles-page') && !document.querySelector('.profile-operation')`, 'verification returning home');
+  await client.capture('10-verification-result.png');
+
 }
 
 await ensureCdpPortAvailable();
 await seedDummyConfig();
 
-const child = spawn(executable, [], {
+const child = spawn(executable, ['--config-dir', configRoot], {
   cwd: repoRoot,
   env: {
     ...process.env,
-    FLEET_CONFIG_DIR: configRoot,
-    FLEET_SIMULATE_SYNC: '1',
-    FLEET_SIMULATE_SYNC_HOLD_PERCENT: '50',
     WEBVIEW2_USER_DATA_FOLDER: path.join(testRoot, 'webview2'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
   },

@@ -25,16 +25,22 @@ pub(crate) struct CoreInner {
 }
 
 impl Core {
-    pub fn spawn_threaded_default() -> anyhow::Result<Self> {
-        let core = Self::new_default()?;
+    pub fn spawn_threaded(config_root: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let core = Self::new(config_root)?;
         runtime::spawn_threaded(core.clone());
         Ok(core)
     }
 
-    pub fn new_in_current_runtime_default() -> anyhow::Result<Self> {
-        let core = Self::new_default()?;
-        runtime::spawn_in_current(core.clone());
+    pub fn new_in_current_runtime_for_command(
+        config_root: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<Self> {
+        let core = Self::new(config_root)?;
+        runtime::spawn_in_current(core.clone(), runtime::StartupPolicy::ExplicitCommand);
         Ok(core)
+    }
+
+    pub fn profile_state_root_dir(&self) -> anyhow::Result<std::path::PathBuf> {
+        self.inner.config.profile_state_root_dir()
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<AppState> {
@@ -76,8 +82,8 @@ impl Core {
         publish_state(&mut guard, &self.inner.state_tx);
     }
 
-    fn new_default() -> anyhow::Result<Self> {
-        let config = Arc::new(ConfigRepo::new_default()?);
+    fn new(config_root: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let config = Arc::new(ConfigRepo::new(config_root)?);
         let operations = OperationRuntime::new();
         let (state_tx, _state_rx) = watch::channel(AppState::default());
         let state = Mutex::new(AppState::default());
@@ -95,8 +101,8 @@ impl Core {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_for_test() -> anyhow::Result<Self> {
-        Self::new_default()
+    pub(crate) fn new_for_test(root: &std::path::Path) -> anyhow::Result<Self> {
+        Self::new(Some(root.to_path_buf()))
     }
 
     pub(crate) fn allocate_session_id(&self) -> u64 {

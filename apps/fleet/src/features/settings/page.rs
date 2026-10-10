@@ -4,11 +4,11 @@ use directories::ProjectDirs;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
 
 use crate::app::router::Route;
+use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::services::bridge::FleetBridge;
 use crate::services::platform::open::open_path;
 use crate::services::updates;
 use crate::stores::app_store::AppStore;
-use crate::stores::toast_store::ToastStore;
 use crate::stores::update_store::{
     apply_update, check_for_updates_status, AppUpdateStatus, UpdateStore,
 };
@@ -22,7 +22,9 @@ use super::sections::{
 pub fn Settings() -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
-    let toasts = use_context::<ToastStore>();
+    let feedback = use_action_error();
+    let setup_feedback = use_action_error();
+    let reset_feedback = use_action_error();
     let update_store = use_context::<UpdateStore>();
     let nav = dioxus_router::use_navigator();
 
@@ -67,27 +69,23 @@ pub fn Settings() -> Element {
 
     let open_logs = move || {
         spawn(async move {
-            let log_dir = if let Some(dir) = std::env::var_os("FLEET_LOG_DIR") {
-                std::path::PathBuf::from(dir)
-            } else {
-                let Some(proj) = ProjectDirs::from("com", "fleet", "manager") else {
-                    return;
-                };
-                proj.data_dir().join("logs")
+            let Some(proj) = ProjectDirs::from("com", "fleet", "manager") else {
+                return;
             };
+            let log_dir = proj.data_dir().join("logs");
             let _ = std::fs::create_dir_all(&log_dir);
             open_path(log_dir).await;
         });
     };
 
     let bridge_for_onboarding = bridge.clone();
-    let toasts_for_onboarding = toasts.clone();
+    let feedback_for_onboarding = setup_feedback.clone();
     let nav_for_onboarding = nav;
     let restart_onboarding = move || {
         let bridge = bridge_for_onboarding.clone();
-        let toasts = toasts_for_onboarding.clone();
+        let feedback = feedback_for_onboarding.clone();
         let nav = nav_for_onboarding;
-        spawn_settings_task(toasts, "Restart setup", async move {
+        spawn_settings_task(feedback, async move {
             let mut settings = bridge.get_snapshot().settings.clone();
             settings.ui.onboarding_completed = false;
             bridge.core().save_settings(settings).await?;
@@ -247,14 +245,14 @@ pub fn Settings() -> Element {
     let on_request_factory_reset = move || factory_reset_confirm_open.set(true);
     let on_cancel_factory_reset = move |_: MouseEvent| factory_reset_confirm_open.set(false);
     let bridge_for_factory_reset = bridge.clone();
-    let toasts_for_factory_reset = toasts.clone();
+    let feedback_for_factory_reset = reset_feedback.clone();
     let nav_for_factory_reset = nav;
     let on_confirm_factory_reset = move |_: MouseEvent| {
         let bridge = bridge_for_factory_reset.clone();
-        let toasts = toasts_for_factory_reset.clone();
+        let feedback = feedback_for_factory_reset.clone();
         let nav = nav_for_factory_reset;
         factory_reset_confirm_open.set(false);
-        spawn_settings_task(toasts, "Factory reset", async move {
+        spawn_settings_task(feedback, async move {
             bridge.core().factory_reset().await?;
             let _ = nav.push(Route::Onboarding {});
             Ok(())
@@ -267,15 +265,16 @@ pub fn Settings() -> Element {
     };
 
     let bridge_for_save = bridge.clone();
-    let toasts_for_save = toasts.clone();
+    let feedback_for_save = feedback.clone();
     let nav_for_save = nav;
     let on_save = move |_: MouseEvent| {
         if saving() || !dirty() || custom_template_error.is_some() {
             return;
         }
+        feedback_for_save.clear();
         saving.set(true);
         let bridge = bridge_for_save.clone();
-        let toasts = toasts_for_save.clone();
+        let feedback = feedback_for_save.clone();
         let nav = nav_for_save;
         let settings = draft();
         spawn(async move {
@@ -284,7 +283,7 @@ pub fn Settings() -> Element {
                     let _ = nav.push(Route::Profiles {});
                 }
                 Err(err) => {
-                    toasts.push_api_error("Save settings", &err);
+                    feedback.set(&err);
                     saving.set(false);
                 }
             }
@@ -339,6 +338,7 @@ pub fn Settings() -> Element {
                     {advanced_section(
                         open_logs,
                         restart_onboarding,
+                        rsx! { ActionErrorView { feedback: setup_feedback.clone() } },
                         on_request_reset_settings,
                         on_request_factory_reset,
                         reset_settings_confirm_open(),
@@ -365,11 +365,13 @@ pub fn Settings() -> Element {
                                 on_cancel: on_cancel_factory_reset,
                             }
                         },
+                        rsx! { ActionErrorView { feedback: reset_feedback.clone() } },
                     )}
                 }
             }
 
             PageFooter {
+                error: Some(rsx! { ActionErrorView { feedback: feedback.clone() } }),
                 actions: Some(rsx! {
                     Button {
                         variant: ButtonVariant::Ghost,

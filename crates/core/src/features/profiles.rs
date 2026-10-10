@@ -1,6 +1,6 @@
 use crate::core::run_config_blocking;
 use crate::state::{ensure_profile_runtime_mut, recompute_profile_status, AppState};
-use crate::storage::{profile_state_root_dir, ProfilesConfig};
+use crate::storage::ProfilesConfig;
 use crate::Core;
 use fleet_domain::{validated_repo_url, Profile, ProfileId, RepoServer};
 use std::path::{Path, PathBuf};
@@ -222,22 +222,20 @@ impl Core {
         run_config_blocking(self.config_repo(), |c| c.delete_profiles()).await
     }
 
-    pub async fn profile_save(&self, profile: Profile) -> Result<Profile, crate::ApiError> {
-        let previous = if profile.id.trim().is_empty() {
+    pub async fn profile_save(&self, mut profile: Profile) -> Result<Profile, crate::ApiError> {
+        profile.id = profile.id.trim().to_string();
+        let profile_mutation = if profile.id.trim().is_empty() {
             None
         } else {
-            self.load_profile(&profile.id.trim().to_string()).await.ok()
-        };
-        let profile_mutation = if previous
-            .as_ref()
-            .is_some_and(|previous| profile_path_context_changed(Some(previous), &profile))
-        {
             Some(
                 self.operation_runtime()
                     .reserve_profile_mutation(profile.id.clone())?,
             )
-        } else {
+        };
+        let previous = if profile.id.trim().is_empty() {
             None
+        } else {
+            self.load_profile(&profile.id.trim().to_string()).await.ok()
         };
         let requested_profile_id = profile.id.clone();
         let saved = self
@@ -358,9 +356,13 @@ impl Core {
             return Ok(());
         };
 
-        let servers = load_cached_repo_servers(&profile)
-            .await?
-            .unwrap_or_default();
+        let servers = load_cached_repo_servers(
+            &profile,
+            self.profile_state_root_dir()
+                .map_err(|e| crate::ApiError::new("state_root", e.to_string()))?,
+        )
+        .await?
+        .unwrap_or_default();
 
         let servers_for_state = servers.clone();
         self.update_state(|state| {
@@ -372,8 +374,9 @@ impl Core {
 }
 pub(crate) fn load_cached_repo_servers_blocking(
     profile: &Profile,
+    state_root: PathBuf,
 ) -> Result<Option<Vec<RepoServer>>, crate::ApiError> {
-    let (cache_root, repo_url) = swifty_cache_target(profile)?;
+    let (cache_root, repo_url) = swifty_cache_target(profile, &state_root)?;
 
     let Some(cache) = swifty_repo::load_cached_repo_blocking(&cache_root, &repo_url)
         .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
@@ -397,9 +400,10 @@ pub(crate) fn load_cached_repo_servers_blocking(
 
 pub(crate) async fn load_cached_repo_servers(
     profile: &Profile,
+    state_root: PathBuf,
 ) -> Result<Option<Vec<RepoServer>>, crate::ApiError> {
     let profile = profile.clone();
-    tokio::task::spawn_blocking(move || load_cached_repo_servers_blocking(&profile))
+    tokio::task::spawn_blocking(move || load_cached_repo_servers_blocking(&profile, state_root))
         .await
         .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
 }
@@ -414,16 +418,17 @@ pub(crate) fn set_profile_repo_servers_runtime(
     runtime.repo_servers = servers;
 }
 
-fn swifty_cache_target(profile: &Profile) -> Result<(PathBuf, String), crate::ApiError> {
+fn swifty_cache_target(
+    profile: &Profile,
+    state_root: &Path,
+) -> Result<(PathBuf, String), crate::ApiError> {
     profile
         .dest_path()
         .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
     let repo_url = validated_repo_url(&profile.source)
         .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
-    let state_root =
-        profile_state_root_dir().map_err(|e| crate::ApiError::new("state_root", e.to_string()))?;
     Ok((
-        fleet_domain::repo_cache_dir(&state_root, &profile.id),
+        fleet_domain::repo_cache_dir(state_root, &profile.id),
         repo_url.to_string(),
     ))
 }
@@ -552,7 +557,7 @@ mod tests {
         normalize_destination_for_compare, profile_path_context_changed,
     };
     use crate::state::AppState;
-    use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+
     use crate::Core;
     use fleet_domain::health::{
         LocalFileHealth, LocalFileReport, RepoCheckFreshness, RepoCheckReport,
@@ -697,8 +702,6 @@ mod tests {
                     verification: fleet_domain::VerificationKind::Fast,
                     health: LocalFileHealth::Dirty,
                     checked_at_unix_ms: 10,
-                    missing_paths_count: 0,
-                    modified_paths_count: 0,
                 }),
                 validation: None,
                 materialization: None,
@@ -728,17 +731,16 @@ mod tests {
     }
 
     #[test]
-    fn user_story_profile_path_change_is_rejected_while_an_operation_owns_the_profile() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
+    fn user_story_all_profile_edits_are_rejected_while_an_operation_owns_the_profile() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::new_for_test().expect("core");
+            let core = Core::new_for_test(temp_dir.path()).expect("core");
             let profile = sample_profile("p1", "/tmp/p1");
             core.update_state(|state| {
                 state.profiles.insert(profile.id.clone(), profile.clone());
@@ -747,32 +749,35 @@ mod tests {
                 .operation_runtime()
                 .reserve_profile_mutation(profile.id.clone())
                 .expect("reserve active profile");
-            let changed = Profile {
-                destination: "/tmp/p1-new".to_string(),
-                ..profile
-            };
-
-            let error = core
-                .profile_save(changed)
-                .await
-                .expect_err("active profile edit must fail");
-            assert_eq!(error.code, "profile_busy");
+            let mut renamed = profile.clone();
+            renamed.name = "Renamed while syncing".to_string();
+            let mut moved = profile.clone();
+            moved.destination = "/tmp/p1-new".to_string();
+            let mut redirected = profile.clone();
+            redirected.source = "https://example.com/changed".to_string();
+            let mut padded_id = profile.clone();
+            padded_id.id = " p1 ".to_string();
+            for changed in [renamed, moved, redirected, padded_id, profile] {
+                let error = core
+                    .profile_save(changed)
+                    .await
+                    .expect_err("active profile edit must fail");
+                assert_eq!(error.code, "profile_busy");
+            }
         });
     }
 
     #[test]
     fn load_profile_prefers_loaded_state_before_config_reload() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::new_for_test().expect("core");
+            let core = Core::new_for_test(temp_dir.path()).expect("core");
             let profile = sample_profile("p1", "/tmp/p1");
             core.update_state(|state| {
                 state.profiles.insert(profile.id.clone(), profile.clone());
@@ -788,17 +793,15 @@ mod tests {
 
     #[test]
     fn deleting_profile_removes_profile_from_config() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
+            let core = Core::spawn_threaded(Some(temp_dir.path().to_path_buf())).expect("core");
             let profile = sample_profile("p1", "/tmp/p1");
             core.profile_save(profile).await.expect("save profile");
             core.profile_delete("p1".to_string())
@@ -812,17 +815,15 @@ mod tests {
 
     #[test]
     fn profile_save_destination_conflict_returns_destination_in_use() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::spawn_threaded_default().expect("core");
+            let core = Core::spawn_threaded(Some(temp_dir.path().to_path_buf())).expect("core");
             core.profile_save(sample_profile(
                 "p1",
                 if cfg!(windows) {

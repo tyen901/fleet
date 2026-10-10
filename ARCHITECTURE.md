@@ -64,3 +64,12 @@ When reviewing a design change, ask:
   work?
 - Do tests cover the intended behavior and the failure or integration boundary
   that makes the change meaningful?
+
+## Target-private state
+
+Store target observations in `<target>/.fleet/observations.sqlite`, with their
+database session lock beside them. Flux shares this hidden directory for its
+target operation lock, staging, and recovery facts under `.fleet/flux`.
+Repository downloads remain in Fleet's application cache. Reserved `.fleet` entries at every depth are
+excluded from managed scanning and mutation. Old application-state observations
+and sibling Flux workspaces are not read or migrated.

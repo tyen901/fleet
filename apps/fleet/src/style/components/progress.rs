@@ -6,6 +6,12 @@ pub struct ProgressBarProps {
     pub percent: Option<u64>,
     #[props(default = false)]
     pub indeterminate: bool,
+    #[props(default = false)]
+    pub frozen: bool,
+    #[props(default = "Operation progress".to_string())]
+    pub label: String,
+    #[props(default)]
+    pub value_text: String,
 }
 
 #[component]
@@ -13,11 +19,12 @@ pub fn ProgressBar(props: ProgressBarProps) -> Element {
     if props.indeterminate {
         return rsx! {
             div {
-                class: "progress-bar progress-bar-active progress-bar-indeterminate",
+                class: if props.frozen { "progress-bar progress-bar-indeterminate progress-bar-frozen" } else { "progress-bar progress-bar-indeterminate" },
                 role: "progressbar",
                 "aria-valuemin": "0",
                 "aria-valuemax": "100",
-                "aria-label": "Operation progress",
+                "aria-label": props.label,
+                "aria-valuetext": props.value_text,
                 div { class: "progress-bar-fill" }
             }
         };
@@ -27,13 +34,14 @@ pub fn ProgressBar(props: ProgressBarProps) -> Element {
 
     rsx! {
         progress {
-            class: "progress-bar",
+            class: if props.frozen { "progress-bar progress-bar-frozen" } else { "progress-bar" },
             max: "100",
             value: width.to_string(),
             "aria-valuemin": "0",
             "aria-valuemax": "100",
             "aria-valuenow": width.to_string(),
-            "aria-label": "Operation progress",
+            "aria-label": props.label,
+            "aria-valuetext": props.value_text,
         }
     }
 }

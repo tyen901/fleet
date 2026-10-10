@@ -4,14 +4,14 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::app::router::Route;
-use crate::features::profiles::common::{
-    local_files_need_sync, profile_icon_src, repo_update_available, start_profile_operation_request,
-};
+use crate::features::action_error::{use_action_error, ActionError, ActionErrorView};
+use crate::features::profiles::common::{profile_icon_src, start_profile_operation};
+use crate::features::profiles::operation::{OperationCancel, OperationReveal};
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
-use crate::stores::toast_store::ToastStore;
 use crate::style::{Button, ButtonVariant, IconButton, PageFooter};
-use icondata::{BsGear, BsPlusLg, BsThreeDots};
+use fleet_core::ProfilePrimaryAction;
+use icondata::{BsGear, BsPlusLg};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GameStartKind {
@@ -19,50 +19,21 @@ enum GameStartKind {
     Join,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CardSyncAction {
-    Update,
-    Sync,
-}
-
-impl CardSyncAction {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Update => "Update",
-            Self::Sync => "Sync",
-        }
-    }
-
-    fn request_labels(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Update => ("update", "start_update_failed", "Update failed"),
-            Self::Sync => ("sync", "start_sync_failed", "Sync failed"),
-        }
-    }
-}
-
 #[derive(Clone, PartialEq)]
 struct ProfileRowViewState {
     id: String,
     name: String,
     icon_src: Option<String>,
-    status_label: Option<String>,
     start_disabled: bool,
     launch_loading: bool,
     join_loading: bool,
-    check_running: bool,
-    sync_action: Option<CardSyncAction>,
-    sync_enabled: bool,
-}
-
-fn exclusive_operation(kind: fleet_core::OperationKind) -> bool {
-    matches!(
-        kind,
-        fleet_core::OperationKind::Validate | fleet_core::OperationKind::Sync
-    )
+    primary_action: ProfilePrimaryAction,
+    active: Option<fleet_core::ActiveOperationState>,
+    outcome_message: Option<String>,
 }
 
 fn profile_row_view_state(
+    core: &fleet_core::Core,
     snapshot: &fleet_core::AppState,
     profile_id: &str,
     profile_name: &str,
@@ -72,59 +43,38 @@ fn profile_row_view_state(
     let profile = snapshot.profiles.get(profile_id);
     let runtime = snapshot.profile_runtime_by_id.get(profile_id);
     let status = runtime.map(|entry| &entry.status);
-    let active_operation = runtime
-        .and_then(|entry| entry.active.as_ref())
-        .map(|active| active.operation);
-    let exclusive_active = active_operation.is_some_and(exclusive_operation);
-
-    // A profile with nothing wrong shows no status at all.
-    let status_label = status
-        .map(|status| status.headline)
-        .filter(|headline| headline.is_noteworthy())
-        .map(|headline| headline.label().to_string());
     let launch_loading = launching_profile_id == Some(profile_id);
     let join_loading = joining_profile_id == Some(profile_id);
-    let check_running = active_operation == Some(fleet_core::OperationKind::Check);
-    let sync_action = card_sync_action(status, active_operation.is_some());
-    let start_disabled = status.map(|status| !status.can_launch).unwrap_or(true)
-        || exclusive_active
-        || launch_loading
-        || join_loading;
+    let start_disabled =
+        status.map(|status| !status.can_launch).unwrap_or(true) || launch_loading || join_loading;
 
     ProfileRowViewState {
         id: profile_id.to_string(),
         name: profile_name.to_string(),
-        icon_src: profile.and_then(|profile| profile_icon_src(&snapshot.settings, profile)),
-        status_label,
+        icon_src: profile.and_then(|profile| profile_icon_src(core, &snapshot.settings, profile)),
         start_disabled,
         launch_loading,
         join_loading,
-        check_running,
-        sync_action,
-        sync_enabled: status.is_some_and(|status| status.actions.sync_enabled),
-    }
-}
-
-fn card_sync_action(
-    status: Option<&fleet_core::ProfileStatusState>,
-    operation_active: bool,
-) -> Option<CardSyncAction> {
-    if repo_update_available(status, operation_active) {
-        Some(CardSyncAction::Update)
-    } else if !operation_active && status.is_some_and(local_files_need_sync) {
-        Some(CardSyncAction::Sync)
-    } else {
-        None
+        primary_action: status
+            .map(|status| status.primary_action)
+            .unwrap_or(ProfilePrimaryAction::CheckForUpdates),
+        active: runtime.and_then(|runtime| runtime.active.clone()),
+        outcome_message: runtime
+            .and_then(|runtime| runtime.last_operation.as_ref())
+            .filter(|outcome| outcome.status == fleet_core::OperationTerminalStatus::Failed)
+            .and_then(|outcome| outcome.error.as_ref().map(|error| error.message.clone())),
     }
 }
 
 fn spawn_game_start(
     bridge: FleetBridge,
-    toasts: ToastStore,
+    feedback: ActionError,
     profile_id: String,
     kind: GameStartKind,
     mut loading: Signal<Option<String>>,
 ) {
+    feedback.clear();
+    loading.set(Some(profile_id.clone()));
     spawn(async move {
         let action = match kind {
             GameStartKind::Launch => "launch",
@@ -147,18 +97,14 @@ fn spawn_game_start(
         };
         match result {
             Ok(_) => {
-                loading.set(Some(profile_id.clone()));
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 if loading().as_deref() == Some(profile_id.as_str()) {
                     loading.set(None);
                 }
             }
             Err(err) => {
-                let title = match kind {
-                    GameStartKind::Launch => "Launch failed",
-                    GameStartKind::Join => "Join failed",
-                };
-                toasts.push_api_error(title, &err);
+                loading.set(None);
+                feedback.set(&err);
             }
         }
     });
@@ -168,8 +114,6 @@ fn spawn_game_start(
 pub fn Profiles() -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
-    let toasts = use_context::<ToastStore>();
-
     let nav = use_navigator();
     let launching_profile_id = use_signal(|| None::<String>);
     let joining_profile_id = use_signal(|| None::<String>);
@@ -186,6 +130,7 @@ pub fn Profiles() -> Element {
         .iter()
         .map(|(id, name)| {
             profile_row_view_state(
+                &bridge.core(),
                 &snapshot,
                 id,
                 name,
@@ -207,21 +152,21 @@ pub fn Profiles() -> Element {
                     }
                 } else {
                     div { class: "profiles-page__list", role: "list",
-                        for row in rows {
+                        for (index,row) in rows.into_iter().enumerate() {
                             ProfileRow {
                                 key: "{row.id}",
+                                primary:index==0,
                                 row,
                                 on_start: {
                                     let bridge = bridge.clone();
-                                    let toasts = toasts.clone();
-                                    move |(profile_id, kind): (String, GameStartKind)| {
+                                    move |(profile_id, kind, feedback): (String, GameStartKind, ActionError)| {
                                         let loading = match kind {
                                             GameStartKind::Launch => launching_profile_id,
                                             GameStartKind::Join => joining_profile_id,
                                         };
                                         spawn_game_start(
                                             bridge.clone(),
-                                            toasts.clone(),
+                                            feedback.clone(),
                                             profile_id,
                                             kind,
                                             loading,
@@ -259,13 +204,14 @@ pub fn Profiles() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct ProfileRowProps {
     row: ProfileRowViewState,
-    on_start: EventHandler<(String, GameStartKind)>,
+    primary: bool,
+    on_start: EventHandler<(String, GameStartKind, ActionError)>,
 }
 
 #[component]
 fn ProfileRow(props: ProfileRowProps) -> Element {
     let bridge = use_context::<FleetBridge>();
-    let toasts = use_context::<ToastStore>();
+    let feedback = use_action_error();
     let nav = use_navigator();
     let row = props.row.clone();
 
@@ -278,9 +224,45 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
 
     let profile_id_for_launch = row.id.clone();
     let profile_id_for_join = row.id.clone();
-    let profile_id_for_sync = row.id.clone();
-    let nav_for_sync = nav;
+    let profile_id_for_action = row.id.clone();
+    let action_label = match row.primary_action {
+        ProfilePrimaryAction::None => None,
+        ProfilePrimaryAction::CheckForUpdates => Some("Check for updates"),
+        ProfilePrimaryAction::Update => Some("Update"),
+        ProfilePrimaryAction::Sync => Some("Sync"),
+        ProfilePrimaryAction::FixProfile => Some("Fix"),
+    };
+    let on_primary_action = {
+        let bridge = bridge.clone();
+        let feedback = feedback.clone();
+        move |_| match row.primary_action {
+            ProfilePrimaryAction::None => {}
+            ProfilePrimaryAction::FixProfile => {
+                let _ = nav.push(Route::ProfileView {
+                    id: profile_id_for_action.clone(),
+                });
+            }
+            ProfilePrimaryAction::CheckForUpdates => start_profile_operation(
+                bridge.clone(),
+                feedback.clone(),
+                profile_id_for_action.clone(),
+                fleet_core::OperationKind::Check,
+                "check",
+                "start_check_failed",
+            ),
+            ProfilePrimaryAction::Sync | ProfilePrimaryAction::Update => start_profile_operation(
+                bridge.clone(),
+                feedback.clone(),
+                profile_id_for_action.clone(),
+                fleet_core::OperationKind::Sync,
+                "sync",
+                "start_sync_failed",
+            ),
+        }
+    };
     let on_start = props.on_start;
+    let launch_feedback = feedback.clone();
+    let join_feedback = feedback.clone();
 
     let launch_label = if row.launch_loading {
         "Launching..."
@@ -293,6 +275,38 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
         "Join"
     };
 
+    let task = row
+        .active
+        .clone()
+        .filter(|active| active.operation != fleet_core::OperationKind::Check);
+    let checking = row
+        .active
+        .as_ref()
+        .is_some_and(|active| active.operation == fleet_core::OperationKind::Check);
+    let actions_visible = task.is_none();
+    let checking_or_action_label = if checking {
+        Some("Checking")
+    } else {
+        action_label
+    };
+    let action_variant = if checking || row.primary_action == ProfilePrimaryAction::CheckForUpdates
+    {
+        ButtonVariant::Ghost
+    } else if props.primary {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Secondary
+    };
+    let launch_variant = if props.primary
+        && actions_visible
+        && (checking
+            || action_label.is_none()
+            || row.primary_action == ProfilePrimaryAction::CheckForUpdates)
+    {
+        ButtonVariant::Primary
+    } else {
+        ButtonVariant::Secondary
+    };
     let main_class = if row.icon_src.is_some() {
         "profile-row__main profile-row__main--with-icon"
     } else {
@@ -301,156 +315,60 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
 
     rsx! {
         div { class: "profile-row", role: "listitem",
-            div {
-                class: main_class,
+            div { class: main_class,
                 if let Some(icon_src) = row.icon_src.clone() {
-                    img {
-                        class: "profile-row__icon",
-                        src: icon_src,
-                        alt: "",
-                    }
+                    img { class: "profile-row__icon", src: icon_src, alt: "" }
                 }
                 div { class: "profile-row__summary",
                     div { class: "profile-row__name", "{row.name}" }
                 }
-                div { class: "profile-row__status",
-                    if let Some(status_label) = row.status_label.clone() {
-                        div { class: "profile-row__state",
-                            if row.check_running {
-                                span { class: "profile-row__spinner", aria_hidden: "true" }
+                if let Some(active) = task.clone() {
+                    OperationCancel { active }
+                } else {
+                    IconButton {
+                        icon: BsGear,
+                        label: "Profile settings".to_string(),
+                        disabled: checking,
+                        onclick: open_profile,
+                    }
+                }
+            }
+            OperationReveal { active: task }
+            ActionErrorView { feedback: feedback.clone() }
+            if row.active.is_none() {
+                if let Some(message) = row.outcome_message.as_ref() {
+                    p { class: "field__error", role: "alert", "{message}" }
+                }
+            }
+            div { class: if actions_visible { "operation-reveal" } else { "operation-reveal operation-reveal--closed" },
+                div { class: "operation-reveal__inner",
+                    div { class: "profile-row__actions",
+                        div { class: "profile-row__buttons",
+                            if let Some(label) = checking_or_action_label {
+                                Button { variant: action_variant, loading: checking, onclick: on_primary_action, "{label}" }
                             }
-                            span { "{status_label}" }
+                            Button {
+                                variant: launch_variant,
+                                disabled: row.start_disabled,
+                                loading: row.launch_loading,
+                                onclick: move |_| {
+                                    on_start.call((profile_id_for_launch.clone(), GameStartKind::Launch, launch_feedback.clone()));
+                                },
+                                "{launch_label}"
+                            }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                disabled: row.start_disabled,
+                                loading: row.join_loading,
+                                onclick: move |_| {
+                                    on_start.call((profile_id_for_join.clone(), GameStartKind::Join, join_feedback.clone()));
+                                },
+                                "{join_label}"
+                            }
                         }
                     }
                 }
             }
-            div { class: "profile-row__actions",
-                div {
-                    class: if row.sync_action.is_some() {
-                        "profile-row__buttons profile-row__buttons--with-sync"
-                    } else {
-                        "profile-row__buttons"
-                    },
-                    if let Some(sync_action) = row.sync_action {
-                        Button {
-                            variant: ButtonVariant::Primary,
-                            disabled: !row.sync_enabled,
-                            onclick: {
-                                let bridge = bridge.clone();
-                                let toasts = toasts.clone();
-                                move |_| {
-                                    let profile_id = profile_id_for_sync.clone();
-                                    let bridge = bridge.clone();
-                                    let toasts = toasts.clone();
-                                    let (action, error_reason, fail_title) =
-                                        sync_action.request_labels();
-                                    spawn(async move {
-                                        if start_profile_operation_request(
-                                            bridge,
-                                            toasts,
-                                            profile_id.clone(),
-                                            fleet_core::OperationKind::Sync,
-                                            action,
-                                            error_reason,
-                                            fail_title,
-                                        )
-                                        .await
-                                        {
-                                            let _ = nav_for_sync
-                                                .push(Route::ProfileView { id: profile_id });
-                                        }
-                                    });
-                                }
-                            },
-                            {sync_action.label()}
-                        }
-                    }
-                    Button {
-                        variant: if row.sync_action.is_some() {
-                            ButtonVariant::Secondary
-                        } else {
-                            ButtonVariant::Primary
-                        },
-                        disabled: row.start_disabled,
-                        loading: row.launch_loading,
-                        onclick: move |_| {
-                            on_start.call((profile_id_for_launch.clone(), GameStartKind::Launch));
-                        },
-                        "{launch_label}"
-                    }
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        disabled: row.start_disabled,
-                        loading: row.join_loading,
-                        onclick: move |_| {
-                            on_start.call((profile_id_for_join.clone(), GameStartKind::Join));
-                        },
-                        "{join_label}"
-                    }
-                }
-                IconButton {
-                    icon: BsThreeDots,
-                    label: "Profile details".to_string(),
-                    onclick: open_profile,
-                }
-            }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{card_sync_action, CardSyncAction};
-    use crate::features::profiles::common::local_files_need_sync;
-
-    #[test]
-    fn local_files_need_sync_for_local_repair_states() {
-        for local_health in [
-            fleet_core::LocalFileHealth::Missing,
-            fleet_core::LocalFileHealth::Dirty,
-            fleet_core::LocalFileHealth::MissingDestination,
-            fleet_core::LocalFileHealth::ExpectedStateUnavailable,
-            fleet_core::LocalFileHealth::InventoryUnavailable,
-        ] {
-            let status = fleet_core::ProfileStatusState {
-                local_health,
-                ..fleet_core::ProfileStatusState::unknown(0)
-            };
-            assert!(local_files_need_sync(&status));
-        }
-    }
-
-    #[test]
-    fn local_files_need_sync_excludes_ready_and_unknown_states() {
-        for local_health in [
-            fleet_core::LocalFileHealth::Clean,
-            fleet_core::LocalFileHealth::Unknown,
-        ] {
-            let status = fleet_core::ProfileStatusState {
-                local_health,
-                ..fleet_core::ProfileStatusState::unknown(0)
-            };
-            assert!(!local_files_need_sync(&status));
-        }
-    }
-
-    #[test]
-    fn profile_card_exposes_the_required_sync_action() {
-        let mut status = fleet_core::ProfileStatusState {
-            headline: fleet_core::ProfileStatusHeadline::NeedsSync,
-            local_health: fleet_core::LocalFileHealth::Dirty,
-            ..fleet_core::ProfileStatusState::unknown(0)
-        };
-        assert_eq!(
-            card_sync_action(Some(&status), false),
-            Some(CardSyncAction::Sync)
-        );
-
-        status.repo_freshness = Some(fleet_core::RepoCheckFreshness::UpdateAvailable);
-        assert_eq!(
-            card_sync_action(Some(&status), false),
-            Some(CardSyncAction::Update)
-        );
-        assert_eq!(card_sync_action(Some(&status), true), None);
     }
 }
