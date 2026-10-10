@@ -1,14 +1,15 @@
 use dioxus::prelude::*;
 
-use crate::stores::toast_store::ToastStore;
+use crate::features::action_error::ActionError;
 
-pub(crate) fn spawn_settings_task<F>(toasts: ToastStore, title: &'static str, task: F)
+pub(crate) fn spawn_settings_task<F>(feedback: ActionError, task: F)
 where
     F: std::future::Future<Output = Result<(), fleet_core::ApiError>> + 'static,
 {
+    feedback.clear();
     spawn(async move {
         if let Err(err) = task.await {
-            toasts.push_api_error(title, &err);
+            feedback.set(&err);
         }
     });
 }

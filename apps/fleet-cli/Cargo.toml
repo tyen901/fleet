@@ -1,12 +1,15 @@
 [package]
 name = "fleet-cli"
-version = "4.0.0"
+version = "4.1.0-alpha.3"
 edition = "2021"
 build = "build.rs"
 
+[features]
+default = ["flux"]
+flux = ["fleet-core/flux"]
+
 [dependencies]
 fleet-core = { workspace = true }
-fleet-domain = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
@@ -14,6 +17,7 @@ indicatif = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+fleet-domain = { workspace = true }
 serde_json = { workspace = true }
 swifty_artifacts = { workspace = true }
 tempfile = { workspace = true }

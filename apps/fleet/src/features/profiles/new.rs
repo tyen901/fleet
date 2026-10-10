@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use tracing::{error, info};
 
 use crate::app::router::Route;
+use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::features::profiles::{
     common::{new_profile_from_draft, ProfileFormField},
     draft::ProfileDraft,
@@ -9,14 +10,13 @@ use crate::features::profiles::{
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
-use crate::stores::toast_store::ToastStore;
 use crate::style::{Button, ButtonVariant, PageFooter, Section};
 
 #[component]
 pub fn NewProfile() -> Element {
     let bridge = use_context::<FleetBridge>();
     let store = use_context::<AppStore>();
-    let toasts = use_context::<ToastStore>();
+    let feedback = use_action_error();
     let nav = dioxus_router::use_navigator();
 
     let mut name = use_signal(String::new);
@@ -31,7 +31,7 @@ pub fn NewProfile() -> Element {
     let on_create = {
         let bridge = bridge.clone();
         let store = store.clone();
-        let toasts = toasts.clone();
+        let feedback = feedback.clone();
         move |_: MouseEvent| {
             if create_loading() {
                 return;
@@ -44,7 +44,7 @@ pub fn NewProfile() -> Element {
             create_loading.set(true);
             let profile = new_profile_from_draft(&draft);
             let bridge = bridge.clone();
-            let toasts = toasts.clone();
+            let feedback = feedback.clone();
 
             spawn(async move {
                 info!(op = "ui_profile_create", "profile create requested");
@@ -54,7 +54,7 @@ pub fn NewProfile() -> Element {
                     }
                     Err(err) => {
                         create_loading.set(false);
-                        toasts.push_api_error("Create profile failed", &err);
+                        feedback.set(&err);
                         error!(
                             op = "ui_profile_create",
                             outcome = "failed",
@@ -77,6 +77,7 @@ pub fn NewProfile() -> Element {
         div { class: "page-frame",
             div { class: "page-frame__body",
                 div { class: "page__inner section-list",
+                    ActionErrorView { feedback: feedback.clone() }
                     Section {
                         ProfileFormField {
                             title: "Name".to_string(),

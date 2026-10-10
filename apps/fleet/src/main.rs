@@ -26,11 +26,9 @@ fn load_window_icon() -> anyhow::Result<Icon> {
 
 fn main() -> anyhow::Result<()> {
     let result = (|| -> anyhow::Result<()> {
-        dotenvy::dotenv().ok();
-
         velopack::VelopackApp::build().run();
 
-        let bridge = FleetBridge::new()?;
+        let bridge = FleetBridge::new(config_root()?)?;
         let settings = bridge.get_snapshot().settings.clone();
         fleet_core::logging::init(fleet_core::logging::LoggingConfig {
             project_dir_name: "manager",
@@ -39,13 +37,7 @@ fn main() -> anyhow::Result<()> {
         })?;
 
         let args: Vec<String> = std::env::args().collect();
-        info!(
-            ?args,
-            version = services::updates::build_version_string(),
-            os = std::env::consts::OS,
-            arch = std::env::consts::ARCH,
-            "fleet launched"
-        );
+        info!(?args, "fleet launched");
         let window_icon = load_window_icon()?;
 
         dioxus::LaunchBuilder::desktop()
@@ -78,4 +70,20 @@ fn App() -> Element {
         StyleAssets {}
         AppRoot {}
     }
+}
+
+fn config_root() -> anyhow::Result<Option<std::path::PathBuf>> {
+    let mut args = std::env::args_os().skip(1);
+    let mut root = None;
+    while let Some(arg) = args.next() {
+        if arg == "--config-dir" {
+            root =
+                Some(std::path::PathBuf::from(args.next().ok_or_else(|| {
+                    anyhow::anyhow!("--config-dir requires a path")
+                })?));
+        } else {
+            anyhow::bail!("unknown argument: {}", arg.to_string_lossy());
+        }
+    }
+    Ok(root)
 }

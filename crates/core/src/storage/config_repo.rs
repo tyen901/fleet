@@ -10,21 +10,11 @@ const SETTINGS_FILENAME: &str = "settings.json";
 const PROFILE_STATE_DIRNAME: &str = "profile_state";
 
 pub fn config_root_dir() -> anyhow::Result<PathBuf> {
-    let dir = if let Some(dir) = std::env::var_os("FLEET_CONFIG_DIR") {
-        PathBuf::from(dir)
-    } else {
-        ProjectDirs::from("com", "fleet", "manager")
-            .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?
-            .config_dir()
-            .to_path_buf()
-    };
+    let dir = ProjectDirs::from("com", "fleet", "manager")
+        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?
+        .config_dir()
+        .to_path_buf();
 
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-pub fn profile_state_root_dir() -> anyhow::Result<PathBuf> {
-    let dir = config_root_dir()?.join(PROFILE_STATE_DIRNAME);
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -41,9 +31,19 @@ pub struct ConfigRepo {
 }
 
 impl ConfigRepo {
-    pub fn new_default() -> anyhow::Result<Self> {
-        let dir = config_root_dir()?;
-        Ok(Self { root: dir })
+    pub fn new(root: Option<PathBuf>) -> anyhow::Result<Self> {
+        let root = match root {
+            Some(root) => root,
+            None => config_root_dir()?,
+        };
+        fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn profile_state_root_dir(&self) -> anyhow::Result<PathBuf> {
+        let dir = self.root.join(PROFILE_STATE_DIRNAME);
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
     pub fn load_profiles(&self) -> anyhow::Result<ProfilesConfig> {

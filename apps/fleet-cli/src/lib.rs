@@ -10,9 +10,12 @@ mod ui;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
-    /// Enable debug logging (uses a debug filter when RUST_LOG is unset).
+    /// Enable debug logging.
     #[arg(long, global = true)]
     pub debug: bool,
+    /// Directory containing settings, profiles and sync state.
+    #[arg(long, global = true)]
+    pub config_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -90,7 +93,7 @@ pub async fn run() -> anyhow::Result<()> {
     })?;
     let args: Vec<String> = std::env::args().collect();
     info!(?args, "fleet-cli launched");
-    let core = Core::new_in_current_runtime_default()?;
+    let core = Core::new_in_current_runtime_for_command(cli.config_dir)?;
     let result = commands::dispatch(&core, cli.command).await;
     if let Err(ref err) = result {
         error!(error = %err, "fleet-cli failed");

@@ -60,3 +60,12 @@
     animation: none;
   }
 }
+
+.progress-bar-frozen .progress-bar-fill {
+  animation: none;
+  transform: none;
+}
+
+.progress-bar-frozen.progress-bar-indeterminate .progress-bar-fill {
+  width: 0;
+}

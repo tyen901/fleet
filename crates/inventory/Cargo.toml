@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = { workspace = true }
+fmutex = { workspace = true }
 flux = { workspace = true }
-futures-util = { workspace = true }
 rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+sha1 = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
+fleet-flux = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
