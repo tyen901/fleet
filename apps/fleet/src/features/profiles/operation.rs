@@ -98,28 +98,28 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
             .cloned()
     };
     let syncing = active.operation == OperationKind::Sync;
-    let planned = track(ProgressTrackKind::Patch).is_some();
+    let patching = syncing && track(ProgressTrackKind::Patch).is_some();
     rsx! {
         section { class: "profile-operation", aria_label: "Profile operation",
             div { class: "operation-usages",
-                if syncing {
+                if patching {
                     UsageMetric { label: "Network", bytes_per_sec: progress.usage.network_bytes_per_sec, disk: false }
                 }
                 UsageMetric { label: "Disk usage", bytes_per_sec: progress.usage.disk_bytes_per_sec, disk: true }
             }
-            if syncing {
+            if patching {
                 WorkBar { label: "Downloading data", track: track(ProgressTrackKind::Download), download: true, frozen }
             }
             WorkBar {
-                label: if syncing { "Patching files" } else { "Validating files" },
-                track: track(if syncing { ProgressTrackKind::Patch } else { ProgressTrackKind::LocalCheck }),
+                label: if patching { "Patching files" } else if syncing { "Scanning files" } else { "Validating files" },
+                track: track(if patching { ProgressTrackKind::Patch } else { ProgressTrackKind::LocalCheck }),
                 download: false,
                 frozen,
             }
             span { class: "profile-operation__eta",
                 if active.cancel_requested { "Stopping" }
                 else if progress.active_stage == OperationStage::Finalizing { "Finishing" }
-                else if !syncing || planned { "{eta(progress.usage.eta_seconds)}" }
+                else { "{eta(progress.usage.eta_seconds)}" }
             }
         }
     }
