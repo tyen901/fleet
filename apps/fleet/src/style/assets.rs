@@ -9,7 +9,6 @@ const BUTTONS_CSS: &str = include_str!("../../assets/css/components/buttons.css"
 const FORMS_CSS: &str = include_str!("../../assets/css/components/forms.css");
 const SECTIONS_CSS: &str = include_str!("../../assets/css/components/sections.css");
 const PROGRESS_CSS: &str = include_str!("../../assets/css/components/progress.css");
-const TOASTS_CSS: &str = include_str!("../../assets/css/components/toasts.css");
 const SETTINGS_CSS: &str = include_str!("../../assets/css/pages/settings.css");
 const PROFILES_CSS: &str = include_str!("../../assets/css/pages/profiles.css");
 const ONBOARDING_CSS: &str = include_str!("../../assets/css/pages/onboarding.css");
@@ -26,7 +25,6 @@ pub fn StyleAssets() -> Element {
         style { {FORMS_CSS} }
         style { {SECTIONS_CSS} }
         style { {PROGRESS_CSS} }
-        style { {TOASTS_CSS} }
         style { {SETTINGS_CSS} }
         style { {PROFILES_CSS} }
         style { {ONBOARDING_CSS} }

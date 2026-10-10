@@ -3,21 +3,27 @@ use crate::state::AppState;
 use std::collections::BTreeMap;
 use tracing::warn;
 
+#[derive(Clone, Copy)]
+pub(crate) enum StartupPolicy {
+    Desktop,
+    ExplicitCommand,
+}
+
 pub(crate) fn spawn_threaded(core: Core) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("tokio runtime");
-        rt.block_on(async move { run_core_loop(core).await });
+        rt.block_on(async move { run_core_loop(core, StartupPolicy::Desktop).await });
     });
 }
 
-pub(crate) fn spawn_in_current(core: Core) {
-    tokio::spawn(async move { run_core_loop(core).await });
+pub(crate) fn spawn_in_current(core: Core, startup_policy: StartupPolicy) {
+    tokio::spawn(async move { run_core_loop(core, startup_policy).await });
 }
 
-async fn run_core_loop(core: Core) {
+async fn run_core_loop(core: Core, startup_policy: StartupPolicy) {
     let initial = match load_initial_state(&core).await {
         Ok(state) => state,
         Err(err) => {
@@ -31,7 +37,7 @@ async fn run_core_loop(core: Core) {
 
     for profile_id in &profile_ids {
         core.spawn_profile_repo_cache_refresh(profile_id.clone());
-        if auto_check_on_startup {
+        if auto_check_on_startup && matches!(startup_policy, StartupPolicy::Desktop) {
             let core_for_checks = core.clone();
             let profile_id_for_checks = profile_id.clone();
             tokio::spawn(async move {

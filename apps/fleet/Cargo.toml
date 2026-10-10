@@ -1,12 +1,15 @@
 [package]
 name = "fleet"
-version = "4.0.0"
+version = "4.1.0-alpha.3"
 edition = "2021"
+
+[features]
+default = ["flux"]
+flux = ["fleet-core/flux"]
 
 [dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
-dotenvy = "0.15.7"
 open = "5.3.3"
 rfd = "0.17.2"
 directories = { workspace = true }

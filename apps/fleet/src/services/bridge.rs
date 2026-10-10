@@ -8,8 +8,8 @@ pub struct FleetBridge {
 }
 
 impl FleetBridge {
-    pub fn new() -> anyhow::Result<Self> {
-        let core = Core::spawn_threaded_default()?;
+    pub fn new(config_root: Option<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let core = Core::spawn_threaded(config_root)?;
         let state_rx = core.subscribe_state();
         Ok(Self { core, state_rx })
     }

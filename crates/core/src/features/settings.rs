@@ -115,7 +115,7 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::{effective_settings_defaults, settings_field_is_non_default};
-    use crate::test_support::{EnvVarGuard, ENV_VAR_LOCK};
+
     use crate::{Core, SettingsField};
     use fleet_domain::{normalize_app_settings, AppSettings};
 
@@ -135,10 +135,7 @@ mod tests {
 
     #[test]
     fn concurrent_settings_saves_publish_the_final_persisted_settings() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -147,7 +144,7 @@ mod tests {
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::new_for_test().expect("core");
+            let core = Core::new_for_test(temp_dir.path()).expect("core");
             let base = core.load_settings().await.expect("load settings");
             let mut a = base.clone();
             a.startup.auto_check_profiles_on_startup = false;
@@ -168,17 +165,15 @@ mod tests {
 
     #[test]
     fn failed_settings_save_preserves_published_state() {
-        let _guard = ENV_VAR_LOCK.lock().expect("env lock");
-
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let _env = EnvVarGuard::set_path("FLEET_CONFIG_DIR", temp_dir.path());
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
 
         runtime.block_on(async {
-            let core = Core::new_for_test().expect("core");
+            let core = Core::new_for_test(temp_dir.path()).expect("core");
             let mut persisted = core.load_settings().await.expect("load settings");
             persisted.ui.show_profile_icons = false;
             core.save_settings(persisted.clone())
