@@ -28,7 +28,7 @@ fleet-arma3              = { path = "crates/arma3" }
 # Pinned external dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-flux                    = { git = "https://github.com/tyen901/flux.git", rev = "a95accc11843ca92ac3349a811b07ee0492679ad" }
+flux                    = { git = "https://github.com/tyen901/flux.git", rev = "c522b549d179ade064ba5e42fe66abe94574f706" }
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }

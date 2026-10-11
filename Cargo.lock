@@ -1782,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "fleet"
-version = "4.1.0-alpha.3"
+version = "4.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-cli"
-version = "4.1.0-alpha.3"
+version = "4.1.0-alpha.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1916,7 +1916,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "2.0.0"
-source = "git+https://github.com/tyen901/flux.git?rev=a95accc11843ca92ac3349a811b07ee0492679ad#a95accc11843ca92ac3349a811b07ee0492679ad"
+source = "git+https://github.com/tyen901/flux.git?rev=c522b549d179ade064ba5e42fe66abe94574f706#c522b549d179ade064ba5e42fe66abe94574f706"
 dependencies = [
  "blake3",
  "cap-fs-ext",
