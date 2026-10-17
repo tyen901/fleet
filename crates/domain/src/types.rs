@@ -5,18 +5,25 @@ use std::str::FromStr;
 
 pub type ProfileId = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
     pub message: String,
 }
 
 impl ApiError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Messages are authored UI copy. Never format dependency errors into them.
+    pub fn new(code: impl Into<String>, message: &'static str) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
         }
+    }
+
+    /// Record diagnostics at the application boundary without sending them to the UI.
+    pub fn reported(code: &str, message: &'static str, diagnostic: impl std::fmt::Debug) -> Self {
+        tracing::error!(code, message, diagnostic = ?diagnostic, "Application action failed");
+        Self::new(code, message)
     }
 }
 

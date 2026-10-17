@@ -1,5 +1,7 @@
 use std::sync::OnceLock;
 
+use fleet_core::ApiError;
+
 use semver::Version;
 use velopack::{sources, UpdateCheck, UpdateManager, UpdateOptions};
 
@@ -41,45 +43,69 @@ fn runtime_allows_update_checks(
     build_allows_update_checks(&installed_version(), false)
 }
 
-pub fn check_for_updates(feed_url: &str) -> Result<Option<String>, String> {
+pub fn check_for_updates(feed_url: &str) -> Result<Option<String>, ApiError> {
     if feed_url.trim().is_empty() || feed_url == "disabled" {
-        return Err("Updates are disabled.".to_string());
+        return Err(ApiError::new("updates_disabled", "Updates are disabled."));
     }
     if !current_build_allows_update_checks() {
         return Ok(None);
     }
 
     let options = UpdateOptions::default();
-    let um = UpdateManager::new(sources::HttpSource::new(feed_url), Some(options), None)
-        .map_err(|e| e.to_string())?;
+    let um = UpdateManager::new(sources::HttpSource::new(feed_url), Some(options), None).map_err(
+        |error| ApiError::reported("update_check", "Could not prepare the update check.", error),
+    )?;
 
-    match um.check_for_updates().map_err(|e| e.to_string())? {
+    match um.check_for_updates().map_err(|error| {
+        ApiError::reported(
+            "update_check",
+            "Could not check for updates. Try again.",
+            error,
+        )
+    })? {
         UpdateCheck::UpdateAvailable(update) => Ok(Some(update.TargetFullRelease.Version)),
         UpdateCheck::NoUpdateAvailable | UpdateCheck::RemoteIsEmpty => Ok(None),
     }
 }
 
-pub fn download_apply_and_restart(feed_url: &str) -> Result<(), String> {
+pub fn download_apply_and_restart(feed_url: &str) -> Result<(), ApiError> {
     if feed_url.trim().is_empty() || feed_url == "disabled" {
-        return Err("Updates are disabled.".to_string());
+        return Err(ApiError::new("updates_disabled", "Updates are disabled."));
     }
     if !current_build_allows_update_checks() {
         return Ok(());
     }
 
     let options = UpdateOptions::default();
-    let um = UpdateManager::new(sources::HttpSource::new(feed_url), Some(options), None)
-        .map_err(|e| e.to_string())?;
+    let um = UpdateManager::new(sources::HttpSource::new(feed_url), Some(options), None).map_err(
+        |error| ApiError::reported("update_apply", "Could not prepare the update.", error),
+    )?;
 
-    let update = match um.check_for_updates().map_err(|e| e.to_string())? {
+    let update = match um.check_for_updates().map_err(|error| {
+        ApiError::reported(
+            "update_check",
+            "Could not check for updates. Try again.",
+            error,
+        )
+    })? {
         UpdateCheck::UpdateAvailable(update) => update,
         UpdateCheck::NoUpdateAvailable | UpdateCheck::RemoteIsEmpty => return Ok(()),
     };
 
-    um.download_updates(&update, None)
-        .map_err(|e| e.to_string())?;
-    um.apply_updates_and_restart(&update)
-        .map_err(|e| e.to_string())?;
+    um.download_updates(&update, None).map_err(|error| {
+        ApiError::reported(
+            "update_download",
+            "Could not download the update. Try again.",
+            error,
+        )
+    })?;
+    um.apply_updates_and_restart(&update).map_err(|error| {
+        ApiError::reported(
+            "update_apply",
+            "Could not apply the update. Try again.",
+            error,
+        )
+    })?;
 
     Ok(())
 }

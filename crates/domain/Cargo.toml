@@ -8,3 +8,4 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 url = { workspace = true }
 sha1 = { workspace = true }
+tracing = { workspace = true }

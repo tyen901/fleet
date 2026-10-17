@@ -28,12 +28,12 @@ pub(crate) async fn check(
     };
     let (repo, inventory) = receiver.observe(publisher.clone(), work).await;
     if cancellation.is_cancelled() {
-        return Err(crate::ApiError::new("canceled", "canceled"));
+        return Err(crate::ApiError::new("canceled", "Canceled"));
     }
     publisher.stage(OperationStage::Finalizing);
     Ok(CheckReport {
         profile_id: profile.id.clone(),
-        repo: repo.ok_or_else(|| crate::ApiError::new("canceled", "canceled"))?,
+        repo: repo.ok_or_else(|| crate::ApiError::new("canceled", "Canceled"))?,
         local: inventory?,
     })
 }

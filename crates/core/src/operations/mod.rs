@@ -26,6 +26,6 @@ pub(crate) use runtime::OperationRuntime;
 pub(crate) fn backend_unavailable() -> crate::ApiError {
     crate::ApiError::new(
         "backend_unavailable",
-        "File maintenance is unavailable in this build. Enable the flux feature to refresh, verify, or sync managed files.",
+        "File maintenance is unavailable in this build of Fleet.",
     )
 }

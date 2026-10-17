@@ -1839,6 +1839,8 @@ dependencies = [
  "fleet-download",
  "fleet-flux",
  "fleet-inventory",
+ "flux",
+ "object_store",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -1859,6 +1861,7 @@ dependencies = [
  "anyhow",
  "serde",
  "sha1",
+ "tracing",
  "url",
 ]
 

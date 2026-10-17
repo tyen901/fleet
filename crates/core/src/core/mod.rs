@@ -132,7 +132,7 @@ impl Core {
         let profile = self
             .load_profile(&profile_id_owned)
             .await
-            .map_err(|e| ApiError::new("not_found", e.to_string()))?;
+            .map_err(|e| ApiError::reported("not_found", "Could not load the profile.", e))?;
 
         let profile_id_owned = profile.id.clone();
         let profile_for_state = profile.clone();

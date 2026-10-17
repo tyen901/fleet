@@ -67,13 +67,13 @@ impl Core {
         let profile = self
             .load_profile(&profile_id)
             .await
-            .map_err(|e| ApiError::new("not_found", e.to_string()))?;
+            .map_err(|e| ApiError::reported("not_found", "Could not load the profile.", e))?;
         let local_check = self.launch_local_check(&profile).await?;
         validate_launch_compatibility(&local_check)?;
         let mut settings = self
             .load_settings()
             .await
-            .map_err(|e| ApiError::new("settings_error", e.to_string()))?;
+            .map_err(|e| ApiError::reported("settings_error", "Could not load settings.", e))?;
         self.ensure_arma3_settings(&mut settings).await?;
 
         arma3_execute(
@@ -82,17 +82,25 @@ impl Core {
             action,
             extra_args,
             dry_run,
-            &self
-                .profile_state_root_dir()
-                .map_err(|e| ApiError::new("state_root", e.to_string()))?,
+            &self.profile_state_root_dir().map_err(|e| {
+                ApiError::reported(
+                    "state_root",
+                    "Could not access Fleet data. Check folder permissions.",
+                    e,
+                )
+            })?,
         )
     }
 
     #[cfg(feature = "flux")]
     async fn launch_local_check(&self, profile: &Profile) -> Result<LocalFileReport, ApiError> {
-        let state_root = self
-            .profile_state_root_dir()
-            .map_err(|err| ApiError::new("state_root", err.to_string()))?;
+        let state_root = self.profile_state_root_dir().map_err(|err| {
+            ApiError::reported(
+                "state_root",
+                "Could not access Fleet data. Check folder permissions.",
+                err,
+            )
+        })?;
 
         local_files::check(
             profile,
@@ -139,7 +147,7 @@ fn arma3_execute(
         extra_args.unwrap_or_default(),
         state_root,
     )
-    .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
+    .map_err(launch_error)?;
 
     let pid = if dry_run {
         None
@@ -155,9 +163,13 @@ fn arma3_execute(
             args = ?command.args,
             "arma3 launch command"
         );
-        let child = command
-            .spawn()
-            .map_err(|e| ApiError::new("launch_failed", e.to_string()))?;
+        let child = command.spawn().map_err(|e| {
+            ApiError::reported(
+                "launch_failed",
+                "Could not start Arma 3. Check the game directory and launch settings.",
+                e,
+            )
+        })?;
         Some(child.id())
     };
 
@@ -166,6 +178,21 @@ fn arma3_execute(
         args: command.args,
         pid,
     })
+}
+
+fn launch_error(error: Arma3Error) -> ApiError {
+    let message = match &error {
+        Arma3Error::InvalidInstall { .. } | Arma3Error::MissingExecutable { .. } => {
+            "Check the Arma 3 game directory in Settings."
+        }
+        Arma3Error::SteamNotFound => "Install Steam and make it available before launching Arma 3.",
+        Arma3Error::UnsupportedLaunchMethod { .. } => "Choose a supported launch type in Settings.",
+        Arma3Error::InvalidModDir { .. } => "Check the additional mod folders in profile settings.",
+        Arma3Error::Io(_) => {
+            "Could not prepare Arma 3. Check the game directory and launch settings."
+        }
+    };
+    ApiError::reported("launch_failed", message, error)
 }
 
 fn build_launch(
@@ -561,12 +588,10 @@ fn validate_launch_compatibility(report: &LocalFileReport) -> Result<(), ApiErro
         return Ok(());
     }
 
-    Err(ApiError::new(
+    Err(ApiError::reported(
         "launch_incompatible",
-        format!(
-            "launch blocked: manifest health {:?}; run Sync",
-            report.health
-        ),
+        "Sync this profile before launching Arma 3.",
+        report,
     ))
 }
 

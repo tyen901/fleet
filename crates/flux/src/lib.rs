@@ -18,3 +18,9 @@ pub fn is_cancellation(error: &anyhow::Error) -> bool {
         .downcast_ref::<flux::Error>()
         .is_some_and(|error| error.kind() == flux::ErrorKind::Cancelled)
 }
+
+pub fn is_source_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<flux::Error>()
+        .is_some_and(|error| error.kind() == flux::ErrorKind::Source)
+}

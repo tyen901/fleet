@@ -66,12 +66,22 @@ async fn check_or_validate(
             LocalFileHealth::MissingDestination,
         ));
     }
-    let repo_url = validated_repo_url(&profile.source)
-        .map_err(|_| crate::ApiError::new("invalid_profile", "profile source is not valid"))?;
+    let repo_url = validated_repo_url(&profile.source).map_err(|_| {
+        crate::ApiError::new(
+            "invalid_profile",
+            "Enter a valid repository URL in profile settings.",
+        )
+    })?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
     let inventory_db = observation_db_path(&dest);
     let Some(input) = fleet_flux::load_cached_swifty_materialization_input(repo_url, &repo_cache)
-        .map_err(|error| crate::ApiError::new("repo_cache", error.to_string()))?
+        .map_err(|error| {
+        crate::ApiError::reported(
+            "repo_cache",
+            "Could not read repository data. Run Sync to download it again.",
+            error,
+        )
+    })?
     else {
         return Ok(report(
             profile,
@@ -99,10 +109,16 @@ async fn check_or_validate(
                     LocalFileHealth::InventoryUnavailable,
                 ))
             }
-            Err(error) => return Err(crate::ApiError::new("inventory", error.to_string())),
+            Err(error) => {
+                return Err(crate::ApiError::reported(
+                    "inventory",
+                    "Could not access the local file inventory. Check folder permissions.",
+                    error,
+                ))
+            }
         };
     if cancel.is_cancelled() {
-        return Err(crate::ApiError::new("canceled", "canceled"));
+        return Err(crate::ApiError::new("canceled", "Canceled"));
     }
 
     let matches = match read_kind {
@@ -116,8 +132,20 @@ async fn check_or_validate(
             let manifest = input.manifest().clone();
             tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
                 .await
-                .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?
-                .map_err(|error| crate::ApiError::new("inventory", error.to_string()))?;
+                .map_err(|error| {
+                    crate::ApiError::reported(
+                        "inventory",
+                        "Could not access the local file inventory. Check folder permissions.",
+                        error,
+                    )
+                })?
+                .map_err(|error| {
+                    crate::ApiError::reported(
+                        "inventory",
+                        "Could not access the local file inventory. Check folder permissions.",
+                        error,
+                    )
+                })?;
             fleet_flux::verify_manifest(&dest, inventory, input, cancel.clone(), work)
                 .await
                 .map_err(|error| operation_error("inventory_validation", &cancel, error))?
@@ -140,9 +168,13 @@ fn operation_error(
     error: anyhow::Error,
 ) -> crate::ApiError {
     if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
-        crate::ApiError::new("canceled", "canceled")
+        crate::ApiError::new("canceled", "Canceled")
     } else {
-        crate::ApiError::new(code, format!("File check failed: {error:#}"))
+        crate::ApiError::reported(
+            code,
+            "Could not check local files. Check folder permissions and try again.",
+            error,
+        )
     }
 }
 

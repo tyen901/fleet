@@ -73,8 +73,8 @@ where
                                 }
                             }
                         },
-                        AppUpdateStatus::Error(msg) => rsx! {
-                            Notice { tone: NoticeTone::Danger, "{msg}" }
+                        AppUpdateStatus::Error(error) => rsx! {
+                            Notice { tone: NoticeTone::Danger, "{error.message}" }
                         },
                         _ => rsx! {},
             }

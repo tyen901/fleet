@@ -69,7 +69,9 @@ impl Core {
             c.save_settings(&settings_to_save)
         })
         .await
-        .map_err(|error| crate::ApiError::new("settings_error", error.to_string()))?;
+        .map_err(|error| {
+            crate::ApiError::reported("settings_error", "Could not save settings.", error)
+        })?;
         self.update_state(|state| state.settings = settings);
         Ok(())
     }
@@ -80,22 +82,20 @@ impl Core {
     }
 
     pub async fn factory_reset(&self) -> Result<(), crate::ApiError> {
-        self.reset_profiles()
-            .await
-            .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
-        self.reset_settings()
-            .await
-            .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
+        self.reset_profiles().await.map_err(|e| {
+            crate::ApiError::reported("factory_reset", "Could not remove profiles.", e)
+        })?;
+        self.reset_settings().await.map_err(|e| {
+            crate::ApiError::reported("factory_reset", "Could not reset settings.", e)
+        })?;
 
-        let settings = self
-            .load_settings()
-            .await
-            .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
+        let settings = self.load_settings().await.map_err(|e| {
+            crate::ApiError::reported("factory_reset", "Could not load settings.", e)
+        })?;
 
-        let profiles_cfg = self
-            .list_profiles()
-            .await
-            .map_err(|e| crate::ApiError::new("error", e.to_string()))?;
+        let profiles_cfg = self.list_profiles().await.map_err(|e| {
+            crate::ApiError::reported("factory_reset", "Could not load profiles.", e)
+        })?;
 
         let mut profiles = std::collections::BTreeMap::new();
         for p in profiles_cfg.profiles {
@@ -185,7 +185,14 @@ mod tests {
 
             let mut unsaved = persisted.clone();
             unsaved.startup.auto_check_profiles_on_startup = false;
-            assert!(core.save_settings(unsaved).await.is_err());
+            let error = core
+                .save_settings(unsaved)
+                .await
+                .expect_err("blocked settings path");
+            assert_eq!(error.message, "Could not save settings.");
+            assert!(!error
+                .message
+                .contains(&temp_dir.path().display().to_string()));
             assert_eq!(core.read_state(|state| state.settings.clone()), persisted);
 
             std::fs::remove_file(temp_dir.path()).expect("remove config path blocker");

@@ -314,7 +314,9 @@ impl Core {
             config.save_profiles(&cfg)
         })
         .await
-        .map_err(|error| crate::ApiError::new("profile_delete", error.to_string()))?;
+        .map_err(|error| {
+            crate::ApiError::reported("profile_delete", "Could not remove the profile.", error)
+        })?;
 
         self.update_state(|state| {
             state.profiles.remove(&profile_id);
@@ -358,8 +360,13 @@ impl Core {
 
         let servers = load_cached_repo_servers(
             &profile,
-            self.profile_state_root_dir()
-                .map_err(|e| crate::ApiError::new("state_root", e.to_string()))?,
+            self.profile_state_root_dir().map_err(|e| {
+                crate::ApiError::reported(
+                    "state_root",
+                    "Could not access Fleet data. Check folder permissions.",
+                    e,
+                )
+            })?,
         )
         .await?
         .unwrap_or_default();
@@ -378,8 +385,14 @@ pub(crate) fn load_cached_repo_servers_blocking(
 ) -> Result<Option<Vec<RepoServer>>, crate::ApiError> {
     let (cache_root, repo_url) = swifty_cache_target(profile, &state_root)?;
 
-    let Some(cache) = swifty_repo::load_cached_repo_blocking(&cache_root, &repo_url)
-        .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
+    let Some(cache) =
+        swifty_repo::load_cached_repo_blocking(&cache_root, &repo_url).map_err(|e| {
+            crate::ApiError::reported(
+                "swifty_cache",
+                "Could not read repository data. Run Sync to download it again.",
+                e,
+            )
+        })?
     else {
         return Ok(None);
     };
@@ -405,7 +418,13 @@ pub(crate) async fn load_cached_repo_servers(
     let profile = profile.clone();
     tokio::task::spawn_blocking(move || load_cached_repo_servers_blocking(&profile, state_root))
         .await
-        .map_err(|e| crate::ApiError::new("swifty_cache", e.to_string()))?
+        .map_err(|e| {
+            crate::ApiError::reported(
+                "swifty_cache",
+                "Could not read repository data. Run Sync to download it again.",
+                e,
+            )
+        })?
 }
 
 pub(crate) fn set_profile_repo_servers_runtime(
@@ -422,11 +441,20 @@ fn swifty_cache_target(
     profile: &Profile,
     state_root: &Path,
 ) -> Result<(PathBuf, String), crate::ApiError> {
-    profile
-        .dest_path()
-        .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
-    let repo_url = validated_repo_url(&profile.source)
-        .map_err(|e| crate::ApiError::new("invalid_profile", e.to_string()))?;
+    profile.dest_path().map_err(|e| {
+        crate::ApiError::reported(
+            "invalid_profile",
+            "Choose a destination folder and a valid repository URL in profile settings.",
+            e,
+        )
+    })?;
+    let repo_url = validated_repo_url(&profile.source).map_err(|e| {
+        crate::ApiError::reported(
+            "invalid_profile",
+            "Choose a destination folder and a valid repository URL in profile settings.",
+            e,
+        )
+    })?;
     Ok((
         fleet_domain::repo_cache_dir(state_root, &profile.id),
         repo_url.to_string(),
@@ -532,21 +560,21 @@ fn clear_profile_check_state(state: &mut AppState, profile_id: &str, now_ms: u64
 
 fn map_profile_save_error(err: &SaveProfileError) -> crate::ApiError {
     match err {
-        SaveProfileError::DestinationInUse {
-            existing_profile_id,
-        } => crate::ApiError::new(
+        SaveProfileError::DestinationInUse { .. } => crate::ApiError::reported(
             "destination_in_use",
-            format!(
-                "destination already used by profile {}",
-                existing_profile_id
-            ),
+            "This folder is already used by another profile. Choose a different folder.",
+            err,
         ),
-        SaveProfileError::InvalidSource(source_err) => {
-            crate::ApiError::new("error", source_err.to_string())
-        }
-        SaveProfileError::Persistence(persistence_err) => {
-            crate::ApiError::new("error", persistence_err.to_string())
-        }
+        SaveProfileError::InvalidSource(error) => crate::ApiError::reported(
+            "invalid_profile",
+            "Enter a valid HTTP or HTTPS repository URL.",
+            error,
+        ),
+        SaveProfileError::Persistence(error) => crate::ApiError::reported(
+            "profile_save",
+            "Could not save the profile. Check folder permissions.",
+            error,
+        ),
     }
 }
 
@@ -848,7 +876,10 @@ mod tests {
                 .expect_err("destination conflict should fail");
 
             assert_eq!(err.code, "destination_in_use");
-            assert_eq!(err.message, "destination already used by profile p1");
+            assert_eq!(
+                err.message,
+                "This folder is already used by another profile. Choose a different folder."
+            );
         });
     }
 }

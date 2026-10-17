@@ -107,9 +107,13 @@ impl OperationRuntime {
         operation: OperationKind,
     ) -> Result<u64, ApiError> {
         #[cfg(feature = "flux")]
-        let state_root = core
-            .profile_state_root_dir()
-            .map_err(|err| ApiError::new("state_root", err.to_string()))?;
+        let state_root = core.profile_state_root_dir().map_err(|err| {
+            ApiError::reported(
+                "state_root",
+                "Could not access Fleet data. Check folder permissions.",
+                err,
+            )
+        })?;
         let reservation = self.reserve_profile_mutation(profile_id.clone())?;
         let profile = self.load_profile(&core, &profile_id)?;
         let session_id = core.allocate_session_id();
@@ -198,7 +202,7 @@ impl OperationRuntime {
                     rt.finish(
                         &core,
                         session_id,
-                        Err(ApiError::new("canceled", "canceled")),
+                        Err(ApiError::new("canceled", "Canceled")),
                         reservation,
                     );
                     return;
@@ -234,13 +238,16 @@ impl OperationRuntime {
         let profiles = core
             .config_repo()
             .load_profiles()
-            .map_err(|err| ApiError::new("config", err.to_string()))?;
+            .map_err(|err| ApiError::reported("config", "Could not load profiles.", err))?;
         let Some(profile) = profiles
             .profiles
             .into_iter()
             .find(|profile| &profile.id == profile_id)
         else {
-            return Err(ApiError::new("not_found", "profile not found"));
+            return Err(ApiError::new(
+                "not_found",
+                "This profile is no longer available.",
+            ));
         };
         core.update_state(|state| {
             state.profiles.insert(profile.id.clone(), profile.clone());
@@ -265,7 +272,7 @@ impl OperationRuntime {
             // Serialize the terminal decision with cancellation, including the
             // validation-to-repair boundary. The reservation outlives all workers.
             if record.cancel.is_cancelled() {
-                out = Err(ApiError::new("canceled", "canceled"));
+                out = Err(ApiError::new("canceled", "Canceled"));
             }
             if let Some(runtime) = state.profile_runtime_by_id.get_mut(&record.profile_id) {
                 let (status, error) = match &out {
@@ -392,10 +399,13 @@ impl OperationRuntime {
         self.cancel(core, session_id);
         // Keep our own receiver: the UI may consume and remove this session.
         while terminal_rx.borrow().is_none() {
-            terminal_rx
-                .changed()
-                .await
-                .map_err(|_| ApiError::new("internal", "session terminal channel closed"))?;
+            terminal_rx.changed().await.map_err(|error| {
+                ApiError::reported(
+                    "internal",
+                    "Could not finish the operation. Try again.",
+                    error,
+                )
+            })?;
         }
         Ok(())
     }
@@ -407,7 +417,10 @@ impl OperationRuntime {
         let mut terminal_rx = {
             let sessions = self.sessions.lock().unwrap();
             let Some(record) = sessions.get(&session_id) else {
-                return Err(ApiError::new("not_found", "session not found"));
+                return Err(ApiError::new(
+                    "not_found",
+                    "This operation is no longer available.",
+                ));
             };
             record.terminal_rx.clone()
         };
@@ -416,7 +429,7 @@ impl OperationRuntime {
             if let Some(done) = terminal_rx.borrow().clone() {
                 self.sessions.lock().unwrap().remove(&session_id);
                 if done.canceled {
-                    return Err(ApiError::new("canceled", "canceled"));
+                    return Err(ApiError::new("canceled", "Canceled"));
                 }
                 if let Some(err) = done.error {
                     return Err(err);
@@ -425,9 +438,13 @@ impl OperationRuntime {
                     return Ok(output);
                 }
             }
-            if terminal_rx.changed().await.is_err() {
+            if let Err(error) = terminal_rx.changed().await {
                 self.sessions.lock().unwrap().remove(&session_id);
-                return Err(ApiError::new("internal", "session terminal channel closed"));
+                return Err(ApiError::reported(
+                    "internal",
+                    "Could not finish the operation. Try again.",
+                    error,
+                ));
             }
         }
     }
@@ -619,7 +636,7 @@ mod tests {
                 cancel.cancelled().await;
                 assert!(worker_runtime.reserve_profile_mutation("p1".to_string()).is_err());
                 worker_runtime.finish(&worker_core, 9,
-                    Err(crate::ApiError::new("canceled", "canceled")), reservation);
+                    Err(crate::ApiError::new("canceled", "Canceled")), reservation);
                 worker_runtime.sessions.lock().unwrap().remove(&9);
             });
             runtime.cancel_update_check(&core, "p1").await.unwrap();

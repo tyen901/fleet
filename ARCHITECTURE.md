@@ -29,6 +29,13 @@ performed; avoid additional scans whose only purpose is reporting.
 
 ## Evidence and persistence
 
+User-facing errors contain concise, authored messages and necessary corrective
+actions. Convert dependency and runtime failures at the application boundary;
+record their diagnostics in structured logs. Never put error chains, response
+bodies, debug output, or internal identifiers in labels, notices, or overlays.
+`ApiError` constructors require static UI copy so diagnostic formatting cannot
+accidentally become a displayed message. Updater failures follow the same contract.
+
 Observations must describe what was actually checked or completed. Persist them
 atomically so reuse never depends on a partially committed claim. Keep durable,
 target-bound reuse evidence separate from transient plans, progress, staging,

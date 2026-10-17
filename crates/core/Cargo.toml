@@ -29,3 +29,5 @@ rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+flux = { workspace = true }
+object_store = { workspace = true }
