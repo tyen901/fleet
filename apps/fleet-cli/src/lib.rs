@@ -89,7 +89,7 @@ pub async fn run() -> anyhow::Result<()> {
     fleet_core::logging::init(fleet_core::logging::LoggingConfig {
         project_dir_name: "fleet-cli",
         file_prefix: "fleet-cli",
-        debug_enabled: cfg!(debug_assertions) && cli.debug,
+        debug_enabled: cli.debug,
     })?;
     let args: Vec<String> = std::env::args().collect();
     info!(?args, "fleet-cli launched");

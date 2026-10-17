@@ -21,7 +21,11 @@ pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<Arc<dyn
     let store_url = index.base_url.strip_suffix('/').unwrap_or(&index.base_url);
     let store = HttpBuilder::new()
         .with_url(store_url)
-        .with_client_options(ClientOptions::new().with_allow_http(true))
+        .with_client_options(
+            ClientOptions::new()
+                .with_allow_http(true)
+                .with_timeout_disabled(),
+        )
         .build()
         .context("build Swifty HTTP object store")?;
     let mut hits_by_key: HashMap<ContentKey, Vec<SourceRange>> = HashMap::new();
