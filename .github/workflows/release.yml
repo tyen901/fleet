@@ -68,6 +68,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           overwrite_files: true
           files: |
