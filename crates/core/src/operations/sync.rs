@@ -1,7 +1,7 @@
 use crate::operations::progress::progress_channel;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
-use fleet_domain::{observation_db_path, validated_repo_url, LocalFileHealth, Profile};
+use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
 use fleet_inventory::FleetInventory;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +28,6 @@ pub(crate) async fn sync(
         )
     })?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let inventory_db = observation_db_path(&dest);
 
     publisher.stage(OperationStage::LoadingExpectedState);
     let downloads = fleet_download::DownloadService::new_default();
@@ -49,15 +48,13 @@ pub(crate) async fn sync(
         )
     })?;
     let inventory = Arc::new(
-        FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id()).map_err(
-            |error| {
-                crate::ApiError::reported(
-                    "inventory",
-                    "Could not prepare the local file inventory. Check folder permissions.",
-                    error,
-                )
-            },
-        )?,
+        FleetInventory::open(&dest, fleet_flux::swifty_profile_id()).map_err(|error| {
+            crate::ApiError::reported(
+                "inventory",
+                "Could not prepare the local file inventory. Check folder permissions.",
+                error,
+            )
+        })?,
     );
     let catalog = inventory.clone();
     let manifest = input.manifest().clone();

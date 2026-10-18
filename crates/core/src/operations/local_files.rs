@@ -1,5 +1,5 @@
 use fleet_domain::health::{LocalFileReport, VerificationKind};
-use fleet_domain::{observation_db_path, validated_repo_url, LocalFileHealth, Profile};
+use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
 use fleet_inventory::FleetInventory;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,7 +73,6 @@ async fn check_or_validate(
         )
     })?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let inventory_db = observation_db_path(&dest);
     let Some(input) = fleet_flux::load_cached_swifty_materialization_input(repo_url, &repo_cache)
         .map_err(|error| {
         crate::ApiError::reported(
@@ -89,34 +88,38 @@ async fn check_or_validate(
             LocalFileHealth::ExpectedStateUnavailable,
         ));
     };
-    if !inventory_db.is_file() && matches!(read_kind, ReadKind::Check { .. }) {
-        return Ok(report(
-            profile,
-            verification_kind,
-            LocalFileHealth::InventoryUnavailable,
-        ));
-    }
-    let inventory =
-        match FleetInventory::open(&inventory_db, &dest, fleet_flux::swifty_profile_id()) {
-            Ok(inventory) => Arc::new(inventory),
-            Err(
-                fleet_inventory::InventoryError::Incompatible
-                | fleet_inventory::InventoryError::CorruptDatabase,
-            ) => {
-                return Ok(report(
-                    profile,
-                    verification_kind,
-                    LocalFileHealth::InventoryUnavailable,
-                ))
-            }
-            Err(error) => {
-                return Err(crate::ApiError::reported(
-                    "inventory",
-                    "Could not access the local file inventory. Check folder permissions.",
-                    error,
-                ))
-            }
-        };
+    let opened = if matches!(read_kind, ReadKind::Check { .. }) {
+        FleetInventory::open_existing(&dest, fleet_flux::swifty_profile_id())
+    } else {
+        FleetInventory::open(&dest, fleet_flux::swifty_profile_id()).map(Some)
+    };
+    let inventory = match opened {
+        Ok(Some(inventory)) => Arc::new(inventory),
+        Ok(None) => {
+            return Ok(report(
+                profile,
+                verification_kind,
+                LocalFileHealth::InventoryUnavailable,
+            ))
+        }
+        Err(
+            fleet_inventory::InventoryError::Incompatible
+            | fleet_inventory::InventoryError::CorruptDatabase,
+        ) => {
+            return Ok(report(
+                profile,
+                verification_kind,
+                LocalFileHealth::InventoryUnavailable,
+            ))
+        }
+        Err(error) => {
+            return Err(crate::ApiError::reported(
+                "inventory",
+                "Could not access the local file inventory. Check folder permissions.",
+                error,
+            ))
+        }
+    };
     if cancel.is_cancelled() {
         return Err(crate::ApiError::new("canceled", "Canceled"));
     }

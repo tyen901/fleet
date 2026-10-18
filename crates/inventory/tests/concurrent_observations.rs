@@ -28,8 +28,7 @@ fn file(index: usize) -> FileSpec {
 #[test]
 fn parallel_observations_remain_atomic_and_terminal_callbacks_can_read() {
     let temp = tempfile::tempdir().unwrap();
-    let inventory =
-        FleetInventory::open(&temp.path().join("facts.sqlite"), temp.path(), PROFILE).unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let manifest = Manifest::new(PROFILE, (0..8).map(file).collect(), vec![]).unwrap();
     std::thread::scope(|scope| {
         for spec in manifest.files() {
@@ -85,21 +84,38 @@ fn parallel_observations_remain_atomic_and_terminal_callbacks_can_read() {
 #[test]
 fn outstanding_observation_holds_session_exclusion_and_discards_partial_facts() {
     let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("facts.sqlite");
-    let inventory = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file(0);
     let mut writer = inventory.begin_observation(&spec.path).unwrap();
     writer.append(&spec.segments).unwrap();
     drop(inventory);
     assert!(matches!(
-        FleetInventory::open(&db, temp.path(), PROFILE),
+        FleetInventory::open(temp.path(), PROFILE),
         Err(InventoryError::Locked)
     ));
     drop(writer);
-    let reopened = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let reopened = FleetInventory::open(temp.path(), PROFILE).unwrap();
     assert!(reopened.observed(&spec.path).unwrap().is_none());
     assert!(reopened
         .lookup(&spec.segments[0].key, 1)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn read_only_open_does_not_create_state_and_all_observations_are_target_local() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    assert!(FleetInventory::open_existing(&target, PROFILE)
+        .unwrap()
+        .is_none());
+    assert!(!target.exists());
+    let inventory = FleetInventory::open(&target, PROFILE).unwrap();
+    assert!(target.join(".fleet/observations.sqlite").is_file());
+    assert!(target.join(".fleet/observations.lock").is_file());
+    assert!(!target.join("observations.sqlite").exists());
+    drop(inventory);
+    assert!(FleetInventory::open_existing(&target, PROFILE)
+        .unwrap()
+        .is_some());
 }

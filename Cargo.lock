@@ -1919,7 +1919,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "2.0.0"
-source = "git+https://github.com/tyen901/flux.git?rev=903f0104a1fdb464bc86230c1d85954d7e560655#903f0104a1fdb464bc86230c1d85954d7e560655"
+source = "git+https://github.com/tyen901/flux.git?rev=09651421b87757d0154761697f58e1ef554b5c7e#09651421b87757d0154761697f58e1ef554b5c7e"
 dependencies = [
  "blake3",
  "cap-fs-ext",
@@ -5786,6 +5786,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swifty_artifacts",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

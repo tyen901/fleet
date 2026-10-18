@@ -240,7 +240,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "sync must remove destination paths outside the requested manifest"
     );
 
-    let inventory_db = fleet_domain::observation_db_path(&dest_root);
+    let inventory_db = dest_root.join(".fleet/observations.sqlite");
     assert!(inventory_db.exists(), "inventory db missing");
 
     fs::write(&inventory_db, b"corrupt inventory").expect("corrupt inventory database");

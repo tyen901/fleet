@@ -4,7 +4,7 @@
 
 Flux now constructs eligible remote content directly in its private destination stage while the response body is arriving. It avoids a durable artifact and second copy for keys whose remaining changed placements belong to one destination. Network admission and blocking file work have separate limits, and standard Tokio/futures APIs supply task, queue, and wakeup mechanics.
 
-The reviewed production baseline is c522b54. Fleet pins production implementation 5ca5a01. Flux HEAD bc3aa3c contains the recorded performance results and has no production source difference from that pinned implementation. The measured candidate executable was built from 3c76054, which adds fixture changes to 5ca5a01; the measured baseline uses unchanged old production code with the common harness in d8c0d86.
+The benchmark-era reviewed production baseline was c522b54 and candidate production implementation was 5ca5a01. Benchmark-era Flux HEAD bc3aa3c contained the recorded results with no additional production source difference. These are historical executable identities from before the requested Git identity rewrite. Fleet now pins the cleanup implementation 0965142. The measured candidate executable was built from 3c76054, which adds fixture changes to 5ca5a01; the measured baseline uses unchanged old production code with the common harness in d8c0d86.
 
 All 48 matched HTTP trials passed exact verification. The actual PCA target is complete and all 85.7 GB passed content validation. The first large PCA transfer stalled near completion and was canceled; the successful retry does not explain that stall or establish uninterrupted full-run throughput.
 
@@ -45,7 +45,7 @@ Active writers share Arc<Mutex<StageFile>>. The mutex protects synchronous seek/
 
 Downloaded measures actual remote bytes. Written and Patched for direct construction follow successful stage writes and include repeated placements. Fetched outcome bytes count each remote key once; written outcome bytes count completed destination coverage.
 
-Publication remains serialized because namespace mutation and source preservation require it. Before admitting publication, the engine computes exhausted durable keys from placement counts. The blocking publication job records durable publication evidence, removes those checkpoints in one redb transaction, unlinks artifacts, and synchronizes the workspace. Coordinator completion performs bookkeeping rather than artifact filesystem/database cleanup.
+Publication currently serializes all namespace mutations. Conflicting mutations and protected source reads require ordering; global serialization is the present implementation choice, not an intrinsic correctness requirement. Before admitting publication, the engine computes exhausted durable keys from placement counts. The blocking publication job records durable publication evidence, removes those checkpoints in one redb transaction, unlinks artifacts, and synchronizes the workspace. Coordinator completion performs bookkeeping rather than artifact filesystem/database cleanup.
 
 ## Resource API and execution policy
 
@@ -142,9 +142,13 @@ This establishes completed correct materialization, fast observed bulk transfer,
 
 ## HTTP configuration decision
 
-Fleet disables object_store's default 30-second whole-request timeout, which includes response consumption. ClientOptions in object_store 0.13.2 exposes no idle-read timeout. No timeout adapter was added to explain the unreproduced stall.
+Fleet now uses object_store's default 30-second whole-request timeout. The
+previous `with_timeout_disabled` override was added in the throughput change
+without evidence justifying an indefinite response wait and has been removed.
+The default covers response consumption and consumer backpressure, not just idle
+reads: a healthy long transfer can still time out. This change does not diagnose
+or prove a fix for the earlier PCA stall. No timeout adapter was added.
 
-If later evidence warrants idle-read timeout, reqwest already supplies ClientBuilder::read_timeout, and object_store already implements HttpService for its reqwest 0.12 Client. A small HttpConnector factory can return HttpClient::new(configured_client.clone()); no custom request/body/range/retry implementation is necessary. Fleet's reqwest 0.13 client is a different type. Preserve object_store's HTTP/1 and disabled-compression choices when configuring a replacement client. [ClientOptions](https://docs.rs/object_store/0.13.2/object_store/client/struct.ClientOptions.html), [HttpService](https://docs.rs/object_store/0.13.2/object_store/client/trait.HttpService.html), [reqwest read timeout](https://docs.rs/reqwest/0.12.28/reqwest/struct.ClientBuilder.html#method.read_timeout)
 
 ## Implementation ownership and deleted policy
 
@@ -158,3 +162,73 @@ If later evidence warrants idle-read timeout, reqwest already supplies ClientBui
 | Fleet consumer and dependency pin | Adopt the breaking limits API and production revision; validate actual PCA output. |
 
 Deleted policy includes mandatory remote singleton artifacts, duplicate artifact reservations, their second assembly copy and per-key checkpoints, one blocking dispatch per chunk, the shared active_work API/gate, serialized planning, the arbitrary admitted-file gate, queue-head blocking, and coordinator-side artifact retirement. No fallback path or compatibility shim retains those policies.
+
+## Historical policy audit and cleanup (2026-10-18)
+
+The cleanup is deliberately breaking. Fleet has one target-local observation
+path (`.fleet/observations.sqlite`); arbitrary database paths and their conditional
+safety checks are gone. Existing-target checks do not create storage. There is no
+old-path migration or retained compatibility API.
+
+| Historical or newly added policy | Cleanup and evidence |
+| --- | --- |
+| Progress-only source preflight (`cfa59d10`, retained through `38effac`) | Removed the global extra local-lookup pass and `DownloadPlan` API. Actual bytes drive download progress; assembly bytes drive ETA. The lookup-once regression fails when the old preflight is restored and passes with the replacement. |
+| Goal-wide artifact probes, including new direct singleton keys | Recovery now streams actual checkpoint rows and existing artifacts. Only validated, still-demanded evidence becomes ready; stale, missing and orphaned artifacts are removed. A recovery regression covers all four cases. |
+| Scanner thread and channel(1) (`18a6bb02`/`8107fa64`) | Scan and observation append run together on the admitted blocking worker. Partial observations remain invisible on failure. |
+| Remote candidate vectors with unused alternatives | `ContentSource::lookup` returns one optional selected occurrence per key. Fleet stores only its deterministic selected occurrence. Local freshness alternatives remain a distinct inventory responsibility. |
+| Synchronous failed-stage cleanup and pipeline destruction | Awaited blocking teardown now owns unlinking and final cleanup, keeping filesystem work off async coordinator threads. |
+| Four-connection SQLite pool tuning (`c49b95e`) | Removed custom pool sizing, idle, checkout and timeout settings; use r2d2 defaults. Removed the duplicate rusqlite busy-timeout override. Library defaults are not a claim of optimal sizing. |
+| Retaining old HTTP validators after a new response omitted them | Removed the fallback merge. Fresh responses replace hints; a repeated-request regression proves old validators do not return. Conditional 304 handling remains normal HTTP cache semantics. |
+| Metadata client idle pool limit and zero-to-one request coercion | Removed idle-pool override; concurrency is now nonzero in the type rather than silently coerced to serial execution. |
+| Disabled bulk request timeout (this throughput pass) | Removed as described above; no speculative replacement timeout system. |
+
+### Remaining execution policy, explicitly not proven optimal
+
+- **Inventory is still a global barrier before acquisition.** It establishes all
+  fresh local reuse and fixed choices before writes can destroy sources.
+- **Lookup pagination fragments transport.** Coalescing flushes at the lookup
+  batch boundary (default 128 keys), even for contiguous ranges. This inherited
+  behavior (`7a6ca21`) is an incidental transport limit, not a correctness need.
+- **`network_requests` counts whole pipelines.** The throughput implementation
+  (`38effac`) holds slots through local lookup waits and post-EOF disk completion;
+  all slots can be occupied without active HTTP. It bounds queued work as well as
+  transfer. It must not be described as an exact active-request count.
+- **Publication still serializes globally** (inherited `7a6ca21`). Ordering
+  conflicting namespace mutations and protected reads is necessary; global
+  serialization is not. Parent creation currently depends on it. The earlier
+  proposal overstated the necessity of the global gate.
+- **Default limits remain chosen policy:** file workers 4, acquisition pipelines
+  8, lookup batch 128, local candidates 4, chunk queue 8, chunks 64 KiB and staging
+  64 GiB. The matched benchmarks validate the combined implementation, not each
+  number's independent optimality. Reservations enforce real disk ownership;
+  buffer peak accounting is observational, not an extra admission controller.
+- **Metadata HTTP still explicitly uses** 5-second connect / 20-second total
+  deadlines, two community-middleware retries and eight concurrent requests.
+  Bulk HTTP uses object_store's own timeout/retry behavior. These are distinct
+  paths. No evidence establishes these metadata values as throughput-optimal.
+
+The remaining barriers are reported, not silently defended as required by the
+libraries. Removing them safely needs changes to actual source planning,
+coalescing or namespace ownership; deleting their gates alone would introduce
+races or unbounded queued work. No second scheduler, custom latch, fallback source
+selection, or timeout adapter was introduced to conceal them.
+
+
+### Cleanup verification
+
+Fleet workspace build, full workspace tests, strict all-target Clippy, formatting
+and diff checks passed. Flux all-target workspace tests (including 50
+materialization regressions), strict Clippy and formatting passed for 0965142.
+The restored progress-preflight negative control failed with duplicate lookup;
+the replacement passes. This is additional regression evidence, not a rerun of
+the historical 48-trial performance comparison.
+
+Release CLI against actual PCA: the first cleanup sync rebuilt absent observation
+state, read the 85,732,470,520-byte target and completed cleanly in 51.735 seconds,
+keeping all 3,320 files with zero fetch/write work. Full content validation then
+passed in 43.597 seconds. The next warm sync completed in 2.890 seconds with all
+3,320 files kept, zero fetched/written bytes, Clean / UpToDate / Materialized.
+These are observed local timings with uncontrolled cache state; no build or tests
+ran concurrently. Logs: target/pca-sync/policy-sync.log, policy-validate.log and
+policy-warm-sync.log. This warm run does not test bulk HTTP timeout behavior or
+resolve the earlier near-tail transport stall.

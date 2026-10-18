@@ -4,7 +4,6 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use flux::{
     ConfirmedFile, ContentKey, Error, ErrorKind, Inventory, LocalOccurrence, Manifest,
@@ -93,31 +92,29 @@ impl InventorySession {
 }
 
 impl FleetInventory {
-    /// Opens a fresh target-bound observation database and holds its session lock.
+    /// Opens observations owned exclusively by this target's `.fleet` workspace.
     pub fn open(
-        db_path: &Path,
         target_root: &Path,
         profile: ProfileId,
     ) -> std::result::Result<Self, InventoryError> {
         let workspace = flux::workspace_dir(target_root)
             .map_err(|error| InventoryError::Message(error.to_string()))?;
-        if db_path == target_root.join(".fleet/observations.sqlite") {
-            for name in [
-                "observations.sqlite",
-                "observations.lock",
-                "observations.sqlite-wal",
-                "observations.sqlite-shm",
-            ] {
-                let path = workspace.join(name);
-                if let Ok(metadata) = std::fs::symlink_metadata(path) {
-                    if !metadata.is_file() || metadata.file_type().is_symlink() {
-                        return Err(InventoryError::Message("invalid observation file".into()));
-                    }
+        let db_path = workspace.join("observations.sqlite");
+        for name in [
+            "observations.sqlite",
+            "observations.lock",
+            "observations.sqlite-wal",
+            "observations.sqlite-shm",
+        ] {
+            let path = workspace.join(name);
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                    return Err(InventoryError::Message("invalid observation file".into()))
                 }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-        }
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
         }
         let lock_path = db_path.with_extension("lock");
         std::fs::OpenOptions::new()
@@ -128,7 +125,7 @@ impl FleetInventory {
             .map_err(InventoryError::Other)?
             .ok_or(InventoryError::Locked)?;
         let fresh = !db_path.is_file();
-        let conn = open_connection(db_path)?;
+        let conn = open_connection(&db_path)?;
         if fresh {
             initialize(&conn).map_err(map_sqlite_error)?;
             bind(&conn, target_root, profile).map_err(map_sqlite_error)?;
@@ -138,14 +135,9 @@ impl FleetInventory {
         }
         drop(conn);
         let manager =
-            SqliteConnectionManager::file(db_path).with_init(|conn| configure_connection(conn));
-        let pool = r2d2::Pool::builder()
-            .max_size(4)
-            .min_idle(Some(1))
-            .test_on_check_out(false)
-            .connection_timeout(Duration::from_secs(5))
-            .build(manager)
-            .map_err(|error| InventoryError::Message(error.to_string()))?;
+            SqliteConnectionManager::file(&db_path).with_init(|conn| configure_connection(conn));
+        let pool =
+            r2d2::Pool::new(manager).map_err(|error| InventoryError::Message(error.to_string()))?;
         Ok(Self {
             session: Arc::new(InventorySession {
                 db_path: db_path.to_path_buf(),
@@ -154,6 +146,20 @@ impl FleetInventory {
             }),
             profile,
         })
+    }
+
+    /// Checks need existing facts and must not create a new target or database.
+    pub fn open_existing(
+        target_root: &Path,
+        profile: ProfileId,
+    ) -> std::result::Result<Option<Self>, InventoryError> {
+        if !target_root
+            .join(".fleet/observations.sqlite")
+            .try_exists()?
+        {
+            return Ok(None);
+        }
+        Self::open(target_root, profile).map(Some)
     }
 
     /// Registers immutable known recipes before a materialization run.
@@ -820,7 +826,6 @@ fn open_connection(path: &Path) -> std::result::Result<Connection, InventoryErro
 }
 
 fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
-    conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
 }
 

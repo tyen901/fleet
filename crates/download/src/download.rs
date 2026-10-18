@@ -9,6 +9,7 @@ use reqwest::StatusCode;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use std::io::Write;
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, error};
@@ -19,7 +20,7 @@ pub struct DownloadServiceConfig {
     pub connect_timeout: Duration,
     pub timeout: Duration,
     pub retries: u16,
-    pub parallel_requests: u16,
+    pub parallel_requests: NonZeroU16,
 }
 
 impl Default for DownloadServiceConfig {
@@ -29,7 +30,7 @@ impl Default for DownloadServiceConfig {
             connect_timeout: Duration::from_secs(5),
             timeout: Duration::from_secs(20),
             retries: 2,
-            parallel_requests: 8,
+            parallel_requests: NonZeroU16::new(8).unwrap(),
         }
     }
 }
@@ -51,7 +52,6 @@ impl DownloadService {
             .default_headers(headers)
             .connect_timeout(cfg.connect_timeout)
             .timeout(cfg.timeout)
-            .pool_max_idle_per_host(16)
             .build()
             .expect("build reqwest client");
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(cfg.retries as u32);
@@ -66,7 +66,7 @@ impl DownloadService {
     }
 
     pub fn parallel_requests(&self) -> usize {
-        usize::from(self.cfg.parallel_requests.max(1))
+        usize::from(self.cfg.parallel_requests.get())
     }
 
     pub async fn download_one(
@@ -253,7 +253,7 @@ mod tests {
             axum::serve(listener, app).await.expect("serve requests");
         });
         let service = DownloadService::new(DownloadServiceConfig {
-            parallel_requests: 2,
+            parallel_requests: NonZeroU16::new(2).unwrap(),
             ..DownloadServiceConfig::default()
         });
         let specs = (0..3)

@@ -20,7 +20,6 @@ const ETA_STALL_TIMEOUT: Duration = Duration::from_secs(15);
 struct WorkProgress {
     check_total: Option<u64>,
     checked: u64,
-    download_total: Option<u64>,
     downloaded: u64,
     patch_total: Option<u64>,
     rebuilt: u64,
@@ -34,7 +33,6 @@ impl WorkProgress {
         match event {
             InventoryPlan { bytes } => self.check_total = Some(bytes),
             Checked { bytes, .. } => self.checked += bytes,
-            DownloadPlan { bytes } => self.download_total = Some(bytes),
             Downloaded { bytes } => self.downloaded += bytes,
             PatchPlan { bytes } => self.patch_total = Some(bytes),
             Patched { bytes, .. } => self.rebuilt += bytes,
@@ -54,7 +52,7 @@ impl WorkProgress {
                 ProgressTrack {
                     kind: ProgressTrackKind::Download,
                     done: self.downloaded,
-                    total: self.download_total,
+                    total: self.finalizing.then_some(self.downloaded),
                 },
                 ProgressTrack {
                     kind: ProgressTrackKind::Patch,
@@ -195,7 +193,7 @@ impl RateSample {
             self.disk_rate +=
                 (disk.saturating_sub(self.disk) as f64 / elapsed - self.disk_rate) * alpha;
             let current = if work.patch_total.is_some() {
-                work.downloaded + work.rebuilt
+                work.rebuilt
             } else {
                 work.checked_bytes()
             };
@@ -215,10 +213,7 @@ impl RateSample {
         if now.duration_since(self.disk_last_at) >= Duration::from_secs(2) {
             self.disk_rate = 0.;
         }
-        let total = match (work.download_total, work.patch_total) {
-            (Some(a), Some(b)) => Some(a + b),
-            _ => work.check_total,
-        };
+        let total = work.patch_total.or(work.check_total);
         let eta_seconds = total.and_then(|total| {
             if now.duration_since(self.started) < ETA_WARMUP
                 || now.duration_since(self.work_last_at) >= ETA_STALL_TIMEOUT
@@ -392,7 +387,6 @@ mod tests {
             work.read += 100;
             rates.sample_at(&work, start + Duration::from_secs(second));
         }
-        work.download_total = Some(1_000);
         work.patch_total = Some(2_000);
         assert!(rates
             .sample_at(&work, start + Duration::from_secs(31))
@@ -405,7 +399,7 @@ mod tests {
             if second < 36 {
                 assert!(usage.eta_seconds.is_none());
             } else {
-                assert_eq!(usage.eta_seconds, Some(25));
+                assert_eq!(usage.eta_seconds, Some(35));
             }
         }
     }
@@ -413,12 +407,13 @@ mod tests {
     #[test]
     fn patch_and_download_tracks_are_independent() {
         let mut work = WorkProgress::default();
-        work.apply(fleet_flux::ProgressEvent::DownloadPlan { bytes: 40 });
         work.apply(fleet_flux::ProgressEvent::PatchPlan { bytes: 100 });
         work.apply(fleet_flux::ProgressEvent::Downloaded { bytes: 20 });
         work.apply(fleet_flux::ProgressEvent::Patched { bytes: 30 });
         let tracks = work.tracks();
-        assert_eq!((tracks[0].done, tracks[0].total), (20, Some(40)));
+        assert_eq!((tracks[0].done, tracks[0].total), (20, None));
         assert_eq!((tracks[1].done, tracks[1].total), (30, Some(100)));
+        work.apply(fleet_flux::ProgressEvent::Finalizing);
+        assert_eq!(work.tracks()[0].total, Some(20));
     }
 }

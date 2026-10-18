@@ -16,7 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("cached input has no revision")?
         .to_owned();
     let inventory = Arc::new(fleet_inventory::FleetInventory::open(
-        &Path::new(&args[3]).join(".fleet/observations.sqlite"),
         Path::new(&args[3]),
         fleet_flux::swifty_profile_id(),
     )?);

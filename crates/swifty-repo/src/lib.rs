@@ -251,15 +251,12 @@ pub async fn sync_repo_metadata(
                 cache_dirty = true;
             }
 
-            // Update cache hints from GET response (fallback to prior values if absent)
-            let prior = cache.repo_http.clone();
-            let merged_repo_http = HttpCacheHints {
-                etag: etag.or_else(|| prior.as_ref().and_then(|p| p.etag.clone())),
-                last_modified: last_modified
-                    .or_else(|| prior.as_ref().and_then(|p| p.last_modified.clone())),
+            let repo_http = HttpCacheHints {
+                etag,
+                last_modified,
             };
-            if cache.repo_http.as_ref() != Some(&merged_repo_http) {
-                cache.repo_http = Some(merged_repo_http);
+            if cache.repo_http.as_ref() != Some(&repo_http) {
+                cache.repo_http = Some(repo_http);
                 cache_dirty = true;
             }
 
@@ -784,8 +781,10 @@ mod tests {
         *response.status_mut() = status;
         let headers = response.headers_mut();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ETAG, HeaderValue::from_str(etag).expect("valid etag"));
-        headers.insert(LAST_MODIFIED, HeaderValue::from_static(LAST_MODIFIED_VALUE));
+        if !etag.is_empty() {
+            headers.insert(ETAG, HeaderValue::from_str(etag).expect("valid etag"));
+            headers.insert(LAST_MODIFIED, HeaderValue::from_static(LAST_MODIFIED_VALUE));
+        }
         response
     }
 
@@ -811,6 +810,37 @@ mod tests {
             axum::serve(listener, app).await.expect("serve");
         });
         (format!("http://{addr}/repo.json"), task)
+    }
+
+    #[tokio::test]
+    async fn fresh_response_without_validators_discards_cached_http_hints() {
+        let repo = empty_repo_spec("current");
+        let (repo_url, server) = spawn_repo_server(&repo, "", false).await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = FsRepoCacheStore::new(temp.path().to_path_buf());
+        store
+            .save_repo_cache(
+                &repo_url,
+                &make_cache_blob(&repo_url, repo, None, Some("old-etag"), BTreeMap::new()),
+            )
+            .await
+            .unwrap();
+        let downloads = DownloadService::new_default();
+        // Repeating the request must not reintroduce validators from the old body.
+        for _ in 0..2 {
+            sync_repo_metadata(&repo_url, &store, &downloads)
+                .await
+                .unwrap();
+            let cached = store.load_repo_cache(&repo_url).await.unwrap().unwrap();
+            assert_eq!(
+                cached.repo_http,
+                Some(HttpCacheHints {
+                    etag: None,
+                    last_modified: None
+                })
+            );
+        }
+        server.abort();
     }
 
     #[tokio::test]

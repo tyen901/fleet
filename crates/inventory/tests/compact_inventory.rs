@@ -73,12 +73,7 @@ fn count(conn: &Connection, table: &str) -> i64 {
 #[test]
 fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
     let temp = tempfile::tempdir().unwrap();
-    let inventory = FleetInventory::open(
-        &temp.path().join("observations.sqlite"),
-        temp.path(),
-        PROFILE,
-    )
-    .unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let first = file("a", &[(1, 4), (2, 3)]);
     let second = file("b", &[(1, 4), (2, 3)]);
     let goal = manifest(vec![first.clone(), second.clone()]);
@@ -87,7 +82,7 @@ fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
     observe(&inventory, &first, 1);
     observe(&inventory, &second, 2);
 
-    let conn = Connection::open(temp.path().join("observations.sqlite")).unwrap();
+    let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "content"), 2);
     assert_eq!(count(&conn, "recipes"), 1);
     assert_eq!(count(&conn, "recipe_segments"), 2);
@@ -101,12 +96,7 @@ fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
 #[test]
 fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
     let temp = tempfile::tempdir().unwrap();
-    let inventory = FleetInventory::open(
-        &temp.path().join("observations.sqlite"),
-        temp.path(),
-        PROFILE,
-    )
-    .unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let clean = file("clean", &[(1, 4), (2, 3)]);
     let damaged = file("damaged", &[(1, 4), (3, 3)]);
     let goal = manifest(vec![clean.clone()]);
@@ -114,7 +104,7 @@ fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
     observe(&inventory, &clean, 1);
     observe(&inventory, &damaged, 2);
 
-    let conn = Connection::open(temp.path().join("observations.sqlite")).unwrap();
+    let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "recipes"), 2);
     assert_eq!(count(&conn, "content"), 3);
     assert_eq!(count(&conn, "recipe_segments"), 4);
@@ -138,12 +128,7 @@ fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
 #[test]
 fn registering_a_new_goal_keeps_installed_old_recipe() {
     let temp = tempfile::tempdir().unwrap();
-    let inventory = FleetInventory::open(
-        &temp.path().join("observations.sqlite"),
-        temp.path(),
-        PROFILE,
-    )
-    .unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let old = file("old", &[(1, 4), (2, 3)]);
     let new = file("new", &[(1, 4), (3, 3)]);
     let old_goal = manifest(vec![old.clone()]);
@@ -154,7 +139,7 @@ fn registering_a_new_goal_keeps_installed_old_recipe() {
     let new_goal = manifest(vec![old.clone(), new.clone()]);
     inventory.register_manifest(&new_goal).unwrap();
     observe(&inventory, &new, 2);
-    let conn = Connection::open(temp.path().join("observations.sqlite")).unwrap();
+    let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "recipes"), 2);
     terminal(&inventory, &new_goal);
     assert_eq!(count(&conn, "recipes"), 2);
@@ -165,18 +150,13 @@ fn registering_a_new_goal_keeps_installed_old_recipe() {
 #[test]
 fn terminal_failure_rolls_back_all_fact_changes() {
     let temp = tempfile::tempdir().unwrap();
-    let inventory = FleetInventory::open(
-        &temp.path().join("observations.sqlite"),
-        temp.path(),
-        PROFILE,
-    )
-    .unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file("file", &[(1, 4)]);
     let goal = manifest(vec![spec.clone()]);
     inventory.register_manifest(&goal).unwrap();
     observe(&inventory, &spec, 1);
     terminal(&inventory, &goal);
-    let conn = Connection::open(temp.path().join("observations.sqlite")).unwrap();
+    let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     let original_id: i64 = conn
         .query_row(
             "SELECT id FROM observed_files WHERE path = ?1",
@@ -232,8 +212,7 @@ fn terminal_failure_rolls_back_all_fact_changes() {
 #[test]
 fn incomplete_observation_is_invisible_and_previous_complete_fact_survives() {
     let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("observations.sqlite");
-    let inventory = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file("file", &[(1, 4)]);
     observe(&inventory, &spec, 1);
     let mut writer = inventory.begin_observation(&spec.path).unwrap();
@@ -248,29 +227,28 @@ fn incomplete_observation_is_invisible_and_previous_complete_fact_survives() {
         Some(evidence(1, 4))
     );
     drop(inventory);
-    let reopened = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let reopened = FleetInventory::open(temp.path(), PROFILE).unwrap();
     assert_eq!(reopened.observed(&spec.path).unwrap(), Some(evidence(1, 4)));
 }
 
 #[test]
 fn observation_keeps_session_lock_until_finished_or_discarded() {
     let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("observations.sqlite");
-    let inventory = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file("file", &[(1, 4)]);
     let mut writer = inventory.begin_observation(&spec.path).unwrap();
     writer.append(&spec.segments).unwrap();
     drop(inventory);
-    assert!(FleetInventory::open(&db, temp.path(), PROFILE).is_err());
+    assert!(FleetInventory::open(temp.path(), PROFILE).is_err());
     drop(writer);
-    FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    FleetInventory::open(temp.path(), PROFILE).unwrap();
 }
 
 #[test]
 fn read_only_payload_measurement_shows_one_recipe_for_many_files() {
     let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("observations.sqlite");
-    let inventory = FleetInventory::open(&db, temp.path(), PROFILE).unwrap();
+    let db = temp.path().join(".fleet/observations.sqlite");
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let files = (0..64)
         .map(|index| file(&format!("file-{index}"), &[(1, 4), (2, 3)]))
         .collect::<Vec<_>>();
