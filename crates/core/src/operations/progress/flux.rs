@@ -31,6 +31,7 @@ impl WorkProgress {
     fn apply(&mut self, event: fleet_flux::ProgressEvent) {
         use fleet_flux::ProgressEvent::*;
         match event {
+            DownloadPlan { .. } => {}
             InventoryPlan { bytes } => self.check_total = Some(bytes),
             Checked { bytes, .. } => self.checked += bytes,
             Downloaded { bytes } => self.downloaded += bytes,

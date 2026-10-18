@@ -56,11 +56,12 @@ impl ContentSource for SwiftyStoreSource {
     fn lookup<'a>(
         &'a self,
         keys: &'a [ContentKey],
-    ) -> BoxFuture<'a, flux::Result<Vec<Option<SourceRange>>>> {
+        _limit_per_key: usize,
+    ) -> BoxFuture<'a, flux::Result<Vec<Vec<SourceRange>>>> {
         async move {
             Ok(keys
                 .iter()
-                .map(|key| self.hits_by_key.get(key).cloned())
+                .map(|key| self.hits_by_key.get(key).cloned().into_iter().collect())
                 .collect())
         }
         .boxed()
