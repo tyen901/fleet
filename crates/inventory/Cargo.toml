@@ -14,7 +14,10 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+fleet-download = { workspace = true }
 fleet-flux = { workspace = true }
+serde = { workspace = true }
+sha2 = "0.10"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }

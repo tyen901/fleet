@@ -1902,14 +1902,17 @@ dependencies = [
 name = "fleet-inventory"
 version = "0.1.0"
 dependencies = [
+ "fleet-download",
  "fleet-flux",
  "flux",
  "fmutex",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

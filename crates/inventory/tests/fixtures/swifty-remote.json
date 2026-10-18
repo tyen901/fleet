@@ -1,0 +1,54 @@
+{
+  "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+  "total_bytes": 1024514039,
+  "remote_content_bytes": 1010555489,
+  "parts": 11768,
+  "unique_keys": 11750,
+  "files": [
+    {
+      "path": "@rosche/addons/hag_objects.pbo",
+      "length": 44557790,
+      "sha256": "96834081e3ea8997411f4740ba8ffcf58c05700c10545821b90fd9512153b074"
+    },
+    {
+      "path": "@rosche/addons/hag_objects.pbo.wl_rosche_05.bisign",
+      "length": 565,
+      "sha256": "dd14f026c3ab2d5c07e2a34dfb772415b8098b236367432dda97c7f5e3ff7605"
+    },
+    {
+      "path": "@rosche/addons/wl_buildings.pbo",
+      "length": 260358499,
+      "sha256": "237c7bb408fd71a4663b9151dc294fe87b58d6023cfe7a7efdb0c879f998226c"
+    },
+    {
+      "path": "@rosche/addons/wl_buildings.pbo.wl_rosche_05.bisign",
+      "length": 565,
+      "sha256": "2524d174cf1676ac10b36f9be45ccfdc59d95c29bc3b7e7e0c9a13e28ac6bf25"
+    },
+    {
+      "path": "@rosche/addons/wl_rosche.pbo",
+      "length": 719595148,
+      "sha256": "c47c1b871505e29cb52dcfbf2733637310c1bb9b7804fa57e4af74d9ca1ed96e"
+    },
+    {
+      "path": "@rosche/addons/wl_rosche.pbo.wl_rosche_05.bisign",
+      "length": 565,
+      "sha256": "c8db7d9ea79b362a4a2becbea0d81b3b8cb8357c78d062f0f8327b2c42bdb8ae"
+    },
+    {
+      "path": "@rosche/keys/wl_rosche_05.bikey",
+      "length": 165,
+      "sha256": "ba00e5a043b982fbbad350e12d1c7456e45fa49fad06d70a476e469e089f1317"
+    },
+    {
+      "path": "@rosche/meta.cpp",
+      "length": 103,
+      "sha256": "0415472d4f39dab912748fc8f7e2f38d2c17069eaaa33efc7b869679368b1475"
+    },
+    {
+      "path": "@rosche/mod.cpp",
+      "length": 639,
+      "sha256": "f734fb9e3d9887dbd80c5e914980b5e27576107f87adb8a6dcb93067efd5db0a"
+    }
+  ]
+}
