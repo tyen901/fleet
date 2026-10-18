@@ -84,7 +84,10 @@ pub async fn materialize(
     let sources = build_store_sources(input.store_index)?;
     let options = flux::Options {
         cancellation: cancel,
-        limits: flux::Limits::default(),
+        limits: flux::Limits {
+            network_requests: 4,
+            ..flux::Limits::default()
+        },
         observer: None,
         progress: Some(work_progress),
     };
