@@ -1,0 +1,201 @@
+{
+  "date": "2026-10-18",
+  "platform": "Windows-10-10.0.19045-SP0",
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-pc-windows-msvc\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+  "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+  "total_bytes": 1024514039,
+  "remote_content_bytes": 1010555489,
+  "fixture_files": 9,
+  "identities": {
+    "old": {
+      "fleet_revision": "f2cfd2bcdf304efae0f847896a051061d6de7e13",
+      "flux_revision": "7b76b613276538c4b792f727350464f4af9c37c3",
+      "executable": "C:\\projects\\fleet-fixture-old\\target\\release\\deps\\swifty_remote-4edff98bbf3217b3.exe",
+      "executable_sha256": "4bc4746b8b70c61806aac6332f5e6fc7dca67da3a991aaa67b7dee34f417b521",
+      "cargo_lock_sha256": "f2126b2d0640bef0ca5e5c6cccdab3b73f420d66f32551ac18f516c530c8e1f1",
+      "fixture_test_sha256": "abb7d625cc4e901e39c190d57712496ba4d9273555d3009ff2435d9a34720c6f",
+      "fixture_descriptor_sha256": "8092127bab725b818f08a67757c45dd743c9f3287ddeffae9d3fc4afb8a6fdd9"
+    },
+    "current": {
+      "fleet_revision": "9ab5688bacec57fb807a3a265dc316a5d4428ecd",
+      "flux_revision": "09651421b87757d0154761697f58e1ef554b5c7e",
+      "executable": "C:\\projects\\fleet-fixture-current\\target\\release\\deps\\swifty_remote-4deb74bbc09cf102.exe",
+      "executable_sha256": "6ae39d73ca36fd9acdfdf574d24f9b9e5d72f5ae66c80cb5dd41311e04c880f2",
+      "cargo_lock_sha256": "88fd8a26487774b5ae3b7fa896787c8460b723dec793c1d01b1f9e4e08d3e5ec",
+      "fixture_test_sha256": "abb7d625cc4e901e39c190d57712496ba4d9273555d3009ff2435d9a34720c6f",
+      "fixture_descriptor_sha256": "8092127bab725b818f08a67757c45dd743c9f3287ddeffae9d3fc4afb8a6fdd9"
+    }
+  },
+  "conditions": {
+    "release": "opt-level=z, lto=fat, codegen-units=1",
+    "disk": "fresh disposable targets on C: for every child process",
+    "old_limits": {
+      "active_work": 4,
+      "lookup_batch": 128,
+      "candidates_per_key": 4,
+      "buffer_bytes": 65536,
+      "staging_bytes": 68719476736
+    },
+    "current_limits": {
+      "file_workers": 4,
+      "network_requests": 4,
+      "buffer_chunks": 8,
+      "lookup_batch": 128,
+      "candidates_per_key": 4,
+      "buffer_bytes": 65536,
+      "staging_bytes": 68719476736
+    },
+    "bulk_http": "object_store defaults, including 30-second whole-request timeout",
+    "limitations": [
+      "WAN and CDN/cache state uncontrolled",
+      "Old shared four-job limit and current separate four/four limits are different scheduling models",
+      "Queue capacity differs as part of the implementation, old one chunk vs current eight",
+      "Timings exclude verification and setup; each trial runs SHA-256 and final profile verification",
+      "No concurrent builds, tests, benchmarks or sync during measured trials"
+    ]
+  },
+  "runs": [
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 13.076883020747168,
+      "cold_seconds": 77.2780094,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 8.9851002,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 0.6018052,
+      "verified": true,
+      "warm_seconds": 0.0338395,
+      "run": 1,
+      "implementation": "old",
+      "process_seconds": 91.82586360000005
+    },
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 85.03597097542136,
+      "cold_seconds": 11.883859,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 5.7134295999999996,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 0.3972033,
+      "verified": true,
+      "warm_seconds": 0.0318876,
+      "run": 2,
+      "implementation": "current",
+      "process_seconds": 22.99464369999987
+    },
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 85.60820420927973,
+      "cold_seconds": 11.8044234,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 5.5164647,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 0.383761,
+      "verified": true,
+      "warm_seconds": 0.0281995,
+      "run": 3,
+      "implementation": "current",
+      "process_seconds": 22.75272189999987
+    },
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 13.352818873433275,
+      "cold_seconds": 75.6810602,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 8.1594083,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 0.4208626,
+      "verified": true,
+      "warm_seconds": 0.0293364,
+      "run": 4,
+      "implementation": "old",
+      "process_seconds": 89.21383950000018
+    },
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 12.24163226623754,
+      "cold_seconds": 82.5507144,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 8.3514479,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 1.1031863,
+      "verified": true,
+      "warm_seconds": 0.1799906,
+      "run": 5,
+      "implementation": "old",
+      "process_seconds": 97.1728051
+    },
+    {
+      "bytes": 1024514039,
+      "cold_fetched_bytes": 1010555489,
+      "cold_megabytes_per_second": 82.90265674684129,
+      "cold_seconds": 12.1896635,
+      "files": 9,
+      "repair_fetched_bytes": 145252,
+      "repair_seconds": 5.7643063,
+      "repo_url": "https://swifty-dev.peanutcommunityarma.com/fixtures/swifty/14cd7a20d77e626f/repo.json",
+      "setup_seconds": 0.3791121,
+      "verified": true,
+      "warm_seconds": 0.0345533,
+      "run": 6,
+      "implementation": "current",
+      "process_seconds": 23.353865399999904
+    }
+  ],
+  "medians": {
+    "old": {
+      "cold_seconds": 77.2780094,
+      "cold_megabytes_per_second": 13.076883020747168,
+      "warm_seconds": 0.0338395,
+      "repair_seconds": 8.3514479
+    },
+    "current": {
+      "cold_seconds": 11.883859,
+      "cold_megabytes_per_second": 85.03597097542136,
+      "warm_seconds": 0.0318876,
+      "repair_seconds": 5.7134295999999996
+    }
+  },
+  "speedup": {
+    "cold_seconds": 6.502770640412344,
+    "warm_seconds": 1.0612118817345928,
+    "repair_seconds": 1.4617223777466342
+  },
+  "regression_controls": {
+    "current_flux_revision": "3c82627",
+    "production_source_revision": "09651421b87757d0154761697f58e1ef554b5c7e",
+    "ci": "Flux .github/workflows/ci.yml runs all-target tests on Windows and Linux",
+    "current_all_target_tests": "passed",
+    "current_strict_clippy": "passed",
+    "controls": [
+      {
+        "test": "remote_output_is_constructed_before_http_eof",
+        "old": "failed: destination construction did not occur before withheld EOF",
+        "current": "passed"
+      },
+      {
+        "test": "singleton_part_count_does_not_create_durable_artifacts",
+        "old": "failed: 3 checkpoints, expected 0",
+        "current": "passed"
+      },
+      {
+        "test": "saturated_network_lookups_leave_file_workers_available",
+        "negative_control": "temporary shared job-count gate inserted at start of Pipeline::fill, using file_workers as the shared ceiling",
+        "mutation": "if self.jobs.len() >= self.options.limits.file_workers { break; }",
+        "mutated_current": "failed: both network slots must be occupied by actual pending lookups",
+        "restored_current": "passed",
+        "cleanup": "original source restored byte-for-byte before full checks and timed trials"
+      }
+    ]
+  }
+}
