@@ -435,7 +435,20 @@ impl ObservationWriter for FleetObservation {
         Ok(())
     }
 
-    fn finish(mut self: Box<Self>, observed: ObservedFile) -> Result<()> {
+    fn finish(
+        self: Box<Self>,
+        observed: ObservedFile,
+    ) -> futures_util::future::BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || self.commit(observed))
+                .await
+                .map_err(|error| Error::with_source(ErrorKind::State, error))?
+        })
+    }
+}
+
+impl FleetObservation {
+    fn commit(mut self, observed: ObservedFile) -> Result<()> {
         if observed.profile() != self.profile || observed.length() != self.next_offset {
             return Err(Error::new(
                 ErrorKind::State,

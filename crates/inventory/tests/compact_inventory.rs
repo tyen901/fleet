@@ -39,10 +39,10 @@ fn evidence(version: u8, length: u64) -> ObservedFile {
     )
 }
 
-fn observe(inventory: &FleetInventory, spec: &FileSpec, version: u8) {
+async fn observe(inventory: &FleetInventory, spec: &FileSpec, version: u8) {
     let mut writer = inventory.begin_observation(&spec.path).unwrap();
     writer.append(&spec.segments).unwrap();
-    writer.finish(evidence(version, spec.length)).unwrap();
+    writer.finish(evidence(version, spec.length)).await.unwrap();
 }
 
 fn terminal(inventory: &FleetInventory, manifest: &Manifest) {
@@ -70,8 +70,8 @@ fn count(conn: &Connection, table: &str) -> i64 {
     .unwrap()
 }
 
-#[test]
-fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
+#[tokio::test]
+async fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let first = file("a", &[(1, 4), (2, 3)]);
@@ -79,8 +79,8 @@ fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
     let goal = manifest(vec![first.clone(), second.clone()]);
 
     inventory.register_manifest(&goal).unwrap();
-    observe(&inventory, &first, 1);
-    observe(&inventory, &second, 2);
+    observe(&inventory, &first, 1).await;
+    observe(&inventory, &second, 2).await;
 
     let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "content"), 2);
@@ -93,16 +93,16 @@ fn known_recipe_is_shared_by_observed_files_and_lookup_uses_occurrences() {
     assert_eq!(hits[1].path.as_str(), "b");
 }
 
-#[test]
-fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
+#[tokio::test]
+async fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let clean = file("clean", &[(1, 4), (2, 3)]);
     let damaged = file("damaged", &[(1, 4), (3, 3)]);
     let goal = manifest(vec![clean.clone()]);
     inventory.register_manifest(&goal).unwrap();
-    observe(&inventory, &clean, 1);
-    observe(&inventory, &damaged, 2);
+    observe(&inventory, &clean, 1).await;
+    observe(&inventory, &damaged, 2).await;
 
     let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "recipes"), 2);
@@ -125,20 +125,20 @@ fn partial_corruption_creates_one_recipe_and_reuses_matching_content() {
     );
 }
 
-#[test]
-fn registering_a_new_goal_keeps_installed_old_recipe() {
+#[tokio::test]
+async fn registering_a_new_goal_keeps_installed_old_recipe() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let old = file("old", &[(1, 4), (2, 3)]);
     let new = file("new", &[(1, 4), (3, 3)]);
     let old_goal = manifest(vec![old.clone()]);
     inventory.register_manifest(&old_goal).unwrap();
-    observe(&inventory, &old, 1);
+    observe(&inventory, &old, 1).await;
     terminal(&inventory, &old_goal);
 
     let new_goal = manifest(vec![old.clone(), new.clone()]);
     inventory.register_manifest(&new_goal).unwrap();
-    observe(&inventory, &new, 2);
+    observe(&inventory, &new, 2).await;
     let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     assert_eq!(count(&conn, "recipes"), 2);
     terminal(&inventory, &new_goal);
@@ -147,14 +147,14 @@ fn registering_a_new_goal_keeps_installed_old_recipe() {
     assert!(inventory.observed(&new.path).unwrap().is_some());
 }
 
-#[test]
-fn terminal_failure_rolls_back_all_fact_changes() {
+#[tokio::test]
+async fn terminal_failure_rolls_back_all_fact_changes() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file("file", &[(1, 4)]);
     let goal = manifest(vec![spec.clone()]);
     inventory.register_manifest(&goal).unwrap();
-    observe(&inventory, &spec, 1);
+    observe(&inventory, &spec, 1).await;
     terminal(&inventory, &goal);
     let conn = Connection::open(temp.path().join(".fleet/observations.sqlite")).unwrap();
     let original_id: i64 = conn
@@ -209,12 +209,12 @@ fn terminal_failure_rolls_back_all_fact_changes() {
     );
 }
 
-#[test]
-fn incomplete_observation_is_invisible_and_previous_complete_fact_survives() {
+#[tokio::test]
+async fn incomplete_observation_is_invisible_and_previous_complete_fact_survives() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let spec = file("file", &[(1, 4)]);
-    observe(&inventory, &spec, 1);
+    observe(&inventory, &spec, 1).await;
     let mut writer = inventory.begin_observation(&spec.path).unwrap();
     writer.append(&spec.segments).unwrap();
     assert_eq!(
@@ -244,8 +244,8 @@ fn observation_keeps_session_lock_until_finished_or_discarded() {
     FleetInventory::open(temp.path(), PROFILE).unwrap();
 }
 
-#[test]
-fn read_only_payload_measurement_shows_one_recipe_for_many_files() {
+#[tokio::test]
+async fn read_only_payload_measurement_shows_one_recipe_for_many_files() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join(".fleet/observations.sqlite");
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
@@ -255,7 +255,7 @@ fn read_only_payload_measurement_shows_one_recipe_for_many_files() {
     let goal = manifest(files.clone());
     inventory.register_manifest(&goal).unwrap();
     for (index, spec) in files.iter().enumerate() {
-        observe(&inventory, spec, index as u8);
+        observe(&inventory, spec, index as u8).await;
     }
 
     let conn = Connection::open(db).unwrap();

@@ -6,6 +6,31 @@ use flux::{
 
 const PROFILE: ProfileId = ProfileId([1; 32]);
 
+#[tokio::test]
+async fn observation_completion_waits_for_sqlite_writer_and_preserves_readers() {
+    let temp = tempfile::tempdir().unwrap();
+    let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
+    let spec = file(0);
+    let database = temp.path().join(".fleet/observations.sqlite");
+    let blocker = rusqlite::Connection::open(&database).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut writer = inventory.begin_observation(&spec.path).unwrap();
+    writer.append(&spec.segments).unwrap();
+    let mut completion = tokio::spawn(writer.finish(evidence(1)));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut completion)
+            .await
+            .is_err()
+    );
+    assert!(inventory.observed(&spec.path).unwrap().is_none());
+    blocker.execute_batch("COMMIT").unwrap();
+    completion.await.unwrap().unwrap();
+    assert_eq!(inventory.observed(&spec.path).unwrap(), Some(evidence(1)));
+    drop(inventory);
+    let reopened = FleetInventory::open(temp.path(), PROFILE).unwrap();
+    assert_eq!(reopened.observed(&spec.path).unwrap(), Some(evidence(1)));
+}
+
 fn evidence(value: u8) -> ObservedFile {
     ObservedFile::new(
         ObservationToken::from_bytes(vec![value; 64]).unwrap(),
@@ -25,14 +50,15 @@ fn file(index: usize) -> FileSpec {
     }
 }
 
-#[test]
-fn parallel_observations_remain_atomic_and_terminal_callbacks_can_read() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parallel_observations_remain_atomic_and_terminal_callbacks_can_read() {
     let temp = tempfile::tempdir().unwrap();
     let inventory = FleetInventory::open(temp.path(), PROFILE).unwrap();
     let manifest = Manifest::new(PROFILE, (0..8).map(file).collect(), vec![]).unwrap();
     std::thread::scope(|scope| {
         for spec in manifest.files() {
             let inventory = &inventory;
+            let runtime = tokio::runtime::Handle::current();
             scope.spawn(move || {
                 let mut writer = inventory.begin_observation(&spec.path).unwrap();
                 writer.append(&spec.segments).unwrap();
@@ -41,7 +67,7 @@ fn parallel_observations_remain_atomic_and_terminal_callbacks_can_read() {
                     .lookup(&spec.segments[0].key, 1)
                     .unwrap()
                     .is_empty());
-                writer.finish(evidence(1)).unwrap();
+                runtime.block_on(writer.finish(evidence(1))).unwrap();
                 assert_eq!(inventory.lookup(&spec.segments[0].key, 1).unwrap().len(), 1);
             });
         }

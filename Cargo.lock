@@ -1906,6 +1906,7 @@ dependencies = [
  "fleet-flux",
  "flux",
  "fmutex",
+ "futures-util",
  "r2d2",
  "r2d2_sqlite",
  "rusqlite",
@@ -1922,7 +1923,7 @@ dependencies = [
 [[package]]
 name = "flux"
 version = "2.0.0"
-source = "git+https://github.com/tyen901/flux.git?rev=09651421b87757d0154761697f58e1ef554b5c7e#09651421b87757d0154761697f58e1ef554b5c7e"
+source = "git+https://github.com/tyen901/flux.git?rev=90c434181b32d0fc693ea553c5549b555917ce81#90c434181b32d0fc693ea553c5549b555917ce81"
 dependencies = [
  "blake3",
  "cap-fs-ext",
