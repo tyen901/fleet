@@ -1,82 +1,35 @@
-# Architecture: Implementation Guidance
+# Fleet architecture
 
-Use this document to guide design choices, not as a catalog of files, crates,
-types, APIs, or current workflows. Code, manifests, tests, and current dependency
-contracts are evidence of the repository's actual structure and behavior; they
-are not assumed correct. User-intended behavior and relevant contracts govern a
-change. Do not restore removed implementation merely to match prose; resolve the
-intent from the evidence and revise this guide when its guidance needs to change.
+## Ownership
 
-## Boundaries and replacement
+The [desktop app](apps/fleet) and [CLI](apps/fleet-cli) use
+[fleet-core](crates/core) for profile, sync, and launch workflows. Keep shared
+policy in core and presentation in the apps. [fleet-flux](crates/flux) adapts
+Swifty inputs to the pinned Flux engine, which checks, verifies, and
+materializes target files. [fleet-inventory](crates/inventory) owns persisted
+file observations.
 
-Give each behavior one clear owner and keep its public surface as small as the
-work requires. Adapters should translate between domains at their boundary,
-without duplicating policy or turning a purpose-built path into a generic
-framework. This keeps changes local and makes responsibility visible.
+## Operations
 
-When a design is replaced, remove the superseded implementation. Do not retain
-duplicate paths, pass-through exports, or compatibility shims unless compatibility
-is an explicit requirement. A deleted concept should not be resurrected because
-documentation still names it.
+Pass cancellation through to workers and keep concurrency and queues bounded.
+Hold the profile operation lock until workers exit, including on cancellation.
+Derive progress from work already performed and report completion from the
+operation result.
 
-## Work that is responsive and bounded
+## Target state
 
-Use bounded parallelism for independent work. Stream work and apply backpressure
-instead of accumulating unbounded queues or whole-result collections. Propagate
-cancellation through in-flight work promptly and leave each layer able to finish
-or abandon its own resources safely. Collect metrics from the work already being
-performed; avoid additional scans whose only purpose is reporting.
+Fleet keeps verified file observations in `<target>/.fleet/observations.sqlite`
+with its session lock beside it. Flux keeps its operation lock, staging, and
+recovery state in `<target>/.fleet/flux`. Reserve `.fleet` at every depth in the
+managed tree. Repository downloads live in the application cache.
 
-## Evidence and persistence
+Commit target-bound observations atomically. Keep transient plans and progress
+separate from reusable evidence. Metadata alone cannot establish byte equality.
+Keep SQLite details inside inventory and use SQL transactions and set operations
+for relational work.
 
-User-facing errors contain concise, authored messages and necessary corrective
-actions. Convert dependency and runtime failures at the application boundary;
-record their diagnostics in structured logs. Never put error chains, response
-bodies, debug output, or internal identifiers in labels, notices, or overlays.
-`ApiError` constructors require static UI copy so diagnostic formatting cannot
-accidentally become a displayed message. Updater failures follow the same contract.
+## Errors
 
-Observations must describe what was actually checked or completed. Persist them
-atomically so reuse never depends on a partially committed claim. Keep durable,
-target-bound reuse evidence separate from transient plans, progress, staging,
-or recovery bookkeeping; transient decisions should be recomputed from the
-current inputs and observations. This prevents an interrupted run from becoming
-false evidence for a later one.
-
-Progress events report observations, not proof of successful terminal completion.
-Metadata-only checks cannot establish byte equality.
-
-Keep storage implementation details private to the persistence boundary. For
-relational inventory work, model typed facts at the boundary and let SQLite do
-set operations, joins, ranking, aggregation, constraints, and mutation. Use
-direct `rusqlite` and SQL transactions rather than an ORM, a query-builder layer,
-or Rust-side row joins. This preserves transactional truth and lets the database
-perform the work it is designed to do.
-
-## Tests and review
-
-Tests should exercise product behavior, Fleet-specific invariants, regressions,
-and integration boundaries. They should demonstrate what a change protects, not
-only that a dependency behaves as documented.
-
-When reviewing a design change, ask:
-
-- Does one place own the behavior, with a minimal boundary around it?
-- Has the replacement removed the old path rather than creating a second one?
-- Are concurrency, streaming, backpressure, and cancellation bounded and
-  observable under failure?
-- Do persisted facts remain truthful, atomic, reusable evidence rather than
-  transient execution state?
-- Does storage keep its implementation private and let SQL perform relational
-  work?
-- Do tests cover the intended behavior and the failure or integration boundary
-  that makes the change meaningful?
-
-## Target-private state
-
-Store target observations in `<target>/.fleet/observations.sqlite`, with their
-database session lock beside them. Flux shares this hidden directory for its
-target operation lock, staging, and recovery facts under `.fleet/flux`.
-Repository downloads remain in Fleet's application cache. Reserved `.fleet` entries at every depth are
-excluded from managed scanning and mutation. Old application-state observations
-and sibling Flux workspaces are not read or migrated.
+At application and updater boundaries, report failures with authored,
+actionable messages and log technical details separately. `ApiError`
+constructors take static messages to keep raw diagnostics out of the UI.
