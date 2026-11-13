@@ -22,6 +22,11 @@ button and field patterns, confirm actions inline, and give icon buttons an
 accessible label and tooltip. Keep copy to action names, needed values, and
 messages users can act on.
 
+Define desktop UI copy in [en-US.ftl](apps/fleet/locales/en-US.ftl) and use
+`dioxus_i18n::t!` in components. Reuse a message key when the meaning is the
+same. Use Fluent variables for interpolated values so translations can
+reorder them.
+
 ## Git
 
 Use `feature/*` for new branches and short, imperative commit subjects.

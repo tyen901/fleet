@@ -63,10 +63,6 @@
   --clr-input-fg-quiet: var(--clr-text-muted);
   --clr-input-error-ring: oklch(70% 0.13 25 / 60%);
 
-  --clr-error-fg: var(--clr-danger-text);
-  --clr-error-bg: var(--clr-danger-subtle);
-  --clr-error-border: oklch(70% 0.13 25 / 40%);
-
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;

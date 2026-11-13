@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,10 +11,13 @@ const testRoot = path.join(repoRoot, 'target', 'ui-render');
 const configRoot = path.join(testRoot, 'config');
 const captureRoot = path.join(testRoot, 'captures');
 const profileRoot = path.join(testRoot, 'profile');
+const secondProfileRoot = path.join(testRoot, 'second-profile');
 const cdpPort = 9333;
 const cdpHost = '127.0.0.1';
 const previewWidth = 420;
 const previewHeight = 560;
+const exampleGameDirectory = String.raw`D:\Steam\steamapps\common\Arma 3`;
+const exampleModpackFolder = String.raw`D:\Mods\Saturn Unit`;
 const executable = path.join(
   repoRoot,
   'target',
@@ -95,10 +100,10 @@ class CdpClient {
     throw new Error(`Timed out waiting for ${description}`);
   }
 
-  async clickText(label) {
+  async clickText(label, scope = 'body') {
     const clicked = await this.evaluate(`(() => {
-      const button = [...document.querySelectorAll('button')]
-        .find((candidate) => candidate.textContent.trim() === ${JSON.stringify(label)} && !candidate.disabled);
+      const button = [...document.querySelectorAll(${JSON.stringify(scope + ' button')})]
+        .find((candidate) => candidate.textContent.trim() === ${JSON.stringify(label)} && !candidate.disabled && candidate.getClientRects().length);
       if (!button) return false;
       button.click();
       return true;
@@ -132,7 +137,6 @@ class CdpClient {
   }
 
   async capture(filename) {
-    await delay(150);
     const controls = await this.evaluate(`(() => {
       // The footer's back affordance is a named exception: icon+label in one
       // control, so it carries its own (tighter) padding, not the shared 12px.
@@ -142,9 +146,13 @@ class CdpClient {
       return {
         buttonsConsistent: buttons.every((button) => {
           const style = getComputedStyle(button);
+          if (!button.getClientRects().length) return true;
+          const padding = button.matches('.mod-list__row .btn--icon, .profile-row__main > .btn--icon')
+            ? '0px'
+            : button.matches('.profile-row__buttons .btn') ? '8px' : '12px';
           return button.getBoundingClientRect().height === 34 &&
-            style.paddingLeft === '12px' &&
-            style.paddingRight === '12px' &&
+            style.paddingLeft === padding &&
+            style.paddingRight === padding &&
             style.whiteSpace === 'nowrap';
         }),
         fieldsConsistent: fields.every((field) => field.getBoundingClientRect().height === 34),
@@ -200,9 +208,11 @@ async function clearDirectoryContents(directory) {
   );
 }
 
-async function seedDummyConfig() {
+async function seedDummyConfig(slowPort) {
   await Promise.all(
-    [configRoot, profileRoot].map((directory) => rm(directory, { recursive: true, force: true })),
+    [configRoot, profileRoot, secondProfileRoot].map((directory) =>
+      rm(directory, { recursive: true, force: true }),
+    ),
   );
   await mkdir(configRoot, { recursive: true });
   await mkdir(captureRoot, { recursive: true });
@@ -226,18 +236,18 @@ async function seedDummyConfig() {
       {
         id: 'ui-test-profile',
         name: 'Saturn Unit',
-        source: 'http://127.0.0.1:9/repo.json',
+        source: `http://127.0.0.1:${slowPort}/unavailable/repo.json`,
         destination: profileRoot,
         arma3_server: null,
         swifty_repo_revision: '',
         launch_params: '',
-        additional_mod_folders: ['@ace', '@cba_a3'],
+        additional_mod_folders: [String.raw`D:\Mods\@ace`, String.raw`D:\Mods\@cba_a3`],
       },
       {
         id: 'ui-test-second-profile',
         name: 'Triton Unit',
-        source: 'http://127.0.0.1:9/repo.json',
-        destination: path.join(testRoot, 'second-profile'),
+        source: `http://127.0.0.1:${slowPort}/repo.json`,
+        destination: secondProfileRoot,
         arma3_server: null,
         swifty_repo_revision: '',
         launch_params: '',
@@ -273,16 +283,23 @@ async function waitForTarget(timeoutMs = 20_000) {
   );
 }
 
-async function runFlow(client) {
+async function runFlow(client, repo) {
   await client.call('Runtime.enable');
   await client.call('Page.enable');
+  await client.call('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+  });
   await client.call('Emulation.setDeviceMetricsOverride', {
     width: previewWidth,
     height: previewHeight,
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await client.waitFor(`document.body?.innerText.includes('FLEET')`, 'onboarding view');
+  await client.waitFor(`document.querySelector('input[aria-label="Arma 3 Directory"]')`, 'onboarding directory field');
+  const onboardingText = await client.evaluate(`document.querySelector('.page-frame').innerText.trim().split(/\\s+/).join(' ')`);
+  if (onboardingText !== 'Arma 3 Directory Auto Continue') {
+    throw new Error(`Unexpected onboarding text: ${JSON.stringify(onboardingText)}`);
+  }
 
   const viewport = await client.evaluate(
     `({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio })`,
@@ -298,18 +315,55 @@ async function runFlow(client) {
   }
 
   await client.capture('01-onboarding.png');
-  await client.setInput('input[type="text"]', path.join(testRoot, 'arma3'));
+  await client.setInput('input[type="text"]', exampleGameDirectory);
+  await client.capture('01a-onboarding-ready.png');
   await client.clickText('Continue');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
-  await client.clickText('Check for updates');
-  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Sync')`, 'profile issue');
-  await client.clickText('Sync');
-  await client.waitFor(`document.querySelector('.profile-row .field__error')?.textContent.trim() && !document.querySelector('.profile-operation')`, 'inline sync error', 20_000);
+  const firstProfile = '.profile-row:first-child';
+  const secondProfile = '.profile-row:nth-child(2)';
+  const openActions = async (profile = firstProfile) => {
+    await client.click(profile + ' [popovertarget]');
+    await client.waitFor(`document.querySelector('.profile-actions:popover-open')`, 'open profile actions');
+  };
+  await client.capture('02a-profiles-default.png');
+  const checkForUpdates = async (profile, capture) => {
+    await openActions(profile);
+    if (capture) await client.capture(capture);
+    await client.clickText('Check for updates', '.profile-actions:popover-open');
+  };
+  const syncFromMenu = async (profile) => {
+    await openActions(profile);
+    await client.clickText('Force sync', '.profile-actions:popover-open');
+  };
+  const noSyncOnCard = (profile) => `![...document.querySelectorAll(${JSON.stringify(profile + ' .profile-row__buttons button')})]
+    .some(button => button.textContent.trim() === 'Sync')`;
+  if (!(await client.evaluate(noSyncOnCard('.profile-row')))) {
+    throw new Error('Unchecked profiles should not show Sync on their cards');
+  }
+  await checkForUpdates(firstProfile, '02k-profiles-check-menu.png');
+  await client.waitFor(`!document.querySelector('.profile-operation')`, 'finished first update check');
+  if (!(await client.evaluate(noSyncOnCard(firstProfile)))) {
+    throw new Error('An unavailable source should not show Sync on the card');
+  }
+  await syncFromMenu(firstProfile);
+  await client.waitFor(`(() => {
+    const notice = document.querySelector('.profile-row:first-child .note--bad');
+    return notice?.querySelector('[role="alert"]')?.textContent.includes('sync source')
+      && getComputedStyle(notice).borderTopWidth === '0px'
+      && !document.querySelector('.profile-operation');
+  })()`, 'inline sync error', 20_000);
   await client.capture('02-profiles-error.png');
-  await client.click('[aria-label="Profile settings"]');
-  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Edit' && !button.disabled)`, 'editing unlocked after failure');
-  await client.capture('02-profile-details-error.png');
-  await client.clickText('Back');
+  await syncFromMenu(firstProfile);
+  await client.waitFor(`document.querySelector('.profile-row__main .note--bad') && !document.querySelector('.profile-operation')`, 'forced sync completed', 20_000);
+  await openActions();
+  await client.capture('02f-profile-actions.png');
+  await client.click(firstProfile + ' [popovertarget]');
+  await client.click(firstProfile + ' .profile-row__name');
+  await client.waitFor(`document.querySelector('.mod-list__row input:not([readonly])')`, 'direct profile editor');
+  if (await client.evaluate(`document.body.innerText.includes("Couldn't load the sync source.")`)) {
+    throw new Error('Sync failure leaked into the profile editor');
+  }
+  await client.clickText('Cancel');
 
   await client.click('[aria-label="Settings"]');
   await client.waitFor(
@@ -322,8 +376,11 @@ async function runFlow(client) {
     const sectionTitles = [...document.querySelectorAll('.section .section__title')]
       .map((title) => title.textContent.trim());
     const gameRow = [...document.querySelectorAll('.field-row')]
-      .find((row) => row.querySelector('.field-row__title')?.textContent.trim() === 'Game directory');
+      .find((row) => row.querySelector('.field-row__title')?.textContent.trim() === 'Arma 3 Directory');
     const resetSlots = [...document.querySelectorAll('.field-reset')];
+    const argsRow = [...document.querySelectorAll('.field-row')]
+      .find(row => row.querySelector('.field-row__title')?.textContent.trim() === 'Default launch arguments');
+    const argsInput = argsRow.querySelector('input');
     const cancel = [...document.querySelectorAll('.page-footer button')]
       .find((button) => button.textContent.trim() === 'Cancel');
     const toggles = [...document.querySelectorAll('.field-row input[type="checkbox"]')];
@@ -332,6 +389,9 @@ async function runFlow(client) {
     return {
       sectionTitles,
       gameDirectoryButtons: gameRow.querySelectorAll('button').length,
+      hasBrowseIcon: Boolean(gameRow.querySelector('.btn--icon[aria-label="Browse for Arma 3 directory"]'))
+        && Boolean(gameRow.querySelector('input[aria-label="Arma 3 Directory"]')),
+      defaultArgsFullWidth: Math.abs(argsInput.getBoundingClientRect().width - argsRow.getBoundingClientRect().width) < 1,
       hasAutoAction: [...gameRow.querySelectorAll('button')]
         .some((button) => button.textContent.trim() === 'Auto'),
       resetSlotsConsistent: resetSlots.length > 0 && new Set(
@@ -350,6 +410,8 @@ async function runFlow(client) {
   if (
     settingsTop.sectionTitles[0] !== 'Updates' ||
     settingsTop.gameDirectoryButtons !== 2 ||
+    !settingsTop.hasBrowseIcon ||
+    !settingsTop.defaultArgsFullWidth ||
     !settingsTop.hasAutoAction ||
     !settingsTop.resetSlotsConsistent ||
     !settingsTop.hasReservedResetSlot ||
@@ -363,6 +425,71 @@ async function runFlow(client) {
   await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
   await delay(100);
   await client.capture('04-settings-bottom.png');
+  const modal = '.confirm-dialog:modal';
+  // Fluent wraps interpolated values with Unicode bidi isolation marks.
+  const withoutIsolation = (value) => value.replace(/[\u2068\u2069]/g, '');
+  const waitForConfirmDialog = async (title) => {
+    await client.waitFor(`(() => {
+      const dialog = document.querySelector(${JSON.stringify(modal)});
+      if (!dialog || (${withoutIsolation.toString()})(dialog.querySelector('h2').textContent.trim()) !== ${JSON.stringify(title)}) return false;
+      const bounds = dialog.getBoundingClientRect();
+      return Math.abs((bounds.left + bounds.right) / 2 - innerWidth / 2) < 1
+        && Math.abs((bounds.top + bounds.bottom) / 2 - innerHeight / 2) < 1
+        && document.activeElement?.textContent.trim() === 'Cancel'
+        && dialog.contains(document.activeElement);
+    })()`, 'centered modal with focus on Cancel');
+  };
+  await client.evaluate(`[...document.querySelectorAll('.field-row')]
+    .find(row => row.querySelector('.field-row__title')?.textContent.trim() === 'Reset all settings')
+    .querySelector('button').click()`);
+  await waitForConfirmDialog('Reset all settings?');
+  await client.capture('04b-settings-reset.png');
+  await client.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await client.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await client.waitFor(`!document.querySelector('.confirm-dialog:modal')`, 'Escape dismisses modal');
+  if (await client.evaluate(`![...document.querySelectorAll('.page-footer button')].find(button => button.textContent.trim() === 'Save')?.disabled`)) {
+    throw new Error('Dismissing reset changed the settings draft');
+  }
+  await client.evaluate(`[...document.querySelectorAll('.field-row')]
+    .find(row => row.querySelector('.field-row__title')?.textContent.trim() === 'Reset all settings')
+    .querySelector('button').click()`);
+  await waitForConfirmDialog('Reset all settings?');
+  await client.clickText('Reset', modal);
+  await client.waitFor(`!document.querySelector('.confirm-dialog:modal') && [...document.querySelectorAll('.page-footer button')].some(button => button.textContent.trim() === 'Save' && !button.disabled)`, 'settings reset applied to the draft');
+  await client.clickText('Cancel', '.page-footer');
+  await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view after discarding reset');
+  await client.click('[aria-label="Settings"]');
+  await client.waitFor(`document.querySelector('.section__title')?.textContent.trim() === 'Updates'`, 'settings restored after discard');
+
+  const openFactoryReset = async () => {
+    await client.evaluate(`(() => {
+      const row = [...document.querySelectorAll('.field-row')]
+        .find(row => row.querySelector('.field-row__title')?.textContent.trim() === 'Factory reset');
+      row.scrollIntoView({ block: 'end' });
+      row.querySelector('button').click();
+    })()`);
+    await waitForConfirmDialog('Factory reset?');
+  };
+  await openFactoryReset();
+  await client.capture('04c-settings-factory-reset.png');
+  await client.clickText('Cancel', modal);
+  await client.waitFor(`!document.querySelector('.confirm-dialog:modal')`, 'factory reset canceled');
+  await client.evaluate(`document.querySelector('.select').scrollIntoView({block:'center'})`);
+  await client.capture('04a-settings-middle.png');
+  await client.evaluate(`(() => {
+    const field = document.querySelector('.select');
+    field.value = 'custom';
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await client.waitFor(`document.querySelector('textarea')`, 'custom launch preview');
+  await client.evaluate(`document.querySelector('textarea').scrollIntoView({block:'center'})`);
+  await client.capture('04d-settings-custom-launch.png');
+  await client.evaluate(`(() => {
+    const field = document.querySelector('.select');
+    field.value = 'arma3-exe';
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    document.querySelector('.page-frame__body').scrollTop = 100000;
+  })()`);
   const settingsLayout = await client.evaluate(`(() => {
     const rows = [...document.querySelectorAll('.field-row')];
     const advanced = [...document.querySelectorAll('.section')]
@@ -455,96 +582,46 @@ async function runFlow(client) {
       .some((button) => button.textContent.trim() === 'Create')`,
     'new profile view',
   );
+  const installFolder = path.join(testRoot, 'modpacks', 'Neptune Unit');
+  const folderInput = 'input[aria-label="Mod install folder"]';
+  const createFields = await client.evaluate(`[...document.querySelectorAll('.form-field__label')].map(label => label.textContent.trim())`);
+  if (createFields.join(',') !== 'Name,Sync source URL,Mod install folder' || await client.evaluate(`document.querySelector('.mod-list, .check') !== null`)) {
+    throw new Error('New profiles should ask for a name, sync source, and mod install folder');
+  }
+  const hasFolderPicker = await client.evaluate(`(() => {
+    const input = document.querySelector(${JSON.stringify(folderInput)});
+    return input?.value === '' && input.placeholder.includes('Mods')
+      && input.closest('.field').querySelector('.btn--icon[aria-label="Browse for mod install folder"]');
+  })()`);
+  if (!hasFolderPicker) throw new Error('Mod install folder needs a placeholder and icon picker');
   await client.capture('05-new-profile.png');
+  await client.setInput('.form-field:nth-child(1) .field__input', 'Neptune !');
+  await client.setInput('.form-field:nth-child(2) .field__input', 'example.test');
+  await client.capture('05a-new-profile-invalid.png');
+  await client.setInput('input[aria-label="Sync source URL"]', repo.invalidManifestSource);
+  await client.clickText('Test URL');
+  await client.waitFor(`[...document.querySelectorAll('[role="status"]')].some(element => element.textContent.includes('Could not load a Swifty manifest'))`, 'invalid remote manifest rejected');
+  await client.capture('05c-new-profile-source-error.png');
+  await client.setInput('input[aria-label="Sync source URL"]', repo.testSource);
+  await client.clickText('Test URL');
+  await client.waitFor(`[...document.querySelectorAll('[role="status"]')].some(element => element.textContent.includes('Swifty manifest found'))`, 'valid remote manifest');
+  await client.capture('05d-new-profile-source-tested.png');
+  await client.setInput('.form-field:nth-child(1) .field__input', 'Neptune Unit');
+  await client.setInput('.form-field:nth-child(2) .field__input', 'https://example.com/neptune/repo.json');
+  if (await client.evaluate(`![...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Create')?.disabled`)) {
+    throw new Error('A mod install folder is required');
+  }
+  await client.setInput(folderInput, String.raw`D:\Mods\Neptune Unit`);
+  await client.waitFor(`[...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Create' && !button.disabled)`, 'valid new profile form');
+  await client.capture('05b-new-profile-ready.png');
   await client.clickText('Cancel');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
 
-  await client.click('[aria-label="Profile settings"]');
-  await client.waitFor(`document.body.innerText.includes('Verify')`, 'profile overview');
-  await client.waitFor(
-    `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Back')`,
-    'profile overview back action',
-  );
-  const profileOverviewLayout = await client.evaluate(`(() => {
-    const maintenanceSection = [...document.querySelectorAll('.section')]
-      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Maintenance');
-    return {
-      hasNoHeader: document.querySelectorAll('.page-header').length === 0,
-      hasLaunchOrJoin: [...document.querySelectorAll('button')]
-        .some((button) => ['Launch', 'Join'].includes(button.textContent.trim())),
-      folderActionsCorrect: (() => {
-        const openFolder = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'Open folder');
-        const folder = [...document.querySelectorAll('.form-field')].find(field => field.querySelector('.form-field__label')?.textContent.trim() === 'Folder');
-        return openFolder && !openFolder.disabled && !folder.querySelector('button') &&
-          openFolder.getBoundingClientRect().bottom <= maintenanceSection.getBoundingClientRect().top;
-      })(),
-      maintenanceActions: [...maintenanceSection.querySelectorAll('.field-row__title')]
-        .map((heading) => heading.textContent.trim()),
-      hasLaunchArguments: [...document.querySelectorAll('.form-field__label')]
-        .some((label) => label.textContent.trim() === 'Launch arguments'),
-      maintenanceButtons: [...maintenanceSection.querySelectorAll('button')].map(button => button.textContent.trim()),
-      hasVerificationDescription: document.body.innerText.includes('Byte-level verification of managed files.'),
-      hasReadCancel: [...document.querySelectorAll('.page-footer button')].some(button => button.textContent.trim() === 'Cancel'),
-      // Read mode uses the real controls, locked rather than replaced.
-      readonlyInputs: [...document.querySelectorAll('.form-field .field__input')]
-        .every((input) => input.readOnly),
-      readonlyInputCount: document.querySelectorAll('.form-field .field__input').length,
-      // An inline row is one control tall whether or not it holds a button.
-      inlineRowHeights: [
-        ...new Set(
-          [...document.querySelectorAll('.field-row')]
-            .filter((row) => row.querySelector('.field-row__control--actions'))
-            .map((row) => Math.round(row.getBoundingClientRect().height)),
-        ),
-      ],
-      // Buttons are filled rather than outlined; every variant shares one
-      // border treatment (none) so state reads from fill/text color alone.
-      buttonsBorderless: [...document.querySelectorAll('.btn')].every(
-        (button) => getComputedStyle(button).borderTopColor === 'rgba(0, 0, 0, 0)',
-      ),
-      // Inputs use a single border color regardless of read-only/disabled
-      // state; only the text communicates emptiness.
-      inputBordersConsistent: new Set(
-        [...document.querySelectorAll('.field__input')].map(
-          (input) => getComputedStyle(input).borderTopColor,
-        ),
-      ).size <= 1,
-      mods: [...document.querySelectorAll('.mod-list__item')].map((item) => item.textContent.trim()),
-    };
-  })()`);
-  if (
-    !profileOverviewLayout.hasNoHeader ||
-    profileOverviewLayout.hasLaunchOrJoin ||
-    !profileOverviewLayout.folderActionsCorrect ||
-    profileOverviewLayout.maintenanceActions.length !== 0 ||
-    profileOverviewLayout.maintenanceButtons.join(',') !== 'Verify' ||
-    profileOverviewLayout.hasVerificationDescription ||
-    profileOverviewLayout.hasReadCancel ||
-    profileOverviewLayout.hasLaunchArguments ||
-    !profileOverviewLayout.readonlyInputs ||
-    profileOverviewLayout.readonlyInputCount !== 3 ||
-    profileOverviewLayout.inlineRowHeights.some((height) => height < 34) ||
-    !profileOverviewLayout.inputBordersConsistent ||
-    !profileOverviewLayout.buttonsBorderless ||
-    profileOverviewLayout.mods.join(',') !== '@ace,@cba_a3'
-  ) {
-    throw new Error(
-      'Profile overview header, Maintenance section, or additional-mod list is incorrect',
-    );
-  }
-  await client.capture('06-profile-overview.png');
-  await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
-  await delay(100);
-  await client.waitFor(
-    `[...document.querySelectorAll('.page-footer button')]
-      .some((button) => button.textContent.trim() === 'Back')`,
-    'scrolled profile overview back action',
-  );
-  await client.capture('06-profile-overview-mods.png');
-
-  await client.clickText('Edit');
-  await client.waitFor(`document.body.innerText.includes('PROFILE REMOVAL')`, 'profile edit mode');
+  await openActions();
+  await client.clickText('Edit profile', '.profile-actions:popover-open');
+  await client.waitFor(`document.querySelector('.mod-list__row input:not([readonly])')`, 'direct profile editing');
+  // Display a realistic example in the editor captures without syncing there.
+  await client.setInput('input[aria-label="Mod install folder"]', exampleModpackFolder);
   await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 0`);
   await delay(100);
   await client.waitFor(
@@ -605,124 +682,270 @@ async function runFlow(client) {
   await delay(100);
   await client.capture('08-edit-profile-mods.png');
 
-  const editButtons = await client.evaluate(`(() => {
-    const modRows = [...document.querySelectorAll('.mod-list__row')];
-    const labels = modRows.flatMap((row) => [...row.querySelectorAll('button')]
-      .map((button) => button.textContent.trim()));
-    const compared = ['Select', 'Browse', 'Remove']
-      .map((label) => [...document.querySelectorAll('button')]
-        .find((button) => button.textContent.trim() === label))
-      .filter(Boolean)
-      .map((button) => {
-        const style = getComputedStyle(button);
-        return [style.fontFamily, style.fontSize, style.fontWeight, style.letterSpacing, style.textTransform].join('|');
-      });
-    const additionalMods = document.querySelector('.mod-list').closest('.section');
-    const addButton = additionalMods.querySelector('[aria-label="Add mod"]');
-    const list = additionalMods.querySelector('.mod-list');
-    const footerLabels = [...document.querySelectorAll('.page-footer button')]
-      .map((button) => button.getAttribute('aria-label') ?? button.textContent.trim());
-    return {
-      labels,
-      sharedTypography: compared.length === 3 && new Set(compared).size === 1,
-      addBeforeList: addButton.getBoundingClientRect().bottom <= list.getBoundingClientRect().top,
-      // Right aligned above the list.
-      addRightAligned:
-        Math.abs(
-          addButton.getBoundingClientRect().right -
-            additionalMods.getBoundingClientRect().right,
-        ) < 1,
-      // Edit mode discards changes with Cancel and persists them with Save.
-      hasBack: footerLabels.includes('Back'),
-      hasCancel: footerLabels.includes('Cancel'),
-      hasSave: footerLabels.includes('Save'),
-    };
-  })()`);
-  if (
-    editButtons.labels.filter((label) => label === 'Browse').length !== 2 ||
-    editButtons.labels.filter((label) => label === 'Remove').length !== 2 ||
-    !editButtons.sharedTypography ||
-    !editButtons.addBeforeList ||
-    !editButtons.addRightAligned ||
-    editButtons.hasBack ||
-    !editButtons.hasCancel ||
-    !editButtons.hasSave
-  ) {
-    throw new Error('Browse controls or shared button typography are incorrect');
+  const modControls = await client.evaluate(`[...document.querySelectorAll('.mod-list__row')].map(row => {
+    const input = row.querySelector('input');
+    const buttons = [...row.querySelectorAll('.btn--icon')];
+    return Boolean(input?.getAttribute('aria-label')) && !input.readOnly &&
+      buttons.length === 2 && buttons.every(button => button.title && button.getAttribute('aria-label'));
+  })`);
+  if (modControls.length !== 2 || modControls.some(valid => !valid)) {
+    throw new Error('Mod rows need editable paths and labeled browse and remove controls');
   }
 
-  const originalModCount = await client.evaluate(
-    `document.querySelectorAll('.mod-list__row').length`,
-  );
-  await client.click('[aria-label="Add mod"]');
+  await client.clickText('Add mod');
+  const newMod = '.mod-list__row:last-child input';
   await client.waitFor(
-    `document.querySelectorAll('.mod-list__row').length === ${originalModCount + 1}`,
-    'new additional-mod row',
+    `document.querySelectorAll('.mod-list__row').length === 3 && document.activeElement === document.querySelector(${JSON.stringify(newMod)})`,
+    'new mod path focused',
   );
-  await client.evaluate(`(() => {
-    document.querySelector('.mod-list').closest('.section').scrollIntoView({ block: 'start' });
-  })()`);
-  await delay(100);
   await client.capture('09-edit-profile-mod-added.png');
-  await client.evaluate(`(() => {
-    const buttons = [...document.querySelectorAll('.mod-list__row button')]
-      .filter((button) => button.textContent.trim() === 'Remove');
-    buttons.at(-1).click();
-  })()`);
-  await client.waitFor(
-    `document.querySelectorAll('.mod-list__row').length === ${originalModCount}`,
-    'additional-mod row removal',
-  );
-  await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
-  await delay(100);
-  await client.clickText('Delete');
-  await client.waitFor(`document.querySelector('.inline-confirm')`, 'delete confirmation');
-  await delay(600);
-  await client.capture('12-delete-confirm.png');
-  await client.evaluate(`(() => {
-    [...document.querySelectorAll('.inline-confirm button')]
-      .find((button) => button.textContent.trim() === 'Cancel').click();
-  })()`);
-
-  while ((await client.evaluate(`document.querySelectorAll('.mod-list__row').length`)) > 0) {
-    await client.clickText('Remove');
-  }
-  const emptyModEditor = await client.evaluate(`(() => {
-    const additionalMods = [...document.querySelectorAll('.section')]
-      .find((section) => section.querySelector('.section__title')?.textContent.trim() === 'Additional mods');
-    return Boolean(additionalMods?.querySelector('[aria-label="Add mod"]')) &&
-      additionalMods.querySelectorAll('.mod-list__row').length === 0;
-  })()`);
-  if (!emptyModEditor) throw new Error('Empty additional-mod editor lost its Add control');
-  await client.click('[aria-label="Add mod"]');
-  await client.waitFor(
-    `document.querySelectorAll('.mod-list__row').length === 1`,
-    'first additional-mod row',
-  );
-  await client.clickText('Remove');
-  await client.waitFor(
-    `document.querySelectorAll('.mod-list__row').length === 0`,
-    'removed first additional-mod row',
-  );
+  const modPath = String.raw`D:\Mods\@rhs`;
+  await client.setInput(newMod, modPath);
+  await client.capture('09a-edit-profile-mod-path.png');
+  await client.setInput('input[aria-label="Mod install folder"]', profileRoot);
   await client.clickText('Save');
-  await client.waitFor(`document.body.innerText.includes('Verify')`, 'profile read mode');
-  const emptyModSectionHidden = await client.evaluate(
-    `![...document.querySelectorAll('.section__title')]
-      .some((title) => title.textContent.trim() === 'Additional mods')`,
-  );
-  if (!emptyModSectionHidden) {
-    throw new Error('Empty additional-mod section remains visible in profile read mode');
+  await client.waitFor(`document.querySelector('.profiles-page')`, 'return to Profiles after saving');
+  if (await client.evaluate(`document.querySelector('.profiles-page').innerText.match(/@ace|@cba_a3|@rhs/)`)) {
+    throw new Error('Additional mods should only appear in the editor');
   }
-  await client.capture('09-profile-overview-empty-mods.png');
-
-  await client.clickText('Verify');
-  await client.waitFor(`document.querySelector('.profiles-page') && !document.querySelector('.profile-operation')`, 'verification returning home');
+  await openActions();
+  await client.clickText('Edit profile', '.profile-actions:popover-open');
+  await client.waitFor(`document.querySelectorAll('.mod-list__row').length === 3 && document.querySelector(${JSON.stringify(newMod)})?.value === ${JSON.stringify(modPath)}`, 'editable saved mod paths');
+  while ((await client.evaluate(`document.querySelectorAll('.mod-list__row').length`)) > 0) {
+    await client.click('[aria-label^="Remove mod folder"]');
+  }
+  await client.clickText('Add mod');
+  await client.waitFor(`document.querySelectorAll('.mod-list__row').length === 1`, 'first mod row from empty editor');
+  await client.click('[aria-label^="Remove mod folder"]');
+  await client.clickText('Save');
+  await client.waitFor(`document.querySelector('.profiles-page')`, 'profile card after removing all additional mods');
+  await openActions();
+  await client.clickText('Verify files', '.profile-actions:popover-open');
+  await client.waitFor(`!document.querySelector('.profile-operation')`, 'verification finished');
   await client.capture('10-verification-result.png');
+
+  const finishOperation = async (expression) => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      repo.failPendingRequests();
+      if (await client.evaluate(expression)) return;
+      await delay(100);
+    }
+    throw new Error('Fixture operation did not finish');
+  };
+
+  const waitForProgressFrame = async (profile) => {
+    await client.waitFor(`(() => {
+      const operation = document.querySelector(${JSON.stringify(profile + ' .profile-operation')});
+      if (!operation) return false;
+      const clip = operation.closest('.operation-reveal__inner').getBoundingClientRect();
+      if (clip.height + 1 < operation.getBoundingClientRect().height) return false;
+      const fill = operation.querySelector('.progress-bar-indeterminate .progress-bar-fill');
+      if (!fill) return true;
+      const fillRect = fill.getBoundingClientRect();
+      const trackRect = fill.parentElement.getBoundingClientRect();
+      return fillRect.left >= trackRect.left && fillRect.right <= trackRect.right;
+    })()`, 'visible progress frame', 2_000);
+  };
+
+  await checkForUpdates(secondProfile);
+  await client.waitFor(`(() => {
+    const row = document.querySelector('.profile-row:nth-child(2)');
+    const fill = row.querySelector('.profile-operation .progress-bar-indeterminate[aria-label="Checking for updates"] .progress-bar-fill');
+    return fill && getComputedStyle(fill).animationName === 'progress-bar-indeterminate'
+      && !row.querySelector('.btn__spinner, .profile-row__buttons');
+  })()`, 'indeterminate profile check');
+  await waitForProgressFrame(secondProfile);
+  await client.capture('02d-profiles-checking.png');
+  await finishOperation(`!document.querySelector('.profile-row:nth-child(2) .operation-reveal--task:not(.operation-reveal--closed)')`);
+  await syncFromMenu(secondProfile);
+  await client.waitFor(`(() => {
+    const row = document.querySelector('.profile-row:nth-child(2)');
+    return row.querySelector('.profile-operation') && !row.querySelector('.profile-row__buttons');
+  })()`, 'sync in progress with game actions hidden');
+  await waitForProgressFrame(secondProfile);
+  await client.capture('02e-profiles-syncing.png');
+  await finishOperation(`!document.querySelector('.profile-operation')`);
+
+  await openActions(secondProfile);
+  await client.clickText('Verify files', '.profile-actions:popover-open');
+  await client.waitFor(`document.querySelector('.profile-row:nth-child(2) .profile-operation')`, 'verification in progress');
+  await waitForProgressFrame(secondProfile);
+  await client.capture('10a-verification-progress.png');
+  await finishOperation(`!document.querySelector('.profile-operation')`);
+
+  await openActions();
+  await client.clickText('Delete profile', '.profile-actions:popover-open');
+  await waitForConfirmDialog('Delete “Saturn Unit”?');
+  await client.capture('12-delete-confirm.png');
+  await client.clickText('Cancel', modal);
+  await client.waitFor(`!document.querySelector('.confirm-dialog:modal') && document.activeElement?.hasAttribute('popovertarget') && document.activeElement.closest('.profile-row')?.querySelector('.profile-row__name')?.textContent.trim() === 'Saturn Unit' && document.querySelectorAll('.profile-row').length === 2`, 'delete canceled and focus restored');
+
+  repo.serveManifest([]);
+  await syncFromMenu(secondProfile);
+  await client.waitFor(`document.querySelectorAll('.profile-row:nth-child(2) .operation-work').length === 2`, 'download and patch tracks');
+  const syncMetricsVisible = await client.evaluate(`(() => {
+    const tracks = [...document.querySelectorAll('.profile-row:nth-child(2) .operation-work')];
+    return tracks[0].querySelector('.operation-work__value')?.textContent.includes('B')
+      && tracks[1].querySelector('.operation-work__value')?.textContent.includes('%')
+      && tracks.every((track, index) => {
+        const row = track.querySelector('.operation-work__bar');
+        const bar = row.querySelector('.progress-bar').getBoundingClientRect();
+        const metric = row.querySelector('.operation-usage');
+        const speed = metric?.querySelector('.operation-usage__value');
+        const icon = metric?.querySelector('.operation-usage__icon');
+        if (!speed?.textContent.includes('/s') || !icon) return false;
+        const speedRect = speed.getBoundingClientRect();
+        const iconRect = icon.getBoundingClientRect();
+        const center = (bar.top + bar.bottom) / 2;
+        return metric.getAttribute('aria-label') === (index === 0 ? 'Network speed' : 'Disk usage')
+          && bar.right <= speedRect.left && speedRect.right <= iconRect.left
+          && Math.abs(center - (speedRect.top + speedRect.bottom) / 2) < 1
+          && Math.abs(center - (iconRect.top + iconRect.bottom) / 2) < 1;
+      });
+  })()`);
+  if (!syncMetricsVisible) throw new Error('Download and patch progress must show values and speeds');
+  await waitForProgressFrame(secondProfile);
+  await client.capture('02j-profiles-download-patch.png');
+  repo.releaseDownload();
+  await client.waitFor(`!document.querySelector('.profile-operation')`, 'fixture download complete', 20_000);
+  await client.waitFor(`(() => {
+    const [launch, join] = document.querySelectorAll('.profile-row:nth-child(2) .profile-row__buttons button');
+    return launch?.textContent.trim() === 'Launch' && !launch.disabled
+      && join?.textContent.trim() === 'Join' && join.disabled;
+  })()`, 'ready profile with Join disabled until a server is available', 20_000);
+  if (!(await client.evaluate(noSyncOnCard(secondProfile)))) {
+    throw new Error('An up-to-date profile should not show Sync on its card');
+  }
+  await client.capture('02g-profiles-launch.png');
+
+  repo.serveManifest([{ name: 'Test server', address: '127.0.0.1', port: 2302, password: '', battleEye: false }]);
+  await checkForUpdates(secondProfile);
+  await client.waitFor(`document.querySelector('.profile-row:nth-child(2) .profile-row__buttons .btn--primary')?.textContent.trim() === 'Sync'`, 'sync offered for known update', 20_000);
+  await client.capture('02h-profiles-update.png');
+  await client.clickText('Sync', secondProfile);
+  await client.waitFor(`(() => {
+    const buttons = [...document.querySelectorAll('.profile-row:nth-child(2) .profile-row__buttons button')];
+    return !document.querySelector('.profile-operation')
+      && buttons.map(button => button.textContent.trim()).join(',') === 'Launch,Join'
+      && buttons.every(button => !button.disabled);
+  })()`, 'ready profile with a server', 20_000);
+  await client.capture('02i-profiles-launch-join.png');
+
+  for (let remaining = 2; remaining > 0; remaining--) {
+    await openActions();
+    await client.clickText('Delete profile', '.profile-actions:popover-open');
+    await client.clickText('Delete', modal);
+    await client.waitFor(`document.querySelectorAll('.profile-row').length === ${remaining - 1}`, 'profile removed');
+  }
+  await client.waitFor(`document.querySelector('.profiles-page__empty')?.innerText.trim() === 'New profile'`, 'empty profiles shows only the creation action');
+  await client.capture('02c-profiles-empty.png');
+  await client.clickText('New profile');
+  await client.setInput('.form-field:nth-child(1) .field__input', 'Neptune Unit');
+  await client.setInput('.form-field:nth-child(2) .field__input', repo.unavailableSource);
+  await client.setInput(folderInput, installFolder);
+  await client.clickText('Create');
+  await client.waitFor(`document.querySelector('.profile-row__name')?.textContent.trim() === 'Neptune Unit'`, 'created profile on Profiles');
+  if (!(await client.evaluate(noSyncOnCard(firstProfile)))) {
+    throw new Error('A new profile should keep manual sync in the menu');
+  }
+  await client.waitFor(`document.querySelector('a.profile-row__name')`, 'new profile check finished');
+  await client.click('a.profile-row__name');
+  await client.waitFor(`[...document.querySelectorAll('.form-field .field__input')].some(input => input.value === ${JSON.stringify(installFolder)})`, 'saved custom mod install folder');
+  await client.clickText('Cancel', '.page-footer');
+  await client.waitFor(`document.querySelector('.profiles-page')`, 'profiles before factory reset');
+  await client.click('[aria-label="Settings"]');
+  await client.waitFor(`document.querySelector('.section__title')?.textContent.trim() === 'Updates'`, 'settings before factory reset');
+  await openFactoryReset();
+  await client.clickText('Factory reset', modal);
+  await client.waitFor(`document.querySelector('input[aria-label="Arma 3 Directory"]') && !document.querySelector('.confirm-dialog:modal')`, 'factory reset returns to setup');
+  await client.setInput('input[aria-label="Arma 3 Directory"]', exampleGameDirectory);
+  await client.clickText('Continue');
+  await client.waitFor(`document.querySelector('.profiles-page__empty')`, 'factory reset cleared profiles');
+
 
 }
 
 await ensureCdpPortAvailable();
-await seedDummyConfig();
+const heldResponses = new Set();
+const heldDownloads = new Set();
+const fixtureBytes = Buffer.from('fleet dummy file\n');
+const fixtureMod = '@fleet-example';
+const fixtureModChecksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const digest = (data) => createHash('md5').update(data).digest('hex').toUpperCase();
+const fixturePart = {
+  Path: `addons/hello.txt_${fixtureBytes.length}`,
+  Length: fixtureBytes.length,
+  Start: 0,
+  Checksum: digest(fixtureBytes),
+};
+const modManifest = JSON.stringify({
+  Name: fixtureMod,
+  Checksum: fixtureModChecksum,
+  Files: [{
+    Path: 'addons\\hello.txt',
+    Length: fixtureBytes.length,
+    Checksum: digest(fixturePart.Checksum),
+    Parts: [fixturePart],
+  }],
+});
+let repoManifest;
+let downloadReleased = false;
+const slowRepo = createHttpServer((request, response) => {
+  if (request.url === '/test/repo.json') {
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+      .end(JSON.stringify({ repoName: 'Test modpack', checksum: '0'.repeat(40), requiredMods: [] }));
+    return;
+  }
+  if (request.url === '/invalid/repo.json') {
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
+    return;
+  }
+  if (request.url === '/unavailable/repo.json') {
+    response.writeHead(404).end();
+    return;
+  }
+  if (repoManifest) {
+    if (request.url === '/repo.json' || request.url === `/${fixtureMod}/mod.srf`) {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+        .end(request.url === '/repo.json' ? repoManifest : modManifest);
+    } else if (request.url === `/${fixtureMod}/addons/hello.txt`) {
+      if (downloadReleased) {
+        sendFixtureDownload(request, response);
+      } else {
+        const pending = { request, response };
+        heldDownloads.add(pending);
+        response.on('close', () => heldDownloads.delete(pending));
+      }
+    } else {
+      response.writeHead(404).end();
+    }
+    return;
+  }
+  heldResponses.add(response);
+  response.on('close', () => heldResponses.delete(response));
+});
+
+function sendFixtureDownload(request, response) {
+  const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? '');
+  if (range) {
+    const start = Number(range[1]);
+    const end = Number(range[2]);
+    response.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fixtureBytes.length}`,
+      'Content-Length': end - start + 1,
+    })
+      .end(fixtureBytes.subarray(start, end + 1));
+  } else {
+    response.writeHead(200, { 'Content-Length': fixtureBytes.length })
+      .end(request.method === 'HEAD' ? undefined : fixtureBytes);
+  }
+}
+await new Promise((resolve, reject) => {
+  slowRepo.once('error', reject);
+  slowRepo.listen(0, cdpHost, resolve);
+});
+await seedDummyConfig(slowRepo.address().port);
 
 const child = spawn(executable, ['--config-dir', configRoot], {
   cwd: repoRoot,
@@ -737,9 +960,31 @@ const child = spawn(executable, ['--config-dir', configRoot], {
 let client;
 try {
   client = await CdpClient.connect(await waitForTarget());
-  await runFlow(client);
+  await runFlow(client, {
+    unavailableSource: `http://${cdpHost}:${slowRepo.address().port}/unavailable/repo.json`,
+    testSource: `http://${cdpHost}:${slowRepo.address().port}/test/repo.json`,
+    invalidManifestSource: `http://${cdpHost}:${slowRepo.address().port}/invalid/repo.json`,
+    failPendingRequests() {
+      for (const response of heldResponses) response.writeHead(404).end();
+    },
+    serveManifest(servers) {
+      repoManifest = JSON.stringify({
+        repoName: 'Fleet UI fixture',
+        checksum: servers.length ? '1'.repeat(40) : '0'.repeat(40),
+        requiredMods: [{ modName: fixtureMod, checkSum: fixtureModChecksum, enabled: true }],
+        optionalMods: [],
+        servers,
+      });
+    },
+    releaseDownload() {
+      downloadReleased = true;
+      for (const { request, response } of heldDownloads) sendFixtureDownload(request, response);
+    },
+  });
   process.stdout.write(`Rendered Fleet UI views to ${captureRoot}\n`);
 } finally {
   client?.close();
   child.kill();
+  slowRepo.closeAllConnections();
+  slowRepo.close();
 }

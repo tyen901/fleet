@@ -36,7 +36,7 @@ pub(crate) async fn sync(
             repo_url,
             &repo_cache,
             &downloads,
-        ) => result.map_err(|error| crate::ApiError::reported("sync_failed", "Could not download repository data. Try Sync again.", error))?,
+        ) => result.map_err(|error| crate::ApiError::reported("sync_failed", "Couldn't load the sync source.", error))?,
         () = cancel.cancelled() => return Err(crate::ApiError::new("canceled", "Canceled")),
     };
     let revision = input.revision().map(ToOwned::to_owned);

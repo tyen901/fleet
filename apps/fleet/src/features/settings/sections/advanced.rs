@@ -2,19 +2,14 @@ use crate::style::{
     Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, Section, SectionHeader,
 };
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn advanced_section<FOpenLogs, FRestartSetup, FResetSettings, FFactoryReset>(
     on_open_logs: FOpenLogs,
     on_restart_setup: FRestartSetup,
     setup_error: Element,
     mut on_reset_settings: FResetSettings,
     mut on_request_factory_reset: FFactoryReset,
-    reset_settings_confirm_open: bool,
-    reset_settings_confirm: Element,
-    factory_reset_confirm_open: bool,
-    factory_reset_confirm: Element,
-    factory_reset_error: Element,
 ) -> Element
 where
     FOpenLogs: Fn() + Clone + 'static,
@@ -24,29 +19,29 @@ where
 {
     rsx! {
         Section {
-            SectionHeader { title: "Advanced".to_string() }
+            SectionHeader { title: t!("advanced") }
             FieldRow {
                 FieldRowMeta {
-                    title: "Logs".to_string(),
+                    title: t!("logs"),
                 }
                 FieldRowActions {
                     Button {
                         variant: ButtonVariant::Secondary,
                         onclick: move |_| on_open_logs(),
-                        "Open"
+                        {t!("open")}
                     }
                 }
             }
 
             FieldRow {
                 FieldRowMeta {
-                    title: "Setup".to_string(),
+                    title: t!("setup"),
                 }
                 FieldRowActions {
                     Button {
                         variant: ButtonVariant::Secondary,
                         onclick: move |_| on_restart_setup(),
-                        "Restart"
+                        {t!("restart")}
                     }
                 }
             }
@@ -54,35 +49,30 @@ where
             {setup_error}
             FieldRow {
                 FieldRowMeta {
-                    title: "Reset all settings".to_string(),
+                    title: t!("reset-all-settings"),
                 }
                 FieldRowActions {
                     Button {
                         variant: ButtonVariant::Secondary,
-                        disabled: reset_settings_confirm_open,
                         onclick: move |_| on_reset_settings(),
-                        "Reset"
+                        {t!("reset")}
                     }
                 }
             }
-            {reset_settings_confirm}
 
             FieldRow {
                 FieldRowMeta {
-                    title: "Factory reset".to_string(),
-                    description: Some("Remove all settings and profiles, then return to setup.".to_string()),
+                    title: t!("factory-reset"),
+                    description: Some(t!("factory-reset-description")),
                 }
                 FieldRowActions {
                     Button {
                         variant: ButtonVariant::Danger,
-                        disabled: factory_reset_confirm_open,
                         onclick: move |_| on_request_factory_reset(),
-                        "Factory reset"
+                        {t!("factory-reset")}
                     }
                 }
             }
-            {factory_reset_confirm}
-            {factory_reset_error}
         }
     }
 }

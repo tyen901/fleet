@@ -166,7 +166,8 @@
   background: var(--clr-danger-subtle);
 }
 
-.inline-confirm .btn--danger {
+.inline-confirm .btn--danger,
+.confirm-dialog .btn--danger {
   --btn-bg: var(--clr-danger-strong-bg);
   --btn-bg-hover: var(--clr-danger-strong-bg);
   --btn-fg: var(--clr-danger-strong-fg);
@@ -186,4 +187,38 @@
   justify-content: flex-end;
   gap: var(--space-2);
   margin-left: auto;
+}
+
+.confirm-dialog {
+  box-sizing: border-box;
+  width: min(100% - 2 * var(--space-5), 360px);
+  max-height: calc(100% - 2 * var(--space-5));
+  margin: auto;
+  padding: var(--space-5);
+  border: 1px solid var(--clr-border);
+  border-radius: var(--radius-3);
+  background: var(--clr-surface-raised);
+  color: var(--clr-text-primary);
+}
+
+.confirm-dialog[open] {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.confirm-dialog::backdrop {
+  background: color-mix(in oklab, var(--clr-canvas) 72%, transparent);
+}
+
+.confirm-dialog__message {
+  margin: 0;
+  color: var(--clr-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }

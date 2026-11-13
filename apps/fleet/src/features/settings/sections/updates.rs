@@ -3,6 +3,7 @@ use crate::style::{
     SectionHeader,
 };
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 
 use crate::stores::update_store::AppUpdateStatus;
 
@@ -25,16 +26,16 @@ where
     let check_loading = matches!(&status, AppUpdateStatus::Checking);
     let apply_loading = matches!(&status, AppUpdateStatus::Downloading);
     let check_label = if check_loading {
-        "Checking..."
+        t!("checking-for-app-update")
     } else {
-        "Check now"
+        t!("check-now")
     };
 
     rsx! {
         Section {
-            SectionHeader { title: "Updates".to_string() }
+            SectionHeader { title: t!("updates") }
             FieldRow {
-                        FieldRowMeta { title: "Fleet version".to_string() }
+                        FieldRowMeta { title: t!("fleet-version") }
                         FieldRowInline {
                             div { class: "field-row__control-main settings-version",
                                 span { class: "mono", "{installed_version()}" }
@@ -55,7 +56,7 @@ where
                                     loading: apply_loading,
                                     disabled: controls_locked,
                                     onclick: move |_| on_apply_update(),
-                                    if apply_loading { "Downloading..." } else { "Apply update" }
+                                    if apply_loading { {t!("downloading-app-update")} } else { {t!("apply-update")} }
                                 }
                             }
                         }
@@ -63,14 +64,11 @@ where
 
             match &status {
                         AppUpdateStatus::UpToDate => rsx! {
-                            Notice { tone: NoticeTone::Success, "Fleet is up to date." }
+                            Notice { tone: NoticeTone::Success, {t!("fleet-up-to-date")} }
                         },
                         AppUpdateStatus::UpdateAvailable { version } => rsx! {
                             Notice {
-                                div {
-                                    "Update available: "
-                                    span { class: "mono", "{version}" }
-                                }
+                                {t!("update-available", version: version.as_str())}
                             }
                         },
                         AppUpdateStatus::Error(error) => rsx! {

@@ -3,6 +3,7 @@ use crate::style::{
     SectionHeader, SelectField, SelectOption, TextField,
 };
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
 
 use super::field_reset::FieldResetButton;
@@ -43,7 +44,7 @@ where
         .trim()
         .to_string();
     let preview_text = if custom_template.is_empty() {
-        "Set a template to see the preview.".to_string()
+        t!("set-template-to-preview")
     } else {
         custom_preview.clone()
     };
@@ -51,27 +52,30 @@ where
 
     rsx! {
         Section {
-            SectionHeader { title: "Game".to_string() }
+            SectionHeader { title: t!("game") }
             FieldRow {
-                    FieldRowMeta { title: "Game directory".to_string() }
+                    FieldRowMeta { title: t!("arma-3-directory") }
                     FieldRowInline {
                         div { class: "field-row__control-main",
                             BrowseField {
                                 value: settings.arma3.arma3_game_dir,
                                 folder_select: true,
+                                                compact_picker: true,
+                                                accessible_label: Some(t!("arma-3-directory")),
+                                                pick_button_text: Some(t!("browse-arma-3-directory")),
                                 on_change: move |next: String| on_set_game_dir(next),
                             }
                         }
                         Button {
                             variant: ButtonVariant::Secondary,
                             onclick: move |_| on_detect_arma3(),
-                            "Auto"
+                            {t!("auto")}
                         }
                     }
                 }
 
                 FieldRow {
-                    FieldRowMeta { title: "Default launch arguments".to_string() }
+                    FieldRowMeta { title: t!("default-launch-arguments") }
                     FieldRowInline {
                         div { class: "field-row__control-main",
                             TextField {
@@ -79,16 +83,18 @@ where
                                 on_change: move |next: String| on_set_default_args(next),
                             }
                         }
-                        FieldResetButton {
-                            field: SettingsField::Arma3DefaultArgs,
-                            show: is_arma3_default_args_non_default,
-                            on_reset,
+                        if is_arma3_default_args_non_default {
+                            FieldResetButton {
+                                field: SettingsField::Arma3DefaultArgs,
+                                show: true,
+                                on_reset,
+                            }
                         }
                     }
                 }
 
                 FieldRow {
-                    FieldRowMeta { title: "Launch type".to_string() }
+                    FieldRowMeta { title: t!("launch-type") }
                     FieldRowInline {
                         div { class: "field-row__control-main",
                             SelectField {
@@ -111,7 +117,7 @@ where
 
                 if settings.arma3.arma3_launch_method == Arma3LaunchMethod::Custom {
                     FieldRow {
-                        FieldRowMeta { title: "Custom template".to_string() }
+                        FieldRowMeta { title: t!("custom-template") }
                         FieldRowStack {
                             TextField {
                                 value: settings.arma3.arma3_custom_launch_template,
@@ -120,7 +126,7 @@ where
                                 on_change: move |next: String| on_set_custom_template(next),
                             }
                             div { class: "settings-preview",
-                                div { class: "settings-preview__label", "Preview" }
+                                div { class: "settings-preview__label", {t!("preview")} }
                                 textarea {
                                     class: "settings-preview__field mono-sm",
                                     value: preview_text.clone(),

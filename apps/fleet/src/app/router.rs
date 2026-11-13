@@ -6,7 +6,7 @@ use crate::features::{
     boot::Boot,
     not_found::PageNotFound,
     onboarding::Onboarding,
-    profiles::{list::Profiles, new::NewProfile, view::ProfileView},
+    profiles::{list::Profiles, new::NewProfile, view::ProfileEdit},
     settings::Settings,
 };
 
@@ -22,7 +22,7 @@ pub enum Route {
         #[route("/profiles/new")]
         NewProfile {},
         #[route("/profiles/:id")]
-        ProfileView { id: String },
+        ProfileEdit { id: String },
         #[route("/settings")]
         Settings {},
     #[end_layout]

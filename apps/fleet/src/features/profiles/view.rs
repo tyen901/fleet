@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use dioxus_router::use_navigator;
 use tracing::{error, info};
 
@@ -6,133 +7,72 @@ use crate::app::router::Route;
 use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::features::profiles::common::{
     build_profile_edit_candidate, default_arma3_args, format_repo_server_label,
-    profile_not_found_page, start_profile_operation_request, ProfileFormField,
+    profile_not_found_page, ProfileFormField, ProfileSourceField,
 };
 use crate::features::profiles::draft::ProfileDraft;
 
-use crate::features::profiles::{PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER};
 use crate::features::shared::browse_field::BrowseField;
 use crate::services::bridge::FleetBridge;
-use crate::services::platform::open::open_path;
 use crate::stores::app_store::AppStore;
 use crate::style::{
     Button, ButtonVariant, FieldRow, FieldRowActions, FieldRowMeta, IconButton, InlineConfirm,
     PageFooter, Section, SectionHeader, SelectField, SelectOption,
 };
-use icondata::BsPlusLg;
+use icondata::BsXLg;
 
 #[component]
-pub fn ProfileView(id: String) -> Element {
-    let bridge = use_context::<FleetBridge>();
+pub fn ProfileEdit(id: String) -> Element {
     let store = use_context::<AppStore>();
-    let feedback = use_action_error();
-    let save_feedback = use_action_error();
-    let delete_feedback = use_action_error();
     let nav = use_navigator();
-
-    let mut editing = use_signal(|| false);
-    let mut name = use_signal(String::new);
-    let mut repo = use_signal(String::new);
-    let mut folder = use_signal(String::new);
-    let mut launch_params = use_signal(String::new);
-    let mut use_default_args = use_signal(|| true);
-    let mut additional_mod_folders = use_signal(Vec::<String>::new);
-    let mut selected_repo_server = use_signal(|| Option::<usize>::None);
-    let mut save_loading = use_signal(|| false);
-    let mut discard_confirm_open = use_signal(|| false);
-    let mut delete_confirm_open = use_signal(|| false);
-    let mut delete_loading = use_signal(|| false);
-
     let snapshot = (store.state)();
-    let Some(profile) = snapshot.profiles.get(&id).cloned() else {
+    let Some(profile) = snapshot.profiles.get(&id) else {
         return profile_not_found_page(nav);
     };
+    rsx! { ProfileEditor { key: "{id}", profile: profile.clone() } }
+}
 
+#[component]
+fn ProfileEditor(profile: fleet_core::Profile) -> Element {
+    let bridge = use_context::<FleetBridge>();
+    let store = use_context::<AppStore>();
+    let save_feedback = use_action_error();
+    let nav = use_navigator();
+    let snapshot = (store.state)();
     let runtime = snapshot.profile_runtime_by_id.get(&profile.id);
-    let status = runtime.map(|entry| entry.status.clone());
-    let active = runtime.and_then(|entry| entry.active.as_ref());
-    let active_operation = active.map(|active| active.operation);
-    let any_active = active_operation.is_some();
-    let nav_for_back = nav;
-
-    let validate_enabled = status
-        .as_ref()
-        .map(|status| status.actions.validate_enabled)
-        .unwrap_or(false);
-    let validate_running = status
-        .as_ref()
-        .map(|status| status.actions.validate_running)
-        .unwrap_or(false);
-    let operation_notice = runtime
-        .and_then(|runtime| runtime.last_operation.as_ref())
-        .filter(|_| !any_active)
-        .filter(|outcome| outcome.status == fleet_core::OperationTerminalStatus::Failed)
-        .and_then(|outcome| outcome.error.as_ref().map(|error| error.message.clone()));
-
-    let on_validate = {
-        let bridge = bridge.clone();
-        let feedback = feedback.clone();
-        let profile_id = profile.id.clone();
-        move |_: MouseEvent| {
-            let bridge = bridge.clone();
-            let feedback = feedback.clone();
-            let profile_id = profile_id.clone();
-            spawn(async move {
-                if start_profile_operation_request(
-                    bridge,
-                    feedback,
-                    profile_id,
-                    fleet_core::OperationKind::Validate,
-                    "validate",
-                    "start_validate_failed",
-                )
-                .await
-                {
-                    let _ = nav.push(Route::Profiles {});
-                }
-            });
-        }
-    };
-
-    // ---- Edit mode -------------------------------------------------------
+    let operation_active = runtime.is_some_and(|runtime| runtime.active.is_some());
     let repo_servers = runtime
-        .map(|runtime| runtime.repo_servers.clone())
+        .map(|runtime| runtime.repo_servers.as_slice())
         .unwrap_or_default();
     let default_args = default_arma3_args(&snapshot.settings);
-    let operation_active = any_active;
-
-    let seed_draft = {
-        let profile = profile.clone();
-        let default_args = default_args.clone();
-        let repo_servers = repo_servers.clone();
-        move || {
-            name.set(profile.name.clone());
-            repo.set(profile.source.clone());
-            folder.set(profile.destination.clone());
-            additional_mod_folders.set(profile.additional_mod_folders.clone());
-            let uses_default = profile.launch_params.trim().is_empty();
-            use_default_args.set(uses_default);
-            launch_params.set(if uses_default {
-                default_args.clone()
-            } else {
-                profile.launch_params.clone()
-            });
-            selected_repo_server.set(profile.arma3_server.as_ref().and_then(|saved| {
-                repo_servers.iter().position(|server| {
-                    server.address.trim() == saved.address.trim() && server.port == saved.port
-                })
-            }));
+    let mut name = use_signal(|| profile.name.clone());
+    let mut repo = use_signal(|| profile.source.clone());
+    let mut folder = use_signal(|| profile.destination.clone());
+    let mut use_default_args = use_signal(|| profile.launch_params.trim().is_empty());
+    let mut launch_params = use_signal(|| {
+        if profile.launch_params.trim().is_empty() {
+            default_args.clone()
+        } else {
+            profile.launch_params.clone()
         }
-    };
-
-    let mut seed_draft_for_enter = seed_draft;
-    let on_edit = move |_: MouseEvent| {
-        if any_active {
-            return;
-        }
-        seed_draft_for_enter();
-        editing.set(true);
-    };
+    });
+    let mut additional_mod_folders = use_signal(|| {
+        profile
+            .additional_mod_folders
+            .iter()
+            .cloned()
+            .enumerate()
+            .collect::<Vec<_>>()
+    });
+    let mut next_mod_id = use_signal(|| profile.additional_mod_folders.len());
+    let mut focus_mod_id = use_signal(|| None::<usize>);
+    let mut server_choice = use_signal(|| {
+        profile
+            .arma3_server
+            .as_ref()
+            .map(|server| (server.address.trim().to_string(), server.port))
+    });
+    let mut save_loading = use_signal(|| false);
+    let mut discard_confirm_open = use_signal(|| false);
 
     let draft = ProfileDraft::from_fields(name(), repo(), folder());
     let validation = draft.validate(&snapshot, Some(profile.id.as_str()));
@@ -141,65 +81,37 @@ pub fn ProfileView(id: String) -> Element {
     } else {
         launch_params()
     };
-    let selected_idx =
-        selected_repo_server().and_then(|idx| (idx < repo_servers.len()).then_some(idx));
+    let selected_idx = server_choice().and_then(|(address, port)| {
+        repo_servers
+            .iter()
+            .position(|server| server.address.trim() == address && server.port == port)
+    });
+    let join_server_value = selected_idx.map(|idx| idx.to_string()).unwrap_or_default();
+    let mut join_server_options = vec![SelectOption::new("", t!("default-server"))];
+    join_server_options.extend(
+        repo_servers.iter().enumerate().map(|(idx, server)| {
+            SelectOption::new(idx.to_string(), format_repo_server_label(server))
+        }),
+    );
+    let server_keys = repo_servers
+        .iter()
+        .map(|server| (server.address.trim().to_string(), server.port))
+        .collect::<Vec<_>>();
 
-    let display_repo_servers = if repo_servers.is_empty() {
-        profile
-            .arma3_server
-            .as_ref()
-            .map(|server| {
-                vec![fleet_core::RepoServer {
-                    address: server.address.clone(),
-                    port: server.port,
-                    password: server.password.clone(),
-                }]
-            })
-            .unwrap_or_default()
-    } else {
-        repo_servers.clone()
-    };
-    let display_selected_idx = if repo_servers.is_empty() {
-        (!display_repo_servers.is_empty()).then_some(0)
-    } else {
-        selected_idx
-    };
-    let join_server_value = if display_repo_servers.len() == 1 {
-        "0".to_string()
-    } else if let Some(idx) = display_selected_idx {
-        idx.to_string()
-    } else {
-        String::new()
-    };
-    let join_server_options = if display_repo_servers.len() <= 1 {
-        if let Some(server) = display_repo_servers.first() {
-            vec![SelectOption::new("0", format_repo_server_label(server))]
-        } else {
-            vec![SelectOption::new("", "None (use default join behavior)")]
-        }
-    } else {
-        let mut options = vec![SelectOption::new("", "None (use default join behavior)")];
-        options.extend(
-            display_repo_servers
-                .iter()
-                .enumerate()
-                .map(|(idx, server)| {
-                    SelectOption::new(idx.to_string(), format_repo_server_label(server))
-                }),
-        );
-        options
-    };
-
+    let mod_paths = additional_mod_folders()
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     let next_profile = build_profile_edit_candidate(
         &profile,
         &draft,
         use_default_args(),
         &launch_value,
-        &additional_mod_folders(),
-        &repo_servers,
+        &mod_paths,
+        repo_servers,
         selected_idx,
     );
-    let profile_dirty = editing() && next_profile != profile;
+    let profile_dirty = next_profile != profile;
     let can_save = validation.is_valid() && profile_dirty;
 
     let on_save = {
@@ -221,7 +133,7 @@ pub fn ProfileView(id: String) -> Element {
                 match bridge.core().profile_save(next).await {
                     Ok(_) => {
                         save_loading.set(false);
-                        editing.set(false);
+                        let _ = nav.push(Route::Profiles {});
                     }
                     Err(err) => {
                         save_loading.set(false);
@@ -243,124 +155,64 @@ pub fn ProfileView(id: String) -> Element {
         if profile_dirty {
             discard_confirm_open.set(true);
         } else {
-            editing.set(false);
+            let _ = nav.push(Route::Profiles {});
         }
-    });
-    let leave_page = EventHandler::new(move |_: MouseEvent| {
-        let _ = nav_for_back.push(Route::Profiles {});
     });
     let on_confirm_discard = move |_: MouseEvent| {
         discard_confirm_open.set(false);
-        editing.set(false);
+        let _ = nav.push(Route::Profiles {});
     };
     let on_cancel_discard = move |_: MouseEvent| {
         discard_confirm_open.set(false);
     };
 
     let on_add_mod = move |_: MouseEvent| {
-        additional_mod_folders.with_mut(|folders| folders.push(String::new()));
+        let id = next_mod_id();
+        next_mod_id.set(id + 1);
+        focus_mod_id.set(Some(id));
+        additional_mod_folders.with_mut(|folders| folders.push((id, String::new())));
     };
 
-    let on_request_delete = move |_: MouseEvent| {
-        if operation_active || delete_loading() {
-            return;
-        }
-        delete_confirm_open.set(true);
-    };
-    let on_cancel_delete = move |_: MouseEvent| {
-        if !delete_loading() {
-            delete_confirm_open.set(false);
-        }
-    };
-    let on_confirm_delete = {
-        let bridge = bridge.clone();
-        let feedback = delete_feedback.clone();
-        let profile_id = profile.id.clone();
-        move |_: MouseEvent| {
-            if operation_active || delete_loading() {
-                return;
-            }
-            delete_confirm_open.set(false);
-            feedback.clear();
-            delete_loading.set(true);
-            let bridge = bridge.clone();
-            let feedback = feedback.clone();
-            let profile_id = profile_id.clone();
-            spawn(async move {
-                info!(op = "profile_delete", profile_id = %profile_id, "profile delete requested");
-                match bridge.core().profile_delete(profile_id.clone()).await {
-                    Ok(()) => {
-                        let _ = nav.push(Route::Profiles {});
-                    }
-                    Err(err) => {
-                        error!(
-                            op = "profile_delete",
-                            profile_id = %profile_id,
-                            outcome = "failed",
-                            code = %err.code,
-                            reason = "profile_delete_failed",
-                            "profile delete failed"
-                        );
-                        delete_loading.set(false);
-                        feedback.set(&err);
-                    }
-                }
-            });
-        }
-    };
-
-    // Draft signals hold nothing until edit mode seeds them.
-    let use_default_args_saved = profile.launch_params.trim().is_empty();
     rsx! {
         div { class: "page-frame",
             div { class: "page-frame__body",
                 div { class: "page__inner section-list",
                     InlineConfirm {
                         open: discard_confirm_open(),
-                        message: "Discard unsaved changes?".to_string(),
-                        confirm_label: "Discard".to_string(),
-                        cancel_label: "Keep editing".to_string(),
+                        message: t!("discard-changes"),
+                        confirm_label: t!("discard"),
+                        cancel_label: t!("keep-editing"),
                         confirm_variant: ButtonVariant::Danger,
                         on_confirm: on_confirm_discard,
                         on_cancel: on_cancel_discard,
                     }
 
                     Section {
-                        // Editing is a mode on this page. Read mode keeps the
-                        // same controls in place and marks them readonly.
                         ProfileFormField {
-                            title: "Name".to_string(),
-                            value: if editing() { name() } else { profile.name.clone() },
-                            readonly: !editing() || operation_active,
-                            placeholder: Some(crate::features::profiles::PROFILE_NAME_PLACEHOLDER.to_string()),
-                            error: if editing() && !validation.name_ok && !name().trim().is_empty() { Some("Name must be alphanumeric (spaces allowed).".to_string()) } else { None },
+                            title: t!("profile-name"),
+                            value: name(),
+                            readonly: operation_active,
+                            placeholder: Some(t!("profile-name-placeholder")),
+                            error: if !validation.name_ok && !name().trim().is_empty() { Some(t!("invalid-profile-name")) } else { None },
                             on_change: move |v| name.set(v),
                         }
-                        ProfileFormField {
-                            title: "Sync source URL".to_string(),
-                            value: if editing() { repo() } else { profile.source.clone() },
-                            readonly: !editing() || operation_active,
-                            placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
-                            error: if editing() && !validation.repo_ok && !repo().trim().is_empty() { Some(
-                                "Sync source URL must use HTTP or HTTPS and point to a valid profile source."
-                                    .to_string(),
-                            ) } else { None },
+                        ProfileSourceField {
+                            value: repo(),
+                            readonly: operation_active,
                             on_change: move |v| repo.set(v),
                         }
                         ProfileFormField {
-                            title: "Folder".to_string(),
-                            value: if editing() { folder() } else { profile.destination.clone() },
-                            readonly: !editing() || operation_active,
-                            placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
+                            title: t!("mod-install-folder"),
+                            value: folder(),
+                            readonly: operation_active,
+                            placeholder: Some(t!(if cfg!(windows) { "profile-mod-folder-placeholder-windows" } else { "profile-mod-folder-placeholder-unix" })),
                             folder_select: true,
-                            pick_button_text: Some("Select".to_string()),
-                            error: if editing() && !validation.folder_ok && !folder().trim().is_empty() { Some("Folder is required and must be unique.".to_string()) } else { None },
+                            error: if !validation.folder_ok && !folder().trim().is_empty() { Some(t!("mod-folder-in-use")) } else { None },
                             on_change: move |v| folder.set(v),
                         }
                         FieldRow {
-                            FieldRowMeta { title: "Use default launch arguments".to_string() }
+                            FieldRowMeta { title: t!("use-default-launch-arguments") }
                             FieldRowActions {
-                                if editing() {
                                     input {
                                         r#type: "checkbox",
                                         class: "check",
@@ -370,201 +222,98 @@ pub fn ProfileView(id: String) -> Element {
                                             use_default_args.set(evt.checked());
                                         },
                                     }
-                                } else {
-                                    span { class: "field-row__value",
-                                        if use_default_args_saved {
-                                            "Yes"
-                                        } else {
-                                            "No"
-                                        }
-                                    }
-                                }
                             }
                         }
-                        if (editing() && !use_default_args()) || (!editing() && !use_default_args_saved) {
+                        if !use_default_args() {
                             ProfileFormField {
-                                title: "Launch arguments".to_string(),
-                                value: if editing() { launch_params() } else { profile.launch_params.clone() },
-                                readonly: !editing() || operation_active,
+                                title: t!("launch-arguments"),
+                                value: launch_params(),
+                                readonly: operation_active,
                                 on_change: move |v| launch_params.set(v),
                             }
                         }
-                        if display_repo_servers.len() > 1 {
+                        if repo_servers.len() > 1 {
                             div { class: "form-field",
-                                span { class: "form-field__label", "Join server" }
+                                span { class: "form-field__label", {t!("join-server")} }
                                 SelectField {
-                                    disabled: !editing() || operation_active,
+                                    disabled: operation_active,
                                     value: join_server_value.clone(),
                                     options: join_server_options.clone(),
                                     onchange: move |value: String| {
-                                        selected_repo_server.set(value.parse::<usize>().ok());
+                                        server_choice.set(value.parse::<usize>().ok().and_then(|idx| server_keys.get(idx).cloned()));
                                     },
                                 }
                             }
                         }
                     }
 
-                    if editing() || !profile.additional_mod_folders.is_empty() {
                         div { class: "section-divider" }
 
                         Section {
                             SectionHeader {
-                                title: "Additional mods".to_string(),
-                                action: editing().then(|| rsx! {
-                                    IconButton {
-                                        icon: BsPlusLg,
-                                        label: "Add mod".to_string(),
+                                title: t!("additional-mods"),
+                                action: Some(rsx! {
+                                    Button {
+                                        variant: ButtonVariant::Secondary,
                                         disabled: operation_active,
                                         onclick: on_add_mod,
+                                        {t!("add-mod")}
                                     }
                                 }),
                             }
-                            if editing() {
                                 div { class: "mod-list",
-                                    for (idx , mod_dir) in additional_mod_folders().iter().cloned().enumerate() {
-                                        div { class: "mod-list__row", key: "{idx}",
+                                    for (idx, (id, mod_dir)) in additional_mod_folders().into_iter().enumerate() {
+                                        div { class: "mod-list__row", key: "{id}",
                                             BrowseField {
                                                 value: mod_dir,
-                                                placeholder: Some("Path to mod directory".to_string()),
+                                                placeholder: Some(t!("folder-path")),
+                                                accessible_label: Some(t!("mod-folder", number: idx + 1)),
+                                                focus_on_mount: focus_mod_id() == Some(id),
                                                 disabled: operation_active,
                                                 folder_select: true,
-                                                pick_button_text: Some("Browse".to_string()),
+                                                compact_picker: true,
+                                                pick_button_text: Some(t!("browse-mod-folder", number: idx + 1)),
                                                 on_change: move |next| {
                                                     additional_mod_folders
                                                         .with_mut(|folders| {
-                                                            if idx < folders.len() {
-                                                                folders[idx] = next;
+                                                            if let Some((_, path)) = folders.iter_mut().find(|(key, _)| *key == id) {
+                                                                *path = next;
                                                             }
                                                         });
                                                 },
                                             }
-                                            Button {
-                                                variant: ButtonVariant::Danger,
+                                            IconButton {
+                                                icon: BsXLg,
+                                                label: t!("remove-mod-folder", number: idx + 1),
+                                                variant: ButtonVariant::Ghost,
                                                 disabled: operation_active,
                                                 onclick: move |_| {
                                                     additional_mod_folders
                                                         .with_mut(|folders| {
-                                                            if idx < folders.len() {
-                                                                folders.remove(idx);
-                                                            }
+                                                            folders.retain(|(key, _)| *key != id);
                                                         });
                                                 },
-                                                "Remove"
                                             }
                                         }
                                     }
                                 }
-                            } else {
-                                div {
-                                    class: "mod-list mod-list--plain",
-                                    role: "list",
-                                    for mod_dir in profile.additional_mod_folders.iter() {
-                                        div {
-                                            class: "mod-list__item mono",
-                                            role: "listitem",
-                                            "{mod_dir}"
-                                        }
-                                    }
-                                }
-                            }
                         }
-                    }
-
-                    if !editing() {
-                        if let Some(message) = operation_notice.clone() {
-                            p { class: "field__error", role: "alert", "{message}" }
-                        }
-
-                        Section {
-                            Button {
-                                variant: ButtonVariant::Ghost,
-                                disabled: !std::path::Path::new(profile.destination.trim()).is_dir(),
-                                onclick: {
-                                    let destination = profile.destination.trim().to_string();
-                                    move |_| {
-                                        let path = std::path::PathBuf::from(&destination);
-                                        if path.is_dir() {
-                                            spawn(async move { open_path(path).await; });
-                                        }
-                                    }
-                                },
-                                "Open folder"
-                            }
-                        }
-
-                        Section {
-                            SectionHeader {
-                                title: "Maintenance".to_string(),
-                            }
-                            ActionErrorView { feedback: feedback.clone() }
-                            Button {
-                                variant: ButtonVariant::Ghost,
-                                disabled: !validate_enabled || any_active,
-                                loading: validate_running,
-                                onclick: on_validate,
-                                "Verify"
-                            }
-                        }
-                    }
-
-                    if editing() {
-                        Section {
-                            SectionHeader { title: "Profile removal".to_string() }
-                            FieldRow {
-                                FieldRowMeta { title: "Delete profile".to_string() }
-                                FieldRowActions {
-                                    Button {
-                                        variant: ButtonVariant::Danger,
-                                        disabled: operation_active || delete_confirm_open(),
-                                        onclick: on_request_delete,
-                                        "Delete"
-                                    }
-                                }
-                            }
-                            InlineConfirm {
-                                open: delete_confirm_open(),
-                                message: format!("Delete \"{}\"? Local files are kept.", profile.name),
-                                confirm_label: "Delete".to_string(),
-                                cancel_label: "Cancel".to_string(),
-                                confirm_variant: ButtonVariant::Danger,
-                                loading: delete_loading(),
-                                disabled: operation_active,
-                                on_confirm: on_confirm_delete,
-                                on_cancel: on_cancel_delete,
-                            }
-                            ActionErrorView { feedback: delete_feedback.clone() }
-                        }
-                    }
                 }
             }
 
-            if editing() {
                 PageFooter {
                     error: Some(rsx! { ActionErrorView { feedback: save_feedback.clone() } }),
                     actions: Some(rsx! {
-                        Button { variant: ButtonVariant::Ghost, onclick: on_cancel_edit, "Cancel" }
+                        Button { variant: ButtonVariant::Ghost, onclick: on_cancel_edit, {t!("cancel")} }
                         Button {
                             variant: ButtonVariant::Primary,
                             loading: save_loading(),
                             disabled: !can_save || operation_active,
                             onclick: on_save,
-                            "Save"
+                            {t!("save")}
                         }
                     }),
                 }
-            } else {
-                PageFooter {
-                    actions: Some(rsx! {
-                        Button { variant: ButtonVariant::Ghost, onclick: move |evt| leave_page.call(evt), "Back" }
-                        Button {
-                            variant: ButtonVariant::Primary,
-                            disabled: any_active,
-                            onclick: on_edit,
-                            "Edit"
-                        }
-                    }),
-                }
-            }
         }
     }
 }

@@ -1,6 +1,8 @@
 use crate::style::{Button, ButtonVariant, TextField};
 use base64::Engine as _;
+use dioxus::dioxus_core::Task;
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use dioxus_router::Navigator;
 use tracing::{error, info};
 
@@ -18,7 +20,9 @@ pub(crate) struct ProfileFormFieldProps {
     #[props(default)]
     pub folder_select: bool,
     #[props(default)]
-    pub pick_button_text: Option<String>,
+    pub action: Option<Element>,
+    #[props(default)]
+    pub feedback: Option<Element>,
     #[props(default)]
     pub error: Option<String>,
     #[props(default = false)]
@@ -41,13 +45,17 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
                     readonly: props.readonly,
                     disabled: props.disabled,
                     folder_select: true,
-                    pick_button_text: props.pick_button_text,
+                    compact_picker: true,
+                    accessible_label: Some(props.title.clone()),
+                    pick_button_text: Some(t!("browse-mod-install-folder")),
                     invalid: props.error.is_some(),
                     on_change: move |v| props.on_change.call(v),
                 }
             } else {
                 TextField {
                     value: props.value,
+                    accessible_label: Some(props.title.clone()),
+                    action: props.action,
                     placeholder: props.placeholder,
                     disabled: props.disabled,
                     readonly: props.readonly,
@@ -58,6 +66,66 @@ pub(crate) fn ProfileFormField(props: ProfileFormFieldProps) -> Element {
             if let Some(error) = props.error {
                 div { class: "field__error", "{error}" }
             }
+            {props.feedback}
+        }
+    }
+}
+
+#[component]
+pub(crate) fn ProfileSourceField(
+    value: String,
+    #[props(default)] readonly: bool,
+    on_change: EventHandler<String>,
+) -> Element {
+    let bridge = use_context::<FleetBridge>();
+    let mut test_task = use_signal(|| None::<Task>);
+    let mut test_result = use_signal(|| None::<Result<(), fleet_core::ApiError>>);
+    let valid = fleet_domain::validated_repo_url(&value).is_ok();
+    let testing = test_task().is_some();
+
+    let test_source = value.clone();
+    rsx! {
+        ProfileFormField {
+            title: t!("profile-source-url"),
+            placeholder: Some(t!("profile-repo-url-placeholder")),
+            error: (!valid && !value.trim().is_empty()).then(|| {
+                t!("invalid-profile-source")
+            }),
+            readonly,
+            value,
+            on_change: move |value| {
+                if let Some(task) = test_task.take() {
+                    task.cancel();
+                }
+                test_result.set(None);
+                on_change.call(value);
+            },
+            action: Some(rsx! {
+                Button {
+                    variant: ButtonVariant::Secondary,
+                    disabled: !valid || readonly,
+                    loading: testing,
+                    onclick: move |_| {
+                        let core = bridge.core();
+                        let source = test_source.clone();
+                        test_result.set(None);
+                        test_task.set(Some(spawn(async move {
+                            let result = core.test_profile_source(&source).await;
+                            test_result.set(Some(result));
+                            test_task.set(None);
+                        })));
+                    },
+                    if testing { {t!("testing-url")} } else { {t!("test-url")} }
+                }
+            }),
+            feedback: test_result().map(|result| rsx! {
+                p { class: "field__error", role: "status",
+                    match result {
+                        Ok(()) => t!("manifest-found"),
+                        Err(error) => error.message,
+                    }
+                }
+            }),
         }
     }
 }
@@ -68,14 +136,14 @@ pub(crate) fn profile_not_found_page(nav: Navigator) -> Element {
         div { class: "page-frame",
             div { class: "page-frame__body",
                 div { class: "page__inner stack-sm",
-                    h1 { class: "page-title", "Profile not found" }
-                    p { class: "page__muted", "This profile no longer exists." }
+                    h1 { class: "page-title", {t!("profile-not-found")} }
+                    p { class: "page__muted", {t!("profile-gone")} }
                     Button {
                         variant: ButtonVariant::Primary,
                         onclick: move |_| {
                             let _ = nav_for_profiles.push(Route::Profiles {});
                         },
-                        "Back to profiles"
+                        {t!("back-to-profiles")}
                     }
                 }
             }

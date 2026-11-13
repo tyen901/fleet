@@ -1,17 +1,23 @@
 use dioxus::prelude::*;
-use dioxus_router::use_navigator;
+use dioxus_i18n::t;
+use dioxus_router::{use_navigator, Link};
 use std::time::Duration;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::app::router::Route;
 use crate::features::action_error::{use_action_error, ActionError, ActionErrorView};
 use crate::features::profiles::common::{profile_icon_src, start_profile_operation};
 use crate::features::profiles::operation::{OperationCancel, OperationReveal};
 use crate::services::bridge::FleetBridge;
+use crate::services::platform::open::open_path;
 use crate::stores::app_store::AppStore;
-use crate::style::{Button, ButtonVariant, IconButton, PageFooter};
-use fleet_core::ProfilePrimaryAction;
-use icondata::{BsGear, BsPlusLg};
+use crate::style::{
+    Button, ButtonVariant, ConfirmDialog, IconButton, Notice, NoticeTone, PageFooter,
+};
+use fleet_core::{
+    OperationKind, OperationTerminalStatus, ProfilePrimaryAction, RepoCheckFreshness,
+};
+use icondata::{BsGear, BsPlusLg, BsThreeDots};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GameStartKind {
@@ -24,12 +30,18 @@ struct ProfileRowViewState {
     id: String,
     name: String,
     icon_src: Option<String>,
-    start_disabled: bool,
+    can_launch: bool,
+    has_join_server: bool,
+    destination: String,
+    can_verify: bool,
+    can_check: bool,
     launch_loading: bool,
     join_loading: bool,
-    primary_action: ProfilePrimaryAction,
+    needs_fix: bool,
+    can_sync: bool,
+    update_available: bool,
     active: Option<fleet_core::ActiveOperationState>,
-    outcome_message: Option<String>,
+    failed_operation: Option<(OperationKind, String)>,
 }
 
 fn profile_row_view_state(
@@ -45,24 +57,40 @@ fn profile_row_view_state(
     let status = runtime.map(|entry| &entry.status);
     let launch_loading = launching_profile_id == Some(profile_id);
     let join_loading = joining_profile_id == Some(profile_id);
-    let start_disabled =
-        status.map(|status| !status.can_launch).unwrap_or(true) || launch_loading || join_loading;
+
+    let needs_fix = profile
+        .is_some_and(|profile| fleet_domain::validated_repo_url(&profile.source).is_err())
+        || status.is_some_and(|status| status.primary_action == ProfilePrimaryAction::FixProfile);
 
     ProfileRowViewState {
         id: profile_id.to_string(),
         name: profile_name.to_string(),
         icon_src: profile.and_then(|profile| profile_icon_src(core, &snapshot.settings, profile)),
-        start_disabled,
+        can_launch: status.is_some_and(|status| status.can_launch),
+        has_join_server: runtime.is_some_and(|entry| !entry.repo_servers.is_empty())
+            || profile.is_some_and(|profile| profile.arma3_server.is_some()),
+        destination: profile
+            .map(|profile| profile.destination.clone())
+            .unwrap_or_default(),
+        can_verify: status.is_some_and(|status| status.actions.validate_enabled),
+        can_check: status.is_none_or(|status| status.actions.check_enabled),
         launch_loading,
         join_loading,
-        primary_action: status
-            .map(|status| status.primary_action)
-            .unwrap_or(ProfilePrimaryAction::CheckForUpdates),
+        needs_fix,
+        can_sync: !needs_fix && status.is_none_or(|status| status.actions.sync_enabled),
+        update_available: status.is_some_and(|status| {
+            status.repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
+        }),
         active: runtime.and_then(|runtime| runtime.active.clone()),
-        outcome_message: runtime
+        failed_operation: runtime
             .and_then(|runtime| runtime.last_operation.as_ref())
-            .filter(|outcome| outcome.status == fleet_core::OperationTerminalStatus::Failed)
-            .and_then(|outcome| outcome.error.as_ref().map(|error| error.message.clone())),
+            .filter(|outcome| outcome.status == OperationTerminalStatus::Failed)
+            .and_then(|outcome| {
+                outcome
+                    .error
+                    .as_ref()
+                    .map(|error| (outcome.operation, error.message.clone()))
+            }),
     }
 }
 
@@ -148,14 +176,16 @@ pub fn Profiles() -> Element {
             div { class: "page-frame__body",
                 if rows.is_empty() {
                     div { class: "profiles-page__empty",
-                        p { class: "page__muted", "No profiles yet." }
+                        Button {
+                            onclick: move |_| { let _ = nav_for_new.push(Route::NewProfile {}); },
+                            {t!("new-profile")}
+                        }
                     }
                 } else {
                     div { class: "profiles-page__list", role: "list",
-                        for (index,row) in rows.into_iter().enumerate() {
+                        for row in rows.iter().cloned() {
                             ProfileRow {
                                 key: "{row.id}",
-                                primary:index==0,
                                 row,
                                 on_start: {
                                     let bridge = bridge.clone();
@@ -181,16 +211,18 @@ pub fn Profiles() -> Element {
 
             PageFooter {
                 actions: Some(rsx! {
-                    IconButton {
-                        icon: BsPlusLg,
-                        label: "New profile".to_string(),
-                        onclick: move |_| {
-                            let _ = nav_for_new.push(Route::NewProfile {});
-                        },
+                    if !rows.is_empty() {
+                        IconButton {
+                            icon: BsPlusLg,
+                            label: t!("new-profile"),
+                            onclick: move |_| {
+                                let _ = nav_for_new.push(Route::NewProfile {});
+                            },
+                        }
                     }
                     IconButton {
                         icon: BsGear,
-                        label: "Settings".to_string(),
+                        label: t!("settings"),
                         onclick: move |_| {
                             let _ = nav_for_settings.push(Route::Settings {});
                         },
@@ -204,7 +236,6 @@ pub fn Profiles() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct ProfileRowProps {
     row: ProfileRowViewState,
-    primary: bool,
     on_start: EventHandler<(String, GameStartKind, ActionError)>,
 }
 
@@ -212,162 +243,226 @@ struct ProfileRowProps {
 fn ProfileRow(props: ProfileRowProps) -> Element {
     let bridge = use_context::<FleetBridge>();
     let feedback = use_action_error();
+    let delete_feedback = use_action_error();
     let nav = use_navigator();
     let row = props.row.clone();
 
-    let profile_id_for_open = row.id.clone();
-    let open_profile = move |_| {
-        let _ = nav.push(Route::ProfileView {
-            id: profile_id_for_open.clone(),
-        });
-    };
+    let mut delete_open = use_signal(|| false);
+    let mut deleting = use_signal(|| false);
+    let menu_id = format!("profile-actions-{}", row.id);
+    let menu_trigger_id = format!("{menu_id}-trigger");
+    let edit_route = Route::ProfileEdit { id: row.id.clone() };
+    let destination = std::path::PathBuf::from(row.destination.trim());
 
-    let profile_id_for_launch = row.id.clone();
-    let profile_id_for_join = row.id.clone();
-    let profile_id_for_action = row.id.clone();
-    let action_label = match row.primary_action {
-        ProfilePrimaryAction::None => None,
-        ProfilePrimaryAction::CheckForUpdates => Some("Check for updates"),
-        ProfilePrimaryAction::Update => Some("Update"),
-        ProfilePrimaryAction::Sync => Some("Sync"),
-        ProfilePrimaryAction::FixProfile => Some("Fix"),
-    };
-    let on_primary_action = {
+    let on_delete = {
         let bridge = bridge.clone();
-        let feedback = feedback.clone();
-        move |_| match row.primary_action {
-            ProfilePrimaryAction::None => {}
-            ProfilePrimaryAction::FixProfile => {
-                let _ = nav.push(Route::ProfileView {
-                    id: profile_id_for_action.clone(),
-                });
+        let feedback = delete_feedback.clone();
+        let id = row.id.clone();
+        move |_| {
+            if deleting() {
+                return;
             }
-            ProfilePrimaryAction::CheckForUpdates => start_profile_operation(
-                bridge.clone(),
-                feedback.clone(),
-                profile_id_for_action.clone(),
-                fleet_core::OperationKind::Check,
-                "check",
-                "start_check_failed",
-            ),
-            ProfilePrimaryAction::Sync | ProfilePrimaryAction::Update => start_profile_operation(
-                bridge.clone(),
-                feedback.clone(),
-                profile_id_for_action.clone(),
-                fleet_core::OperationKind::Sync,
-                "sync",
-                "start_sync_failed",
-            ),
+            feedback.clear();
+            deleting.set(true);
+            let bridge = bridge.clone();
+            let feedback = feedback.clone();
+            let id = id.clone();
+            spawn(async move {
+                if let Err(err) = bridge.core().profile_delete(id.clone()).await {
+                    error!(profile_id = %id, code = %err.code, "profile delete failed");
+                    feedback.set(&err);
+                    deleting.set(false);
+                }
+            });
         }
     };
-    let on_start = props.on_start;
-    let launch_feedback = feedback.clone();
-    let join_feedback = feedback.clone();
 
-    let launch_label = if row.launch_loading {
-        "Launching..."
-    } else {
-        "Launch"
+    let edit_route_for_name = edit_route.clone();
+    let on_edit = EventHandler::new(move |_| {
+        let _ = nav.push(edit_route.clone());
+    });
+    let start_operation = |operation| {
+        let bridge = bridge.clone();
+        let feedback = feedback.clone();
+        let id = row.id.clone();
+        EventHandler::new(move |_| {
+            let (action, reason) = match operation {
+                OperationKind::Check => ("check", "start_check_failed"),
+                OperationKind::Sync => ("sync", "start_sync_failed"),
+                OperationKind::Validate => ("validate", "start_validate_failed"),
+            };
+            start_profile_operation(
+                bridge.clone(),
+                feedback.clone(),
+                id.clone(),
+                operation,
+                action,
+                reason,
+            );
+        })
     };
-    let join_label = if row.join_loading {
-        "Joining..."
-    } else {
-        "Join"
-    };
+    let on_check = start_operation(OperationKind::Check);
+    let on_sync = start_operation(OperationKind::Sync);
+    let on_verify = start_operation(OperationKind::Validate);
 
-    let task = row
-        .active
-        .clone()
-        .filter(|active| active.operation != fleet_core::OperationKind::Check);
-    let checking = row
-        .active
-        .as_ref()
-        .is_some_and(|active| active.operation == fleet_core::OperationKind::Check);
-    let actions_visible = task.is_none();
-    let checking_or_action_label = if checking {
-        Some("Checking")
-    } else {
-        action_label
+    let start_game = |kind| {
+        let on_start = props.on_start;
+        let id = row.id.clone();
+        let feedback = feedback.clone();
+        move |_| on_start.call((id.clone(), kind, feedback.clone()))
     };
-    let action_variant = if checking || row.primary_action == ProfilePrimaryAction::CheckForUpdates
-    {
-        ButtonVariant::Ghost
-    } else if props.primary {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Secondary
-    };
-    let launch_variant = if props.primary
-        && actions_visible
-        && (checking
-            || action_label.is_none()
-            || row.primary_action == ProfilePrimaryAction::CheckForUpdates)
-    {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Secondary
-    };
-    let main_class = if row.icon_src.is_some() {
-        "profile-row__main profile-row__main--with-icon"
-    } else {
-        "profile-row__main"
-    };
+    let on_launch = start_game(GameStartKind::Launch);
+    let on_join = start_game(GameStartKind::Join);
 
+    let task = row.active;
+    let starting_game = row.launch_loading || row.join_loading;
+    let show_launch =
+        task.is_none() && (row.launch_loading || (row.can_launch && !row.join_loading));
+    let show_join = task.is_none() && (row.join_loading || (row.can_launch && !row.launch_loading));
+    let retry_check = matches!(row.failed_operation, Some((OperationKind::Check, _)));
+    let check_label = if retry_check {
+        t!("retry-check")
+    } else {
+        t!("check-for-updates")
+    };
+    let show_sync = task.is_none() && !starting_game && row.can_sync && row.update_available;
+    let show_fix = task.is_none() && !starting_game && row.needs_fix;
+
+    let delete_feedback_on_open = delete_feedback.clone();
     rsx! {
         div { class: "profile-row", role: "listitem",
-            div { class: main_class,
-                if let Some(icon_src) = row.icon_src.clone() {
+            div { class: "profile-row__main",
+                if let Some(icon_src) = row.icon_src {
                     img { class: "profile-row__icon", src: icon_src, alt: "" }
                 }
-                div { class: "profile-row__summary",
-                    div { class: "profile-row__name", "{row.name}" }
-                }
-                if let Some(active) = task.clone() {
-                    OperationCancel { active }
-                } else {
-                    IconButton {
-                        icon: BsGear,
-                        label: "Profile settings".to_string(),
-                        disabled: checking,
-                        onclick: open_profile,
+                div { class: "profile-row__identity",
+                    if task.is_none() && !starting_game {
+                        Link {
+                            class: "profile-row__name",
+                            title: row.name.clone(),
+                            to: edit_route_for_name,
+                            "{row.name}"
+                        }
+                    } else {
+                        span { class: "profile-row__name", title: row.name.clone(), "{row.name}" }
                     }
-                }
-            }
-            OperationReveal { active: task }
-            ActionErrorView { feedback: feedback.clone() }
-            if row.active.is_none() {
-                if let Some(message) = row.outcome_message.as_ref() {
-                    p { class: "field__error", role: "alert", "{message}" }
-                }
-            }
-            div { class: if actions_visible { "operation-reveal" } else { "operation-reveal operation-reveal--closed" },
-                div { class: "operation-reveal__inner",
-                    div { class: "profile-row__actions",
-                        div { class: "profile-row__buttons",
-                            if let Some(label) = checking_or_action_label {
-                                Button { variant: action_variant, loading: checking, onclick: on_primary_action, "{label}" }
-                            }
-                            Button {
-                                variant: launch_variant,
-                                disabled: row.start_disabled,
-                                loading: row.launch_loading,
-                                onclick: move |_| {
-                                    on_start.call((profile_id_for_launch.clone(), GameStartKind::Launch, launch_feedback.clone()));
-                                },
-                                "{launch_label}"
-                            }
-                            Button {
-                                variant: ButtonVariant::Secondary,
-                                disabled: row.start_disabled,
-                                loading: row.join_loading,
-                                onclick: move |_| {
-                                    on_start.call((profile_id_for_join.clone(), GameStartKind::Join, join_feedback.clone()));
-                                },
-                                "{join_label}"
+                    if task.is_none() {
+                        if let Some((_, message)) = row.failed_operation.as_ref() {
+                            Notice { tone: NoticeTone::Danger,
+                                span { role: "alert", "{message}" }
                             }
                         }
                     }
                 }
+                if show_launch || show_join || show_sync || show_fix {
+                    div { class: "profile-row__buttons",
+                        if show_sync {
+                            Button { onclick: on_sync, {t!("sync")} }
+                        }
+                        if show_fix {
+                            Button { onclick: on_edit, {t!("fix-profile")} }
+                        }
+                        if show_launch {
+                            Button {
+                                variant: if show_sync { ButtonVariant::Secondary } else { ButtonVariant::Primary },
+                                loading: row.launch_loading,
+                                onclick: on_launch,
+                                if row.launch_loading { {t!("launching")} } else { {t!("launch")} }
+                            }
+                        }
+                        if show_join {
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                disabled: !row.has_join_server,
+                                loading: row.join_loading,
+                                onclick: on_join,
+                                if row.join_loading { {t!("joining")} } else { {t!("join")} }
+                            }
+                        }
+                    }
+                }
+                if let Some(active) = task.clone() {
+                    OperationCancel { active }
+                } else if !starting_game {
+                    IconButton {
+                        id: Some(menu_trigger_id.clone()),
+                        icon: BsThreeDots,
+                        variant: ButtonVariant::Ghost,
+                        label: t!("more-actions-for-profile", name: row.name.as_str()),
+                        popover_target: Some(menu_id.clone()),
+                    }
+                    div {
+                        id: menu_id.clone(),
+                        class: "profile-actions",
+                        popover: "auto",
+                        role: "group",
+                        "aria-label": t!("actions-for-profile", name: row.name.as_str()),
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            dismiss_popover: Some(menu_id.clone()),
+                            onclick: on_edit,
+                            {t!("edit-profile")}
+                        }
+                        if row.can_check {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                dismiss_popover: Some(menu_id.clone()),
+                                onclick: on_check,
+                                "{check_label}"
+                            }
+                        }
+                        if row.can_sync && !show_sync {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                dismiss_popover: Some(menu_id.clone()),
+                                onclick: on_sync,
+                                {t!("force-sync")}
+                            }
+                        }
+                        if destination.is_dir() {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                dismiss_popover: Some(menu_id.clone()),
+                                onclick: move |_| {
+                                    let destination = destination.clone();
+                                    spawn(async move { open_path(destination).await; });
+                                },
+                                {t!("open-folder")}
+                            }
+                        }
+                        if row.can_verify {
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                dismiss_popover: Some(menu_id.clone()),
+                                onclick: on_verify,
+                                {t!("verify-files")}
+                            }
+                        }
+                        Button {
+                            variant: ButtonVariant::Danger,
+                            dismiss_popover: Some(menu_id.clone()),
+                            onclick: move |_| {
+                                delete_feedback_on_open.clear();
+                                delete_open.set(true);
+                            },
+                            {t!("delete-profile")}
+                        }
+                    }
+                }
+            }
+            OperationReveal { active: task.clone() }
+            ActionErrorView { feedback: feedback.clone() }
+            ConfirmDialog {
+                open: delete_open(),
+                title: t!("confirm-delete-profile-title", name: row.name.as_str()),
+                message: t!("delete-profile-files-kept"),
+                confirm_label: t!("confirm-delete-profile"),
+                loading: deleting(),
+                disabled: task.is_some(),
+                feedback: Some(rsx! { ActionErrorView { feedback: delete_feedback.clone() } }),
+                return_focus_id: Some(menu_trigger_id),
+                on_confirm: on_delete,
+                on_cancel: move |_| delete_open.set(false),
             }
         }
     }

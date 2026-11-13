@@ -8,10 +8,14 @@ use super::{AppIcon, ButtonVariant};
 pub struct IconButtonProps {
     pub icon: Icon,
     pub label: String,
+    #[props(default)]
+    pub id: Option<String>,
     #[props(default = ButtonVariant::Secondary)]
     pub variant: ButtonVariant,
     #[props(default = false)]
     pub disabled: bool,
+    #[props(default)]
+    pub popover_target: Option<String>,
     #[props(default)]
     pub onclick: Option<EventHandler<MouseEvent>>,
 }
@@ -25,14 +29,15 @@ pub fn IconButton(props: IconButtonProps) -> Element {
         ButtonVariant::Danger => "btn--danger",
     };
     let disabled = props.disabled;
-
     rsx! {
         button {
             r#type: "button",
+            id: props.id,
             class: "btn btn--icon {variant_class}",
             disabled,
             "aria-label": "{props.label}",
             title: "{props.label}",
+            popovertarget: props.popover_target.clone(),
             onclick: move |evt| {
                 if disabled {
                     return;

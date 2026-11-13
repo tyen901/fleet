@@ -1,12 +1,12 @@
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use tracing::{error, info};
 
 use crate::app::router::Route;
 use crate::features::action_error::{use_action_error, ActionErrorView};
 use crate::features::profiles::{
-    common::{new_profile_from_draft, ProfileFormField},
+    common::{new_profile_from_draft, ProfileFormField, ProfileSourceField},
     draft::ProfileDraft,
-    PROFILE_NAME_PLACEHOLDER, PROFILE_REPO_URL_PLACEHOLDER, PROFILE_TARGET_FOLDER_PLACEHOLDER,
 };
 use crate::services::bridge::FleetBridge;
 use crate::stores::app_store::AppStore;
@@ -26,7 +26,8 @@ pub fn NewProfile() -> Element {
 
     let draft = ProfileDraft::from_fields(name(), repo(), folder());
     let validation = draft.validate(&(store.state)(), None);
-    let can_create = validation.is_valid();
+    let valid_source = fleet_domain::validated_repo_url(&draft.source).is_ok();
+    let can_create = validation.is_valid() && valid_source;
 
     let on_create = {
         let bridge = bridge.clone();
@@ -37,7 +38,9 @@ pub fn NewProfile() -> Element {
                 return;
             }
             let draft = ProfileDraft::from_fields(name(), repo(), folder());
-            if !draft.validate(&(store.state)(), None).is_valid() {
+            if !draft.validate(&(store.state)(), None).is_valid()
+                || fleet_domain::validated_repo_url(&draft.source).is_err()
+            {
                 return;
             }
 
@@ -49,8 +52,8 @@ pub fn NewProfile() -> Element {
             spawn(async move {
                 info!(op = "ui_profile_create", "profile create requested");
                 match bridge.core().profile_save(profile).await {
-                    Ok(saved) => {
-                        let _ = nav.push(Route::ProfileView { id: saved.id });
+                    Ok(_) => {
+                        let _ = nav.push(Route::Profiles {});
                     }
                     Err(err) => {
                         create_loading.set(false);
@@ -80,40 +83,27 @@ pub fn NewProfile() -> Element {
                     ActionErrorView { feedback: feedback.clone() }
                     Section {
                         ProfileFormField {
-                            title: "Name".to_string(),
+                            title: t!("profile-name"),
                             value: name(),
-                            placeholder: Some(PROFILE_NAME_PLACEHOLDER.to_string()),
+                            placeholder: Some(t!("profile-name-placeholder")),
                             error: if !validation.name_ok && !name().trim().is_empty() {
-                                Some("Name must be alphanumeric (spaces allowed).".to_string())
+                                Some(t!("invalid-profile-name"))
                             } else {
                                 None
                             },
                             on_change: move |v| name.set(v),
                         }
-                        ProfileFormField {
-                            title: "Sync source URL".to_string(),
+                        ProfileSourceField {
                             value: repo(),
-                            placeholder: Some(PROFILE_REPO_URL_PLACEHOLDER.to_string()),
-                            error: if !validation.repo_ok && !repo().trim().is_empty() {
-                                Some("Sync source URL must use HTTP or HTTPS and point to a valid profile source.".to_string())
-                            } else {
-                                None
-                            },
                             on_change: move |v| repo.set(v),
                         }
-                    }
-
-                    div { class: "section-divider" }
-
-                    Section {
                         ProfileFormField {
-                            title: "Folder".to_string(),
+                            title: t!("mod-install-folder"),
                             value: folder(),
-                            placeholder: Some(PROFILE_TARGET_FOLDER_PLACEHOLDER.to_string()),
+                            placeholder: Some(t!(if cfg!(windows) { "profile-mod-folder-placeholder-windows" } else { "profile-mod-folder-placeholder-unix" })),
                             folder_select: true,
-                            pick_button_text: Some("Select".to_string()),
                             error: if !validation.folder_ok && !folder().trim().is_empty() {
-                                Some("Folder is required and must be unique.".to_string())
+                                Some(t!("mod-folder-in-use"))
                             } else {
                                 None
                             },
@@ -128,14 +118,14 @@ pub fn NewProfile() -> Element {
                     Button {
                         variant: ButtonVariant::Ghost,
                         onclick: on_cancel,
-                        "Cancel"
+                        {t!("cancel")}
                     }
                     Button {
                         variant: ButtonVariant::Primary,
                         loading: create_loading(),
                         disabled: !can_create,
                         onclick: on_create,
-                        "Create"
+                        {t!("create-profile")}
                     }
                 }),
             }

@@ -11,7 +11,6 @@ const SECTIONS_CSS: &str = include_str!("../../assets/css/components/sections.cs
 const PROGRESS_CSS: &str = include_str!("../../assets/css/components/progress.css");
 const SETTINGS_CSS: &str = include_str!("../../assets/css/pages/settings.css");
 const PROFILES_CSS: &str = include_str!("../../assets/css/pages/profiles.css");
-const ONBOARDING_CSS: &str = include_str!("../../assets/css/pages/onboarding.css");
 
 #[component]
 pub fn StyleAssets() -> Element {
@@ -27,6 +26,5 @@ pub fn StyleAssets() -> Element {
         style { {PROGRESS_CSS} }
         style { {SETTINGS_CSS} }
         style { {PROFILES_CSS} }
-        style { {ONBOARDING_CSS} }
     }
 }

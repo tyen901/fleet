@@ -6,6 +6,10 @@ pub struct TextFieldProps {
     pub label: Option<String>,
     #[props(default)]
     pub placeholder: Option<String>,
+    #[props(default)]
+    pub accessible_label: Option<String>,
+    #[props(default)]
+    pub action: Option<Element>,
     pub value: String,
     #[props(default = false)]
     pub disabled: bool,
@@ -30,6 +34,7 @@ pub fn TextField(props: TextFieldProps) -> Element {
                     r#type: "text",
                     value: props.value.clone(),
                     placeholder: props.placeholder.unwrap_or_default(),
+                    "aria-label": props.accessible_label,
                     disabled: props.disabled,
                     readonly: props.readonly,
                     "aria-invalid": if props.invalid { "true" } else { "false" },
@@ -42,6 +47,7 @@ pub fn TextField(props: TextFieldProps) -> Element {
                         }
                     },
                 }
+                {props.action}
             }
         }
     }

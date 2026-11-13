@@ -15,8 +15,8 @@ const cssRoot = path.resolve(
 
 // tokens.css defines the scales, so it is the one file allowed raw values.
 const TOKENS_FILE = 'tokens.css';
-// The section label and the brand wordmark are the only uppercase text.
-const UPPERCASE_FILES = new Set(['typography.css', 'onboarding.css']);
+// The section label is the only uppercase text.
+const UPPERCASE_FILES = new Set(['typography.css']);
 
 const SPACING_PROPS = new Set([
   'gap',

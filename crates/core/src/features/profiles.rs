@@ -31,6 +31,30 @@ impl std::fmt::Display for SaveProfileError {
 impl std::error::Error for SaveProfileError {}
 
 impl Core {
+    pub async fn test_profile_source(&self, source: &str) -> Result<(), crate::ApiError> {
+        let source = validated_repo_url(source).map_err(|_| {
+            crate::ApiError::new(
+                "invalid_source",
+                "Enter an HTTP or HTTPS URL to the repository file.",
+            )
+        })?;
+        let downloads =
+            fleet_download::DownloadService::new(fleet_download::DownloadServiceConfig {
+                retries: 0,
+                timeout: std::time::Duration::from_secs(10),
+                ..Default::default()
+            });
+        swifty_repo::validate_remote_manifest(source, &downloads)
+            .await
+            .map_err(|err| {
+                crate::ApiError::reported(
+                    "source_test_failed",
+                    "Could not load a Swifty manifest. Check the URL and try again.",
+                    err,
+                )
+            })
+    }
+
     pub async fn list_profiles(&self) -> anyhow::Result<ProfilesConfig> {
         info!(op = "list_profiles", "profiles list requested");
         run_config_blocking(self.config_repo(), |c| c.load_profiles()).await

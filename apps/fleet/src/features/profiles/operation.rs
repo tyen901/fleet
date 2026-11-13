@@ -1,24 +1,11 @@
 use crate::services::bridge::FleetBridge;
 use crate::style::{Button, ButtonVariant, ProgressBar};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use fleet_core::{
     ActiveOperationState, OperationKind, OperationStage, ProgressTrack, ProgressTrackKind,
 };
 
-fn rate(bytes: u64) -> String {
-    format!("{}/s", fleet_domain::utils::format_bytes(bytes))
-}
-fn eta(seconds: Option<u64>) -> String {
-    seconds
-        .map(|seconds| {
-            format!(
-                "Estimated {:02}:{:02} remaining",
-                seconds / 60,
-                seconds % 60
-            )
-        })
-        .unwrap_or_else(|| "Estimated — remaining".to_string())
-}
 #[component]
 pub(crate) fn OperationCancel(active: ActiveOperationState) -> Element {
     let bridge = use_context::<FleetBridge>();
@@ -29,17 +16,21 @@ pub(crate) fn OperationCancel(active: ActiveOperationState) -> Element {
             variant: ButtonVariant::Secondary,
             disabled: stopping || finishing,
             onclick: move |_| { let _ = bridge.core().cancel_session(active.session_id); },
-            if stopping { "Stopping" } else if finishing { "Finishing" } else { "Cancel" }
+            if stopping { {t!("stopping")} } else if finishing { {t!("finishing")} } else { {t!("cancel")} }
         }
     }
 }
 #[component]
-fn UsageMetric(label: String, bytes_per_sec: u64, disk: bool) -> Element {
-    let value = rate(bytes_per_sec);
+fn UsageMetric(bytes_per_sec: u64, disk: bool) -> Element {
+    let value = t!("bytes-per-second", bytes: fleet_domain::utils::format_bytes(bytes_per_sec));
     let animated = bytes_per_sec > 0;
+    let label = if disk {
+        t!("disk-usage")
+    } else {
+        t!("network-speed")
+    };
     rsx! {
-        div { class: "operation-usage",
-            span { class: "operation-usage__label", "{label}" }
+        div { class: "operation-usage", role: "group", aria_label: label.clone(), title: label,
             span { class: "operation-usage__value", "{value}" }
             svg {
                 class: if disk { "operation-usage__icon operation-usage__icon--disk" } else { "operation-usage__icon" },
@@ -60,29 +51,45 @@ fn UsageMetric(label: String, bytes_per_sec: u64, disk: bool) -> Element {
     }
 }
 #[component]
-fn WorkBar(label: String, track: Option<ProgressTrack>, download: bool, frozen: bool) -> Element {
+fn WorkBar(
+    label: String,
+    track: Option<ProgressTrack>,
+    #[props(default)] bytes_per_sec: Option<u64>,
+    #[props(default)] download: bool,
+    frozen: bool,
+) -> Element {
     let percent = track.as_ref().and_then(ProgressTrack::percent);
     let value = if download {
-        fleet_domain::utils::format_bytes(track.as_ref().map_or(0, |track| track.done))
+        track.as_ref().map(|track| {
+            let done = fleet_domain::utils::format_bytes(track.done);
+            match track.total {
+                Some(total) => format!("{done} / {}", fleet_domain::utils::format_bytes(total)),
+                None => done,
+            }
+        })
     } else {
-        percent
-            .map(|p| format!("{p}%"))
-            .unwrap_or_else(|| "—".to_string())
+        percent.map(|percent| format!("{percent}%"))
     };
     rsx! {
         div { class: if download { "operation-work" } else { "operation-work operation-work--patch" },
             div { class: "operation-work__heading",
                 span { "{label}" }
-                span { class: if download { "operation-work__value operation-work__value--download" } else { "operation-work__value" },
-                    span { "{value}" }
-                    if download {
-                        svg { width: "15", height: "15", view_box: "0 0 16 16", fill: "none", stroke: "currentColor", stroke_width: "2", "aria-hidden": "true",
-                            path { d: "M8 1v9m-4-4 4 4 4-4M2 11v3h12v-3" }
-                        }
-                    }
+                if let Some(value) = value.as_ref() {
+                    span { class: "operation-work__value", "{value}" }
                 }
             }
-            ProgressBar { percent, indeterminate: percent.is_none(), frozen, label, value_text: value }
+            div { class: "operation-work__bar",
+                ProgressBar {
+                    percent,
+                    indeterminate: percent.is_none(),
+                    frozen,
+                    label,
+                    value_text: value.unwrap_or_else(|| t!("in-progress")),
+                }
+                if let Some(bytes_per_sec) = bytes_per_sec {
+                    UsageMetric { bytes_per_sec, disk: !download }
+                }
+            }
         }
     }
 }
@@ -97,29 +104,37 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
             .find(|track| track.kind == kind)
             .cloned()
     };
-    let syncing = active.operation == OperationKind::Sync;
-    let patching = syncing && track(ProgressTrackKind::Patch).is_some();
+    let patch = track(ProgressTrackKind::Patch);
+    let patching = active.operation == OperationKind::Sync && patch.is_some();
+    let (label, work) = match active.operation {
+        OperationKind::Check => (t!("checking-for-updates"), None),
+        OperationKind::Sync if patching => (t!("patching-files"), patch),
+        OperationKind::Sync => (t!("scanning-files"), track(ProgressTrackKind::LocalCheck)),
+        OperationKind::Validate => (t!("verifying-files"), track(ProgressTrackKind::LocalCheck)),
+    };
     rsx! {
-        section { class: "profile-operation", aria_label: "Profile operation",
-            div { class: "operation-usages",
-                if patching {
-                    UsageMetric { label: "Network", bytes_per_sec: progress.usage.network_bytes_per_sec, disk: false }
-                }
-                UsageMetric { label: "Disk usage", bytes_per_sec: progress.usage.disk_bytes_per_sec, disk: true }
-            }
+        section { class: "profile-operation", aria_label: t!("profile-operation"),
             if patching {
-                WorkBar { label: "Downloading data", track: track(ProgressTrackKind::Download), download: true, frozen }
+                WorkBar {
+                    label: t!("downloading"),
+                    track: track(ProgressTrackKind::Download),
+                    bytes_per_sec: Some(progress.usage.network_bytes_per_sec),
+                    download: true,
+                    frozen,
+                }
             }
             WorkBar {
-                label: if patching { "Patching files" } else if syncing { "Scanning files" } else { "Validating files" },
-                track: track(if patching { ProgressTrackKind::Patch } else { ProgressTrackKind::LocalCheck }),
-                download: false,
+                label: label,
+                track: work,
+                bytes_per_sec: patching.then_some(progress.usage.disk_bytes_per_sec),
                 frozen,
             }
-            span { class: "profile-operation__eta",
-                if active.cancel_requested { "Stopping" }
-                else if progress.active_stage == OperationStage::Finalizing { "Finishing" }
-                else { "{eta(progress.usage.eta_seconds)}" }
+            if !frozen && active.operation != OperationKind::Check {
+                if let Some(seconds) = progress.usage.eta_seconds {
+                    span { class: "profile-operation__eta",
+                        {t!("time-remaining", time: format!("{}:{:02}", seconds / 60, seconds % 60))}
+                    }
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
-use crate::style::{Button, ButtonVariant, InlineConfirm, PageFooter};
+use crate::style::{Button, ButtonVariant, ConfirmDialog, PageFooter};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use directories::ProjectDirs;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
 
@@ -34,6 +35,7 @@ pub fn Settings() -> Element {
     let mut saving = use_signal(|| false);
     let mut reset_settings_confirm_open = use_signal(|| false);
     let mut factory_reset_confirm_open = use_signal(|| false);
+    let mut factory_resetting = use_signal(|| false);
     let installed_version = use_signal(updates::installed_version_string);
     let update_checks_enabled = updates::current_build_allows_update_checks();
     let defaults = fleet_core::effective_settings_defaults();
@@ -242,20 +244,37 @@ pub fn Settings() -> Element {
         dirty_for_reset_all.set(true);
     };
 
-    let on_request_factory_reset = move || factory_reset_confirm_open.set(true);
+    let reset_feedback_on_open = reset_feedback.clone();
+    let on_request_factory_reset = move || {
+        if saving() {
+            return;
+        }
+        reset_feedback_on_open.clear();
+        factory_reset_confirm_open.set(true);
+    };
     let on_cancel_factory_reset = move |_: MouseEvent| factory_reset_confirm_open.set(false);
     let bridge_for_factory_reset = bridge.clone();
     let feedback_for_factory_reset = reset_feedback.clone();
     let nav_for_factory_reset = nav;
     let on_confirm_factory_reset = move |_: MouseEvent| {
+        if factory_resetting() {
+            return;
+        }
         let bridge = bridge_for_factory_reset.clone();
         let feedback = feedback_for_factory_reset.clone();
         let nav = nav_for_factory_reset;
-        factory_reset_confirm_open.set(false);
-        spawn_settings_task(feedback, async move {
-            bridge.core().factory_reset().await?;
-            let _ = nav.push(Route::Onboarding {});
-            Ok(())
+        factory_resetting.set(true);
+        feedback.clear();
+        spawn(async move {
+            match bridge.core().factory_reset().await {
+                Ok(()) => {
+                    let _ = nav.push(Route::Onboarding {});
+                }
+                Err(err) => {
+                    feedback.set(&err);
+                    factory_resetting.set(false);
+                }
+            }
         });
     };
 
@@ -341,33 +360,28 @@ pub fn Settings() -> Element {
                         rsx! { ActionErrorView { feedback: setup_feedback.clone() } },
                         on_request_reset_settings,
                         on_request_factory_reset,
-                        reset_settings_confirm_open(),
-                        rsx! {
-                            InlineConfirm {
-                                open: reset_settings_confirm_open(),
-                                message: "Restore all settings to defaults? Applied when you save.".to_string(),
-                                confirm_label: "Reset".to_string(),
-                                cancel_label: "Cancel".to_string(),
-                                confirm_variant: ButtonVariant::Secondary,
-                                on_confirm: on_confirm_reset_settings,
-                                on_cancel: on_cancel_reset_settings,
-                            }
-                        },
-                        factory_reset_confirm_open(),
-                        rsx! {
-                            InlineConfirm {
-                                open: factory_reset_confirm_open(),
-                                message: "Remove all settings and profiles, then return to setup?".to_string(),
-                                confirm_label: "Factory reset".to_string(),
-                                cancel_label: "Cancel".to_string(),
-                                confirm_variant: ButtonVariant::Danger,
-                                on_confirm: on_confirm_factory_reset,
-                                on_cancel: on_cancel_factory_reset,
-                            }
-                        },
-                        rsx! { ActionErrorView { feedback: reset_feedback.clone() } },
                     )}
                 }
+            }
+
+            ConfirmDialog {
+                open: reset_settings_confirm_open(),
+                title: t!("confirm-reset-all-settings"),
+                message: t!("reset-settings-when-saved"),
+                confirm_label: t!("reset"),
+                confirm_variant: ButtonVariant::Primary,
+                on_confirm: on_confirm_reset_settings,
+                on_cancel: on_cancel_reset_settings,
+            }
+            ConfirmDialog {
+                open: factory_reset_confirm_open(),
+                title: t!("confirm-factory-reset"),
+                message: t!("factory-reset-description"),
+                confirm_label: t!("factory-reset"),
+                loading: factory_resetting(),
+                feedback: Some(rsx! { ActionErrorView { feedback: reset_feedback.clone() } }),
+                on_confirm: on_confirm_factory_reset,
+                on_cancel: on_cancel_factory_reset,
             }
 
             PageFooter {
@@ -376,14 +390,14 @@ pub fn Settings() -> Element {
                     Button {
                         variant: ButtonVariant::Ghost,
                         onclick: on_cancel,
-                        "Cancel"
+                        {t!("cancel")}
                     }
                     Button {
                         variant: ButtonVariant::Primary,
                         loading: saving(),
                         disabled: !dirty() || custom_template_error.is_some(),
                         onclick: on_save,
-                        "Save"
+                        {t!("save")}
                     }
                 }),
             }

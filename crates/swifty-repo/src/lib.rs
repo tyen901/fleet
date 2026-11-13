@@ -11,6 +11,17 @@ use tracing::debug;
 
 use fleet_download::{DownloadResult, DownloadService, DownloadSpec};
 
+/// Check a remote manifest without writing repository cache or downloading mods.
+pub async fn validate_remote_manifest(repo_url: &str, downloads: &DownloadService) -> Result<()> {
+    let DownloadResult::Downloaded(manifest) =
+        downloads.download_one("repo.json", repo_url, None).await?
+    else {
+        anyhow::bail!("unexpected 304 for an unconditional manifest request");
+    };
+    swifty_artifacts::read_repo_json(&manifest.bytes).context("parse repo.json")?;
+    Ok(())
+}
+
 /// Internal cached blob stored as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepoCacheBlob {

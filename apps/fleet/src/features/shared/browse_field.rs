@@ -1,10 +1,14 @@
-use crate::style::{Button, ButtonVariant};
+use crate::style::{Button, ButtonVariant, IconButton};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
+use icondata::BsFolder2Open;
 
 #[derive(Props, Clone, PartialEq)]
 pub struct BrowseFieldProps {
     #[props(default)]
     pub label: Option<String>,
+    #[props(default)]
+    pub accessible_label: Option<String>,
     #[props(default)]
     pub placeholder: Option<String>,
     pub value: String,
@@ -17,6 +21,10 @@ pub struct BrowseFieldProps {
     pub folder_select: bool,
     #[props(default)]
     pub pick_button_text: Option<String>,
+    #[props(default)]
+    pub compact_picker: bool,
+    #[props(default)]
+    pub focus_on_mount: bool,
     #[props(default = false)]
     pub invalid: bool,
     pub on_change: EventHandler<String>,
@@ -28,7 +36,7 @@ pub fn BrowseField(props: BrowseFieldProps) -> Element {
         .pick_button_text
         .clone()
         .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| "Browse".to_string());
+        .unwrap_or_else(|| t!("browse"));
     let on_browse = move |_| {
         let folder_select = props.folder_select;
         let on_change = props.on_change;
@@ -58,6 +66,7 @@ pub fn BrowseField(props: BrowseFieldProps) -> Element {
                     r#type: "text",
                     value: props.value.clone(),
                     placeholder: props.placeholder.unwrap_or_default(),
+                    "aria-label": props.accessible_label.clone().or_else(|| props.label.clone()),
                     disabled: props.disabled,
                     readonly: props.readonly,
                     "aria-invalid": if props.invalid { "true" } else { "false" },
@@ -65,13 +74,28 @@ pub fn BrowseField(props: BrowseFieldProps) -> Element {
                     spellcheck: "false",
                     onmousedown: move |evt| evt.stop_propagation(),
                     oninput: move |evt| props.on_change.call(evt.value()),
+                    onmounted: move |evt| {
+                        if props.focus_on_mount {
+                            spawn(async move { let _ = evt.data().set_focus(true).await; });
+                        }
+                    },
                 }
                 if !props.readonly && props.folder_select {
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        disabled: props.disabled,
-                        onclick: on_browse,
-                        "{pick_button_label}"
+                    if props.compact_picker {
+                        IconButton {
+                            icon: BsFolder2Open,
+                            label: pick_button_label,
+                            variant: ButtonVariant::Ghost,
+                            disabled: props.disabled,
+                            onclick: on_browse,
+                        }
+                    } else {
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            disabled: props.disabled,
+                            onclick: on_browse,
+                            "{pick_button_label}"
+                        }
                     }
                 }
 

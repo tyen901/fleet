@@ -10,10 +10,13 @@ mod style;
 use app::root::AppRoot;
 use dioxus::desktop::{tao::window::Icon, Config, LogicalSize, WindowBuilder};
 use dioxus::prelude::*;
+use dioxus_i18n::prelude::{use_init_i18n, I18nConfig};
+use dioxus_i18n::unic_langid::langid;
 use services::bridge::FleetBridge;
 use style::StyleAssets;
 use tracing::{error, info};
 
+const APP_NAME: &str = "Fleet";
 const APP_WIDTH: f64 = 420.0;
 const APP_HEIGHT: f64 = 560.0;
 
@@ -45,7 +48,7 @@ fn main() -> anyhow::Result<()> {
             .with_cfg(
                 Config::new().with_menu(None).with_window(
                     WindowBuilder::new()
-                        .with_title("Fleet")
+                        .with_title(APP_NAME)
                         .with_window_icon(Some(window_icon))
                         .with_inner_size(LogicalSize::new(APP_WIDTH, APP_HEIGHT))
                         .with_min_inner_size(LogicalSize::new(APP_WIDTH, APP_HEIGHT))
@@ -66,6 +69,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn App() -> Element {
+    use_init_i18n(|| {
+        let english = langid!("en-US");
+        I18nConfig::new(english.clone())
+            .with_locale((english.clone(), include_str!("../locales/en-US.ftl")))
+            .with_fallback(english)
+    });
+
     rsx! {
         StyleAssets {}
         AppRoot {}

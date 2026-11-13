@@ -40,10 +40,11 @@ as it is rebuilt. Both totals are fixed after inventory. Task metrics report
 network throughput and logical disk reads plus writes, with an estimated time
 remaining once throughput stabilizes.
 
-Checking for updates uses an inline spinner. Verification starts from profile
-settings and returns to the home view. Mismatched files automatically continue
-into sync, retaining the same profile lock. Editing stays locked until workers
-finish, including cancellation. Sync and validation also block launching;
-Launch and Join cancel an active update check before starting the game.
-Progress smoothly collapses after
-completion or cancellation; failures remain inline on the affected profile.
+Checking for updates uses an indeterminate progress bar. **Force sync**
+starts sync from the profile menu. **Verify files** rescans and hashes local
+files. Mismatches found during verification automatically continue into sync
+under the same profile lock. Editing stays locked until workers finish,
+including cancellation. Profile cards hide Launch and Join during checks,
+sync, and verification. When a profile is ready to launch, Join requires a
+server. Progress collapses after completion or cancellation, and failures
+remain inline on the affected profile.

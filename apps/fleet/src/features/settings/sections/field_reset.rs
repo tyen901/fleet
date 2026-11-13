@@ -1,5 +1,6 @@
 use crate::style::{Button, ButtonVariant};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use fleet_core::SettingsField;
 
 #[derive(Props, Clone, PartialEq)]
@@ -30,7 +31,7 @@ pub(crate) fn FieldResetButton(props: FieldResetButtonProps) -> Element {
                 variant: ButtonVariant::Ghost,
                 disabled: !props.show,
                 onclick: move |_| props.on_reset.call(field),
-                "Reset"
+                {t!("reset")}
             }
         }
     }

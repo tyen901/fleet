@@ -1,5 +1,6 @@
 use crate::style::{FieldRow, FieldRowActions, FieldRowMeta, Section, SectionHeader};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use fleet_core::SettingsField;
 
 use super::field_reset::FieldResetButton;
@@ -15,9 +16,9 @@ where
 {
     rsx! {
         Section {
-            SectionHeader { title: "General".to_string() }
+            SectionHeader { title: t!("general") }
             FieldRow {
-                FieldRowMeta { title: "Show profile icons".to_string() }
+                FieldRowMeta { title: t!("show-profile-icons") }
                 FieldRowActions {
                     FieldResetButton {
                         field: SettingsField::ShowProfileIcons,

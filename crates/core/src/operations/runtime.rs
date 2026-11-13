@@ -226,6 +226,15 @@ impl OperationRuntime {
                     out = Err(crate::operations::backend_unavailable());
                 }
             }
+            if matches!(
+                &out,
+                Ok(OperationOutput::Check(_) | OperationOutput::Sync(_))
+            ) {
+                // Publish cached server availability before the row offers Join.
+                if let Err(error) = core.refresh_profile_repo_cache(profile.id.clone()).await {
+                    tracing::debug!(profile_id = %profile.id, code = %error.code, "profile server refresh failed");
+                }
+            }
             rt.finish(&core, session_id, out, reservation);
         });
         Ok(session_id)

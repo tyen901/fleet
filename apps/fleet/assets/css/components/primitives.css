@@ -28,8 +28,12 @@
 }
 
 .note--bad {
-  color: var(--clr-danger-text);
-  border-color: var(--clr-danger-subtle);
+  color: var(--clr-text-secondary);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: var(--text-label);
+  overflow-wrap: anywhere;
 }
 
 .code {

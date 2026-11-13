@@ -19,6 +19,8 @@ pub struct ButtonProps {
     #[props(default)]
     pub id: Option<String>,
     #[props(default)]
+    pub dismiss_popover: Option<String>,
+    #[props(default)]
     pub onclick: Option<EventHandler<MouseEvent>>,
     pub children: Element,
 }
@@ -32,6 +34,8 @@ pub fn Button(props: ButtonProps) -> Element {
         button {
             r#type: "button",
             id: props.id.clone(),
+            popovertarget: props.dismiss_popover.clone(),
+            popovertargetaction: props.dismiss_popover.as_ref().map(|_| "hide"),
             class: "{class}",
             disabled,
             onclick: move |evt| {

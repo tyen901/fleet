@@ -1,5 +1,6 @@
 use crate::style::{FieldRow, FieldRowActions, FieldRowMeta, Section, SectionHeader};
 use dioxus::prelude::*;
+use dioxus_i18n::t;
 use fleet_core::SettingsField;
 
 use super::field_reset::FieldResetButton;
@@ -19,9 +20,9 @@ where
 {
     rsx! {
         Section {
-            SectionHeader { title: "Startup".to_string() }
+            SectionHeader { title: t!("startup") }
             FieldRow {
-                FieldRowMeta { title: "Check profiles on startup".to_string() }
+                FieldRowMeta { title: t!("check-profiles-on-startup") }
                 FieldRowActions {
                     FieldResetButton {
                         field: SettingsField::AutoCheckProfilesOnStartup,
@@ -40,7 +41,7 @@ where
             }
 
             FieldRow {
-                FieldRowMeta { title: "Check for Fleet updates on startup".to_string() }
+                FieldRowMeta { title: t!("check-fleet-updates-on-startup") }
                 FieldRowActions {
                     FieldResetButton {
                         field: SettingsField::AutoCheckOnStartup,
