@@ -35,10 +35,10 @@ not supported.
 ### Operation progress
 
 Sync shows separate download and patch bars. Download progress counts remote
-payload bytes; local reuse is excluded. Patch progress counts changed file output
-as it is rebuilt. Both totals are fixed after inventory. Task metrics report
-network throughput and logical disk reads plus writes, with an estimated time
-remaining once throughput stabilizes.
+payload bytes against the planned total, which refines as Flux identifies local
+reuse. Patch progress counts changed file output as it is rebuilt. Task metrics
+report network throughput and logical disk reads plus writes, with an estimated
+time remaining once throughput stabilizes.
 
 Checking for updates uses an indeterminate progress bar that clears as soon
 as the check finishes. **Validate files** rescans and hashes local files.

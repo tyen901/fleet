@@ -875,7 +875,17 @@ async function runFlow(client, repo) {
 
   repo.serveManifest([]);
   await validateFromMenu(secondProfile);
-  await client.waitFor(`document.querySelectorAll('.profile-row:nth-child(2) .operation-work').length === 2`, 'download and patch tracks');
+  const downloadValue = (downloaded, percent) => `(() => {
+    const row = document.querySelector('.profile-row:nth-child(2) .operation-work');
+    const text = ${JSON.stringify(`${downloaded} / ${fixtureSizeMiB.toFixed(1)} MiB`)};
+    const bar = row?.querySelector('progress');
+    return bar?.value === ${percent}
+      && (${withoutIsolation.toString()})(row.querySelector('.operation-work__value')?.textContent ?? '') === text
+      && (${withoutIsolation.toString()})(bar.getAttribute('aria-valuetext') ?? '') === text;
+  })()`;
+  await client.waitFor(downloadValue('0 B', 0), 'total download size before transfer');
+  repo.startDownload();
+  await client.waitFor(downloadValue(`${(fixtureSizeMiB / 2).toFixed(1)} MiB`, 50), 'partial download progress');
   const syncMetricsVisible = await client.evaluate(`(() => {
     const tracks = [...document.querySelectorAll('.profile-row:nth-child(2) .operation-work')];
     return tracks[0].querySelector('.operation-work__value')?.textContent.includes('B')
@@ -898,6 +908,7 @@ async function runFlow(client, repo) {
   })()`);
   if (!syncMetricsVisible) throw new Error('Download and patch progress must show values and speeds');
   await waitForProgressFrame(secondProfile);
+  await delay(180); // Let the 160 ms determinate fill transition reach the captured value.
   await client.capture('02j-profiles-download-patch.png');
   repo.releaseDownload();
   await client.waitFor(`!document.querySelector('.profile-operation')`, 'fixture download complete', 20_000);
@@ -984,7 +995,8 @@ async function runFlow(client, repo) {
 await ensureCdpPortAvailable();
 const heldResponses = new Set();
 const heldDownloads = new Set();
-const fixtureBytes = Buffer.from('fleet dummy file\n');
+const fixtureSizeMiB = 2;
+const fixtureBytes = Buffer.alloc(fixtureSizeMiB * 1024 * 1024, 'fleet dummy file\n');
 const fixtureMod = '@fleet-example';
 const fixtureModChecksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const digest = (data) => createHash('md5').update(data).digest('hex').toUpperCase();
@@ -1005,7 +1017,8 @@ const modManifest = JSON.stringify({
   }],
 });
 let repoManifest;
-let downloadReleased = false;
+let downloadStarted = false;
+const { promise: downloadRemainder, resolve: releaseDownloadRemainder } = Promise.withResolvers();
 const slowRepo = createHttpServer((request, response) => {
   if (request.url === '/test/repo.json') {
     response.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1025,7 +1038,7 @@ const slowRepo = createHttpServer((request, response) => {
       response.writeHead(200, { 'Content-Type': 'application/json' })
         .end(request.url === '/repo.json' ? repoManifest : modManifest);
     } else if (request.url === `/${fixtureMod}/addons/hello.txt`) {
-      if (downloadReleased) {
+      if (downloadStarted) {
         sendFixtureDownload(request, response);
       } else {
         const pending = { request, response };
@@ -1041,20 +1054,28 @@ const slowRepo = createHttpServer((request, response) => {
   response.on('close', () => heldResponses.delete(response));
 });
 
-function sendFixtureDownload(request, response) {
+async function sendFixtureDownload(request, response) {
   const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? '');
+  let body = fixtureBytes;
   if (range) {
     const start = Number(range[1]);
     const end = Number(range[2]);
+    body = fixtureBytes.subarray(start, end + 1);
     response.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fixtureBytes.length}`,
-      'Content-Length': end - start + 1,
-    })
-      .end(fixtureBytes.subarray(start, end + 1));
+      'Content-Length': body.length,
+    });
   } else {
-    response.writeHead(200, { 'Content-Length': fixtureBytes.length })
-      .end(request.method === 'HEAD' ? undefined : fixtureBytes);
+    response.writeHead(200, { 'Content-Length': body.length });
   }
+  if (request.method === 'HEAD') {
+    response.end();
+    return;
+  }
+  const split = Math.floor(body.length / 2);
+  response.write(body.subarray(0, split));
+  await downloadRemainder;
+  if (!response.destroyed) response.end(body.subarray(split));
 }
 await new Promise((resolve, reject) => {
   slowRepo.once('error', reject);
@@ -1091,10 +1112,11 @@ try {
         servers,
       });
     },
-    releaseDownload() {
-      downloadReleased = true;
+    startDownload() {
+      downloadStarted = true;
       for (const { request, response } of heldDownloads) sendFixtureDownload(request, response);
     },
+    releaseDownload: releaseDownloadRemainder,
   });
   process.stdout.write(`Rendered Fleet UI views to ${captureRoot}\n`);
 } finally {

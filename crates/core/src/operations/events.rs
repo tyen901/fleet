@@ -61,6 +61,7 @@ pub struct ProgressTrack {
     pub kind: ProgressTrackKind,
     pub done: u64,
     pub total: Option<u64>,
+    pub total_is_estimate: bool,
 }
 
 impl ProgressTrack {

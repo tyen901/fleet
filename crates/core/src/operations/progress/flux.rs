@@ -21,6 +21,8 @@ struct WorkProgress {
     check_total: Option<u64>,
     checked: u64,
     downloaded: u64,
+    download_total: Option<u64>,
+    download_total_is_estimate: bool,
     patch_total: Option<u64>,
     rebuilt: u64,
     read: u64,
@@ -33,6 +35,10 @@ impl WorkProgress {
         match event {
             InventoryPlan { bytes } => self.check_total = Some(bytes),
             Checked { bytes, .. } => self.checked += bytes,
+            DownloadPlan { bytes, estimated } => {
+                self.download_total = Some(bytes);
+                self.download_total_is_estimate = estimated;
+            }
             Downloaded { bytes } => self.downloaded += bytes,
             PatchPlan { bytes } => self.patch_total = Some(bytes),
             Patched { bytes, .. } => self.rebuilt += bytes,
@@ -52,12 +58,14 @@ impl WorkProgress {
                 ProgressTrack {
                     kind: ProgressTrackKind::Download,
                     done: self.downloaded,
-                    total: self.finalizing.then_some(self.downloaded),
+                    total: self.download_total,
+                    total_is_estimate: self.download_total_is_estimate,
                 },
                 ProgressTrack {
                     kind: ProgressTrackKind::Patch,
                     done: self.rebuilt,
                     total: self.patch_total,
+                    total_is_estimate: false,
                 },
             ]
         } else {
@@ -65,6 +73,7 @@ impl WorkProgress {
                 kind: ProgressTrackKind::LocalCheck,
                 done: self.checked_bytes(),
                 total: self.check_total,
+                total_is_estimate: false,
             }]
         }
     }
@@ -407,13 +416,25 @@ mod tests {
     #[test]
     fn patch_and_download_tracks_are_independent() {
         let mut work = WorkProgress::default();
+        work.apply(fleet_flux::ProgressEvent::DownloadPlan {
+            bytes: 50,
+            estimated: true,
+        });
         work.apply(fleet_flux::ProgressEvent::PatchPlan { bytes: 100 });
         work.apply(fleet_flux::ProgressEvent::Downloaded { bytes: 20 });
         work.apply(fleet_flux::ProgressEvent::Patched { bytes: 30 });
         let tracks = work.tracks();
-        assert_eq!((tracks[0].done, tracks[0].total), (20, None));
+        assert_eq!((tracks[0].done, tracks[0].total), (20, Some(50)));
+        assert_eq!(tracks[0].percent(), Some(40));
+        assert!(tracks[0].total_is_estimate);
         assert_eq!((tracks[1].done, tracks[1].total), (30, Some(100)));
+        work.apply(fleet_flux::ProgressEvent::DownloadPlan {
+            bytes: 30,
+            estimated: false,
+        });
+        work.apply(fleet_flux::ProgressEvent::Downloaded { bytes: 10 });
         work.apply(fleet_flux::ProgressEvent::Finalizing);
-        assert_eq!(work.tracks()[0].total, Some(20));
+        assert_eq!(work.tracks()[0].percent(), Some(100));
+        assert!(!work.tracks()[0].total_is_estimate);
     }
 }

@@ -434,6 +434,7 @@ mod tests {
                     kind: crate::ProgressTrackKind::LocalCheck,
                     done: 100,
                     total: Some(100),
+                    total_is_estimate: false,
                 }],
                 usage: Default::default(),
             },

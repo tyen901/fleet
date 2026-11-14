@@ -62,9 +62,13 @@ fn WorkBar(
     let value = if download {
         track.as_ref().map(|track| {
             let done = fleet_domain::utils::format_bytes(track.done);
-            match track.total {
-                Some(total) => format!("{done} / {}", fleet_domain::utils::format_bytes(total)),
-                None => done,
+            let Some(total) = track.total.map(fleet_domain::utils::format_bytes) else {
+                return done;
+            };
+            if track.total_is_estimate {
+                t!("download-progress-estimate", done: done, total: total)
+            } else {
+                t!("download-progress", done: done, total: total)
             }
         })
     } else {
