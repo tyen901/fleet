@@ -103,3 +103,7 @@ time-remaining = { $time } remaining
 update-available = Update available: { $version }
 bytes-per-second = { $bytes }/s
 attempted-route = attempted: { $route }
+sky-location = Sky location
+latitude = Latitude
+longitude = Longitude
+sky-coordinates-invalid = Enter latitude from −90 to 90 and longitude from −180 to 180.

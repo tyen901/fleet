@@ -259,6 +259,36 @@ impl Default for Arma3Settings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkyLocation {
+    latitude_microdegrees: i32,
+    longitude_microdegrees: i32,
+}
+
+impl SkyLocation {
+    pub const WELLINGTON: Self = Self {
+        latitude_microdegrees: -41_284_600,
+        longitude_microdegrees: 174_779_100,
+    };
+
+    pub fn from_degrees(latitude: f64, longitude: f64) -> Option<Self> {
+        if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+            return None;
+        }
+        Some(Self {
+            latitude_microdegrees: (latitude * 1_000_000.0).round() as i32,
+            longitude_microdegrees: (longitude * 1_000_000.0).round() as i32,
+        })
+    }
+
+    pub fn degrees(self) -> (f64, f64) {
+        (
+            f64::from(self.latitude_microdegrees) / 1_000_000.0,
+            f64::from(self.longitude_microdegrees) / 1_000_000.0,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UiSettings {
     /// If true, the app will skip the first-run onboarding flow.
@@ -272,6 +302,8 @@ pub struct UiSettings {
     /// If false, the UI falls back to text.
     #[serde(default = "default_true")]
     pub show_profile_icons: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky_location: Option<SkyLocation>,
 }
 
 impl Default for UiSettings {
@@ -279,6 +311,7 @@ impl Default for UiSettings {
         Self {
             onboarding_completed: false,
             show_profile_icons: true,
+            sky_location: None,
         }
     }
 }
@@ -339,6 +372,10 @@ fn default_true() -> bool {
 }
 
 pub fn normalize_app_settings(mut settings: AppSettings) -> AppSettings {
+    settings.ui.sky_location = settings.ui.sky_location.and_then(|location| {
+        let (latitude, longitude) = location.degrees();
+        SkyLocation::from_degrees(latitude, longitude)
+    });
     if settings.arma3.arma3_default_args.trim().is_empty() {
         settings.arma3.arma3_default_args = DEFAULT_ARMA3_ARGS.to_string();
     }

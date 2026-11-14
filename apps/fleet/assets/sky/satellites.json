@@ -1,0 +1,69 @@
+{
+  "source": "CelesTrak General Perturbations data",
+  "urls": [
+    "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=JSON",
+    "https://celestrak.org/NORAD/elements/gp.php?CATNR=20580&FORMAT=JSON"
+  ],
+  "objects": [
+    {
+      "label": "ISS",
+      "OBJECT_NAME": "ISS (ZARYA)",
+      "OBJECT_ID": "1998-067A",
+      "EPOCH": "2026-11-13T09:36:10.705824",
+      "MEAN_MOTION": 15.49350588,
+      "ECCENTRICITY": 0.0007366,
+      "INCLINATION": 51.6324,
+      "RA_OF_ASC_NODE": 281.7005,
+      "ARG_OF_PERICENTER": 20.9423,
+      "MEAN_ANOMALY": 339.1866,
+      "EPHEMERIS_TYPE": 0,
+      "CLASSIFICATION_TYPE": "U",
+      "NORAD_CAT_ID": 25544,
+      "ELEMENT_SET_NO": 999,
+      "REV_AT_EPOCH": 59488,
+      "BSTAR": 0.00016503,
+      "MEAN_MOTION_DOT": 8.768e-05,
+      "MEAN_MOTION_DDOT": 0
+    },
+    {
+      "label": "Tiangong",
+      "OBJECT_NAME": "CSS (TIANHE)",
+      "OBJECT_ID": "2021-035A",
+      "EPOCH": "2026-11-13T12:59:15.891360",
+      "MEAN_MOTION": 15.61773849,
+      "ECCENTRICITY": 0.00043868,
+      "INCLINATION": 41.4674,
+      "RA_OF_ASC_NODE": 134.3818,
+      "ARG_OF_PERICENTER": 302.2376,
+      "MEAN_ANOMALY": 57.8037,
+      "EPHEMERIS_TYPE": 0,
+      "CLASSIFICATION_TYPE": "U",
+      "NORAD_CAT_ID": 48274,
+      "ELEMENT_SET_NO": 999,
+      "REV_AT_EPOCH": 31649,
+      "BSTAR": 0.00020630815,
+      "MEAN_MOTION_DOT": 0.00018078,
+      "MEAN_MOTION_DDOT": 0
+    },
+    {
+      "label": "Hubble",
+      "OBJECT_NAME": "HST",
+      "OBJECT_ID": "1990-037B",
+      "EPOCH": "2026-11-13T18:11:53.812608",
+      "MEAN_MOTION": 15.32289169,
+      "ECCENTRICITY": 0.0002317,
+      "INCLINATION": 28.4709,
+      "RA_OF_ASC_NODE": 137.1307,
+      "ARG_OF_PERICENTER": 23.1595,
+      "MEAN_ANOMALY": 336.9105,
+      "EPHEMERIS_TYPE": 0,
+      "CLASSIFICATION_TYPE": "U",
+      "NORAD_CAT_ID": 20580,
+      "ELEMENT_SET_NO": 999,
+      "REV_AT_EPOCH": 81152,
+      "BSTAR": 0.00017849,
+      "MEAN_MOTION_DOT": 5.966e-05,
+      "MEAN_MOTION_DDOT": 0
+    }
+  ]
+}

@@ -319,13 +319,41 @@ async function runFlow(client, repo) {
   await client.capture('01a-onboarding-ready.png');
   await client.clickText('Continue');
   await client.waitFor(`document.querySelector('.profiles-page__list')`, 'profiles view');
+  await client.waitFor(
+    `(() => {
+      const sky = document.querySelector('wellington-sky[data-ready="true"]');
+      const bounds = sky?.getBoundingClientRect();
+      return bounds?.width === innerWidth && bounds.height === innerHeight
+        && getComputedStyle(sky).pointerEvents === 'none'
+        && sky.getAttribute('aria-hidden') === 'true';
+    })()`,
+    'full-window Wellington background behind the profile cards',
+  );
   const firstProfile = '.profile-row:first-child';
   const secondProfile = '.profile-row:nth-child(2)';
   const openActions = async (profile = firstProfile) => {
     await client.click(profile + ' [popovertarget]');
     await client.waitFor(`document.querySelector('.profile-actions:popover-open')`, 'open profile actions');
   };
+  const sky = "document.querySelector('wellington-sky')";
+  const setSkyTime = (instant) =>
+    client.evaluate(`${sky}.setAttribute('instant', ${JSON.stringify(instant)})`);
+  const skyColor = () => client.evaluate(`(() => {
+    const ctx = ${sky}.querySelector('canvas').getContext('2d');
+    return [...ctx.getImageData(210, 410, 1, 1).data];
+  })()`);
+  await setSkyTime('2026-11-14T07:30:00Z');
   await client.capture('02a-profiles-default.png');
+  await setSkyTime('2026-11-14T00:00:00Z');
+  const dayColor = await skyColor();
+  await client.capture('02m-profiles-sky-daylight.png');
+  await setSkyTime('2026-11-14T10:30:00Z');
+  const nightColor = await skyColor();
+  await client.capture('02n-profiles-sky-night.png');
+  if (dayColor[2] <= dayColor[0] || dayColor[2] - nightColor[2] < 40) {
+    throw new Error('The profile sky should shift from blue daylight to a dark night gradient');
+  }
+  await client.evaluate(`${sky}.removeAttribute('instant')`);
   const checkForUpdates = async (profile, capture) => {
     await openActions(profile);
     if (capture) await client.capture(capture);
@@ -422,6 +450,37 @@ async function runFlow(client, repo) {
   ) {
     throw new Error('Settings ordering or inline control sizing is incorrect');
   }
+  const latitude = 'input[aria-label="Latitude"]';
+  const longitude = 'input[aria-label="Longitude"]';
+  const saveEnabled = `[...document.querySelectorAll('.page-footer button')]
+    .some(button => button.textContent.trim() === 'Save' && !button.disabled)`;
+  const coordinateError = `document.querySelector('${latitude}').closest('.section')
+    .querySelector('.field__error[role="alert"]')?.textContent.trim()`;
+  await client.evaluate(`document.querySelector('${latitude}').scrollIntoView({ block: 'center' })`);
+  if (await client.evaluate(coordinateError)) throw new Error('Blank sky coordinates show an error');
+  await client.capture('04e-settings-sky-default.png');
+  await client.setInput(latitude, '-90');
+  await client.waitFor(`${coordinateError} === 'Enter latitude from −90 to 90 and longitude from −180 to 180.'`, 'inline sky coordinate validation');
+  if (await client.evaluate(saveEnabled)) throw new Error('A single sky coordinate can be saved');
+  await client.capture('04g-settings-sky-invalid.png');
+  await client.setInput(longitude, '181');
+  if (!(await client.evaluate(coordinateError)) || await client.evaluate(saveEnabled)) {
+    throw new Error('Out-of-range sky coordinates should show an error and prevent saving');
+  }
+  await client.setInput(longitude, '180');
+  await client.waitFor(`(${saveEnabled}) && !(${coordinateError})`, 'valid sky coordinates clear the error');
+  await client.capture('04f-settings-sky-override.png');
+  await client.clickText('Save', '.page-footer');
+  await client.waitFor(`document.querySelector('wellington-sky[data-ready="true"][location="-90,180"]')`, 'saved sky location');
+  await client.capture('02l-profiles-south-pole.png');
+  await client.click('[aria-label="Settings"]');
+  await client.waitFor(`document.querySelector('${latitude}')?.value === '-90' && document.querySelector('${longitude}')?.value === '180'`, 'persisted sky coordinates');
+  await client.setInput(latitude, '');
+  await client.setInput(longitude, '');
+  await client.clickText('Save', '.page-footer');
+  await client.waitFor(`document.querySelector('wellington-sky[data-ready="true"][location="-41.2846,174.7791"]')`, 'restored Wellington sky');
+  await client.click('[aria-label="Settings"]');
+  await client.waitFor(`document.querySelector('${latitude}')`, 'returned to settings');
   await client.evaluate(`document.querySelector('.page-frame__body').scrollTop = 100000`);
   await delay(100);
   await client.capture('04-settings-bottom.png');

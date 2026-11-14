@@ -1,8 +1,12 @@
-use crate::style::{Button, ButtonVariant, ConfirmDialog, PageFooter};
+use crate::style::{
+    Button, ButtonVariant, ConfirmDialog, FieldRow, FieldRowInline, FieldRowStack, PageFooter,
+    Section, SectionHeader, TextField,
+};
 use dioxus::prelude::*;
 use dioxus_i18n::t;
 use directories::ProjectDirs;
 use fleet_core::{Arma3LaunchMethod, SettingsField};
+use fleet_domain::SkyLocation;
 
 use crate::app::router::Route;
 use crate::features::action_error::{use_action_error, ActionErrorView};
@@ -40,6 +44,28 @@ pub fn Settings() -> Element {
     let update_checks_enabled = updates::current_build_allows_update_checks();
     let defaults = fleet_core::effective_settings_defaults();
     let settings = draft();
+    let initial_coordinates = || {
+        snapshot
+            .settings
+            .ui
+            .sky_location
+            .map(|location| {
+                let (lat, lon) = location.degrees();
+                (lat.to_string(), lon.to_string())
+            })
+            .unwrap_or_default()
+    };
+    let mut coordinates = use_signal(initial_coordinates);
+    let (latitude, longitude) = coordinates();
+    let both_blank = latitude.trim().is_empty() && longitude.trim().is_empty();
+    let override_location = latitude
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .zip(longitude.trim().parse::<f64>().ok())
+        .and_then(|(lat, lon)| SkyLocation::from_degrees(lat, lon));
+    let invalid_location = !both_blank && override_location.is_none();
+    let (default_lat, default_lon) = SkyLocation::WELLINGTON.degrees();
 
     let on_check_updates = move || {
         let mut status = update_store.status;
@@ -241,6 +267,7 @@ pub fn Settings() -> Element {
     let on_confirm_reset_settings = move |_: MouseEvent| {
         reset_settings_confirm_open.set(false);
         draft_for_reset_all.set(defaults_for_reset_all.clone());
+        coordinates.set((String::new(), String::new()));
         dirty_for_reset_all.set(true);
     };
 
@@ -287,7 +314,7 @@ pub fn Settings() -> Element {
     let feedback_for_save = feedback.clone();
     let nav_for_save = nav;
     let on_save = move |_: MouseEvent| {
-        if saving() || !dirty() || custom_template_error.is_some() {
+        if saving() || !dirty() || custom_template_error.is_some() || invalid_location {
             return;
         }
         feedback_for_save.clear();
@@ -295,7 +322,8 @@ pub fn Settings() -> Element {
         let bridge = bridge_for_save.clone();
         let feedback = feedback_for_save.clone();
         let nav = nav_for_save;
-        let settings = draft();
+        let mut settings = draft();
+        settings.ui.sky_location = override_location;
         spawn(async move {
             match bridge.core().save_settings(settings).await {
                 Ok(()) => {
@@ -354,6 +382,52 @@ pub fn Settings() -> Element {
                         on_reset,
                     )}
 
+                    Section {
+                        SectionHeader { title: t!("sky-location") }
+                        FieldRow {
+                            FieldRowStack {
+                                FieldRowInline {
+                                    TextField {
+                                        value: latitude,
+                                        placeholder: Some(default_lat.to_string()),
+                                        accessible_label: Some(t!("latitude")),
+                                        label: Some(t!("latitude")),
+                                        on_change: move |value| {
+                                            coordinates.write().0 = value;
+                                            let mut dirty = dirty;
+                                            dirty.set(true);
+                                        },
+                                    }
+                                    TextField {
+                                        value: longitude,
+                                        placeholder: Some(default_lon.to_string()),
+                                        accessible_label: Some(t!("longitude")),
+                                        label: Some(t!("longitude")),
+                                        on_change: move |value| {
+                                            coordinates.write().1 = value;
+                                            let mut dirty = dirty;
+                                            dirty.set(true);
+                                        },
+                                    }
+                                    if !both_blank {
+                                        Button {
+                                            variant: ButtonVariant::Ghost,
+                                            onclick: move |_| {
+                                                coordinates.set((String::new(), String::new()));
+                                                let mut dirty = dirty;
+                                                dirty.set(true);
+                                            },
+                                            {t!("reset")}
+                                        }
+                                    }
+                                }
+                                if invalid_location {
+                                    p { class: "field__error", role: "alert", {t!("sky-coordinates-invalid")} }
+                                }
+                            }
+                        }
+                    }
+
                     {advanced_section(
                         open_logs,
                         restart_onboarding,
@@ -395,7 +469,7 @@ pub fn Settings() -> Element {
                     Button {
                         variant: ButtonVariant::Primary,
                         loading: saving(),
-                        disabled: !dirty() || custom_template_error.is_some(),
+                        disabled: !dirty() || custom_template_error.is_some() || invalid_location,
                         onclick: on_save,
                         {t!("save")}
                     }

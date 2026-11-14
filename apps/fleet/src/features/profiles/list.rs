@@ -173,6 +173,7 @@ pub fn Profiles() -> Element {
 
     rsx! {
         div { class: "page-frame profiles-page",
+            crate::app::sky::SkyBackground { location: snapshot.settings.ui.sky_location }
             div { class: "page-frame__body",
                 if rows.is_empty() {
                     div { class: "profiles-page__empty",
