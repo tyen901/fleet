@@ -5,34 +5,21 @@ import {
   observerAt,
   orbitUpdateInterval,
   position,
-  prepareStars,
   skySnapshotTime,
-  starsAboveHorizon,
   tracksForNight,
 } from './sky-model.mjs';
 
 const treatment = {
   zoom: 1,
-  stars: 0.72,
   paths: 0.32,
   moonPath: 0.56,
   atmosphere: true,
 };
 
-let catalogue;
 let satellites;
 const nightTracks = new Map();
 
-function loadCatalogue() {
-  catalogue ??= (async () => {
-    const response = await fetch(new URL('./stars.json', import.meta.url));
-    if (!response.ok) throw new Error(`Wellington catalogue returned HTTP ${response.status}`);
-    return prepareStars((await response.json()).stars);
-  })();
-  return catalogue;
-}
-
-function skyAt(stars, timestamp, site) {
+function skyAt(timestamp, site) {
   const day = Math.floor(timestamp / 86_400_000) * 86_400_000;
   const key = `${day}/${site.latitude}/${site.longitude}`;
   if (!nightTracks.has(key)) {
@@ -45,7 +32,6 @@ function skyAt(stars, timestamp, site) {
     isChart: false,
     showPaths: true,
     site,
-    stars: starsAboveHorizon(stars, timestamp, 6.5, site),
     sun: position('Sun', timestamp, site),
     tracks: nightTracks.get(key),
   };
@@ -64,10 +50,9 @@ class WellingtonSky extends HTMLElement {
   #timestamp;
   #projected = [];
   #paintedSky;
-  #stars;
   #satellites;
   #site = observerAt(null);
-  #starTime;
+  #skyTime;
   #model;
   #frame;
   #resize = new ResizeObserver(() => this.#drawLayers());
@@ -99,7 +84,6 @@ class WellingtonSky extends HTMLElement {
     }
     this.#resize.observe(this);
     try {
-      this.#stars = await loadCatalogue();
       satellites ??= loadSatellites().catch((error) => {
         console.error(error);
         return [];
@@ -120,7 +104,7 @@ class WellingtonSky extends HTMLElement {
   attributeChangedCallback(name) {
     if (name === 'location') {
       this.#site = observerAt(this.getAttribute('location'));
-      this.#starTime = undefined;
+      this.#skyTime = undefined;
       this.#orbitTime = undefined;
     }
     this.#update();
@@ -138,12 +122,12 @@ class WellingtonSky extends HTMLElement {
   renderAt(timestamp) {
     if (!this.isConnected || !this.#satellites) return;
     this.#timestamp = timestamp;
-    const starTime = skySnapshotTime(timestamp);
+    const skyTime = skySnapshotTime(timestamp);
     const orbitTime = Math.floor(timestamp / orbitUpdateInterval) * orbitUpdateInterval;
     let redraw = false;
-    if (this.#starTime !== starTime) {
-      this.#model = skyAt(this.#stars, starTime, this.#site);
-      this.#starTime = starTime;
+    if (this.#skyTime !== skyTime) {
+      this.#model = skyAt(skyTime, this.#site);
+      this.#skyTime = skyTime;
       this.#paintedSky = undefined;
       redraw = true;
     }

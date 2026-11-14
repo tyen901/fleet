@@ -1,12 +1,5 @@
 // Astronomy Engine 2.1.19, vendored from the npm package's esm/astronomy.js.
-import {
-  Body,
-  Equator,
-  Horizon,
-  Illumination,
-  Observer,
-  Rotation_EQJ_HOR,
-} from './astronomy-engine.mjs';
+import { Body, Equator, Horizon, Illumination, Observer } from './astronomy-engine.mjs';
 
 export const observer = new Observer(-41.2846, 174.7791, 0);
 export function observerAt(input) {
@@ -172,40 +165,6 @@ export function lunarPass(timestamp, site = observer) {
       (nearest, points) => (!nearest || distance(points) < distance(nearest) ? points : nearest),
       null,
     );
-}
-
-export function prepareStars(stars) {
-  return stars.map(([hours, dec, magnitude, name]) => {
-    const ra = hours * 15 * degrees;
-    const lat = dec * degrees;
-    return {
-      x: Math.cos(lat) * Math.cos(ra),
-      y: Math.cos(lat) * Math.sin(ra),
-      z: Math.sin(lat),
-      magnitude,
-      name,
-    };
-  });
-}
-
-export function starsAboveHorizon(stars, timestamp, limit, site = observer) {
-  const { rot } = Rotation_EQJ_HOR(new Date(timestamp), site);
-  const visible = [];
-  // The library's horizontal frame is north, west, up. Row vectors match RotateVector.
-  for (const { x, y, z, magnitude, name } of stars) {
-    if (magnitude > limit) continue;
-    const up = rot[0][2] * x + rot[1][2] * y + rot[2][2] * z;
-    if (up < 0) continue;
-    const north = rot[0][0] * x + rot[1][0] * y + rot[2][0] * z;
-    const west = rot[0][1] * x + rot[1][1] * y + rot[2][1] * z;
-    visible.push({
-      altitude: Math.atan2(up, Math.hypot(north, west)) / degrees,
-      azimuth: (Math.atan2(-west, north) / degrees + 360) % 360,
-      magnitude,
-      name,
-    });
-  }
-  return visible;
 }
 
 export function project(altitude, azimuth, projection) {

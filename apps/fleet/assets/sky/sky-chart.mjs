@@ -158,10 +158,9 @@ const foreground = '#dfdfdf';
 function paintSky(
   ctx,
   { width, height, centerX, centerY, radius, point },
-  { stars, sun, isChart, treatment },
+  { sun, isChart, treatment },
 ) {
   const daylight = daylightLevel(sun, treatment);
-  const scale = Math.min(1, radius / 270);
 
   ctx.save();
   ctx.clearRect(0, 0, width, height);
@@ -194,16 +193,6 @@ function paintSky(
     ctx.stroke();
   }
 
-  for (const star of stars) {
-    const [x, y] = point(star.altitude, star.azimuth);
-    const strength = Math.max(0.09, Math.min(1, (7 - star.magnitude) / 5));
-    ctx.globalAlpha =
-      strength * (1 - daylight) * Math.min(1, (star.altitude + 7) / 20) * (treatment?.stars ?? 1);
-    ctx.fillStyle = foreground;
-    const size = (0.48 + strength * strength * 1.45) * Math.max(0.68, scale);
-    circle(ctx, x, y, size);
-    ctx.fill();
-  }
   ctx.restore();
   ctx.restore();
 }

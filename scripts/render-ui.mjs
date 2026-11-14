@@ -353,6 +353,28 @@ async function runFlow(client, repo) {
   if (dayColor[2] <= dayColor[0] || dayColor[2] - nightColor[2] < 40) {
     throw new Error('The profile sky should shift from blue daylight to a dark night gradient');
   }
+  const starlessNight = await client.evaluate(`(() => {
+    const [background, orbits] = ${sky}.querySelectorAll('canvas');
+    const pixels = background.getContext('2d').getImageData(0, 0, background.width, background.height);
+    // At this instant the Sun is well below the horizon, leaving a vertical gradient.
+    for (let y = 1; y < pixels.height - 1; y++) {
+      const start = y * pixels.width * 4;
+      for (let x = 1; x < pixels.width - 1; x++) {
+        for (let channel = 0; channel < 3; channel++) {
+          if (Math.abs(pixels.data[start + 4 * x + channel] - pixels.data[start + 4 + channel]) > 2) return false;
+        }
+      }
+    }
+    const overlay = orbits.getContext('2d').getImageData(0, 0, orbits.width, orbits.height);
+    return overlay.data.some((value, index) => index % 4 === 3 && value > 0);
+  })()`);
+  if (!starlessNight) throw new Error('Night should show a smooth gradient and a separate orbital overlay');
+  await setSkyTime('2026-11-17T08:36:20Z');
+  await client.waitFor(
+    `${sky}.querySelector('[data-satellite="Tiangong"]:not([hidden])')?.style.transform`,
+    'visible Tiangong marker',
+  );
+  await client.capture('02q-profiles-sky-satellite.png');
   await client.evaluate(`${sky}.removeAttribute('instant')`);
   const checkForUpdates = async (profile, capture) => {
     await openActions(profile);

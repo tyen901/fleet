@@ -34,10 +34,6 @@ pub(crate) fn SkyBackground(location: Option<SkyLocation>) -> Element {
                 script,
                 include_bytes!("../../assets/sky/astronomy-engine.mjs"),
             )),
-            "/sky/stars.json" => Some((
-                "application/json",
-                include_bytes!("../../assets/sky/stars.json"),
-            )),
             _ => None,
         };
         let response = match asset {
