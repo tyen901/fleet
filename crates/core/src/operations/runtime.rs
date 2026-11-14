@@ -175,11 +175,16 @@ impl OperationRuntime {
                 #[cfg(not(feature = "flux"))]
                 _ => Err(crate::operations::backend_unavailable()),
             };
-            // Validation repairs mismatched content in the same session and reservation.
+            // Validation installs missing content and repairs mismatches in the same session and reservation.
             // Cancellation and backend errors remain terminal, never trigger a repair.
-            if matches!(&out,Ok(OperationOutput::Validate(report)) if matches!(report.health,fleet_domain::LocalFileHealth::Dirty|fleet_domain::LocalFileHealth::Missing|fleet_domain::LocalFileHealth::MissingDestination))
-                && !cancel.is_cancelled()
-            {
+            let validation_needs_sync = matches!(&out, Ok(OperationOutput::Validate(report)) if matches!(
+                report.health,
+                fleet_domain::LocalFileHealth::Dirty
+                    | fleet_domain::LocalFileHealth::Missing
+                    | fleet_domain::LocalFileHealth::MissingDestination
+                    | fleet_domain::LocalFileHealth::ExpectedStateUnavailable
+            ));
+            if validation_needs_sync && !cancel.is_cancelled() {
                 let mut transitioned = false;
                 core.update_state(|state| {
                     if cancel.is_cancelled() {

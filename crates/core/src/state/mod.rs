@@ -151,6 +151,7 @@ pub enum ProfilePrimaryAction {
     None,
     CheckForUpdates,
     Sync,
+    Repair,
     Update,
     FixProfile,
 }
@@ -326,19 +327,26 @@ fn derive_profile_status(runtime: &ProfileRuntimeState) -> ProfileStatusState {
         ProfilePrimaryAction::None
     } else if invalid_profile {
         ProfilePrimaryAction::FixProfile
-    } else if repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
-        && local_health == LocalFileHealth::Clean
-    {
+    } else if repo_freshness == Some(RepoCheckFreshness::UpdateAvailable) {
         ProfilePrimaryAction::Update
     } else if matches!(
         local_health,
-        LocalFileHealth::Dirty
-            | LocalFileHealth::Missing
-            | LocalFileHealth::MissingDestination
+        LocalFileHealth::Dirty | LocalFileHealth::Missing
+    ) || (matches!(
+        local_health,
+        LocalFileHealth::MissingDestination | LocalFileHealth::InventoryUnavailable
+    ) && runtime
+        .repo_check
+        .as_ref()
+        .is_some_and(|report| report.local_revision.is_some()))
+    {
+        ProfilePrimaryAction::Repair
+    } else if matches!(
+        local_health,
+        LocalFileHealth::MissingDestination
             | LocalFileHealth::ExpectedStateUnavailable
             | LocalFileHealth::InventoryUnavailable
-    ) || repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
-        || sync_failed
+    ) || sync_failed
         || canceled_operation == Some(OperationKind::Sync)
     {
         ProfilePrimaryAction::Sync
@@ -464,6 +472,19 @@ mod tests {
         assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
         assert!(!status.can_launch);
         assert!(!status.has_error);
+
+        let runtime = ensure_profile_runtime_mut(&mut state, "p1", 2);
+        runtime.repo_check = Some(RepoCheckReport {
+            profile_id: "p1".to_string(),
+            local_revision: Some("installed".to_string()),
+            remote_revision: Some("installed".to_string()),
+            freshness: RepoCheckFreshness::UpToDate,
+            checked_at_unix_ms: 2,
+        });
+        assert_eq!(
+            derive_profile_status(runtime).primary_action,
+            ProfilePrimaryAction::Repair
+        );
     }
 
     #[test]
@@ -497,7 +518,7 @@ mod tests {
 
         let status = derive_profile_status(state.profile_runtime_by_id.get("p1").expect("runtime"));
         assert_eq!(status.headline, ProfileStatusHeadline::UpdateAvailable);
-        assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
+        assert_eq!(status.primary_action, ProfilePrimaryAction::Update);
     }
 
     #[test]
@@ -532,19 +553,19 @@ mod tests {
         runtime.check = Some(LocalFileReport {
             profile_id: "p1".to_string(),
             verification: fleet_domain::VerificationKind::Fast,
-            health: LocalFileHealth::ExpectedStateUnavailable,
+            health: LocalFileHealth::Dirty,
             checked_at_unix_ms: 1,
         });
         runtime.repo_check = Some(RepoCheckReport {
             profile_id: "p1".to_string(),
-            local_revision: None,
+            local_revision: Some("installed".to_string()),
             remote_revision: None,
             freshness: RepoCheckFreshness::Error,
             checked_at_unix_ms: 1,
         });
         assert_eq!(
             derive_profile_status(&runtime).primary_action,
-            ProfilePrimaryAction::Sync
+            ProfilePrimaryAction::Repair
         );
     }
 
@@ -645,7 +666,7 @@ mod tests {
 
         assert_eq!(status.headline, ProfileStatusHeadline::NeedsSync);
         assert!(status.actions.sync_enabled);
-        assert_eq!(status.primary_action, ProfilePrimaryAction::Sync);
+        assert_eq!(status.primary_action, ProfilePrimaryAction::Repair);
         assert!(!status.can_launch);
     }
 

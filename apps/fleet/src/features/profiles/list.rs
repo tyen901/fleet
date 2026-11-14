@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use dioxus_i18n::t;
-use dioxus_router::{use_navigator, Link};
+use dioxus_router::use_navigator;
 use std::time::Duration;
 use tracing::{error, info};
 
@@ -38,8 +38,7 @@ struct ProfileRowViewState {
     launch_loading: bool,
     join_loading: bool,
     needs_fix: bool,
-    can_sync: bool,
-    update_available: bool,
+    sync_action: Option<ProfilePrimaryAction>,
     active: Option<fleet_core::ActiveOperationState>,
     failed_operation: Option<(OperationKind, String)>,
 }
@@ -77,10 +76,24 @@ fn profile_row_view_state(
         launch_loading,
         join_loading,
         needs_fix,
-        can_sync: !needs_fix && status.is_none_or(|status| status.actions.sync_enabled),
-        update_available: status.is_some_and(|status| {
-            status.repo_freshness == Some(RepoCheckFreshness::UpdateAvailable)
-        }),
+        sync_action: status
+            .filter(|status| !needs_fix && status.actions.sync_enabled)
+            .and_then(|status| match status.primary_action {
+                action @ (ProfilePrimaryAction::Repair | ProfilePrimaryAction::Update) => {
+                    Some(action)
+                }
+                ProfilePrimaryAction::Sync
+                    if runtime
+                        .and_then(|entry| entry.repo_check.as_ref())
+                        .is_some_and(|report| {
+                            report.remote_revision.is_some()
+                                && report.freshness != RepoCheckFreshness::Error
+                        }) =>
+                {
+                    Some(ProfilePrimaryAction::Sync)
+                }
+                _ => None,
+            }),
         active: runtime.and_then(|runtime| runtime.active.clone()),
         failed_operation: runtime
             .and_then(|runtime| runtime.last_operation.as_ref())
@@ -278,7 +291,6 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
         }
     };
 
-    let edit_route_for_name = edit_route.clone();
     let on_edit = EventHandler::new(move |_| {
         let _ = nav.push(edit_route.clone());
     });
@@ -304,7 +316,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
     };
     let on_check = start_operation(OperationKind::Check);
     let on_sync = start_operation(OperationKind::Sync);
-    let on_verify = start_operation(OperationKind::Validate);
+    let on_validate = start_operation(OperationKind::Validate);
 
     let start_game = |kind| {
         let on_start = props.on_start;
@@ -326,7 +338,16 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
     } else {
         t!("check-for-updates")
     };
-    let show_sync = task.is_none() && !starting_game && row.can_sync && row.update_available;
+    let sync_label = if task.is_none() && !starting_game {
+        row.sync_action.map(|action| match action {
+            ProfilePrimaryAction::Repair => t!("repair"),
+            ProfilePrimaryAction::Update => t!("update"),
+            _ => t!("sync"),
+        })
+    } else {
+        None
+    };
+    let show_sync = sync_label.is_some();
     let show_fix = task.is_none() && !starting_game && row.needs_fix;
 
     let delete_feedback_on_open = delete_feedback.clone();
@@ -337,16 +358,7 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                     img { class: "profile-row__icon", src: icon_src, alt: "" }
                 }
                 div { class: "profile-row__identity",
-                    if task.is_none() && !starting_game {
-                        Link {
-                            class: "profile-row__name",
-                            title: row.name.clone(),
-                            to: edit_route_for_name,
-                            "{row.name}"
-                        }
-                    } else {
-                        span { class: "profile-row__name", title: row.name.clone(), "{row.name}" }
-                    }
+                    span { class: "profile-row__name", title: row.name.clone(), "{row.name}" }
                     if task.is_none() {
                         if let Some((_, message)) = row.failed_operation.as_ref() {
                             Notice { tone: NoticeTone::Danger,
@@ -357,8 +369,8 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                 }
                 if show_launch || show_join || show_sync || show_fix {
                     div { class: "profile-row__buttons",
-                        if show_sync {
-                            Button { onclick: on_sync, {t!("sync")} }
+                        if let Some(label) = sync_label {
+                            Button { onclick: on_sync, "{label}" }
                         }
                         if show_fix {
                             Button { onclick: on_edit, {t!("fix-profile")} }
@@ -412,14 +424,6 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                                 "{check_label}"
                             }
                         }
-                        if row.can_sync && !show_sync {
-                            Button {
-                                variant: ButtonVariant::Ghost,
-                                dismiss_popover: Some(menu_id.clone()),
-                                onclick: on_sync,
-                                {t!("force-sync")}
-                            }
-                        }
                         if destination.is_dir() {
                             Button {
                                 variant: ButtonVariant::Ghost,
@@ -435,8 +439,8 @@ fn ProfileRow(props: ProfileRowProps) -> Element {
                             Button {
                                 variant: ButtonVariant::Ghost,
                                 dismiss_popover: Some(menu_id.clone()),
-                                onclick: on_verify,
-                                {t!("verify-files")}
+                                onclick: on_validate,
+                                {t!("validate-files")}
                             }
                         }
                         Button {

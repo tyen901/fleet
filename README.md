@@ -40,11 +40,12 @@ as it is rebuilt. Both totals are fixed after inventory. Task metrics report
 network throughput and logical disk reads plus writes, with an estimated time
 remaining once throughput stabilizes.
 
-Checking for updates uses an indeterminate progress bar. **Force sync**
-starts sync from the profile menu. **Verify files** rescans and hashes local
-files. Mismatches found during verification automatically continue into sync
-under the same profile lock. Editing stays locked until workers finish,
+Checking for updates uses an indeterminate progress bar that clears as soon
+as the check finishes. **Validate files** rescans and hashes local files.
+Missing content or mismatches automatically continue into sync under the
+same profile lock. Editing stays locked until workers finish,
 including cancellation. Profile cards hide Launch and Join during checks,
-sync, and verification. When a profile is ready to launch, Join requires a
-server. Progress collapses after completion or cancellation, and failures
-remain inline on the affected profile.
+sync, and verification. **Repair** syncs detected local damage, and
+**Update** syncs a newer remote revision. When a profile is ready to launch,
+Join requires a server. Progress clears after completion or cancellation,
+and failures remain inline on the affected profile.

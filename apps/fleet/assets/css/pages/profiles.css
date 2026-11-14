@@ -101,16 +101,11 @@
 
 .profile-row__name {
   color: inherit;
-  text-decoration: none;
   font-size: var(--text-body);
   font-weight: var(--weight-medium);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-a.profile-row__name:hover {
-  text-decoration: underline;
 }
 
 .profile-actions {
@@ -219,19 +214,11 @@ a.profile-row__name:hover {
   opacity: 1;
   transition:
     grid-template-rows 320ms ease,
-    opacity 200ms ease,
-    margin-bottom 320ms ease,
-    visibility 320ms;
+    opacity 200ms ease;
 }
 .operation-reveal__inner {
   min-height: 0;
   overflow: hidden;
-}
-.operation-reveal--closed {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  margin-bottom: calc(-1 * var(--space-2));
-  visibility: hidden;
 }
 .usage-pulse {
   animation: usage-pulse 1.8s ease-in-out infinite;
@@ -251,7 +238,7 @@ a.profile-row__name:hover {
   }
 }
 @starting-style {
-  .operation-reveal--task {
+  .operation-reveal {
     grid-template-rows: 0fr;
     opacity: 0;
   }

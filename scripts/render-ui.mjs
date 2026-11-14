@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { createServer as createHttpServer } from 'node:http';
 import { createHash } from 'node:crypto';
@@ -381,21 +381,29 @@ async function runFlow(client, repo) {
     if (capture) await client.capture(capture);
     await client.clickText('Check for updates', '.profile-actions:popover-open');
   };
-  const syncFromMenu = async (profile) => {
+  const validateFromMenu = async (profile) => {
     await openActions(profile);
-    await client.clickText('Force sync', '.profile-actions:popover-open');
+    await client.clickText('Validate files', '.profile-actions:popover-open');
   };
   const noSyncOnCard = (profile) => `![...document.querySelectorAll(${JSON.stringify(profile + ' .profile-row__buttons button')})]
     .some(button => button.textContent.trim() === 'Sync')`;
   if (!(await client.evaluate(noSyncOnCard('.profile-row')))) {
     throw new Error('Unchecked profiles should not show Sync on their cards');
   }
+  const nameSelector = JSON.stringify(firstProfile + ' .profile-row__name');
+  if (!(await client.evaluate(`document.querySelector(${nameSelector})?.tagName === 'SPAN'`))) {
+    throw new Error('Profile title should be display-only');
+  }
+  await client.click(firstProfile + ' .profile-row__name');
+  if (!(await client.evaluate(`document.querySelector('.profiles-page__list')`))) {
+    throw new Error('Profile title should leave the profile cards open');
+  }
   await checkForUpdates(firstProfile, '02k-profiles-check-menu.png');
   await client.waitFor(`!document.querySelector('.profile-operation')`, 'finished first update check');
   if (!(await client.evaluate(noSyncOnCard(firstProfile)))) {
     throw new Error('An unavailable source should not show Sync on the card');
   }
-  await syncFromMenu(firstProfile);
+  await validateFromMenu(firstProfile);
   await client.waitFor(`(() => {
     const notice = document.querySelector('.profile-row:first-child .note--bad');
     return notice?.querySelector('[role="alert"]')?.textContent.includes('sync source')
@@ -403,12 +411,13 @@ async function runFlow(client, repo) {
       && !document.querySelector('.profile-operation');
   })()`, 'inline sync error', 20_000);
   await client.capture('02-profiles-error.png');
-  await syncFromMenu(firstProfile);
-  await client.waitFor(`document.querySelector('.profile-row__main .note--bad') && !document.querySelector('.profile-operation')`, 'forced sync completed', 20_000);
   await openActions();
+  const profileActions = await client.evaluate(`[...document.querySelectorAll('.profile-actions:popover-open button')].map(button => button.textContent.trim())`);
+  if (!profileActions.includes('Validate files') || profileActions.includes('Force sync')) {
+    throw new Error('Profile actions should offer Validate files without Force sync');
+  }
   await client.capture('02f-profile-actions.png');
-  await client.click(firstProfile + ' [popovertarget]');
-  await client.click(firstProfile + ' .profile-row__name');
+  await client.clickText('Edit profile', '.profile-actions:popover-open');
   await client.waitFor(`document.querySelector('.mod-list__row input:not([readonly])')`, 'direct profile editor');
   if (await client.evaluate(`document.body.innerText.includes("Couldn't load the sync source.")`)) {
     throw new Error('Sync failure leaked into the profile editor');
@@ -800,8 +809,7 @@ async function runFlow(client, repo) {
   await client.click('[aria-label^="Remove mod folder"]');
   await client.clickText('Save');
   await client.waitFor(`document.querySelector('.profiles-page')`, 'profile card after removing all additional mods');
-  await openActions();
-  await client.clickText('Verify files', '.profile-actions:popover-open');
+  await validateFromMenu(firstProfile);
   await client.waitFor(`!document.querySelector('.profile-operation')`, 'verification finished');
   await client.capture('10-verification-result.png');
 
@@ -838,8 +846,12 @@ async function runFlow(client, repo) {
   })()`, 'indeterminate profile check');
   await waitForProgressFrame(secondProfile);
   await client.capture('02d-profiles-checking.png');
-  await finishOperation(`!document.querySelector('.profile-row:nth-child(2) .operation-reveal--task:not(.operation-reveal--closed)')`);
-  await syncFromMenu(secondProfile);
+  await finishOperation(`document.querySelector('.profile-row:nth-child(2) [popovertarget]')`);
+  if (await client.evaluate(`document.querySelector('.profile-row:nth-child(2) .operation-reveal')`)) {
+    throw new Error('Progress should be removed when the check completes');
+  }
+  await client.capture('02o-profiles-check-complete.png');
+  await validateFromMenu(secondProfile);
   await client.waitFor(`(() => {
     const row = document.querySelector('.profile-row:nth-child(2)');
     return row.querySelector('.profile-operation') && !row.querySelector('.profile-row__buttons');
@@ -848,8 +860,7 @@ async function runFlow(client, repo) {
   await client.capture('02e-profiles-syncing.png');
   await finishOperation(`!document.querySelector('.profile-operation')`);
 
-  await openActions(secondProfile);
-  await client.clickText('Verify files', '.profile-actions:popover-open');
+  await validateFromMenu(secondProfile);
   await client.waitFor(`document.querySelector('.profile-row:nth-child(2) .profile-operation')`, 'verification in progress');
   await waitForProgressFrame(secondProfile);
   await client.capture('10a-verification-progress.png');
@@ -863,7 +874,7 @@ async function runFlow(client, repo) {
   await client.waitFor(`!document.querySelector('.confirm-dialog:modal') && document.activeElement?.hasAttribute('popovertarget') && document.activeElement.closest('.profile-row')?.querySelector('.profile-row__name')?.textContent.trim() === 'Saturn Unit' && document.querySelectorAll('.profile-row').length === 2`, 'delete canceled and focus restored');
 
   repo.serveManifest([]);
-  await syncFromMenu(secondProfile);
+  await validateFromMenu(secondProfile);
   await client.waitFor(`document.querySelectorAll('.profile-row:nth-child(2) .operation-work').length === 2`, 'download and patch tracks');
   const syncMetricsVisible = await client.evaluate(`(() => {
     const tracks = [...document.querySelectorAll('.profile-row:nth-child(2) .operation-work')];
@@ -900,11 +911,33 @@ async function runFlow(client, repo) {
   }
   await client.capture('02g-profiles-launch.png');
 
+  const installedFile = path.join(secondProfileRoot, fixtureMod, 'addons', 'hello.txt');
+  if (!fixtureBytes.equals(await readFile(installedFile))) {
+    throw new Error('Validate files should install files for an unsynced profile');
+  }
+  await writeFile(installedFile, Buffer.alloc(fixtureBytes.length, 120));
+  await validateFromMenu(secondProfile);
+  await client.waitFor(`document.querySelector('.profile-row:nth-child(2) .profile-row__buttons .btn--primary')?.textContent.trim() === 'Launch'`, 'validation repaired the modified file', 20_000);
+  if (!fixtureBytes.equals(await readFile(installedFile))) {
+    throw new Error('Validate files should repair modified files');
+  }
+
+  const primaryAction = `document.querySelector('.profile-row:nth-child(2) .profile-row__buttons .btn--primary')?.textContent.trim()`;
+  await rm(installedFile);
+  await checkForUpdates(secondProfile);
+  await client.waitFor(`${primaryAction} === 'Repair'`, 'repair offered for missing local content', 20_000);
+  await client.capture('02p-profiles-repair.png');
+  await client.clickText('Repair', secondProfile);
+  await client.waitFor(`${primaryAction} === 'Launch'`, 'repair finished', 20_000);
+  if (!fixtureBytes.equals(await readFile(installedFile))) {
+    throw new Error('Repair should restore the missing file');
+  }
+
   repo.serveManifest([{ name: 'Test server', address: '127.0.0.1', port: 2302, password: '', battleEye: false }]);
   await checkForUpdates(secondProfile);
-  await client.waitFor(`document.querySelector('.profile-row:nth-child(2) .profile-row__buttons .btn--primary')?.textContent.trim() === 'Sync'`, 'sync offered for known update', 20_000);
+  await client.waitFor(`${primaryAction} === 'Update'`, 'update offered for a newer repository revision', 20_000);
   await client.capture('02h-profiles-update.png');
-  await client.clickText('Sync', secondProfile);
+  await client.clickText('Update', secondProfile);
   await client.waitFor(`(() => {
     const buttons = [...document.querySelectorAll('.profile-row:nth-child(2) .profile-row__buttons button')];
     return !document.querySelector('.profile-operation')
@@ -928,10 +961,11 @@ async function runFlow(client, repo) {
   await client.clickText('Create');
   await client.waitFor(`document.querySelector('.profile-row__name')?.textContent.trim() === 'Neptune Unit'`, 'created profile on Profiles');
   if (!(await client.evaluate(noSyncOnCard(firstProfile)))) {
-    throw new Error('A new profile should keep manual sync in the menu');
+    throw new Error('A new profile should only offer file validation in the menu');
   }
-  await client.waitFor(`document.querySelector('a.profile-row__name')`, 'new profile check finished');
-  await client.click('a.profile-row__name');
+  await client.waitFor(`document.querySelector('.profile-row [popovertarget]')`, 'new profile check finished');
+  await openActions();
+  await client.clickText('Edit profile', '.profile-actions:popover-open');
   await client.waitFor(`[...document.querySelectorAll('.form-field .field__input')].some(input => input.value === ${JSON.stringify(installFolder)})`, 'saved custom mod install folder');
   await client.clickText('Cancel', '.page-footer');
   await client.waitFor(`document.querySelector('.profiles-page')`, 'profiles before factory reset');

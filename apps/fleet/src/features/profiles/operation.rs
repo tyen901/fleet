@@ -110,7 +110,7 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
         OperationKind::Check => (t!("checking-for-updates"), None),
         OperationKind::Sync if patching => (t!("patching-files"), patch),
         OperationKind::Sync => (t!("scanning-files"), track(ProgressTrackKind::LocalCheck)),
-        OperationKind::Validate => (t!("verifying-files"), track(ProgressTrackKind::LocalCheck)),
+        OperationKind::Validate => (t!("validating-files"), track(ProgressTrackKind::LocalCheck)),
     };
     rsx! {
         section { class: "profile-operation", aria_label: t!("profile-operation"),
@@ -142,27 +142,17 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
 
 #[component]
 pub(crate) fn OperationReveal(active: Option<ActiveOperationState>) -> Element {
-    let visible = active.is_some();
-    let mut retained = use_signal(|| active.clone());
-    let mut generation = use_signal(|| 0_u64);
-    use_effect(use_reactive!(|(active,)| {
-        let next = *generation.peek() + 1;
-        generation.set(next);
-        if active.is_some() {
-            retained.set(active);
-        } else {
-            spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(320)).await;
-                if *generation.peek() == next {
-                    retained.set(None);
-                }
-            });
-        }
-    }));
+    let Some(active) = active.filter(|task| {
+        task.operation != OperationKind::Check
+            || task.progress.active_stage != OperationStage::Finalizing
+    }) else {
+        return rsx! {};
+    };
+
     rsx! {
-        div {class:if visible {"operation-reveal operation-reveal--task"}else{"operation-reveal operation-reveal--task operation-reveal--closed"},
-            div {class:"operation-reveal__inner",
-                if let Some(active)=retained.read().clone() {ProfileOperation {active}}
+        div { class: "operation-reveal",
+            div { class: "operation-reveal__inner",
+                ProfileOperation { active }
             }
         }
     }
