@@ -1,16 +1,34 @@
-use fleet_core::{OperationSessionEvent, OperationSessionEventKind};
+use fleet_core::{
+    OperationSessionEvent, OperationSessionEventKind, OperationStage, ProgressTrackKind,
+};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::BTreeMap;
 
-fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
-    Some(match &ev.kind {
-        OperationSessionEventKind::Stage { stage } => format!("Stage: {}", stage.label()),
+fn print_plain_event(ev: &OperationSessionEvent, previous: &mut Option<OperationStage>) {
+    let stage = match &ev.kind {
+        OperationSessionEventKind::Stage { stage } => Some(*stage),
+        OperationSessionEventKind::Progress { progress } => Some(progress.stage),
+        _ => None,
+    };
+    if let Some(stage) = stage.filter(|s| Some(*s) != *previous) {
+        println!("Stage: {}", stage.label());
+        *previous = Some(stage);
+    }
+    let line = match &ev.kind {
+        OperationSessionEventKind::Stage { .. } => return,
         OperationSessionEventKind::Progress { progress } => progress
             .tracks
             .iter()
-            .map(|track| match track.total {
-                Some(total) => format!("{}: {}/{total} bytes", track.kind.label(), track.done),
-                None => format!("{}: {} bytes (planning)", track.kind.label(), track.done),
+            .map(|track| {
+                let unit = if track.kind == ProgressTrackKind::PublishedFiles {
+                    "files"
+                } else {
+                    "bytes"
+                };
+                match track.total {
+                    Some(total) => format!("{}: {}/{total} {unit}", track.kind.label(), track.done),
+                    None => format!("{}: {} {unit}", track.kind.label(), track.done),
+                }
             })
             .collect::<Vec<_>>()
             .join(" | "),
@@ -20,7 +38,10 @@ fn plain_event_line(ev: &OperationSessionEvent) -> Option<String> {
         }
         OperationSessionEventKind::Canceled => "canceled".to_string(),
         OperationSessionEventKind::Started => format!("started: {:?}", ev.operation),
-    })
+    };
+    if !line.is_empty() {
+        println!("{line}");
+    }
 }
 
 pub fn spawn_flow_printer(
@@ -35,22 +56,28 @@ pub fn spawn_flow_printer(
             ProgressStyle::with_template("{spinner:.cyan} {msg}").expect("valid spinner template");
         let bar = ProgressStyle::with_template("{msg} {bar:40.cyan/blue} {bytes}/{total_bytes}")
             .expect("valid byte template");
-        let planning = ProgressStyle::with_template("{msg} {bytes} (planning)")
-            .expect("valid planning template");
+        let files = ProgressStyle::with_template("{msg} {bar:40.cyan/blue} {pos}/{len} files")
+            .expect("valid file template");
+        let planning =
+            ProgressStyle::with_template("{msg} {bytes}").expect("valid planning template");
         let phase = mp.add(ProgressBar::new_spinner());
         if !plain {
             phase.set_style(spinner);
             phase.enable_steady_tick(std::time::Duration::from_millis(150));
         }
         let mut bars = BTreeMap::new();
-        while let Ok(ev) = rx.recv().await {
+        let mut previous = None;
+        loop {
+            let ev = match rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             if ev.session_id != session_id {
                 continue;
             }
             if plain {
-                if let Some(line) = plain_event_line(&ev) {
-                    println!("{line}");
-                }
+                print_plain_event(&ev, &mut previous);
             } else {
                 match &ev.kind {
                     OperationSessionEventKind::Stage { stage } => phase.set_message(stage.label()),
@@ -69,7 +96,11 @@ pub fn spawn_flow_printer(
                                 .or_insert_with(|| mp.add(ProgressBar::new(0)));
                             pb.set_message(track.kind.label());
                             if let Some(total) = track.total {
-                                pb.set_style(bar.clone());
+                                pb.set_style(if track.kind == ProgressTrackKind::PublishedFiles {
+                                    files.clone()
+                                } else {
+                                    bar.clone()
+                                });
                                 pb.set_length(total);
                             } else {
                                 pb.set_style(planning.clone());

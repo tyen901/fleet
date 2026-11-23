@@ -102,11 +102,11 @@ impl Core {
             )
         })?;
 
-        local_files::check(
+        local_files::inspect(
             profile,
             &state_root,
             tokio_util::sync::CancellationToken::new(),
-            std::sync::Arc::new(|_| {}),
+            local_files::Inspection::Check,
         )
         .await
     }

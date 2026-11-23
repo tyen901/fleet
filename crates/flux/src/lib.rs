@@ -1,26 +1,9 @@
 mod input;
 mod profile;
-mod runner;
 mod source;
 
-use std::sync::Arc;
+pub use input::{cached_request, load_request};
 
-pub use flux::{Outcome, ProgressEvent};
-pub type WorkProgressObserver = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
-pub use input::{
-    load_cached_swifty_materialization_input, load_swifty_materialization_input, swifty_profile_id,
-    MaterializationInput,
-};
-pub use runner::{check_target, materialize, verify_manifest};
-
-pub fn is_cancellation(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<flux::Error>()
-        .is_some_and(|error| error.kind() == flux::ErrorKind::Cancelled)
-}
-
-pub fn is_source_error(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<flux::Error>()
-        .is_some_and(|error| error.kind() == flux::ErrorKind::Source)
-}
+mod inspect;
+mod inventory;
+pub use inspect::{check, prepare, verify, InspectionError, Prepared};

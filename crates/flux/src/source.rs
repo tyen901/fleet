@@ -1,68 +1,37 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
-use flux::{ContentKey, ContentSource, SourceRange};
-use futures_util::{future::BoxFuture, FutureExt};
-use object_store::http::HttpBuilder;
-use object_store::{ClientOptions, ObjectStore};
+use flux::{Key, Range, Source};
+use futures_util::future::BoxFuture;
+use object_store::{http::HttpBuilder, ClientOptions, ObjectStore};
+use std::{collections::HashMap, sync::Arc};
 
-use crate::input::SwiftyStoreIndex;
-
-struct SwiftyStoreSource {
+pub(super) struct Repository {
     store: Arc<dyn ObjectStore>,
-    hits_by_key: HashMap<ContentKey, SourceRange>,
+    ranges: HashMap<Key, Range>,
 }
 
-pub(crate) fn build_store_sources(index: SwiftyStoreIndex) -> Result<Vec<Arc<dyn ContentSource>>> {
-    if index.objects.is_empty() {
-        return Ok(Vec::new());
+impl Repository {
+    pub fn new(url: &str) -> Result<Self> {
+        let base = url::Url::parse(url)?.join("./")?;
+        let store = HttpBuilder::new()
+            .with_url(base.as_str().trim_end_matches('/'))
+            .with_client_options(ClientOptions::new().with_allow_http(true))
+            .build()
+            .context("build Swifty HTTP object store")?;
+        Ok(Self {
+            store: Arc::new(store),
+            ranges: HashMap::new(),
+        })
     }
-    let store_url = index.base_url.strip_suffix('/').unwrap_or(&index.base_url);
-    let store = HttpBuilder::new()
-        .with_url(store_url)
-        .with_client_options(ClientOptions::new().with_allow_http(true))
-        .build()
-        .context("build Swifty HTTP object store")?;
-    let mut hits_by_key: HashMap<ContentKey, SourceRange> = HashMap::new();
-    for object in index.objects {
-        for part in object.parts {
-            let candidate = SourceRange {
-                path: object.object_path.clone(),
-                offset: part.offset,
-            };
-            hits_by_key
-                .entry(part.key)
-                .and_modify(|hit| {
-                    if (candidate.path.as_ref(), candidate.offset) < (hit.path.as_ref(), hit.offset)
-                    {
-                        *hit = candidate.clone();
-                    }
-                })
-                .or_insert(candidate);
-        }
+    pub fn insert(&mut self, key: Key, range: Range) {
+        self.ranges.entry(key).or_insert(range);
     }
-    Ok(vec![Arc::new(SwiftyStoreSource {
-        store: Arc::new(store),
-        hits_by_key,
-    }) as Arc<dyn ContentSource>])
 }
 
-impl ContentSource for SwiftyStoreSource {
-    fn object_store(&self) -> Arc<dyn ObjectStore> {
+impl Source for Repository {
+    fn store(&self) -> Arc<dyn ObjectStore> {
         self.store.clone()
     }
-
-    fn lookup<'a>(
-        &'a self,
-        keys: &'a [ContentKey],
-    ) -> BoxFuture<'a, flux::Result<Vec<Option<SourceRange>>>> {
-        async move {
-            Ok(keys
-                .iter()
-                .map(|key| self.hits_by_key.get(key).cloned())
-                .collect())
-        }
-        .boxed()
+    fn locate<'a>(&'a self, keys: &'a [Key]) -> BoxFuture<'a, flux::Result<Vec<Option<Range>>>> {
+        Box::pin(async move { Ok(keys.iter().map(|k| self.ranges.get(k).cloned()).collect()) })
     }
 }

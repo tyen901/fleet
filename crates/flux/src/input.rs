@@ -1,58 +1,26 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
+use std::{collections::BTreeMap, sync::Arc};
 
+use crate::{
+    profile::{SwiftyVerifier, PROFILE_ID},
+    source::Repository,
+};
 use anyhow::{Context, Result};
 use fleet_download::DownloadService;
-use flux::{ContentKey, FileSpec, Manifest, ProfileId, Segment, TargetPath};
+use flux::{Goal, Key, ProtectedNames, Range, Recipe, Request, Source};
 use object_store::path::Path as ObjectPath;
-use tracing::{debug, debug_span, error};
+use relative_path::{Component, RelativePath};
+use tracing::{debug, error};
 
-const SWIFTY_PROFILE_BYTES: [u8; 32] = *b"fleet-swifty-md5-profile-v1.0000";
+pub(super) const FLEET_DIRECTORY: &str = ".fleet";
 
-pub fn swifty_profile_id() -> ProfileId {
-    ProfileId(SWIFTY_PROFILE_BYTES)
-}
-
-pub struct MaterializationInput {
-    pub(crate) manifest: Manifest,
-    pub(crate) store_index: SwiftyStoreIndex,
-    pub(crate) revision: Option<String>,
-}
-
-impl MaterializationInput {
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    pub fn revision(&self) -> Option<&str> {
-        self.revision.as_deref()
-    }
-}
-
-pub(crate) struct SwiftyStoreIndex {
-    pub(crate) base_url: String,
-    pub(crate) objects: Vec<SwiftyStoreObject>,
-}
-
-pub(crate) struct SwiftyStoreObject {
-    pub(crate) object_path: ObjectPath,
-    pub(crate) parts: Vec<SwiftyStorePart>,
-}
-
-pub(crate) struct SwiftyStorePart {
-    pub(crate) key: ContentKey,
-    pub(crate) offset: u64,
-}
-
-pub async fn load_swifty_materialization_input(
+pub async fn load_request(
+    target: &Path,
     repo_url: &str,
     repo_cache_dir: &Path,
     downloads: &DownloadService,
-) -> Result<MaterializationInput> {
-    let span =
-        debug_span!("sync.load_materialization_input_from_swifty_repo", repo_url = %repo_url);
-    let _guard = span.enter();
+) -> Result<(Request, Option<String>)> {
     let store = swifty_repo::FsRepoCacheStore::new(repo_cache_dir.to_path_buf());
     let started_at = Instant::now();
     let swifty_repo::RepoSyncResult {
@@ -70,47 +38,47 @@ pub async fn load_swifty_materialization_input(
         optional = repo.optional_mods.len(),
         "synced swifty repo metadata"
     );
-    let mut input = swifty_repo_to_materialization_input(repo_url, &repo, &mods)
-        .context("transform swifty repo -> flux materialization input")?;
-    input.revision = revision;
-    Ok(input)
+    let target = target.to_owned();
+    let repo_url = repo_url.to_owned();
+    let request = tokio::task::spawn_blocking(move || {
+        request(&target, &repo, &mods, Some(Repository::new(&repo_url)?))
+    })
+    .await?
+    .context("convert Swifty manifest to a Flux request")?;
+    Ok((request, revision))
 }
 
-pub fn load_cached_swifty_materialization_input(
+pub async fn cached_request(
+    target: &Path,
     repo_url: &str,
     repo_cache_dir: &Path,
-) -> Result<Option<MaterializationInput>> {
-    let Some(cache) = swifty_repo::load_cached_repo_blocking(repo_cache_dir, repo_url)
-        .with_context(|| format!("load swifty cache for {repo_url}"))?
-    else {
-        return Ok(None);
-    };
-    let revision = swifty_repo::repo_blob_revision(&cache);
-    let mods = cache
-        .mods
-        .into_iter()
-        .map(|(name, cached)| (name, cached.manifest))
-        .collect::<BTreeMap<_, _>>();
-    let mut input = swifty_repo_to_materialization_input(repo_url, &cache.repo, &mods)?;
-    input.revision = revision;
-    Ok(Some(input))
+) -> Result<Option<Request>> {
+    let target = target.to_owned();
+    let repo_url = repo_url.to_owned();
+    let repo_cache_dir = repo_cache_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let Some(cache) = swifty_repo::load_cached_repo_blocking(&repo_cache_dir, &repo_url)
+            .with_context(|| format!("load swifty cache for {repo_url}"))?
+        else {
+            return Ok(None);
+        };
+        let mods = cache
+            .mods
+            .into_iter()
+            .map(|(name, cached)| (name, cached.manifest))
+            .collect::<BTreeMap<_, _>>();
+        Ok(Some(request(&target, &cache.repo, &mods, None)?))
+    })
+    .await?
 }
 
-pub fn swifty_repo_to_materialization_input(
-    repo_url: &str,
+fn request(
+    target: &Path,
     repo: &swifty_artifacts::RepoSpec,
     mods: &BTreeMap<String, swifty_artifacts::SrfMod>,
-) -> Result<MaterializationInput> {
-    let base_url = url::Url::parse(repo_url)?
-        .join("./")
-        .context("resolve repo base url")?;
-    let profile = swifty_profile_id();
+    mut repository: Option<Repository>,
+) -> Result<Request> {
     let mut files = Vec::new();
-    let mut store_index = SwiftyStoreIndex {
-        base_url: base_url.to_string(),
-        objects: Vec::new(),
-    };
-    let mut files_seen = BTreeSet::<String>::new();
     let ordered_mod_names = repo
         .required_mods
         .iter()
@@ -128,39 +96,36 @@ pub fn swifty_repo_to_materialization_input(
             validate_swifty_file(mod_m, file)?;
             let file_rel = normalize_swifty_file_rel_path(&mod_m.name, &file.path)?;
             let rel = format!("{}/{}", mod_m.name, file_rel);
-            if !files_seen.insert(rel.clone()) {
-                anyhow::bail!("duplicate target path in Swifty metadata: {rel}");
-            }
-            let target_path = TargetPath::new(rel.clone())?;
-            let mut segments = Vec::new();
-            let mut parts = Vec::new();
+            let object = ObjectPath::parse(&rel)?;
+            let mut keys = Vec::with_capacity(file.parts.len());
             for part in file.parts.iter().filter(|part| part.length > 0) {
-                let key = swifty_segment_key(part.checksum.as_bytes(), part.length)?;
-                segments.push(Segment {
-                    offset: part.start,
-                    key: key.clone(),
-                });
-                parts.push(SwiftyStorePart {
-                    key,
-                    offset: part.start,
-                });
+                let key = Key::new(part.checksum.as_bytes().to_vec(), part.length)?;
+                if let Some(source) = &mut repository {
+                    source.insert(
+                        key.clone(),
+                        Range {
+                            object: object.clone(),
+                            offset: part.start,
+                            etag: None,
+                        },
+                    );
+                }
+                keys.push(key);
             }
-            files.push(FileSpec {
-                path: target_path,
-                length: file.length,
-                segments,
-            });
-            store_index.objects.push(SwiftyStoreObject {
-                object_path: ObjectPath::parse(&rel)?,
-                parts,
-            });
+            files.push((RelativePath::new(&rel).into(), Recipe::new(keys)?));
         }
     }
-    let manifest = Manifest::new(profile, files, Vec::new())?;
-    Ok(MaterializationInput {
-        manifest,
-        store_index,
-        revision: None,
+    let goal = Goal::new(PROFILE_ID, files, vec![])?
+        .with_protected_names(ProtectedNames::new([FLEET_DIRECTORY])?)?;
+    Ok(Request {
+        target: target.to_owned(),
+        goal,
+        verifier: Arc::new(SwiftyVerifier),
+        local: Default::default(),
+        sources: repository
+            .into_iter()
+            .map(|s| Arc::new(s) as Arc<dyn Source>)
+            .collect(),
     })
 }
 
@@ -196,60 +161,21 @@ fn validate_swifty_file(
     Ok(())
 }
 
-fn swifty_segment_key(raw_md5: &[u8; 16], length: u64) -> Result<ContentKey> {
-    Ok(ContentKey::new(
-        swifty_profile_id(),
-        raw_md5.to_vec(),
-        length,
-    )?)
-}
-
 fn normalize_swifty_file_rel_path(mod_name: &str, raw_path: &str) -> Result<String> {
     let normalized = raw_path.replace('\\', "/");
-    if normalized.starts_with('/') {
-        anyhow::bail!(
-            "invalid swifty mod.srf file path: mod={} path={}",
-            mod_name,
-            raw_path
-        );
-    }
-    if normalized.len() >= 3 {
-        let bytes = normalized.as_bytes();
-        if bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/' {
-            anyhow::bail!(
-                "invalid swifty mod.srf file path: mod={} path={}",
-                mod_name,
-                raw_path
-            );
-        }
-    }
-    let mut parts = Vec::new();
-    for part in normalized.split('/') {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            anyhow::bail!(
-                "invalid swifty mod.srf file path traversal: mod={} path={}",
-                mod_name,
-                raw_path
-            );
-        }
-        parts.push(part);
-    }
-    if parts.is_empty() {
-        anyhow::bail!(
-            "invalid swifty mod.srf file path is empty: mod={} path={}",
-            mod_name,
-            raw_path
-        );
-    }
-    Ok(parts.join("/"))
+    let path = RelativePath::new(&normalized);
+    anyhow::ensure!(
+        !normalized.starts_with('/')
+            && path.file_name().is_some()
+            && !path.components().any(|c| c == Component::ParentDir),
+        "invalid Swifty file path in {mod_name}: {raw_path}"
+    );
+    Ok(path.normalize().into_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::swifty_repo_to_materialization_input;
+    use super::request;
     use std::collections::BTreeMap;
 
     #[test]
@@ -275,12 +201,10 @@ mod tests {
             ("@enabled".to_string(), mod_manifest("@enabled", checksum)),
             ("@disabled".to_string(), mod_manifest("@disabled", checksum)),
         ]);
-        let input =
-            swifty_repo_to_materialization_input("https://example.com/repo.json", &repo, &mods)
-                .expect("convert");
-        assert_eq!(input.manifest.files().len(), 1);
+        let input = request(std::path::Path::new("target"), &repo, &mods, None).expect("convert");
+        assert_eq!(input.goal.files().len(), 1);
         assert_eq!(
-            input.manifest.files()[0].path.as_str(),
+            input.goal.files().first_key_value().unwrap().0.as_str(),
             "@enabled/addons/a.pbo_5"
         );
     }

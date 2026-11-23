@@ -1,54 +1,24 @@
+use crate::operations::{progress, OperationPublisher};
 use fleet_domain::health::{LocalFileReport, VerificationKind};
 use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
-use fleet_inventory::FleetInventory;
 use std::path::Path;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-enum ReadKind {
-    Check {
-        work: fleet_flux::WorkProgressObserver,
-    },
-    Validate {
-        work: fleet_flux::WorkProgressObserver,
-    },
+pub(crate) enum Inspection<'a> {
+    Check,
+    Verify(&'a OperationPublisher),
 }
 
-impl ReadKind {
-    fn evidence(&self) -> VerificationKind {
-        match self {
-            Self::Check { .. } => VerificationKind::Fast,
-            Self::Validate { .. } => VerificationKind::ByteExact,
-        }
-    }
-}
-
-pub(crate) async fn check(
+pub(crate) async fn inspect(
     profile: &Profile,
     state_root: &Path,
     cancel: CancellationToken,
-    work: fleet_flux::WorkProgressObserver,
+    mode: Inspection<'_>,
 ) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, ReadKind::Check { work }).await
-}
-
-pub(crate) async fn validate(
-    profile: &Profile,
-    state_root: &Path,
-    cancel: CancellationToken,
-
-    work: fleet_flux::WorkProgressObserver,
-) -> Result<LocalFileReport, crate::ApiError> {
-    check_or_validate(profile, state_root, cancel, ReadKind::Validate { work }).await
-}
-
-async fn check_or_validate(
-    profile: &Profile,
-    state_root: &Path,
-    cancel: CancellationToken,
-    read_kind: ReadKind,
-) -> Result<LocalFileReport, crate::ApiError> {
-    let verification_kind = read_kind.evidence();
+    let verification_kind = match mode {
+        Inspection::Check => VerificationKind::Fast,
+        Inspection::Verify(_) => VerificationKind::ByteExact,
+    };
     let dest = match profile.dest_path() {
         Ok(path) => path,
         Err(_) => {
@@ -73,39 +43,37 @@ async fn check_or_validate(
         )
     })?;
     let repo_cache = fleet_domain::repo_cache_dir(state_root, &profile.id);
-    let Some(input) = fleet_flux::load_cached_swifty_materialization_input(repo_url, &repo_cache)
+    let request = fleet_flux::cached_request(&dest, repo_url, &repo_cache)
+        .await
         .map_err(|error| {
-        crate::ApiError::reported(
-            "repo_cache",
-            "Could not read repository data. Run Sync to download it again.",
-            error,
-        )
-    })?
-    else {
+            crate::ApiError::reported(
+                "repo_cache",
+                "Could not read repository data. Run Sync to download it again.",
+                error,
+            )
+        })?;
+    let Some(request) = request else {
         return Ok(report(
             profile,
             verification_kind,
             LocalFileHealth::ExpectedStateUnavailable,
         ));
     };
-    let opened = if matches!(read_kind, ReadKind::Check { .. }) {
-        FleetInventory::open_existing(&dest, fleet_flux::swifty_profile_id())
-    } else {
-        FleetInventory::open(&dest, fleet_flux::swifty_profile_id()).map(Some)
-    };
-    let inventory = match opened {
-        Ok(Some(inventory)) => Arc::new(inventory),
-        Ok(None) => {
-            return Ok(report(
-                profile,
-                verification_kind,
-                LocalFileHealth::InventoryUnavailable,
-            ))
+    let result = match mode {
+        Inspection::Verify(publisher) => {
+            progress::scanning(publisher, |bytes| {
+                fleet_flux::verify(request, cancel, bytes)
+            })
+            .await
         }
-        Err(
-            fleet_inventory::InventoryError::Incompatible
-            | fleet_inventory::InventoryError::CorruptDatabase,
-        ) => {
+        Inspection::Check => fleet_flux::check(request, cancel).await,
+    };
+    let matches = match result {
+        Ok(clean) => clean,
+        Err(fleet_flux::InspectionError::Operation(flux::Error::Cancelled)) => {
+            return Err(crate::ApiError::new("canceled", "Canceled"))
+        }
+        Err(fleet_flux::InspectionError::Inventory(_)) if matches!(mode, Inspection::Check) => {
             return Ok(report(
                 profile,
                 verification_kind,
@@ -114,44 +82,10 @@ async fn check_or_validate(
         }
         Err(error) => {
             return Err(crate::ApiError::reported(
-                "inventory",
-                "Could not access the local file inventory. Check folder permissions.",
+                "local_check",
+                "Could not check local files. Check folder permissions and try again.",
                 error,
             ))
-        }
-    };
-    if cancel.is_cancelled() {
-        return Err(crate::ApiError::new("canceled", "Canceled"));
-    }
-
-    let matches = match read_kind {
-        ReadKind::Check { work } => {
-            fleet_flux::check_target(&dest, inventory, input, cancel.clone(), work)
-                .await
-                .map_err(|error| operation_error("local_check", &cancel, error))?
-        }
-        ReadKind::Validate { work } => {
-            let catalog = inventory.clone();
-            let manifest = input.manifest().clone();
-            tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
-                .await
-                .map_err(|error| {
-                    crate::ApiError::reported(
-                        "inventory",
-                        "Could not access the local file inventory. Check folder permissions.",
-                        error,
-                    )
-                })?
-                .map_err(|error| {
-                    crate::ApiError::reported(
-                        "inventory",
-                        "Could not access the local file inventory. Check folder permissions.",
-                        error,
-                    )
-                })?;
-            fleet_flux::verify_manifest(&dest, inventory, input, cancel.clone(), work)
-                .await
-                .map_err(|error| operation_error("inventory_validation", &cancel, error))?
         }
     };
     Ok(report(
@@ -163,22 +97,6 @@ async fn check_or_validate(
             LocalFileHealth::Dirty
         },
     ))
-}
-
-fn operation_error(
-    code: &str,
-    cancel: &CancellationToken,
-    error: anyhow::Error,
-) -> crate::ApiError {
-    if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
-        crate::ApiError::new("canceled", "Canceled")
-    } else {
-        crate::ApiError::reported(
-            code,
-            "Could not check local files. Check folder permissions and try again.",
-            error,
-        )
-    }
 }
 
 pub(crate) fn report(

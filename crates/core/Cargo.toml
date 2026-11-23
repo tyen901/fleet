@@ -5,13 +5,13 @@ edition = "2021"
 
 [features]
 default = ["flux"]
-flux = ["dep:fleet-flux", "dep:fleet-inventory"]
+flux = ["dep:fleet-flux", "dep:flux"]
 
 [dependencies]
 anyhow = { workspace = true }
 fleet-download = { workspace = true }
 fleet-domain = { workspace = true }
-fleet-inventory = { workspace = true, optional = true }
+flux = { workspace = true, optional = true }
 fleet-flux = { workspace = true, optional = true }
 swifty-repo = { workspace = true }
 directories = { workspace = true }
@@ -29,5 +29,4 @@ rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-flux = { workspace = true }
 object_store = { workspace = true }

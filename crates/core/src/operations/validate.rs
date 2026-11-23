@@ -1,4 +1,3 @@
-use crate::operations::progress::progress_channel;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::LocalFileReport;
 use fleet_domain::Profile;
@@ -13,10 +12,12 @@ pub(crate) async fn validate(
 ) -> Result<LocalFileReport, crate::ApiError> {
     publisher.stage(OperationStage::Validating);
     publisher.stage(OperationStage::LoadingExpectedState);
-    let (observers, progress_receiver) = progress_channel(publisher.clone());
-    let validation = local_files::validate(profile, state_root, cancellation, observers);
-    let report = progress_receiver
-        .observe(publisher.clone(), validation)
-        .await?;
-    Ok(report)
+    publisher.stage(OperationStage::VerifyingInventory);
+    local_files::inspect(
+        profile,
+        state_root,
+        cancellation,
+        local_files::Inspection::Verify(&publisher),
+    )
+    .await
 }

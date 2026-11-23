@@ -12,12 +12,6 @@ Inspired by:
 The core, desktop app and CLI enable the `flux` feature by default. Flux is pinned
 to a Git commit. Use `cargo build --workspace --locked` or `npm run build`.
 
-For local Flux development, run `npm run build -- --local-flux`. This explicit
-flag patches Flux to `../flux/crates/flux` for that command only and restores the
-Git lockfile afterward. Local development is off by default. The same wrapper
-accepts Cargo commands, for example `node scripts/cargo.mjs check --local-flux`.
-Do not run concurrent Cargo commands in this workspace during a local build.
-
 `cargo build -p fleet --no-default-features --locked` explicitly builds the optional
 UI-only app without the Flux backend.
 
@@ -35,10 +29,9 @@ not supported.
 ### Operation progress
 
 Sync shows separate download and patch bars. Download progress counts remote
-payload bytes against the planned total, which refines as Flux identifies local
-reuse. Patch progress counts changed file output as it is rebuilt. Task metrics
+payload bytes against the total Flux computes after resolving local reuse. Patch progress counts changed file output as it is rebuilt. Task metrics
 report network throughput and logical disk reads plus writes, with an estimated
-time remaining once throughput stabilizes.
+time remaining while output is being written.
 
 Checking for updates uses an indeterminate progress bar that clears as soon
 as the check finishes. **Validate files** rescans and hashes local files.

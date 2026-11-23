@@ -84,6 +84,71 @@ fn smoke_test_root() -> PathBuf {
         .join("smoke_inventory_tests")
 }
 
+#[test]
+fn sync_reuses_inventoried_and_newly_downloaded_parts_across_files() {
+    let bytes = support::swifty_repo_server::initial_file();
+    let (prefix, tail) = bytes.split_at(swifty_artifacts::RAW_PART_SIZE as usize);
+    let parts = [
+        ("installed/prefix.txt", prefix),
+        ("another/tail.txt", tail),
+        ("copies/tail.txt", tail),
+    ];
+    let server = ExampleSwiftyRepoServer::start_with_files(&parts).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let dest = root.path().join("target");
+    let target_path = server.example_file_target_path();
+    let mod_dir = dest.join(target_path.components().next().unwrap());
+    let prefix_path = mod_dir.join(parts[0].0);
+    fs::create_dir_all(prefix_path.parent().unwrap()).unwrap();
+    fs::write(prefix_path, prefix).unwrap();
+    let bin = bin_path();
+    run_cmd(
+        &bin,
+        &[
+            "profile",
+            "add",
+            "reuse",
+            "Reuse",
+            "--source",
+            &server.repo_url(),
+            "--dest",
+            dest.to_str().unwrap(),
+        ],
+        &config,
+    );
+    let sync = |changed| {
+        let output = run_cmd(&bin, &["sync", "reuse", "--no-progress"], &config);
+        let (_, after_scan) = output.split_once("Stage: Planning changes").expect(&output);
+        assert!(!after_scan.contains("Local check:"), "{output}");
+        assert!(
+            after_scan.contains(&format!("Published: {changed}/{changed} files")),
+            "{output}"
+        );
+        assert!(after_scan.contains("Stage: Finishing up"), "{output}");
+        assert_eq!(fs::read(dest.join(&target_path)).unwrap(), bytes);
+        for (path, contents) in parts {
+            assert_eq!(fs::read(mod_dir.join(path)).unwrap(), contents);
+        }
+    };
+
+    // The prefix is installed. Three outputs need the same missing tail.
+    sync(3);
+    assert_eq!(
+        (server.payload_gets(), server.payload_bytes()),
+        (1, tail.len())
+    );
+
+    // The full file is gone. The two surviving, inventoried files each hold a different part.
+    fs::remove_file(dest.join(&target_path)).unwrap();
+    fs::remove_file(mod_dir.join(parts[2].0)).unwrap();
+    sync(2);
+    assert_eq!(
+        (server.payload_gets(), server.payload_bytes()),
+        (1, tail.len())
+    );
+}
+
 fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     let suffix = unique_suffix();
     let run_root = smoke_test_root().join(format!("fleet_run_{suffix}"));
@@ -98,6 +163,10 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         r#"{"auto_check_profiles_on_startup":false}"#,
     )
     .expect("write test settings");
+
+    let protected = dest_root.join(".fleet").join("user-state");
+    fs::create_dir_all(protected.parent().unwrap()).unwrap();
+    fs::write(&protected, b"retained").unwrap();
 
     let server = ExampleSwiftyRepoServer::start().expect("spawn repo server");
     let repo_url = server.repo_url();
@@ -146,6 +215,23 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "expected ready profile check output, got: {out}"
     );
 
+    // Fleet can check and byte-verify with the materializer workspace entirely absent.
+    let workspace = dest_root.join(".flux");
+    let parked = run_root.join("staging");
+    fs::rename(&workspace, &parked).unwrap();
+    let payload_before = server.payload_bytes();
+    assert!(run_cmd(&bin, &["check", profile_id], &config_root).contains("health: Clean"));
+    assert!(run_cmd(
+        &bin,
+        &["validate", profile_id, "--no-progress"],
+        &config_root
+    )
+    .contains("local_health: Clean"));
+    run_cmd(&bin, &["sync", profile_id, "--no-progress"], &config_root);
+    assert!(!workspace.exists());
+    assert_eq!(server.payload_bytes(), payload_before);
+    fs::rename(parked, workspace).unwrap();
+
     let unmanaged_file = dest_root.join("user-owned-not-managed.txt");
     fs::write(&unmanaged_file, b"not part of the managed manifest").expect("write unmanaged file");
     let out = run_cmd(&bin, &["check", profile_id], &config_root);
@@ -185,7 +271,7 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
     server.set_repo_available(true);
 
     let mut modified_bytes = server.example_file_bytes().to_vec();
-    modified_bytes[0] ^= 0x20;
+    *modified_bytes.last_mut().unwrap() ^= 0x20;
     fs::write(&synced_file, &modified_bytes).expect("modify synced file in place");
     assert_eq!(
         fs::metadata(&synced_file).expect("modified metadata").len(),
@@ -199,7 +285,13 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "the existing exact-mirror discrepancy must continue to require sync, got: {out}"
     );
 
+    let served_before = server.payload_bytes();
     run_cmd(&bin, &["sync", profile_id, "--no-progress"], &config_root);
+    assert_eq!(
+        server.payload_bytes() - served_before,
+        server.example_file_bytes().len() - swifty_artifacts::RAW_PART_SIZE as usize,
+        "repair should download only the damaged tail part"
+    );
     assert_eq!(
         fs::read(&synced_file).expect("read repaired file"),
         server.example_file_bytes(),
@@ -240,7 +332,13 @@ fn run_local_swifty_repo_sync_flow(profile_id: &str) {
         "sync must remove destination paths outside the requested manifest"
     );
 
-    let inventory_db = dest_root.join(".fleet/observations.sqlite");
+    assert_eq!(fs::read(&protected).unwrap(), b"retained");
+    let inventory_db = fs::read_dir(dest_root.join(".fleet"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "redb"))
+        .expect("target catalog");
     assert!(inventory_db.exists(), "inventory db missing");
 
     fs::write(&inventory_db, b"corrupt inventory").expect("corrupt inventory database");

@@ -566,7 +566,7 @@ mod tests {
 
     #[cfg(feature = "flux")]
     #[test]
-    fn finalizing_event_rejects_cancel_before_the_next_progress_refresh() {
+    fn finalizing_rejects_cancel_after_a_late_progress_refresh() {
         let temp = tempfile::tempdir().unwrap();
 
         let core = crate::Core::new_for_test(temp.path()).unwrap();
@@ -598,8 +598,7 @@ mod tests {
             operation: fleet_domain::OperationKind::Sync,
             seq,
         };
-        let (observer, _) = crate::operations::progress::progress_channel(publisher.clone());
-        observer(fleet_flux::ProgressEvent::Finalizing);
+        publisher.stage(crate::OperationStage::Finalizing);
         // A snapshot already captured by the refresh timer must not undo finalization.
         publisher.progress(crate::OperationProgressEvent {
             stage: crate::OperationStage::Sync,

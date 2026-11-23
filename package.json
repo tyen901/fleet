@@ -10,6 +10,6 @@
     "lint:design": "node scripts/lint-design.mjs",
     "render:ui": "cargo build -p fleet --locked && node scripts/render-ui.mjs",
     "build:no-flux": "cargo build -p fleet --no-default-features --locked",
-    "build": "node scripts/cargo.mjs build --workspace --locked"
+    "build": "cargo build --workspace --locked"
   }
 }

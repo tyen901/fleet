@@ -1,10 +1,8 @@
-use crate::operations::progress::progress_channel;
+use crate::operations::progress;
 use crate::operations::{local_files, OperationPublisher, OperationStage};
 use fleet_domain::health::{RepoCheckFreshness, RepoCheckReport, SyncReport, VerificationKind};
 use fleet_domain::{validated_repo_url, LocalFileHealth, Profile};
-use fleet_inventory::FleetInventory;
 use std::path::Path;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn sync(
@@ -31,58 +29,42 @@ pub(crate) async fn sync(
 
     publisher.stage(OperationStage::LoadingExpectedState);
     let downloads = fleet_download::DownloadService::new_default();
-    let input = tokio::select! {
-        result = fleet_flux::load_swifty_materialization_input(
+    let (request, revision) = tokio::select! {
+        result = fleet_flux::load_request(
+            &dest,
             repo_url,
             &repo_cache,
             &downloads,
         ) => result.map_err(|error| crate::ApiError::reported("sync_failed", "Couldn't load the sync source.", error))?,
         () = cancel.cancelled() => return Err(crate::ApiError::new("canceled", "Canceled")),
     };
-    let revision = input.revision().map(ToOwned::to_owned);
-    std::fs::create_dir_all(&dest).map_err(|error| {
-        crate::ApiError::reported(
-            "sync_failed",
-            "Could not create the destination folder. Check folder permissions.",
-            error,
-        )
-    })?;
-    let inventory = Arc::new(
-        FleetInventory::open(&dest, fleet_flux::swifty_profile_id()).map_err(|error| {
-            crate::ApiError::reported(
-                "inventory",
-                "Could not prepare the local file inventory. Check folder permissions.",
-                error,
-            )
-        })?,
-    );
-    let catalog = inventory.clone();
-    let manifest = input.manifest().clone();
-    tokio::task::spawn_blocking(move || catalog.register_manifest(&manifest))
-        .await
-        .map_err(|error| {
-            crate::ApiError::reported(
-                "inventory",
-                "Could not prepare the local file inventory. Check folder permissions.",
-                error,
-            )
-        })?
-        .map_err(|error| {
-            crate::ApiError::reported(
-                "inventory",
-                "Could not prepare the local file inventory. Check folder permissions.",
-                error,
-            )
-        })?;
-
     publisher.stage(OperationStage::VerifyingInventory);
-    let (observers, progress_receiver) = progress_channel(publisher.clone());
-    let materialization =
-        fleet_flux::materialize(&dest, inventory, input, cancel.clone(), observers);
-    progress_receiver
-        .observe(publisher.clone(), materialization)
-        .await
-        .map_err(|error| sync_error(&cancel, error))?;
+    let options = flux::Options {
+        cancellation: cancel.clone(),
+        ..Default::default()
+    };
+    let prepared = progress::scanning(&publisher, |bytes| {
+        fleet_flux::prepare(request, cancel.clone(), bytes)
+    })
+    .await
+    .map_err(|error| inventory_error(&cancel, error))?;
+    let verification = if let Some(prepared) = prepared {
+        let outcome = progress::observe(&publisher, prepared.materialize(options))
+            .await
+            .map_err(|error| inventory_error(&cancel, error))?;
+        tracing::info!(
+            operation = "run_success",
+            deleted_entries = outcome.deleted_entries,
+            written_bytes = outcome.written_bytes,
+            fetched_bytes = outcome.fetched_bytes,
+            reused_bytes = outcome.reused_bytes,
+            kept_files = outcome.kept_files,
+            "materialized profile"
+        );
+        VerificationKind::Materialized
+    } else {
+        VerificationKind::Fast
+    };
     publisher.stage(OperationStage::Finalizing);
     Ok(SyncReport {
         profile_id: profile.id.clone(),
@@ -93,25 +75,38 @@ pub(crate) async fn sync(
             freshness: RepoCheckFreshness::UpToDate,
             checked_at_unix_ms: fleet_domain::time::now_unix_ms(),
         },
-        local: local_files::report(
-            profile,
-            VerificationKind::Materialized,
-            LocalFileHealth::Clean,
-        ),
+        local: local_files::report(profile, verification, LocalFileHealth::Clean),
     })
 }
 
-fn sync_error(cancel: &CancellationToken, error: anyhow::Error) -> crate::ApiError {
-    if cancel.is_cancelled() || fleet_flux::is_cancellation(&error) {
-        crate::ApiError::new("canceled", "Canceled")
-    } else {
-        let message = if fleet_flux::is_source_error(&error) {
-            "Sync failed: Could not download a repository file. Try Sync again."
-        } else {
-            "Sync failed: Could not update local files. Check folder permissions and try again."
-        };
-        crate::ApiError::reported("sync_failed", message, error)
+fn inventory_error(
+    cancel: &CancellationToken,
+    error: fleet_flux::InspectionError,
+) -> crate::ApiError {
+    if let fleet_flux::InspectionError::Operation(operation) = error {
+        return sync_error(cancel, operation);
     }
+    crate::ApiError::reported(
+        "sync_failed",
+        "Sync failed: Could not access the local file inventory.",
+        error,
+    )
+}
+
+fn sync_error(cancel: &CancellationToken, error: flux::Error) -> crate::ApiError {
+    if cancel.is_cancelled() || matches!(error, flux::Error::Cancelled) {
+        return crate::ApiError::new("canceled", "Canceled");
+    }
+    let message = match error {
+        flux::Error::Source(_) => {
+            "Sync failed: Could not download a repository file. Try Sync again."
+        }
+        flux::Error::InsufficientSpace { .. } => {
+            "Sync failed: Free up space in the destination and try again."
+        }
+        _ => "Sync failed: Could not update local files. Check folder permissions and try again.",
+    };
+    crate::ApiError::reported("sync_failed", message, error)
 }
 
 #[cfg(test)]
@@ -158,8 +153,7 @@ mod tests {
             .await
             .unwrap_err();
         server.await.unwrap();
-        let error = anyhow::Error::new(flux::Error::with_source(flux::ErrorKind::Source, error))
-            .context("materialize profile");
+        let error = flux::Error::Source(error.to_string());
         let log = tempfile::NamedTempFile::new().unwrap();
         let writer = log.reopen().unwrap();
         let subscriber = tracing_subscriber::fmt()
@@ -187,29 +181,28 @@ mod tests {
 
     #[test]
     fn cancellation_is_distinct_from_source_and_local_failures() {
-        for kind in [
-            flux::ErrorKind::Cancelled,
-            flux::ErrorKind::Source,
-            flux::ErrorKind::Io,
+        for (error, code, is_download) in [
+            (flux::Error::Cancelled, "canceled", false),
+            (
+                flux::Error::Source("private diagnostic".into()),
+                "sync_failed",
+                true,
+            ),
+            (
+                flux::Error::Io(std::io::Error::other("private diagnostic")),
+                "sync_failed",
+                false,
+            ),
         ] {
-            let token = CancellationToken::new();
-            let error = anyhow::Error::new(flux::Error::new(kind, "private diagnostic"));
-            let published = sync_error(&token, error);
-            if kind == flux::ErrorKind::Cancelled {
-                assert_eq!(published.code, "canceled");
-            } else {
-                assert_eq!(published.code, "sync_failed");
-                assert!(!published.message.contains("private diagnostic"));
-                assert_eq!(
-                    published.message.contains("download"),
-                    kind == flux::ErrorKind::Source
-                );
-            }
+            let published = sync_error(&CancellationToken::new(), error);
+            assert_eq!(published.code, code);
+            assert_eq!(published.message.contains("download"), is_download);
+            assert!(!published.message.contains("private diagnostic"));
         }
         let token = CancellationToken::new();
         token.cancel();
         assert_eq!(
-            sync_error(&token, anyhow::anyhow!("in-flight HTTP failure")).code,
+            sync_error(&token, flux::Error::Source("in-flight HTTP failure".into())).code,
             "canceled"
         );
     }

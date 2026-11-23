@@ -26,7 +26,9 @@ pub enum OperationStage {
     Validating,
     LoadingExpectedState,
     VerifyingInventory,
+    Planning,
     Sync,
+    Publishing,
     Finalizing,
 }
 
@@ -43,6 +45,8 @@ impl OperationStage {
             Self::Validating => "Checking profile",
             Self::LoadingExpectedState => "Preparing",
             Self::VerifyingInventory => "Checking local files",
+            Self::Planning => "Planning changes",
+            Self::Publishing => "Publishing files",
             Self::Sync => "Patching",
             Self::Finalizing => "Finishing up",
         }
@@ -54,6 +58,7 @@ pub enum ProgressTrackKind {
     LocalCheck,
     Patch,
     Download,
+    PublishedFiles,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +86,7 @@ impl ProgressTrackKind {
             Self::LocalCheck => "Local check",
             Self::Patch => "Patch",
             Self::Download => "Download",
+            Self::PublishedFiles => "Published",
         }
     }
 }

@@ -1,19 +1,24 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 const EXAMPLE_MOD_NAME: &str = "@fleet-example";
 const EXAMPLE_FILE_REL: &str = "addons\\hello.txt";
-const EXAMPLE_FILE_ROUTE: &str = "/@fleet-example/addons/hello.txt";
-const EXAMPLE_FILE_BYTES: &[u8] = b"fleet dummy file\n";
-const EXAMPLE_FILE_MD5: &str = "7dc1773e58b61108bc3f40abdb29eaa4";
+pub fn initial_file() -> &'static [u8] {
+    static DATA: OnceLock<Vec<u8>> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let mut bytes = vec![b'A'; swifty_artifacts::RAW_PART_SIZE as usize];
+        bytes.extend_from_slice(b"fleet dummy file\n");
+        bytes
+    })
+}
 const EXAMPLE_MOD_MD5: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const UPDATED_FILE_BYTES: &[u8] = b"fleet updated file\n";
-const UPDATED_FILE_MD5: &str = "146712534a31b1d71683176e9a0e1e47";
 const UPDATED_MOD_MD5: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 pub struct ExampleSwiftyRepoServer {
@@ -21,11 +26,16 @@ pub struct ExampleSwiftyRepoServer {
     stop: Arc<AtomicBool>,
     revision: Arc<AtomicUsize>,
     repo_available: Arc<AtomicBool>,
+    repos: Arc<[ExampleSwiftyRepo; 2]>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl ExampleSwiftyRepoServer {
     pub fn start() -> std::io::Result<Self> {
+        Self::start_with_files(&[])
+    }
+
+    pub fn start_with_files(extra_files: &[(&str, &'static [u8])]) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -35,20 +45,21 @@ impl ExampleSwiftyRepoServer {
             ExampleSwiftyRepo::new(
                 "0000000000000000000000000000000000000000",
                 EXAMPLE_MOD_MD5,
-                EXAMPLE_FILE_BYTES,
-                EXAMPLE_FILE_MD5,
+                initial_file(),
+                extra_files,
             ),
             ExampleSwiftyRepo::new(
                 "1111111111111111111111111111111111111111",
                 UPDATED_MOD_MD5,
                 UPDATED_FILE_BYTES,
-                UPDATED_FILE_MD5,
+                &[],
             ),
         ]);
         let handle = {
             let stop = Arc::clone(&stop);
             let revision = Arc::clone(&revision);
             let repo_available = Arc::clone(&repo_available);
+            let repos = repos.clone();
             thread::spawn(move || serve(listener, repos, revision, repo_available, stop))
         };
 
@@ -57,6 +68,7 @@ impl ExampleSwiftyRepoServer {
             stop,
             revision,
             repo_available,
+            repos,
             handle: Some(handle),
         })
     }
@@ -72,10 +84,19 @@ impl ExampleSwiftyRepoServer {
     }
 
     pub fn example_file_bytes(&self) -> &'static [u8] {
-        match self.revision.load(Ordering::Acquire) {
-            0 => EXAMPLE_FILE_BYTES,
-            _ => UPDATED_FILE_BYTES,
-        }
+        self.repos[self.revision.load(Ordering::Acquire)].file_bytes
+    }
+
+    pub fn payload_bytes(&self) -> usize {
+        self.repos[self.revision.load(Ordering::Acquire)]
+            .served
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn payload_gets(&self) -> usize {
+        self.repos[self.revision.load(Ordering::Acquire)]
+            .gets
+            .load(Ordering::Relaxed)
     }
 
     pub fn publish_update(&self) {
@@ -101,6 +122,9 @@ struct ExampleSwiftyRepo {
     repo_json: Vec<u8>,
     mod_srf: Vec<u8>,
     file_bytes: &'static [u8],
+    payloads: BTreeMap<String, &'static [u8]>,
+    served: AtomicUsize,
+    gets: AtomicUsize,
 }
 
 impl ExampleSwiftyRepo {
@@ -108,20 +132,9 @@ impl ExampleSwiftyRepo {
         repo_checksum: &str,
         mod_checksum: &str,
         file_bytes: &'static [u8],
-        file_checksum: &str,
+        extra_files: &[(&str, &'static [u8])],
     ) -> Self {
         let mod_checksum = md5_digest(mod_checksum);
-        let part = swifty_artifacts::SrfPart {
-            path: format!(
-                "{}_{}",
-                EXAMPLE_FILE_REL.replace('\\', "/"),
-                file_bytes.len()
-            ),
-            start: 0,
-            length: file_bytes.len() as u64,
-            checksum: md5_digest(file_checksum),
-        };
-        let file_checksum = swifty_artifacts::file_md5_from_parts(std::slice::from_ref(&part));
         let repo = swifty_artifacts::RepoSpec {
             repo_name: "fleet-example-test-repo".to_string(),
             checksum: repo_checksum.to_string(),
@@ -141,27 +154,41 @@ impl ExampleSwiftyRepo {
             version: String::new(),
             servers: vec![],
         };
+        let mut payloads = BTreeMap::new();
+        let mut files = Vec::new();
+        for (path, bytes) in
+            std::iter::once((EXAMPLE_FILE_REL, file_bytes)).chain(extra_files.iter().copied())
+        {
+            let (file_checksum, parts) = swifty_artifacts::swifty_file_info_from_bytes(path, bytes);
+            files.push(swifty_artifacts::SrfFile {
+                path: path.to_string(),
+                length: bytes.len() as u64,
+                checksum: file_checksum,
+                r#type: None,
+                parts,
+            });
+            let route = format!("/{EXAMPLE_MOD_NAME}/{}", path.replace('\\', "/"));
+            payloads.insert(route, bytes);
+        }
         let mod_manifest = swifty_artifacts::SrfMod {
             name: EXAMPLE_MOD_NAME.to_string(),
             checksum: mod_checksum,
-            files: vec![swifty_artifacts::SrfFile {
-                path: EXAMPLE_FILE_REL.to_string(),
-                length: file_bytes.len() as u64,
-                checksum: file_checksum,
-                r#type: None,
-                parts: vec![part],
-            }],
+            files,
         };
 
         Self {
             repo_json: serde_json::to_vec(&repo).expect("serialize repo.json"),
             mod_srf: serde_json::to_vec(&mod_manifest).expect("serialize mod.srf"),
             file_bytes,
+            payloads,
+            served: AtomicUsize::new(0),
+            gets: AtomicUsize::new(0),
         }
     }
 
     fn response(&self, request: &str, repo_available: bool) -> Vec<u8> {
         let request = HttpRequest::parse(request);
+        let payload = self.payloads.get(&request.path);
         let (status, content_type, body) = match request.path.as_str() {
             "/repo.json" if !repo_available => (
                 "503 Service Unavailable",
@@ -178,31 +205,32 @@ impl ExampleSwiftyRepo {
                 "application/json",
                 self.mod_srf.as_slice().to_vec(),
             ),
-            EXAMPLE_FILE_ROUTE => (
-                "200 OK",
-                "application/octet-stream",
-                self.file_bytes.to_vec(),
-            ),
+            _ if let Some(bytes) = payload => {
+                ("200 OK", "application/octet-stream", bytes.to_vec())
+            }
             _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
         };
 
-        let (status, body, content_range) =
-            if request.path == EXAMPLE_FILE_ROUTE && status.starts_with("200") {
-                match requested_range(request.raw, body.len()) {
-                    Some((start, end)) => (
-                        "206 Partial Content",
-                        body[start..=end].to_vec(),
-                        Some(format!(
-                            "Content-Range: bytes {start}-{end}/{}\r\n",
-                            body.len()
-                        )),
-                    ),
-                    None => (status, body, None),
-                }
-            } else {
-                (status, body, None)
-            };
+        let (status, body, content_range) = if payload.is_some() {
+            match requested_range(request.raw, body.len()) {
+                Some((start, end)) => (
+                    "206 Partial Content",
+                    body[start..=end].to_vec(),
+                    Some(format!(
+                        "Content-Range: bytes {start}-{end}/{}\r\n",
+                        body.len()
+                    )),
+                ),
+                None => (status, body, None),
+            }
+        } else {
+            (status, body, None)
+        };
 
+        if payload.is_some() && request.method == "GET" {
+            self.served.fetch_add(body.len(), Ordering::Relaxed);
+            self.gets.fetch_add(1, Ordering::Relaxed);
+        }
         http_response(
             status,
             content_type,

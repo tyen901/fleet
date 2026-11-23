@@ -7,7 +7,6 @@ members = [
     "crates/core",
     "crates/domain",
     "crates/download",
-    "crates/inventory",
     "crates/flux",
     "crates/swifty-repo",
 ]
@@ -20,7 +19,6 @@ license = "GPL-3.0-only"
 fleet-core               = { path = "crates/core", default-features = false }
 fleet-download           = { path = "crates/download" }
 fleet-domain             = { path = "crates/domain" }
-fleet-inventory          = { path = "crates/inventory" }
 fleet-flux               = { path = "crates/flux" }
 swifty-repo              = { path = "crates/swifty-repo" }
 fleet-arma3              = { path = "crates/arma3" }
@@ -28,7 +26,8 @@ fleet-arma3              = { path = "crates/arma3" }
 # Pinned external dependencies
 swifty_artifacts       = { git = "https://github.com/tyen901/swifty-artifacts.git", package = "swifty_artifacts", tag = "v0.2.1" }
 
-flux                    = { git = "https://github.com/tyen901/flux.git", rev = "c656fc05e4bc2a4d62f1692983ddbc1383edaf66" }
+flux                    = { git = "https://github.com/tyen901/flux.git", rev = "21c10d6ac8b55cc553d109350c127ac9f3585997" }
+relative-path           = "2.0.3"
 
 # Async runtime, HTTP, and server framework
 tokio        = { version = "1.49.0", features = ["full"] }
@@ -74,12 +73,6 @@ sha1 = "0.10.6"  # Swifty repo checksum
 # Filesystem / OS
 directories  = "6.0.0"
 tempfile     = "3.24.0"
-
-# Database
-fmutex = "0.3.0"
-rusqlite = { version = "0.38.0", features = ["bundled-windows", "cache"] }
-r2d2 = "0.8"
-r2d2_sqlite = "0.32"
 
 # Time
 chrono = "0.4.43"

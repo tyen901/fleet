@@ -1,81 +1,59 @@
 use std::io::Read;
 
-use flux::{
-    ContentKey, ContentProfile, Error, ErrorKind, ProfileId, Result, Segment, TargetPath, Validator,
-};
+use flux::{ContentVerifier, Error, Key, ProfileId, Recipe, Result, Validator};
 use swifty_artifacts::{
     Md5Digest, SrfPart, SwiftyStreamingPartScanner, SwiftyStreamingPartValidator,
 };
 
-use crate::input::swifty_profile_id;
+use relative_path::RelativePath;
+pub(super) const PROFILE_ID: ProfileId = *b"fleet-swifty-md5-profile-v1.0000";
+const SCAN_BUFFER: usize = 64 * 1024;
 
-pub struct SwiftyFluxProfile;
+pub(super) struct SwiftyVerifier;
 
-impl ContentProfile for SwiftyFluxProfile {
-    fn id(&self) -> ProfileId {
-        swifty_profile_id()
+pub(super) fn read_recipe(
+    path: &RelativePath,
+    length: u64,
+    reader: &mut dyn Read,
+) -> Result<Recipe> {
+    let mut scanner = SwiftyStreamingPartScanner::new(path.as_str(), length);
+    let mut buffer = [0u8; SCAN_BUFFER];
+    let mut keys = Vec::new();
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let parts = scanner.push(&buffer[..count]).map_err(swifty_error)?;
+        for part in parts.into_iter().filter(|part| part.length > 0) {
+            keys.push(part_key(part)?);
+        }
     }
-
-    fn scan(
-        &self,
-        path: &TargetPath,
-        len: u64,
-        reader: &mut dyn Read,
-        emit: &mut dyn FnMut(Segment) -> Result<()>,
-    ) -> Result<()> {
-        let mut scanner = SwiftyStreamingPartScanner::new(path.as_str(), len);
-        let mut bytes_read = 0u64;
-        let mut buffer = [0u8; 64 * 1024];
-        loop {
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            bytes_read = bytes_read
-                .checked_add(count as u64)
-                .ok_or_else(|| Error::new(ErrorKind::Validation, "profile scan length overflow"))?;
-            let parts = scanner.push(&buffer[..count]).map_err(swifty_error)?;
-            for part in parts {
-                if part.length > 0 {
-                    emit(part_segment(part)?)?;
-                }
-            }
-        }
-        for part in scanner.finish().map_err(swifty_error)? {
-            if part.length > 0 {
-                emit(part_segment(part)?)?;
-            }
-        }
-        if bytes_read != len {
-            return Err(Error::new(
-                ErrorKind::Validation,
-                "profile scanner read length mismatch",
-            ));
-        }
-        Ok(())
+    for part in scanner
+        .finish()
+        .map_err(swifty_error)?
+        .into_iter()
+        .filter(|part| part.length > 0)
+    {
+        keys.push(part_key(part)?);
     }
-
-    fn validator(&self, key: &ContentKey) -> Result<Box<dyn Validator>> {
-        validate_key(key)?;
-        let digest =
-            Md5Digest::from_bytes(key.identity().try_into().map_err(|_| {
-                Error::new(ErrorKind::Validation, "invalid Swifty MD5 digest length")
-            })?);
+    Recipe::new(keys)
+}
+impl ContentVerifier for SwiftyVerifier {
+    fn validator(&self, key: &Key) -> Result<Box<dyn Validator>> {
+        let digest = Md5Digest::from_bytes(
+            key.identity()
+                .try_into()
+                .map_err(|_| Error::Validation("invalid Swifty MD5 digest length".into()))?,
+        );
         Ok(Box::new(SwiftyValidator {
             validator: SwiftyStreamingPartValidator::new(digest, key.length()),
         }))
     }
 }
 
-fn part_segment(part: SrfPart) -> Result<Segment> {
-    Ok(Segment {
-        offset: part.start,
-        key: ContentKey::new(
-            swifty_profile_id(),
-            part.checksum.as_bytes().to_vec(),
-            part.length,
-        )?,
-    })
+fn part_key(part: SrfPart) -> Result<Key> {
+    Key::new(part.checksum.as_bytes().to_vec(), part.length)
 }
 
 struct SwiftyValidator {
@@ -93,22 +71,6 @@ impl Validator for SwiftyValidator {
     }
 }
 
-fn validate_key(key: &ContentKey) -> Result<()> {
-    if key.profile() != swifty_profile_id() {
-        return Err(Error::new(
-            ErrorKind::Validation,
-            "validation profile mismatch",
-        ));
-    }
-    if key.identity().len() != 16 {
-        return Err(Error::new(
-            ErrorKind::Validation,
-            "invalid Swifty MD5 digest length",
-        ));
-    }
-    Ok(())
-}
-
 fn swifty_error(error: swifty_artifacts::SwiftyError) -> Error {
-    Error::with_source(ErrorKind::Validation, error)
+    Error::Validation(error.to_string())
 }

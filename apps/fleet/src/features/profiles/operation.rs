@@ -59,7 +59,14 @@ fn WorkBar(
     frozen: bool,
 ) -> Element {
     let percent = track.as_ref().and_then(ProgressTrack::percent);
-    let value = if download {
+    let value = if let Some(files) = track
+        .as_ref()
+        .filter(|t| t.kind == ProgressTrackKind::PublishedFiles)
+    {
+        files.total.map(
+            |total| t!("published-count", done: files.done.to_string(), total: total.to_string()),
+        )
+    } else if download {
         track.as_ref().map(|track| {
             let done = fleet_domain::utils::format_bytes(track.done);
             let Some(total) = track.total.map(fleet_domain::utils::format_bytes) else {
@@ -109,9 +116,19 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
             .cloned()
     };
     let patch = track(ProgressTrackKind::Patch);
-    let patching = active.operation == OperationKind::Sync && patch.is_some();
+    let patching = progress.active_stage == OperationStage::Sync && patch.is_some();
     let (label, work) = match active.operation {
         OperationKind::Check => (t!("checking-for-updates"), None),
+        OperationKind::Sync if progress.active_stage == OperationStage::Planning => {
+            (t!("planning-changes"), None)
+        }
+        OperationKind::Sync if progress.active_stage == OperationStage::Publishing => (
+            t!("publishing-files"),
+            track(ProgressTrackKind::PublishedFiles),
+        ),
+        OperationKind::Sync if progress.active_stage == OperationStage::Finalizing => {
+            (t!("finishing"), None)
+        }
         OperationKind::Sync if patching => (t!("patching-files"), patch),
         OperationKind::Sync => (t!("scanning-files"), track(ProgressTrackKind::LocalCheck)),
         OperationKind::Validate => (t!("validating-files"), track(ProgressTrackKind::LocalCheck)),
@@ -132,6 +149,15 @@ pub(crate) fn ProfileOperation(active: ActiveOperationState) -> Element {
                 track: work,
                 bytes_per_sec: patching.then_some(progress.usage.disk_bytes_per_sec),
                 frozen,
+            }
+            if patching {
+                if let Some(files) = track(ProgressTrackKind::PublishedFiles) {
+                    if let Some(total) = files.total {
+                        span { class: "profile-operation__eta",
+                            {t!("files-published", done: files.done.to_string(), total: total.to_string())}
+                        }
+                    }
+                }
             }
             if !frozen && active.operation != OperationKind::Check {
                 if let Some(seconds) = progress.usage.eta_seconds {
